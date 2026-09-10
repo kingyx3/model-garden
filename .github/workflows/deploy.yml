@@ -29,6 +29,7 @@ concurrency:
 jobs:
   detect-clouds:
     runs-on: ubuntu-latest
+    environment: ${{ inputs.environment }}
     outputs:
       matrix: ${{ steps.detect.outputs.matrix }}
       count: ${{ steps.detect.outputs.count }}
