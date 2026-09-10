@@ -69,7 +69,8 @@ EOF
         --location "$AZURE_LOCATION" --sku Standard_LRS --kind StorageV2 \
         --min-tls-version TLS1_2 --allow-blob-public-access false --output none
     fi
-    az storage container create --name "$container" --account-name "$storage_account" --auth-mode login --output none
+    # Key auth avoids requiring an additional Blob Data role during first-time bootstrap.
+    az storage container create --name "$container" --account-name "$storage_account" --auth-mode key --output none
 
     cat >"$out" <<EOF
 resource_group_name  = "$resource_group"
