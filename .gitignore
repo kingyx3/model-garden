@@ -1,0 +1,11 @@
+.terraform/
+*.tfstate
+*.tfstate.*
+.terraform.lock.hcl
+*.tfplan
+*.pem
+*.key
+.env
+.env.*
+gha-creds-*.json
+.DS_Store
