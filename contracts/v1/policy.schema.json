@@ -8,7 +8,42 @@
   "properties": {
     "apiVersion": {"const": "modelgarden.ai/v1"},
     "kind": {"const": "Policy"},
-    "metadata": {"type": "object", "additionalProperties": false, "required": ["name", "owner"], "properties": {"name": {"type": "string"}, "owner": {"type": "string"}, "description": {"type": "string"}}},
-    "spec": {"type": "object", "additionalProperties": false, "required": ["rules"], "properties": {"rules": {"type": "array", "items": {"type": "object", "additionalProperties": false, "required": ["id", "effect"], "properties": {"id": {"type": "string"}, "effect": {"enum": ["allow", "deny", "require-approval"]}, "actions": {"type": "array", "items": {"type": "string"}}, "dataClassifications": {"type": "array", "items": {"enum": ["public", "internal", "confidential", "restricted"]}}}}}}
+    "metadata": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "owner"],
+      "properties": {
+        "name": {"type": "string"},
+        "owner": {"type": "string"},
+        "description": {"type": "string"}
+      }
+    },
+    "spec": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["rules"],
+      "properties": {
+        "rules": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["id", "effect"],
+            "properties": {
+              "id": {"type": "string"},
+              "effect": {"enum": ["allow", "deny", "require-approval"]},
+              "actions": {
+                "type": "array",
+                "items": {"type": "string"}
+              },
+              "dataClassifications": {
+                "type": "array",
+                "items": {"enum": ["public", "internal", "confidential", "restricted"]}
+              }
+            }
+          }
+        }
+      }
+    }
   }
 }
