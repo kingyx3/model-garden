@@ -4,17 +4,40 @@ metadata:
   name: model-garden-gateway
   namespace: model-garden
   labels:
-    app: model-garden-gateway
+    app.kubernetes.io/name: model-garden-gateway
+    app.kubernetes.io/part-of: model-garden
 spec:
   replicas: 2
+  minReadySeconds: 10
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
   selector:
     matchLabels:
-      app: model-garden-gateway
+      app.kubernetes.io/name: model-garden-gateway
   template:
     metadata:
       labels:
-        app: model-garden-gateway
+        app.kubernetes.io/name: model-garden-gateway
+        app.kubernetes.io/part-of: model-garden
     spec:
+      serviceAccountName: model-garden-gateway
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        seccompProfile:
+          type: RuntimeDefault
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                topologyKey: kubernetes.io/hostname
+                labelSelector:
+                  matchLabels:
+                    app.kubernetes.io/name: model-garden-gateway
       containers:
         - name: litellm
           image: ghcr.io/berriai/litellm:v1.99.1
@@ -30,6 +53,10 @@ spec:
           envFrom:
             - secretRef:
                 name: model-garden-secrets
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
           resources:
             requests:
               cpu: 250m
@@ -37,16 +64,20 @@ spec:
             limits:
               cpu: "1"
               memory: 1Gi
+          startupProbe:
+            tcpSocket:
+              port: http
+            failureThreshold: 30
+            periodSeconds: 5
           readinessProbe:
             tcpSocket:
               port: http
-            initialDelaySeconds: 10
             periodSeconds: 10
           livenessProbe:
             tcpSocket:
               port: http
-            initialDelaySeconds: 30
             periodSeconds: 20
+            failureThreshold: 3
           volumeMounts:
             - name: config
               mountPath: /app/config.yaml

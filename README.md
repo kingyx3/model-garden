@@ -1,93 +1,87 @@
 # Enterprise Model Garden
 
-Forkable, cloud-portable starter for enterprises that want one governed AI gateway across OpenAI, Anthropic, and OpenAI-compatible/open-weight models.
+A cloud-portable enterprise AI platform baseline for deploying one governed model gateway and a stable contract for business-owned agents, skills, tools and model profiles.
 
-## What this repo deploys
+**Current platform version:** `0.2.0`
 
-- A managed Kubernetes cluster in **AWS (EKS)**, **GCP (GKE)**, or **Azure (AKS)**.
-- A shared **LiteLLM gateway** deployed the same way on every cloud.
-- A simple model-garden convention: applications call stable aliases while provider/model details stay in deployment secrets.
-- GitHub Actions that **auto-detect which cloud(s) to deploy** from the cloud credential secrets present in the repository/environment.
-- OIDC-first cloud authentication and remote Terraform state bootstrap.
+## What it provides
+
+- Managed Kubernetes on **AWS/EKS**, **GCP/GKE** or **Azure/AKS**.
+- One portable **LiteLLM gateway** for OpenAI, Anthropic and OpenAI-compatible/open-weight endpoints.
+- OIDC-first GitHub Actions deployment and encrypted/versioned remote Terraform state.
+- A safe-by-default private `ClusterIP` gateway service.
+- Versioned `modelgarden.ai/v1` JSON Schemas for `Agent`, `Skill`, `ModelProfile`, `Tool`, `KnowledgeSource` and `Policy`.
+- A reference business workspace that is validated in CI.
+- Clear extension points for policy, tools/MCP, observability, evaluation and self-service authoring.
 
 ```text
-Apps / Agents
-     |
-     v
-LiteLLM Gateway  <-- one enterprise endpoint
-     |
-     +-- OpenAI
-     +-- Anthropic
-     +-- OpenAI-compatible endpoint (vLLM, TGI, etc.)
-
-Deployment plane
-     |
-     +-- AWS / EKS
-     +-- GCP / GKE
-     +-- Azure / AKS
+Business teams
+ agents / skills / knowledge / tools
+             |
+             v
+      modelgarden.ai/v1
+             |
+             v
+      Model Garden runtime
+             |
+        Model Gateway
+        /     |      \
+   OpenAI  Anthropic  open-weight/vLLM
+             |
+      EKS / GKE / AKS
 ```
 
 ## Quick start
 
-1. Fork this repository.
-2. Add one cloud's required GitHub Actions secrets from [`docs/secrets.md`](docs/secrets.md).
-3. Add `LITELLM_MASTER_KEY` plus at least one model provider configuration.
-4. Run **Actions -> Deploy model garden -> Run workflow**.
+1. Configure one cloud's OIDC secrets from [`docs/secrets.md`](docs/secrets.md).
+2. Add `LITELLM_MASTER_KEY` and at least one model provider configuration.
+3. Run **Actions → Deploy model garden** with `action=plan`.
+4. Review the plan, then run `action=apply` against a protected GitHub Environment.
 
-The workflow discovers configured clouds automatically. If credentials for more than one cloud are present, it deploys to each of them.
+The gateway is private by default. Production exposure should be through enterprise ingress/API management with TLS, identity and rate limiting.
 
-### Model aliases
+## Business resource contracts
 
-The deployment exposes these stable names when their corresponding secrets are configured:
-
-- `general.openai`
-- `general.anthropic`
-- `general.open-weight`
-
-Client applications should use these aliases instead of hard-coding vendor model IDs.
-
-Example:
+Reference resources are under [`examples/workspace`](examples/workspace) and schemas under [`contracts/v1`](contracts/v1).
 
 ```bash
-curl "$MODEL_GARDEN_URL/v1/chat/completions" \
-  -H "Authorization: Bearer $LITELLM_MASTER_KEY" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "model": "general.openai",
-    "messages": [{"role":"user","content":"Summarize this policy"}]
-  }'
+make dev
+make contracts
 ```
+
+Agents use logical profiles such as `reasoning.high`; they should not hard-code vendor model IDs. See [`docs/contracts.md`](docs/contracts.md).
 
 ## Repository layout
 
 ```text
-.github/workflows/deploy.yml    Multi-cloud deployment workflow
-infra/aws/                      EKS + VPC Terraform
-infra/gcp/                      GKE + VPC Terraform
-infra/azure/                    AKS + VNet Terraform
-platform/k8s/                   Shared gateway workload
-scripts/bootstrap-state.sh      Idempotent remote-state bootstrap
-scripts/render-model-config.sh  Builds LiteLLM config from supplied secrets
-docs/                           Client onboarding and security notes
+infra/aws|gcp|azure/       Cloud infrastructure
+platform/k8s/              Portable runtime
+contracts/v1/              Stable business-facing resource contracts
+examples/workspace/        Reference agents/skills/model profiles/tools
+scripts/                    State bootstrap, config rendering, validation
+.github/workflows/          Validation + deployment
+docs/                       Architecture, onboarding, security, releases
+VERSION                     Platform version
 ```
 
-## Design principles
+## Principles
 
-- **Your API, not a cloud API, is the abstraction.** Cloud providers are replaceable deployment targets.
-- **No model API keys in Terraform.** Provider credentials are injected directly into Kubernetes by GitHub Actions.
-- **OIDC first.** Long-lived cloud access keys are intentionally not the default path.
-- **One portable runtime.** Kubernetes keeps the application layer identical across EKS/GKE/AKS.
-- **Small fork surface.** Most client-specific changes belong in GitHub secrets and Terraform variables rather than code.
+- **Platform implementation and business AI content are separate concerns.**
+- **Stable contracts beat infrastructure coupling.** Business teams author agents/skills, not Terraform.
+- **Logical model profiles beat vendor IDs.** Provider changes should not require editing agents.
+- **No model API keys in Terraform state.** Provider secrets are injected only at runtime.
+- **OIDC first and private by default.** Long-lived cloud keys and public gateways are not the baseline.
+- **Git is the initial control plane.** PR review, CODEOWNERS and versioned schemas provide governance before a UI is added.
 
-## Scope
-
-This is a deployment foundation, not a complete enterprise AI governance product. Before production rollout, add private ingress, SSO/RBAC, network policy, central secrets management, audit export, persistent gateway metadata, policy-as-code, evaluation pipelines, and organization-specific data controls. See [`docs/security.md`](docs/security.md).
-
-## Local validation
+## Validation
 
 ```bash
-terraform -chdir=infra/aws fmt -check
-terraform -chdir=infra/gcp fmt -check
-terraform -chdir=infra/azure fmt -check
-kubectl apply --dry-run=client -k platform/k8s
+make dev
+make validate
 ```
+
+CI additionally runs Terraform `init -backend=false` + `validate` for all three clouds.
+
+## Roadmap
+
+The next platform layer is a real enterprise control plane: model/agent registry, policy engine, Tool/MCP Gateway, SSO/RBAC, persistent metadata, OpenTelemetry, evaluation services and an Agent Studio. See [`docs/architecture.md`](docs/architecture.md).

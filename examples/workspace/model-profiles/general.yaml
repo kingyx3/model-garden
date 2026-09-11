@@ -1,0 +1,21 @@
+apiVersion: modelgarden.ai/v1
+kind: ModelProfile
+metadata:
+  name: reasoning.high
+  owner: ai-platform
+  description: High-quality reasoning profile selected by policy and routing.
+spec:
+  candidates:
+    - provider: openai
+      model: approved-openai-model
+      priority: 1
+    - provider: anthropic
+      model: approved-anthropic-model
+      priority: 2
+    - provider: internal
+      model: approved-open-weight-model
+      priority: 3
+  constraints:
+    maxDataClassification: confidential
+  routing:
+    strategy: ordered-fallback

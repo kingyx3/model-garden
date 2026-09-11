@@ -6,17 +6,21 @@ on:
       action:
         description: Terraform action
         required: true
-        default: apply
+        default: plan
         type: choice
-        options:
-          - plan
-          - apply
-          - destroy
+        options: [plan, apply, destroy]
+      target_cloud:
+        description: Cloud target; auto deploys every fully configured credential set
+        required: true
+        default: auto
+        type: choice
+        options: [auto, aws, gcp, azure, all]
       environment:
         description: Client environment name
         required: true
         default: dev
-        type: string
+        type: choice
+        options: [dev, test, staging, prod]
 
 permissions:
   contents: read
@@ -29,10 +33,8 @@ concurrency:
 jobs:
   detect-clouds:
     runs-on: ubuntu-latest
-    environment: ${{ inputs.environment }}
     outputs:
       matrix: ${{ steps.detect.outputs.matrix }}
-      count: ${{ steps.detect.outputs.count }}
     env:
       AWS_ROLE_ARN: ${{ secrets.AWS_ROLE_ARN }}
       AWS_REGION: ${{ secrets.AWS_REGION }}
@@ -50,28 +52,46 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          target="${{ inputs.target_cloud }}"
           clouds=()
 
-          if [[ -n "$AWS_ROLE_ARN" && -n "$AWS_REGION" ]]; then
-            clouds+=(aws)
-          fi
-          if [[ -n "$GCP_WORKLOAD_IDENTITY_PROVIDER" && -n "$GCP_SERVICE_ACCOUNT" && -n "$GCP_PROJECT_ID" && -n "$GCP_REGION" ]]; then
-            clouds+=(gcp)
-          fi
-          if [[ -n "$AZURE_CLIENT_ID" && -n "$AZURE_TENANT_ID" && -n "$AZURE_SUBSCRIPTION_ID" && -n "$AZURE_LOCATION" ]]; then
-            clouds+=(azure)
-          fi
+          aws_ready=false
+          gcp_ready=false
+          azure_ready=false
+          [[ -n "$AWS_ROLE_ARN" && -n "$AWS_REGION" ]] && aws_ready=true
+          [[ -n "$GCP_WORKLOAD_IDENTITY_PROVIDER" && -n "$GCP_SERVICE_ACCOUNT" && -n "$GCP_PROJECT_ID" && -n "$GCP_REGION" ]] && gcp_ready=true
+          [[ -n "$AZURE_CLIENT_ID" && -n "$AZURE_TENANT_ID" && -n "$AZURE_SUBSCRIPTION_ID" && -n "$AZURE_LOCATION" ]] && azure_ready=true
 
-          json="$(jq -cn '$ARGS.positional' --args "${clouds[@]}")"
-          matrix="$(jq -cn --argjson clouds "$json" '{cloud:$clouds}')"
-          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
-          echo "count=${#clouds[@]}" >> "$GITHUB_OUTPUT"
+          add_if_ready() {
+            local cloud="$1" ready="$2"
+            if [[ "$ready" == true ]]; then
+              clouds+=("$cloud")
+            elif [[ "$target" == "$cloud" ]]; then
+              echo "Requested $cloud but its credential set is incomplete. See docs/secrets.md." >&2
+              exit 1
+            fi
+          }
+
+          case "$target" in
+            auto|all)
+              add_if_ready aws "$aws_ready"
+              add_if_ready gcp "$gcp_ready"
+              add_if_ready azure "$azure_ready"
+              ;;
+            aws) add_if_ready aws "$aws_ready" ;;
+            gcp) add_if_ready gcp "$gcp_ready" ;;
+            azure) add_if_ready azure "$azure_ready" ;;
+            *) echo "Unsupported target: $target" >&2; exit 2 ;;
+          esac
 
           if [[ ${#clouds[@]} -eq 0 ]]; then
             echo "No complete cloud credential set found. See docs/secrets.md." >&2
             exit 1
           fi
 
+          json="$(jq -cn '$ARGS.positional' --args "${clouds[@]}")"
+          matrix="$(jq -cn --argjson clouds "$json" '{cloud:$clouds}')"
+          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
           echo "Configured deployment targets: ${clouds[*]}"
 
   deploy:
@@ -86,16 +106,16 @@ jobs:
       CLIENT_SLUG: ${{ vars.CLIENT_SLUG || 'client' }}
       ENVIRONMENT: ${{ inputs.environment }}
       K8S_NODE_COUNT: ${{ vars.K8S_NODE_COUNT || '2' }}
+      GATEWAY_REPLICAS: ${{ vars.GATEWAY_REPLICAS || '2' }}
+      GATEWAY_SERVICE_TYPE: ${{ vars.GATEWAY_SERVICE_TYPE || 'ClusterIP' }}
       LITELLM_IMAGE: ${{ vars.LITELLM_IMAGE || 'ghcr.io/berriai/litellm:v1.99.1' }}
 
       AWS_ROLE_ARN: ${{ secrets.AWS_ROLE_ARN }}
       AWS_REGION: ${{ secrets.AWS_REGION }}
-
       GCP_WORKLOAD_IDENTITY_PROVIDER: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
       GCP_SERVICE_ACCOUNT: ${{ secrets.GCP_SERVICE_ACCOUNT }}
       GCP_PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
       GCP_REGION: ${{ secrets.GCP_REGION }}
-
       AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
       AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
       AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
@@ -143,7 +163,7 @@ jobs:
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v4
         with:
-          terraform_version: "~1.14.0"
+          terraform_version: "1.14.6"
           terraform_wrapper: false
 
       - name: Bootstrap remote state
@@ -152,7 +172,7 @@ jobs:
           chmod +x scripts/*.sh
           scripts/bootstrap-state.sh "${{ matrix.cloud }}" /tmp/backend.hcl
 
-      - name: Terraform ${{ inputs.action }}
+      - name: Terraform init and validate
         shell: bash
         run: |
           set -euo pipefail
@@ -161,25 +181,45 @@ jobs:
           export TF_VAR_client_slug="$CLIENT_SLUG"
           export TF_VAR_environment="$ENVIRONMENT"
           export TF_VAR_node_count="$K8S_NODE_COUNT"
+          export TF_VAR_platform_version="$(tr -d '\n' < VERSION)"
 
           case "$cloud" in
-            aws)
-              export TF_VAR_region="$AWS_REGION"
-              ;;
-            gcp)
-              export TF_VAR_project_id="$GCP_PROJECT_ID"
-              export TF_VAR_region="$GCP_REGION"
-              ;;
-            azure)
-              export TF_VAR_subscription_id="$AZURE_SUBSCRIPTION_ID"
-              export TF_VAR_location="$AZURE_LOCATION"
-              ;;
+            aws) export TF_VAR_region="$AWS_REGION" ;;
+            gcp) export TF_VAR_project_id="$GCP_PROJECT_ID" TF_VAR_region="$GCP_REGION" ;;
+            azure) export TF_VAR_subscription_id="$AZURE_SUBSCRIPTION_ID" TF_VAR_location="$AZURE_LOCATION" ;;
           esac
 
+          env | grep '^TF_VAR_' >> "$GITHUB_ENV"
           terraform -chdir="infra/$cloud" init -input=false -backend-config=/tmp/backend.hcl
           terraform -chdir="infra/$cloud" fmt -check
           terraform -chdir="infra/$cloud" validate
 
+      - name: Best-effort portable runtime cleanup before destroy
+        if: inputs.action == 'destroy'
+        shell: bash
+        run: |
+          set +e
+          cloud="${{ matrix.cloud }}"
+          cluster="$(terraform -chdir="infra/$cloud" output -raw cluster_name 2>/dev/null)" || exit 0
+          case "$cloud" in
+            aws) aws eks update-kubeconfig --name "$cluster" --region "$AWS_REGION" ;;
+            gcp)
+              location="$(terraform -chdir=infra/gcp output -raw location)"
+              gcloud container clusters get-credentials "$cluster" --zone "$location" --project "$GCP_PROJECT_ID"
+              ;;
+            azure)
+              group="$(terraform -chdir=infra/azure output -raw resource_group)"
+              az aks get-credentials --resource-group "$group" --name "$cluster" --admin --overwrite-existing
+              ;;
+          esac
+          kubectl delete -k platform/k8s --ignore-not-found --wait=false
+          kubectl -n model-garden delete configmap litellm-config secret model-garden-secrets --ignore-not-found
+
+      - name: Terraform ${{ inputs.action }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          cloud="${{ matrix.cloud }}"
           if [[ "${{ inputs.action }}" == "destroy" ]]; then
             terraform -chdir="infra/$cloud" plan -destroy -input=false -out=/tmp/tfplan
             terraform -chdir="infra/$cloud" apply -input=false -auto-approve /tmp/tfplan
@@ -192,14 +232,12 @@ jobs:
 
       - name: Configure EKS kubeconfig
         if: inputs.action == 'apply' && matrix.cloud == 'aws'
-        shell: bash
         run: |
           cluster="$(terraform -chdir=infra/aws output -raw cluster_name)"
           aws eks update-kubeconfig --name "$cluster" --region "$AWS_REGION"
 
       - name: Configure GKE kubeconfig
         if: inputs.action == 'apply' && matrix.cloud == 'gcp'
-        shell: bash
         run: |
           cluster="$(terraform -chdir=infra/gcp output -raw cluster_name)"
           location="$(terraform -chdir=infra/gcp output -raw location)"
@@ -207,18 +245,18 @@ jobs:
 
       - name: Configure AKS kubeconfig
         if: inputs.action == 'apply' && matrix.cloud == 'azure'
-        shell: bash
         run: |
           cluster="$(terraform -chdir=infra/azure output -raw cluster_name)"
           group="$(terraform -chdir=infra/azure output -raw resource_group)"
           az aks get-credentials --resource-group "$group" --name "$cluster" --admin --overwrite-existing
 
-      - name: Deploy model gateway
+      - name: Deploy portable model gateway
         if: inputs.action == 'apply'
         shell: bash
         run: |
           set -euo pipefail
           : "${LITELLM_MASTER_KEY:?LITELLM_MASTER_KEY is required}"
+          case "$GATEWAY_SERVICE_TYPE" in ClusterIP|LoadBalancer) ;; *) echo "GATEWAY_SERVICE_TYPE must be ClusterIP or LoadBalancer" >&2; exit 2 ;; esac
 
           kubectl apply -f platform/k8s/namespace.yaml
           scripts/render-model-config.sh /tmp/config.yaml
@@ -237,9 +275,12 @@ jobs:
 
           kubectl apply -k platform/k8s
           kubectl -n model-garden set image deployment/model-garden-gateway litellm="$LITELLM_IMAGE"
+          kubectl -n model-garden scale deployment/model-garden-gateway --replicas="$GATEWAY_REPLICAS"
+          kubectl -n model-garden patch service model-garden-gateway --type merge -p "{\"spec\":{\"type\":\"$GATEWAY_SERVICE_TYPE\"}}"
           kubectl -n model-garden rollout status deployment/model-garden-gateway --timeout=5m
 
           echo "### ${{ matrix.cloud }} deployment" >> "$GITHUB_STEP_SUMMARY"
+          echo "Platform version: $(cat VERSION)" >> "$GITHUB_STEP_SUMMARY"
           echo '```' >> "$GITHUB_STEP_SUMMARY"
-          kubectl -n model-garden get service model-garden-gateway >> "$GITHUB_STEP_SUMMARY"
+          kubectl -n model-garden get deployment,pod,service,pdb >> "$GITHUB_STEP_SUMMARY"
           echo '```' >> "$GITHUB_STEP_SUMMARY"

@@ -1,0 +1,65 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://modelgarden.ai/schemas/v1/agent.schema.json",
+  "title": "Model Garden Agent v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["apiVersion", "kind", "metadata", "spec"],
+  "properties": {
+    "apiVersion": {"const": "modelgarden.ai/v1"},
+    "kind": {"const": "Agent"},
+    "metadata": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "owner"],
+      "properties": {
+        "name": {"type": "string", "pattern": "^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$"},
+        "owner": {"type": "string", "minLength": 1},
+        "team": {"type": "string", "minLength": 1},
+        "description": {"type": "string"}
+      }
+    },
+    "spec": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["model", "instructions"],
+      "properties": {
+        "model": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["profile"],
+          "properties": {"profile": {"type": "string", "minLength": 1}}
+        },
+        "instructions": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["file"],
+          "properties": {"file": {"type": "string", "minLength": 1}}
+        },
+        "skills": {"type": "array", "items": {"type": "string"}, "uniqueItems": true},
+        "tools": {"type": "array", "items": {"type": "string"}, "uniqueItems": true},
+        "knowledge": {"type": "array", "items": {"type": "string"}, "uniqueItems": true},
+        "security": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "dataClassification": {"enum": ["public", "internal", "confidential", "restricted"]}
+          }
+        },
+        "approvals": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {"externalActions": {"enum": ["none", "required"]}}
+        },
+        "evaluation": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "suite": {"type": "string"},
+            "minimumScore": {"type": "number", "minimum": 0, "maximum": 1}
+          }
+        }
+      }
+    }
+  }
+}

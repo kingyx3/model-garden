@@ -1,0 +1,25 @@
+apiVersion: modelgarden.ai/v1
+kind: Agent
+metadata:
+  name: account-researcher
+  owner: sales-operations
+  team: sales
+  description: Prepare a decision-ready account brief before customer meetings.
+spec:
+  model:
+    profile: reasoning.high
+  instructions:
+    file: instructions.md
+  skills:
+    - account-summary
+  tools:
+    - crm.read
+  knowledge:
+    - sales-playbook
+  security:
+    dataClassification: confidential
+  approvals:
+    externalActions: required
+  evaluation:
+    suite: evals/
+    minimumScore: 0.9

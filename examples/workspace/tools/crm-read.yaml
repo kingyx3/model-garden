@@ -1,0 +1,10 @@
+apiVersion: modelgarden.ai/v1
+kind: Tool
+metadata:
+  name: crm.read
+  owner: ai-platform
+  description: Read approved CRM account and opportunity data.
+spec:
+  type: internal
+  risk: read
+  approvalRequired: false
