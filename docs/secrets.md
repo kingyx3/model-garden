@@ -1,6 +1,6 @@
-# GitHub Actions secrets
+# GitHub Actions secrets and variables
 
-The deploy workflow chooses target clouds from the credential sets that are present. Configure secrets in a protected GitHub **Environment** for production where possible.
+The deploy workflow can auto-detect target clouds from complete credential sets, or you can explicitly select `aws`, `gcp`, `azure` or `all`. Configure production values in a protected GitHub **Environment** wherever possible.
 
 ## Shared model-garden secrets
 
@@ -10,7 +10,7 @@ Required:
 |---|---|
 | `LITELLM_MASTER_KEY` | Bearer token required by the gateway |
 
-Configure at least one model:
+Configure at least one model provider:
 
 | Secret | Example shape | Purpose |
 |---|---|---|
@@ -20,50 +20,62 @@ Configure at least one model:
 | `ANTHROPIC_MODEL_REF` | `anthropic/<model-id>` | LiteLLM model reference |
 | `OPEN_WEIGHT_API_BASE` | `https://.../v1` | OpenAI-compatible endpoint such as vLLM |
 | `OPEN_WEIGHT_MODEL_REF` | `openai/<served-model-name>` | Model reference used against that endpoint |
-| `OPEN_WEIGHT_API_KEY` | provider-specific | Optional endpoint credential; set a non-secret placeholder only if your endpoint requires none |
+| `OPEN_WEIGHT_API_KEY` | provider-specific | Optional endpoint credential |
 
-The renderer only publishes aliases for fully configured providers.
+The renderer publishes aliases only for fully configured providers. Provider credentials are never passed through Terraform.
 
 ## AWS
 
-OIDC is preferred. Required to activate the AWS deployment:
+Required to activate AWS:
 
 - `AWS_ROLE_ARN`
 - `AWS_REGION`
 
-The role must trust this repository's GitHub OIDC identity and be able to create the VPC/EKS resources plus the remote-state S3 bucket. Avoid static AWS access keys.
+Use GitHub OIDC. The role must trust the intended repository/environment and be able to create the VPC/EKS resources plus the remote-state S3 bucket. Avoid static AWS access keys.
 
 ## GCP
 
-Required to activate the GCP deployment:
+Required to activate GCP:
 
 - `GCP_WORKLOAD_IDENTITY_PROVIDER`
 - `GCP_SERVICE_ACCOUNT`
 - `GCP_PROJECT_ID`
 - `GCP_REGION`
 
-Use Workload Identity Federation; the service account needs permissions for GKE, Compute networking, Service Usage, and the Terraform-state GCS bucket.
+Use Workload Identity Federation. The service account needs permissions for GKE, Compute networking, Service Usage and the Terraform-state GCS bucket.
 
 ## Azure
 
-Required to activate the Azure deployment:
+Required to activate Azure:
 
 - `AZURE_CLIENT_ID`
 - `AZURE_TENANT_ID`
 - `AZURE_SUBSCRIPTION_ID`
 - `AZURE_LOCATION`
 
-Create a federated credential for the repository/environment and grant the deployment principal the least privilege needed to create the resource group, VNet, AKS cluster, and state storage account.
+Use a federated credential for the repository/environment. The deployment identity needs the least privilege required to create the resource group, VNet, AKS cluster and state storage account.
 
-## Optional deployment settings
+The current bootstrap workflow uses AKS admin kubeconfig after cluster creation. Production environments should move to Entra/Kubernetes RBAC and disable local AKS accounts once the deployment runner has the required cluster-user permissions.
 
-These are read as GitHub repository/environment **variables** when present and otherwise use defaults:
+## Deployment variables
 
-| Variable | Default |
-|---|---|
-| `CLIENT_SLUG` | `client` |
-| `ENVIRONMENT` | `dev` |
-| `K8S_NODE_COUNT` | `2` |
-| `LITELLM_IMAGE` | `ghcr.io/berriai/litellm:v1.99.1` |
+These are GitHub repository/environment **variables**:
 
-Never commit model API keys, cloud credentials, generated kubeconfigs, or rendered LiteLLM configuration.
+| Variable | Default | Purpose |
+|---|---|---|
+| `CLIENT_SLUG` | `client` | DNS/resource-safe client identifier |
+| `K8S_NODE_COUNT` | `2` | Cluster worker count |
+| `GATEWAY_REPLICAS` | `2` | Gateway replica count |
+| `GATEWAY_SERVICE_TYPE` | `ClusterIP` | `ClusterIP` or `LoadBalancer`; keep private for production |
+| `LITELLM_IMAGE` | `ghcr.io/berriai/litellm:v1.99.1` | Gateway image pinned by the deployment |
+
+The workflow input chooses `dev`, `test`, `staging` or `prod` and passes that value to Terraform.
+
+## Production notes
+
+- Restrict Kubernetes API endpoints or use private/self-hosted deployment runners.
+- Put the `ClusterIP` gateway behind enterprise ingress/API management, TLS, SSO and rate limiting.
+- Replace directly created Kubernetes secrets with the customer's cloud secret manager and CSI/External Secrets integration.
+- Pin approved model references per environment and rotate provider credentials independently of Terraform state.
+
+Never commit provider API keys, cloud credentials, generated kubeconfigs or rendered LiteLLM configuration.
