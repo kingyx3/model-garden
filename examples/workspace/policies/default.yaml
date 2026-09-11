@@ -1,0 +1,22 @@
+apiVersion: modelgarden.ai/v1
+kind: Policy
+metadata:
+  name: default-agent-policy
+  owner: security
+  description: Baseline example policy for enterprise agent actions.
+spec:
+  rules:
+    - id: allow-read-actions
+      effect: allow
+      actions:
+        - "*.read"
+      dataClassifications:
+        - public
+        - internal
+        - confidential
+    - id: approve-external-write
+      effect: require-approval
+      actions:
+        - "*.send"
+        - "*.write"
+        - "*.create"

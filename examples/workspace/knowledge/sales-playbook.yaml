@@ -1,0 +1,10 @@
+apiVersion: modelgarden.ai/v1
+kind: KnowledgeSource
+metadata:
+  name: sales-playbook
+  owner: sales-enablement
+  description: Approved sales methodology and product positioning.
+spec:
+  type: repository
+  classification: internal
+  reference: company-sales-playbook

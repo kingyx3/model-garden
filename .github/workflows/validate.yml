@@ -28,10 +28,14 @@ jobs:
       - name: Validate
         run: terraform -chdir=infra/${{ matrix.cloud }} validate
 
-  portable-runtime:
+  contracts-and-runtime:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+      - name: Install contract validator dependencies
+        run: python3 -m pip install -r requirements-dev.txt
+      - name: Validate versioned contracts and reference workspace
+        run: python3 scripts/validate-workspace.py examples/workspace
       - name: Validate shell scripts
         run: bash -n scripts/*.sh
       - name: Smoke-test model config renderer

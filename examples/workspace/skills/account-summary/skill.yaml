@@ -1,0 +1,15 @@
+apiVersion: modelgarden.ai/v1
+kind: Skill
+metadata:
+  name: account-summary
+  owner: sales-operations
+  version: 1.0.0
+  description: Summarise an account into a repeatable executive brief.
+spec:
+  instructions:
+    file: instructions.md
+  allowedTools:
+    - crm.read
+  inputs:
+    - account
+  evaluationSuite: evals/

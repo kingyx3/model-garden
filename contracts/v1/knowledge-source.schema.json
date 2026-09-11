@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://modelgarden.ai/schemas/v1/knowledge-source.schema.json",
+  "title": "Model Garden KnowledgeSource v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["apiVersion", "kind", "metadata", "spec"],
+  "properties": {
+    "apiVersion": {"const": "modelgarden.ai/v1"},
+    "kind": {"const": "KnowledgeSource"},
+    "metadata": {"type": "object", "additionalProperties": false, "required": ["name", "owner"], "properties": {"name": {"type": "string"}, "owner": {"type": "string"}, "description": {"type": "string"}}},
+    "spec": {"type": "object", "additionalProperties": false, "required": ["type", "classification"], "properties": {"type": {"enum": ["repository", "sharepoint", "drive", "database", "url", "vector-index"]}, "classification": {"enum": ["public", "internal", "confidential", "restricted"]}, "reference": {"type": "string"}}}
+  }
+}

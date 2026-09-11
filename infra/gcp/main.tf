@@ -20,10 +20,11 @@ locals {
   name = "${var.client_slug}-${var.environment}-model-garden"
   zone = coalesce(var.zone, "${var.region}-a")
   labels = {
-    project     = "model-garden"
-    client      = var.client_slug
-    environment = var.environment
-    managed_by  = "terraform"
+    project          = "model-garden"
+    platform_version = replace(var.platform_version, ".", "-")
+    client           = var.client_slug
+    environment      = var.environment
+    managed_by       = "terraform"
   }
 }
 
@@ -70,11 +71,18 @@ resource "google_container_cluster" "main" {
 
   remove_default_node_pool = true
   initial_node_count       = 1
-  deletion_protection      = false
+  deletion_protection      = var.deletion_protection
   networking_mode          = "VPC_NATIVE"
+  enable_shielded_nodes    = true
 
   release_channel {
     channel = "REGULAR"
+  }
+
+  master_auth {
+    client_certificate_config {
+      issue_client_certificate = false
+    }
   }
 
   ip_allocation_policy {
@@ -97,13 +105,27 @@ resource "google_container_node_pool" "default" {
   cluster    = google_container_cluster.main.name
   node_count = var.node_count
 
+  management {
+    auto_repair  = true
+    auto_upgrade = true
+  }
+
   node_config {
     machine_type = var.node_machine_type
     disk_size_gb = 50
     oauth_scopes = ["https://www.googleapis.com/auth/cloud-platform"]
 
+    metadata = {
+      disable-legacy-endpoints = "true"
+    }
+
     workload_metadata_config {
       mode = "GKE_METADATA"
+    }
+
+    shielded_instance_config {
+      enable_secure_boot          = true
+      enable_integrity_monitoring = true
     }
 
     labels = local.labels
@@ -114,11 +136,27 @@ variable "client_slug" {
   type        = string
   description = "Short lowercase client identifier used in resource names."
   default     = "client"
+
+  validation {
+    condition     = can(regex("^[a-z0-9][a-z0-9-]{1,19}$", var.client_slug))
+    error_message = "client_slug must be 2-20 lowercase letters, digits or hyphens and start with a letter/digit."
+  }
 }
 
 variable "environment" {
   type        = string
   description = "Deployment environment."
+  default     = "dev"
+
+  validation {
+    condition     = contains(["dev", "test", "staging", "prod"], var.environment)
+    error_message = "environment must be one of dev, test, staging or prod."
+  }
+}
+
+variable "platform_version" {
+  type        = string
+  description = "Model Garden platform version applied to resource metadata."
   default     = "dev"
 }
 
@@ -143,12 +181,23 @@ variable "node_count" {
   type        = number
   description = "Desired GKE worker count."
   default     = 2
+
+  validation {
+    condition     = var.node_count >= 1 && var.node_count <= 20
+    error_message = "node_count must be between 1 and 20."
+  }
 }
 
 variable "node_machine_type" {
   type        = string
   description = "GKE worker machine type."
   default     = "e2-standard-4"
+}
+
+variable "deletion_protection" {
+  type        = bool
+  description = "Protect the GKE cluster from accidental deletion. Enable for production after validating destroy procedures."
+  default     = false
 }
 
 output "cluster_name" {
@@ -161,4 +210,8 @@ output "location" {
 
 output "project_id" {
   value = var.project_id
+}
+
+output "platform_version" {
+  value = var.platform_version
 }

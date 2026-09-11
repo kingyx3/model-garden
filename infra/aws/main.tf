@@ -27,10 +27,11 @@ locals {
   name = "${var.client_slug}-${var.environment}-model-garden"
   azs  = slice(data.aws_availability_zones.available.names, 0, 2)
   tags = {
-    Project     = "model-garden"
-    Client      = var.client_slug
-    Environment = var.environment
-    ManagedBy   = "terraform"
+    Project         = "model-garden"
+    PlatformVersion = var.platform_version
+    Client          = var.client_slug
+    Environment     = var.environment
+    ManagedBy       = "terraform"
   }
 }
 
@@ -64,8 +65,12 @@ module "eks" {
   name               = local.name
   kubernetes_version = var.kubernetes_version
 
-  endpoint_public_access                   = true
+  endpoint_public_access                   = var.cluster_endpoint_public_access
+  endpoint_private_access                  = true
+  endpoint_public_access_cidrs             = var.api_server_authorized_cidrs
   enable_cluster_creator_admin_permissions = true
+  enable_irsa                              = true
+  enabled_log_types                        = ["api", "audit", "authenticator", "controllerManager", "scheduler"]
 
   addons = {
     coredns    = {}
@@ -79,6 +84,7 @@ module "eks" {
   eks_managed_node_groups = {
     default = {
       instance_types = [var.node_instance_type]
+      capacity_type  = "ON_DEMAND"
       min_size       = 1
       max_size       = max(var.node_count, 3)
       desired_size   = var.node_count
@@ -90,11 +96,27 @@ variable "client_slug" {
   type        = string
   description = "Short lowercase client identifier used in resource names."
   default     = "client"
+
+  validation {
+    condition     = can(regex("^[a-z0-9][a-z0-9-]{1,19}$", var.client_slug))
+    error_message = "client_slug must be 2-20 lowercase letters, digits or hyphens and start with a letter/digit."
+  }
 }
 
 variable "environment" {
   type        = string
   description = "Deployment environment."
+  default     = "dev"
+
+  validation {
+    condition     = contains(["dev", "test", "staging", "prod"], var.environment)
+    error_message = "environment must be one of dev, test, staging or prod."
+  }
+}
+
+variable "platform_version" {
+  type        = string
+  description = "Model Garden platform version applied to resource metadata."
   default     = "dev"
 }
 
@@ -107,6 +129,11 @@ variable "node_count" {
   type        = number
   description = "Desired EKS worker count."
   default     = 2
+
+  validation {
+    condition     = var.node_count >= 1 && var.node_count <= 20
+    error_message = "node_count must be between 1 and 20."
+  }
 }
 
 variable "node_instance_type" {
@@ -121,10 +148,26 @@ variable "kubernetes_version" {
   default     = "1.33"
 }
 
+variable "cluster_endpoint_public_access" {
+  type        = bool
+  description = "Whether the EKS API server has a public endpoint. Use private runners before disabling this."
+  default     = true
+}
+
+variable "api_server_authorized_cidrs" {
+  type        = list(string)
+  description = "CIDRs allowed to reach the public EKS API endpoint. Restrict for production or use a private runner."
+  default     = ["0.0.0.0/0"]
+}
+
 output "cluster_name" {
   value = module.eks.cluster_name
 }
 
 output "region" {
   value = var.region
+}
+
+output "platform_version" {
+  value = var.platform_version
 }
