@@ -74,3 +74,14 @@ jobs:
           grep -q 'general.open-weight' /tmp/config.yaml
       - name: Validate Kubernetes manifests render
         run: kubectl kustomize platform/k8s >/tmp/model-garden.yaml
+
+  hermes-compatibility:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install Model Garden validation dependencies
+        run: python3 -m pip install -r requirements-dev.txt
+      - name: Validate shell scripts
+        run: bash -n scripts/*.sh
+      - name: Smoke-test pinned Hermes runtime against Receptionist profile
+        run: bash scripts/smoke-hermes-runtime.sh
