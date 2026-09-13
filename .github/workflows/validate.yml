@@ -36,7 +36,7 @@ jobs:
         run: python3 -m pip install -r requirements-dev.txt
       - name: Validate versioned contracts and reference workspace
         run: python3 scripts/validate-workspace.py examples/workspace
-      - name: Test tiny workspace compiler
+      - name: Test tiny workspace compiler and Hermes adapter
         run: python3 -m unittest discover -s tests -v
       - name: Compile reference Agent desired state
         run: |
@@ -48,6 +48,13 @@ jobs:
           grep -q '"name": "book-appointment"' /tmp/receptionist.json
           grep -q '"name": "calendar.book"' /tmp/receptionist.json
           grep -q '"name": "business-information"' /tmp/receptionist.json
+      - name: Materialize reference Hermes profile
+        run: |
+          python3 scripts/provision-hermes-profile.py /tmp/receptionist.json /tmp/hermes-receptionist
+          grep -q 'approved-openai-model' /tmp/hermes-receptionist/config.yaml
+          grep -q 'Do not invent availability' /tmp/hermes-receptionist/skills/model-garden/book-appointment/SKILL.md
+          test ! -e /tmp/hermes-receptionist/.env
+          python3 scripts/provision-hermes-profile.py /tmp/receptionist.json /tmp/hermes-receptionist | grep -q 'already matches desired state'
       - name: Validate shell scripts
         run: bash -n scripts/*.sh
       - name: Smoke-test model config renderer
