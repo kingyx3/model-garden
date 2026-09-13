@@ -1,0 +1,15 @@
+apiVersion: modelgarden.ai/v1
+kind: Skill
+metadata:
+  name: book-appointment
+  owner: front-office
+  version: 1.0.0
+  description: Book an appointment only from valid returned availability and approved booking rules.
+spec:
+  instructions:
+    file: instructions.md
+  allowedTools:
+    - calendar.book
+  inputs:
+    - booking-request
+  evaluationSuite: evals/
