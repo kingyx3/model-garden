@@ -1,0 +1,13 @@
+apiVersion: modelgarden.ai/v1
+kind: Skill
+metadata:
+  name: human-handoff
+  owner: front-office
+  version: 1.0.0
+  description: Escalate or transfer a caller when a person should take over.
+spec:
+  instructions:
+    file: instructions.md
+  inputs:
+    - handoff-reason
+  evaluationSuite: evals/
