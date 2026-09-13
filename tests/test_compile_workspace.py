@@ -40,7 +40,7 @@ class CompileWorkspaceTests(unittest.TestCase):
             ["answer-faq", "book-appointment", "human-handoff", "take-message"],
         )
         self.assertIn(
-            "Never invent availability",
+            "Do not invent availability",
             compiled["skillInstructions"]["book-appointment"]["content"],
         )
         self.assertTrue(
