@@ -1,0 +1,10 @@
+apiVersion: modelgarden.ai/v1
+kind: KnowledgeSource
+metadata:
+  name: business-information
+  owner: business-owner
+  description: Approved business facts used by the Receptionist, such as services, hours, service area, policies, and escalation contacts.
+spec:
+  type: repository
+  classification: internal
+  reference: client-business-information

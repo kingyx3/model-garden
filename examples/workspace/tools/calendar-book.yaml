@@ -1,0 +1,10 @@
+apiVersion: modelgarden.ai/v1
+kind: Tool
+metadata:
+  name: calendar.book
+  owner: ai-platform
+  description: Create an appointment through an approved booking integration using a validated slot and caller details.
+spec:
+  type: internal
+  risk: write
+  approvalRequired: true

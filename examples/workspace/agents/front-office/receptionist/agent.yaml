@@ -1,0 +1,28 @@
+apiVersion: modelgarden.ai/v1
+kind: Agent
+metadata:
+  name: receptionist
+  owner: front-office
+  team: front-office
+  description: Answer inbound customer calls, handle approved enquiries, capture messages, book appointments, and hand off safely.
+spec:
+  model:
+    profile: reasoning.high
+  instructions:
+    file: instructions.md
+  skills:
+    - answer-faq
+    - take-message
+    - human-handoff
+    - book-appointment
+  tools:
+    - calendar.book
+  knowledge:
+    - business-information
+  security:
+    dataClassification: confidential
+  approvals:
+    externalActions: required
+  evaluation:
+    suite: evals/
+    minimumScore: 0.9

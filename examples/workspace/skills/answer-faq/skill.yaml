@@ -1,0 +1,13 @@
+apiVersion: modelgarden.ai/v1
+kind: Skill
+metadata:
+  name: answer-faq
+  owner: front-office
+  version: 1.0.0
+  description: Answer common customer questions from approved business knowledge.
+spec:
+  instructions:
+    file: instructions.md
+  inputs:
+    - customer-question
+  evaluationSuite: evals/
