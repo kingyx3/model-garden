@@ -2,9 +2,10 @@
 """Compile a validated Model Garden client workspace into deterministic runtime desired state.
 
 The compiler intentionally stays small for the MVP: it validates versioned resources,
-resolves an Agent's references by metadata.name, materializes its instruction file, and
-emits secret-free JSON. Runtime-specific provisioning remains the responsibility of an
-adapter (Hermes is the reference runtime).
+resolves an Agent's references by metadata.name, materializes Agent and Skill instruction
+files, enforces that Skills cannot smuggle in Tools the Agent did not select, and emits
+secret-free JSON. Runtime-specific provisioning remains the responsibility of an adapter
+(Hermes is the reference runtime).
 """
 
 from __future__ import annotations
@@ -79,6 +80,36 @@ def load_workspace(workspace: pathlib.Path) -> tuple[dict[str, dict[str, dict[st
     return resources, source_paths
 
 
+def materialize_instruction_file(
+    workspace: pathlib.Path,
+    resource_kind: str,
+    resource_name: str,
+    resource: dict[str, Any],
+    source_paths: dict[tuple[str, str], pathlib.Path],
+) -> tuple[dict[str, str] | None, list[str]]:
+    instructions = resource.get("spec", {}).get("instructions")
+    if not isinstance(instructions, dict) or not instructions.get("file"):
+        return None, []
+
+    source_path = source_paths[(resource_kind, resource_name)]
+    instruction_path = (source_path.parent / instructions["file"]).resolve()
+    workspace_root = workspace.resolve()
+    errors: list[str] = []
+    try:
+        instruction_path.relative_to(workspace_root)
+    except ValueError:
+        errors.append(f"{resource_kind} {resource_name!r} instruction path escapes workspace: {instruction_path}")
+        return None, errors
+    if not instruction_path.is_file():
+        errors.append(f"{resource_kind} {resource_name!r} instruction file does not exist: {instruction_path}")
+        return None, errors
+
+    return {
+        "source": str(instruction_path.relative_to(workspace_root)),
+        "content": instruction_path.read_text(),
+    }, errors
+
+
 def resolve_agent(
     workspace: pathlib.Path,
     agent: dict[str, Any],
@@ -104,19 +135,33 @@ def resolve_agent(
             else:
                 resolved[field].append(resource)
 
-    agent_path = source_paths[("Agent", name)]
-    instruction_path = (agent_path.parent / spec["instructions"]["file"]).resolve()
-    workspace_root = workspace.resolve()
-    try:
-        instruction_path.relative_to(workspace_root)
-    except ValueError:
-        errors.append(f"Agent {name!r} instruction path escapes workspace: {instruction_path}")
-    if not instruction_path.is_file():
-        errors.append(f"Agent {name!r} instruction file does not exist: {instruction_path}")
+    agent_instructions, instruction_errors = materialize_instruction_file(
+        workspace, "Agent", name, agent, source_paths
+    )
+    errors.extend(instruction_errors)
+
+    selected_tools = set(spec.get("tools", []))
+    skill_instructions: dict[str, dict[str, str]] = {}
+    for skill in resolved["skills"]:
+        skill_name = skill["metadata"]["name"]
+        materialized, skill_errors = materialize_instruction_file(
+            workspace, "Skill", skill_name, skill, source_paths
+        )
+        errors.extend(skill_errors)
+        if materialized is not None:
+            skill_instructions[skill_name] = materialized
+
+        for tool_name in skill.get("spec", {}).get("allowedTools", []):
+            if tool_name not in selected_tools:
+                errors.append(
+                    f"Skill {skill_name!r} requires Tool {tool_name!r}, but Agent {name!r} did not select it"
+                )
 
     if errors:
         raise ValueError("Workspace compilation failed:\n - " + "\n - ".join(errors))
 
+    agent_path = source_paths[("Agent", name)]
+    assert agent_instructions is not None
     return {
         "schemaVersion": 1,
         "source": {
@@ -126,12 +171,10 @@ def resolve_agent(
             "path": str(agent_path.relative_to(workspace)),
         },
         "agent": agent,
-        "instructions": {
-            "source": str(instruction_path.relative_to(workspace_root)),
-            "content": instruction_path.read_text(),
-        },
+        "instructions": agent_instructions,
         "modelProfile": model_profile,
         "skills": resolved["skills"],
+        "skillInstructions": skill_instructions,
         "tools": resolved["tools"],
         "knowledge": resolved["knowledge"],
     }
