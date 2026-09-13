@@ -1,0 +1,13 @@
+apiVersion: modelgarden.ai/v1
+kind: Skill
+metadata:
+  name: take-message
+  owner: front-office
+  version: 1.0.0
+  description: Capture a concise callback message when the caller cannot be completed immediately.
+spec:
+  instructions:
+    file: instructions.md
+  inputs:
+    - caller-request
+  evaluationSuite: evals/
