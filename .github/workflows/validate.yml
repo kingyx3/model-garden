@@ -43,6 +43,11 @@ jobs:
           python3 scripts/compile-workspace.py examples/workspace --agent account-researcher --output /tmp/account-researcher.json
           grep -q '"name": "account-researcher"' /tmp/account-researcher.json
           grep -q '"name": "reasoning.high"' /tmp/account-researcher.json
+          python3 scripts/compile-workspace.py examples/workspace --agent receptionist --output /tmp/receptionist.json
+          grep -q '"name": "receptionist"' /tmp/receptionist.json
+          grep -q '"name": "book-appointment"' /tmp/receptionist.json
+          grep -q '"name": "calendar.book"' /tmp/receptionist.json
+          grep -q '"name": "business-information"' /tmp/receptionist.json
       - name: Validate shell scripts
         run: bash -n scripts/*.sh
       - name: Smoke-test model config renderer
