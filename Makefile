@@ -9,6 +9,7 @@ contracts:
 compiler:
 	python3 -m unittest discover -s tests -v
 	python3 scripts/compile-workspace.py examples/workspace --agent account-researcher --output /tmp/model-garden-account-researcher.json
+	python3 scripts/compile-workspace.py examples/workspace --agent receptionist --output /tmp/model-garden-receptionist.json
 
 terraform:
 	terraform -chdir=infra/aws fmt -check
