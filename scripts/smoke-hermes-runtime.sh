@@ -5,6 +5,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 LOCK="$ROOT/platform/hermes.lock"
 PROFILE_DIR="${1:-/tmp/model-garden-hermes-smoke}"
 VENV_DIR="${HERMES_SMOKE_VENV:-/tmp/model-garden-hermes-venv}"
+SOURCE_DIR="${HERMES_SMOKE_SOURCE:-/tmp/model-garden-hermes-source}"
 DESIRED_STATE="${HERMES_SMOKE_DESIRED_STATE:-/tmp/model-garden-receptionist.json}"
 
 repo="$(awk -F= '$1=="repository" {print $2}' "$LOCK")"
@@ -20,9 +21,12 @@ python3 "$ROOT/scripts/compile-workspace.py" "$ROOT/examples/workspace" --agent 
 rm -rf "$PROFILE_DIR"
 python3 "$ROOT/scripts/provision-hermes-profile.py" "$DESIRED_STATE" "$PROFILE_DIR"
 
+rm -rf "$SOURCE_DIR" "$VENV_DIR"
+git clone --quiet --filter=blob:none "$repo" "$SOURCE_DIR"
+git -C "$SOURCE_DIR" checkout --quiet "$commit"
 python3 -m venv "$VENV_DIR"
 "$VENV_DIR/bin/python" -m pip install --disable-pip-version-check --quiet --upgrade pip
-"$VENV_DIR/bin/python" -m pip install --disable-pip-version-check --quiet "git+${repo}@${commit}"
+"$VENV_DIR/bin/python" -m pip install --disable-pip-version-check --quiet -e "$SOURCE_DIR"
 
 actual_version="$(HERMES_HOME="$PROFILE_DIR" "$VENV_DIR/bin/python" -c 'import importlib.metadata; print(importlib.metadata.version("hermes-agent"))')"
 if [[ "$actual_version" != "$version" ]]; then
