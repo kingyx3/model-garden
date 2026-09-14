@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 import pathlib
+import shutil
 import subprocess
 import tempfile
 import unittest
@@ -30,6 +31,8 @@ class RebuildClientRuntimeTests(unittest.TestCase):
         (repo / "platform" / "hermes.lock").write_text(
             (ROOT / "platform" / "hermes.lock").read_text(encoding="utf-8"), encoding="utf-8"
         )
+        for directory in ("contracts", "scripts", "examples"):
+            shutil.copytree(ROOT / directory, repo / directory)
         subprocess.run(["git", "init", "-q", str(repo)], check=True)
         subprocess.run(["git", "-C", str(repo), "config", "user.email", "tests@modelgarden.invalid"], check=True)
         subprocess.run(["git", "-C", str(repo), "config", "user.name", "Model Garden Tests"], check=True)
@@ -66,6 +69,26 @@ class RebuildClientRuntimeTests(unittest.TestCase):
             self.assertEqual((resolved / "VERSION").read_text(encoding="utf-8").strip(), "0.2.0")
             self.assertEqual(rebuild.verify_lock(workspace, resolved)["modelgarden"], "0.2.0")
 
+    def test_locked_release_supplies_selected_curated_skill_and_tool_without_manual_library(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            workspace = bootstrap.bootstrap(root / "acme-ai-workspace", "acme")
+            agent_path = workspace / "agents" / "receptionist" / "agent.yaml"
+            agent = yaml.safe_load(agent_path.read_text(encoding="utf-8"))
+            agent["spec"]["skills"] = ["book-appointment"]
+            agent["spec"]["tools"] = ["calendar.book"]
+            agent_path.write_text(yaml.safe_dump(agent, sort_keys=False), encoding="utf-8")
+            repository = self._release_repo(root)
+            resolved = rebuild.resolve_platform_release(workspace, root / "cache", str(repository))
+            profile = root / "hermes-profile"
+
+            changed = rebuild.rebuild(workspace, "receptionist", profile, platform_root=resolved)
+
+            skill_path = pathlib.Path("skills/model-garden/book-appointment/SKILL.md")
+            self.assertIn(skill_path, changed)
+            self.assertTrue((profile / skill_path).is_file())
+            self.assertIn("calendar.book", (profile / skill_path).read_text(encoding="utf-8"))
+
     def test_missing_locked_release_tag_fails_closed_and_cleans_cache(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = pathlib.Path(tmp)
@@ -77,6 +100,17 @@ class RebuildClientRuntimeTests(unittest.TestCase):
                 rebuild.resolve_platform_release(workspace, root / "cache", str(repository))
 
             self.assertFalse(destination.exists())
+
+    def test_missing_curated_resource_root_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            (root / "VERSION").write_text("0.2.0\n", encoding="utf-8")
+            (root / "platform").mkdir()
+            (root / "platform" / "hermes.lock").write_text(
+                (ROOT / "platform" / "hermes.lock").read_text(encoding="utf-8"), encoding="utf-8"
+            )
+            with self.assertRaisesRegex(ValueError, "no curated resource root"):
+                rebuild.curated_library_roots(root)
 
     def test_modelgarden_version_mismatch_fails_closed(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
