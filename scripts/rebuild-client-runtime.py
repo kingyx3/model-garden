@@ -3,20 +3,25 @@
 
 This is the narrow reproducibility path for the MVP. It verifies that the Model Garden
 checkout and Hermes runtime revision match the client's platform.lock.yaml before
-compiling the selected Agent and materializing disposable Hermes state. Credentials stay
-outside the workspace/profile and remain the deployment environment's responsibility.
+compiling the selected Agent and materializing disposable Hermes state. When requested,
+it first resolves the exact version tag pinned by the client into a disposable cache.
+Credentials stay outside the workspace/profile and remain the deployment environment's
+responsibility.
 """
 from __future__ import annotations
 
 import argparse
 import importlib.util
 import pathlib
+import shutil
+import subprocess
 import sys
 from typing import Any
 
 import yaml
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
+DEFAULT_PLATFORM_REPOSITORY = "https://github.com/kingyx3/model-garden.git"
 
 
 def _load_module(name: str, path: pathlib.Path):
@@ -33,6 +38,53 @@ def _load_mapping(path: pathlib.Path, label: str) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise ValueError(f"Runtime rebuild failed: {label} must be a YAML object")
     return value
+
+
+def _client_modelgarden_version(workspace: pathlib.Path) -> str:
+    lock_path = workspace / "platform.lock.yaml"
+    if not lock_path.is_file():
+        raise ValueError(f"Runtime rebuild failed: missing lockfile {lock_path}")
+    lock = _load_mapping(lock_path, "platform.lock.yaml")
+    version = lock.get("modelgarden")
+    if not isinstance(version, str) or not version.strip():
+        raise ValueError("Runtime rebuild failed: platform.lock.yaml missing 'modelgarden'")
+    version = version.strip()
+    parts = version.split(".")
+    if len(parts) != 3 or any(not part.isdigit() for part in parts):
+        raise ValueError(f"Runtime rebuild failed: invalid Model Garden version {version!r}")
+    return version
+
+
+def resolve_platform_release(
+    workspace: pathlib.Path,
+    cache_root: pathlib.Path,
+    repository: str = DEFAULT_PLATFORM_REPOSITORY,
+) -> pathlib.Path:
+    """Resolve the client's pinned Model Garden version tag into an isolated checkout."""
+    version = _client_modelgarden_version(workspace)
+    tag = f"v{version}"
+    destination = cache_root / tag
+    if destination.exists():
+        shutil.rmtree(destination)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        subprocess.run(
+            ["git", "clone", "--depth", "1", "--branch", tag, "--single-branch", repository, str(destination)],
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+    except (OSError, subprocess.CalledProcessError) as exc:
+        shutil.rmtree(destination, ignore_errors=True)
+        detail = exc.stderr.strip() if isinstance(exc, subprocess.CalledProcessError) and exc.stderr else str(exc)
+        raise ValueError(f"Runtime rebuild failed: cannot resolve Model Garden release {tag}: {detail}") from exc
+    try:
+        verify_lock(workspace, destination)
+    except (OSError, ValueError, yaml.YAMLError):
+        shutil.rmtree(destination, ignore_errors=True)
+        raise
+    return destination
 
 
 def _platform_versions(platform_root: pathlib.Path) -> dict[str, str]:
@@ -102,15 +154,30 @@ def main() -> int:
         default=[],
         help="curated resource root from this pinned platform release; may be repeated",
     )
+    parser.add_argument(
+        "--resolve-release",
+        type=pathlib.Path,
+        metavar="CACHE_DIR",
+        help="clone the exact v<modelgarden> tag from platform.lock.yaml into CACHE_DIR before rebuilding",
+    )
+    parser.add_argument(
+        "--platform-repository",
+        default=DEFAULT_PLATFORM_REPOSITORY,
+        help="Model Garden git repository used with --resolve-release",
+    )
     parser.add_argument("--dry-run", action="store_true", help="verify/compile and report profile changes without writing")
     args = parser.parse_args()
 
     try:
+        platform_root = ROOT
+        if args.resolve_release is not None:
+            platform_root = resolve_platform_release(args.workspace, args.resolve_release, args.platform_repository)
         changed = rebuild(
             args.workspace,
             args.agent,
             args.profile_dir,
             tuple(pathlib.Path(path) for path in args.library),
+            platform_root=platform_root,
             dry_run=args.dry_run,
         )
     except (OSError, ValueError, yaml.YAMLError) as exc:

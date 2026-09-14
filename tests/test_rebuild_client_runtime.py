@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 import pathlib
-import shutil
+import subprocess
 import tempfile
 import unittest
 
@@ -23,6 +23,21 @@ bootstrap_spec.loader.exec_module(bootstrap)
 
 
 class RebuildClientRuntimeTests(unittest.TestCase):
+    def _release_repo(self, root: pathlib.Path, version: str = "0.2.0") -> pathlib.Path:
+        repo = root / "platform-source"
+        (repo / "platform").mkdir(parents=True)
+        (repo / "VERSION").write_text(version + "\n", encoding="utf-8")
+        (repo / "platform" / "hermes.lock").write_text(
+            (ROOT / "platform" / "hermes.lock").read_text(encoding="utf-8"), encoding="utf-8"
+        )
+        subprocess.run(["git", "init", "-q", str(repo)], check=True)
+        subprocess.run(["git", "-C", str(repo), "config", "user.email", "tests@modelgarden.invalid"], check=True)
+        subprocess.run(["git", "-C", str(repo), "config", "user.name", "Model Garden Tests"], check=True)
+        subprocess.run(["git", "-C", str(repo), "add", "."], check=True)
+        subprocess.run(["git", "-C", str(repo), "commit", "-qm", "release fixture"], check=True)
+        subprocess.run(["git", "-C", str(repo), "tag", f"v{version}"], check=True)
+        return repo
+
     def test_bootstrapped_workspace_rebuilds_disposable_hermes_profile(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = pathlib.Path(tmp)
@@ -38,6 +53,30 @@ class RebuildClientRuntimeTests(unittest.TestCase):
             self.assertTrue((profile / ".modelgarden" / "desired-state.json").is_file())
             self.assertFalse((profile / ".env").exists())
             self.assertEqual(rebuild.rebuild(workspace, "receptionist", profile), [])
+
+    def test_resolves_exact_modelgarden_version_tag_from_lockfile(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            workspace = bootstrap.bootstrap(root / "acme-ai-workspace", "acme")
+            repository = self._release_repo(root)
+
+            resolved = rebuild.resolve_platform_release(workspace, root / "cache", str(repository))
+
+            self.assertEqual(resolved, root / "cache" / "v0.2.0")
+            self.assertEqual((resolved / "VERSION").read_text(encoding="utf-8").strip(), "0.2.0")
+            self.assertEqual(rebuild.verify_lock(workspace, resolved)["modelgarden"], "0.2.0")
+
+    def test_missing_locked_release_tag_fails_closed_and_cleans_cache(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            workspace = bootstrap.bootstrap(root / "acme-ai-workspace", "acme")
+            repository = self._release_repo(root, "0.1.0")
+            destination = root / "cache" / "v0.2.0"
+
+            with self.assertRaisesRegex(ValueError, "cannot resolve Model Garden release v0.2.0"):
+                rebuild.resolve_platform_release(workspace, root / "cache", str(repository))
+
+            self.assertFalse(destination.exists())
 
     def test_modelgarden_version_mismatch_fails_closed(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
