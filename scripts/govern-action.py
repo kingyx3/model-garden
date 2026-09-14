@@ -3,8 +3,8 @@
 
 MVP behavior is intentionally small and explicit:
 - an Agent may request only Tools present in its compiled desired state;
-- selected Tools resolve to allow or require-approval from the Tool contract;
-- approvals bind to an immutable requestId derived from agent + tool + arguments;
+- selected Tools resolve to allow or require-approval from the stricter of Agent and Tool configuration;
+- approvals bind to an immutable requestId derived from agent + tool + exact arguments + initiating identity;
 - denied, pending, approved, and executed material actions can be written as JSONL audit events;
 - execution is injected by the caller, so this module never owns provider credentials.
 
@@ -53,16 +53,15 @@ def build_action_request(
     if not isinstance(arguments, dict):
         raise ValueError("Governed action failed: arguments must be a JSON object")
 
-    material = {
+    material: dict[str, Any] = {
         "agent": _agent_name(desired_state),
         "tool": tool_name,
         "arguments": arguments,
     }
-    request_id = hashlib.sha256(_canonical_json(material).encode("utf-8")).hexdigest()
-    request = {**material, "requestId": request_id}
     if initiating_user:
-        request["initiatingUser"] = initiating_user
-    return request
+        material["initiatingUser"] = initiating_user
+    request_id = hashlib.sha256(_canonical_json(material).encode("utf-8")).hexdigest()
+    return {**material, "requestId": request_id}
 
 
 def authorize_action(
@@ -86,11 +85,19 @@ def authorize_action(
             "request": request,
         }
 
-    spec = tool.get("spec", {})
-    if spec.get("approvalRequired", False):
+    agent_requires_approval = (
+        desired_state.get("agent", {})
+        .get("spec", {})
+        .get("approvals", {})
+        .get("externalActions")
+        == "required"
+    )
+    tool_requires_approval = tool.get("spec", {}).get("approvalRequired", False)
+    if agent_requires_approval or tool_requires_approval:
+        reason = "agent-requires-approval" if agent_requires_approval else "tool-requires-approval"
         return {
             "decision": "require-approval",
-            "reason": "tool-requires-approval",
+            "reason": reason,
             "request": request,
         }
 
