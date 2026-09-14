@@ -3,10 +3,12 @@
 
 This is the narrow reproducibility path for the MVP. It verifies that the Model Garden
 checkout and Hermes runtime revision match the client's platform.lock.yaml before
-compiling the selected Agent and materializing disposable Hermes state. When requested,
-it first resolves the exact version tag pinned by the client into a disposable cache.
-Credentials stay outside the workspace/profile and remain the deployment environment's
-responsibility.
+compiling the selected Agent and materializing disposable Hermes state. The pinned Model
+Garden checkout also supplies the curated non-Agent resource library by default, so client
+workspaces can select shared Skills/Tools without copying them or passing a manual library
+path. When requested, the command first resolves the exact version tag pinned by the
+client into a disposable cache. Credentials stay outside the workspace/profile and remain
+the deployment environment's responsibility.
 """
 from __future__ import annotations
 
@@ -124,11 +126,25 @@ def verify_lock(workspace: pathlib.Path, platform_root: pathlib.Path = ROOT) -> 
     return actual
 
 
+def curated_library_roots(platform_root: pathlib.Path) -> tuple[pathlib.Path, ...]:
+    """Return the curated resource roots shipped by this verified Model Garden release.
+
+    The MVP keeps the curated catalogue co-located with the reference workspace rather
+    than introducing a package registry or second distribution mechanism. Because the
+    entire Model Garden release is immutable and lock-verified, these resources are pinned
+    transitively by the client's Model Garden version.
+    """
+    root = platform_root / "examples" / "workspace"
+    if not root.is_dir():
+        raise ValueError(f"Runtime rebuild failed: pinned platform release has no curated resource root: {root}")
+    return (root,)
+
+
 def rebuild(
     workspace: pathlib.Path,
     agent_name: str,
     profile_dir: pathlib.Path,
-    library_roots: tuple[pathlib.Path, ...] = (),
+    library_roots: tuple[pathlib.Path, ...] | None = None,
     platform_root: pathlib.Path = ROOT,
     dry_run: bool = False,
 ) -> list[pathlib.Path]:
@@ -136,6 +152,8 @@ def rebuild(
     compiler = _load_module("modelgarden_compile_workspace", platform_root / "scripts" / "compile-workspace.py")
     provisioner = _load_module("modelgarden_provision_hermes", platform_root / "scripts" / "provision-hermes-profile.py")
 
+    if library_roots is None:
+        library_roots = curated_library_roots(platform_root)
     compiled = compiler.compile_workspace(workspace, agent_name, library_roots)
     if len(compiled) != 1:
         raise ValueError("Runtime rebuild failed: expected exactly one compiled Agent")
@@ -152,7 +170,7 @@ def main() -> int:
         "--library",
         action="append",
         default=[],
-        help="curated resource root from this pinned platform release; may be repeated",
+        help="additional curated resource root; may be repeated and overrides the automatic pinned-release catalogue only by client-local definitions",
     )
     parser.add_argument(
         "--resolve-release",
@@ -172,11 +190,12 @@ def main() -> int:
         platform_root = ROOT
         if args.resolve_release is not None:
             platform_root = resolve_platform_release(args.workspace, args.resolve_release, args.platform_repository)
+        library_roots = curated_library_roots(platform_root) + tuple(pathlib.Path(path) for path in args.library)
         changed = rebuild(
             args.workspace,
             args.agent,
             args.profile_dir,
-            tuple(pathlib.Path(path) for path in args.library),
+            library_roots,
             platform_root=platform_root,
             dry_run=args.dry_run,
         )
