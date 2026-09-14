@@ -35,6 +35,87 @@ def _write(path: pathlib.Path, content: str) -> None:
     path.write_text(content, encoding="utf-8")
 
 
+def _client_workflow() -> str:
+    return """name: Model Garden client runtime
+
+on:
+  pull_request:
+  push:
+    branches:
+      - dev
+      - main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: model-garden-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Resolve locked Model Garden release
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="$(awk '$1 == \"modelgarden:\" { print $2; exit }' platform.lock.yaml)"
+          if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "platform.lock.yaml must pin modelgarden as MAJOR.MINOR.PATCH" >&2
+            exit 1
+          fi
+          git clone --depth 1 --branch "v${version}" --single-branch \
+            https://github.com/kingyx3/model-garden.git "$RUNNER_TEMP/model-garden"
+          echo "MODEL_GARDEN_ROOT=$RUNNER_TEMP/model-garden" >> "$GITHUB_ENV"
+      - name: Install validation dependencies
+        run: python3 -m pip install -r "$MODEL_GARDEN_ROOT/requirements-dev.txt"
+      - name: Validate client workspace
+        run: python3 "$MODEL_GARDEN_ROOT/scripts/validate-workspace.py" "$GITHUB_WORKSPACE"
+      - name: Verify locked runtime rebuild
+        run: >-
+          python3 "$MODEL_GARDEN_ROOT/scripts/rebuild-client-runtime.py"
+          "$GITHUB_WORKSPACE" "$RUNNER_TEMP/hermes-profile"
+          --agent receptionist --dry-run
+
+  materialize:
+    if: github.event_name == 'push'
+    needs: validate
+    runs-on: ubuntu-latest
+    environment:
+      name: ${{ github.ref_name == 'main' && 'prod' || 'dev' }}
+    steps:
+      - uses: actions/checkout@v7
+      - name: Resolve locked Model Garden release
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="$(awk '$1 == \"modelgarden:\" { print $2; exit }' platform.lock.yaml)"
+          if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "platform.lock.yaml must pin modelgarden as MAJOR.MINOR.PATCH" >&2
+            exit 1
+          fi
+          git clone --depth 1 --branch "v${version}" --single-branch \
+            https://github.com/kingyx3/model-garden.git "$RUNNER_TEMP/model-garden"
+          echo "MODEL_GARDEN_ROOT=$RUNNER_TEMP/model-garden" >> "$GITHUB_ENV"
+      - name: Install runtime rebuild dependencies
+        run: python3 -m pip install -r "$MODEL_GARDEN_ROOT/requirements-dev.txt"
+      - name: Materialize locked Hermes runtime profile
+        run: >-
+          python3 "$MODEL_GARDEN_ROOT/scripts/rebuild-client-runtime.py"
+          "$GITHUB_WORKSPACE" "$RUNNER_TEMP/hermes-profile"
+          --agent receptionist
+      - name: Upload reproducible runtime profile
+        uses: actions/upload-artifact@v4
+        with:
+          name: hermes-profile-${{ github.ref_name }}-${{ github.sha }}
+          path: ${{ runner.temp }}/hermes-profile
+          if-no-files-found: error
+          retention-days: 7
+"""
+
+
 def bootstrap(output: pathlib.Path, client_slug: str, root: pathlib.Path = ROOT) -> pathlib.Path:
     if not CLIENT_SLUG.fullmatch(client_slug):
         raise ValueError("client slug must use lowercase letters, numbers, and internal hyphens only")
@@ -72,9 +153,10 @@ def bootstrap(output: pathlib.Path, client_slug: str, root: pathlib.Path = ROOT)
             output / "environments" / f"{environment}.yaml",
             f"""environment: {environment}\nruntime:\n  profile: receptionist\n""",
         )
+    _write(output / ".github" / "workflows" / "model-garden.yml", _client_workflow())
     _write(
         output / "README.md",
-        f"""# {client_slug} AI workspace\n\nThis private repository is the portable source of truth for {client_slug}'s business-specific Model Garden desired state.\n\n## Bootstrap pins\n\n- Model Garden: `{modelgarden_version}`\n- Hermes: `{hermes_version}` (`{hermes_revision}`)\n- Contract: `v1`\n\n## Next steps\n\n1. Replace the Receptionist bootstrap instructions with business-owner-approved behaviour.\n2. Add approved knowledge references and representative evals.\n3. Select curated Skills/Tools only when the pinned Model Garden compiler can resolve them.\n4. Keep provider credentials in GitHub `dev`/`prod` Environment secrets or provider-native authorization flows, never in this repository.\n5. Validate and compile this workspace with the pinned Model Garden release before promotion.\n\nDo not copy Model Garden platform code, generic connectors, generated Hermes state, or raw credentials into this workspace.\n""",
+        f"""# {client_slug} AI workspace\n\nThis private repository is the portable source of truth for {client_slug}'s business-specific Model Garden desired state.\n\n## Bootstrap pins\n\n- Model Garden: `{modelgarden_version}`\n- Hermes: `{hermes_version}` (`{hermes_revision}`)\n- Contract: `v1`\n\n## GitHub delivery path\n\nThe generated `.github/workflows/model-garden.yml` validates pull requests against the exact Model Garden release pinned in `platform.lock.yaml`. Pushes to `dev` additionally materialize the reproducible Hermes profile through the GitHub `dev` Environment; pushes to `main` do the same through `prod`. The generated profile is a short-lived deployment artifact, not source of truth. Provider/channel/connector deployment and secret injection remain separate target-binding steps.\n\n## Next steps\n\n1. Replace the Receptionist bootstrap instructions with business-owner-approved behaviour.\n2. Add approved knowledge references and representative evals.\n3. Select curated Skills/Tools only when the pinned Model Garden compiler can resolve them.\n4. Create protected GitHub `dev` and `prod` Environments and keep provider credentials there or in provider-native authorization flows, never in this repository.\n5. Use pull requests for validation, merge approved integration changes to `dev`, then promote the tested revision to `main` for production.\n\nDo not copy Model Garden platform code, generic connectors, generated Hermes state, or raw credentials into this workspace.\n""",
     )
     return output
 
