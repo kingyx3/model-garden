@@ -1,12 +1,22 @@
+from __future__ import annotations
+
+import importlib.util
+import pathlib
 import unittest
 
-from platform.channels.livekit_voice import LiveKitVoiceAdapter
+ROOT = pathlib.Path(__file__).resolve().parents[1]
+CHANNEL_PATH = ROOT / "platform" / "channels" / "livekit_voice.py"
+
+channel_spec = importlib.util.spec_from_file_location("livekit_voice", CHANNEL_PATH)
+voice = importlib.util.module_from_spec(channel_spec)
+assert channel_spec.loader is not None
+channel_spec.loader.exec_module(voice)
 
 
 class LiveKitVoiceAdapterTests(unittest.TestCase):
     def test_normalizes_inbound_sip_participant(self):
         events = []
-        adapter = LiveKitVoiceAdapter(
+        adapter = voice.LiveKitVoiceAdapter(
             tenant="acme",
             receptionist="front-desk",
             event_sink=events.append,
@@ -39,7 +49,7 @@ class LiveKitVoiceAdapterTests(unittest.TestCase):
         self.assertEqual(events, [event])
 
     def test_allows_hidden_caller_number(self):
-        adapter = LiveKitVoiceAdapter(tenant="acme", receptionist="front-desk")
+        adapter = voice.LiveKitVoiceAdapter(tenant="acme", receptionist="front-desk")
         event = adapter.call_started(
             participant_identity="sip_123",
             room_name="call-random",
@@ -51,7 +61,7 @@ class LiveKitVoiceAdapterTests(unittest.TestCase):
         self.assertIsNone(event["caller"])
 
     def test_requires_stable_trace_and_called_number(self):
-        adapter = LiveKitVoiceAdapter(tenant="acme", receptionist="front-desk")
+        adapter = voice.LiveKitVoiceAdapter(tenant="acme", receptionist="front-desk")
         with self.assertRaisesRegex(ValueError, "sip.callID"):
             adapter.call_started(
                 participant_identity="sip_123",
@@ -72,7 +82,7 @@ class LiveKitVoiceAdapterTests(unittest.TestCase):
             calls.append((participant, target))
             return {"ok": True}
 
-        adapter = LiveKitVoiceAdapter(
+        adapter = voice.LiveKitVoiceAdapter(
             tenant="acme",
             receptionist="front-desk",
             transfer_call=transfer,
@@ -88,13 +98,13 @@ class LiveKitVoiceAdapterTests(unittest.TestCase):
         self.assertEqual(result["provider_result"], {"ok": True})
 
     def test_transfer_fails_closed_without_runtime_operation(self):
-        adapter = LiveKitVoiceAdapter(tenant="acme", receptionist="front-desk")
+        adapter = voice.LiveKitVoiceAdapter(tenant="acme", receptionist="front-desk")
         with self.assertRaisesRegex(RuntimeError, "not configured"):
             adapter.transfer(participant_identity="sip_123", target_uri="tel:+6565550199")
 
     def test_call_ended_is_provider_neutral_and_emitted(self):
         events = []
-        adapter = LiveKitVoiceAdapter(
+        adapter = voice.LiveKitVoiceAdapter(
             tenant="acme",
             receptionist="front-desk",
             event_sink=events.append,
