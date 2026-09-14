@@ -14,10 +14,18 @@ assert spec.loader is not None
 spec.loader.exec_module(govern)
 
 
-def desired_state(*, approval_required: bool = True) -> dict:
+def desired_state(*, approval_required: bool = True, agent_requires_approval: bool = False) -> dict:
+    agent = {
+        "spec": {
+            "approvals": {
+                "externalActions": "required" if agent_requires_approval else "none",
+            }
+        }
+    }
     return {
         "schemaVersion": 1,
         "source": {"name": "receptionist"},
+        "agent": agent,
         "tools": [
             {
                 "apiVersion": "modelgarden.ai/v1",
@@ -54,6 +62,22 @@ class GovernActionTests(unittest.TestCase):
         self.assertEqual(first["requestId"], reordered["requestId"])
         self.assertNotEqual(first["requestId"], changed["requestId"])
 
+    def test_request_id_binds_initiating_identity_when_present(self):
+        state = desired_state()
+        first = govern.build_action_request(
+            state,
+            "calendar.book",
+            {"slot": "2026-09-15T10:00:00+08:00"},
+            initiating_user="caller-session-1",
+        )
+        second = govern.build_action_request(
+            state,
+            "calendar.book",
+            {"slot": "2026-09-15T10:00:00+08:00"},
+            initiating_user="caller-session-2",
+        )
+        self.assertNotEqual(first["requestId"], second["requestId"])
+
     def test_unselected_tool_is_denied(self):
         decision = govern.authorize_action(desired_state(), "crm.write", {"lead": "x"})
         self.assertEqual(decision["decision"], "deny")
@@ -69,6 +93,15 @@ class GovernActionTests(unittest.TestCase):
         )
         self.assertEqual(result["status"], "pending-approval")
         self.assertEqual(calls, [])
+
+    def test_agent_level_requirement_is_stricter_than_tool_allow(self):
+        decision = govern.authorize_action(
+            desired_state(approval_required=False, agent_requires_approval=True),
+            "calendar.book",
+            {"slot": "2026-09-15T10:00:00+08:00"},
+        )
+        self.assertEqual(decision["decision"], "require-approval")
+        self.assertEqual(decision["reason"], "agent-requires-approval")
 
     def test_approval_binds_to_exact_material_action(self):
         state = desired_state()
@@ -94,7 +127,12 @@ class GovernActionTests(unittest.TestCase):
     def test_exact_approved_action_executes_and_is_audited(self):
         state = desired_state()
         args = {"slot": "2026-09-15T10:00:00+08:00", "caller": "+15550001"}
-        request = govern.build_action_request(state, "calendar.book", args)
+        request = govern.build_action_request(
+            state,
+            "calendar.book",
+            args,
+            initiating_user="caller-session-7",
+        )
         approval = {
             "requestId": request["requestId"],
             "approved": True,
@@ -121,6 +159,7 @@ class GovernActionTests(unittest.TestCase):
         self.assertEqual(events[1]["details"]["approver"], "practice-manager")
         self.assertTrue(all(event["requestId"] == request["requestId"] for event in events))
         self.assertTrue(all(event["agent"] == "receptionist" for event in events))
+        self.assertTrue(all(event["initiatingUser"] == "caller-session-7" for event in events))
 
     def test_selected_non_approval_tool_executes(self):
         result = govern.execute_action(
