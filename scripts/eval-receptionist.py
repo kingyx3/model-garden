@@ -58,7 +58,7 @@ def evaluate(workspace: pathlib.Path, suite_path: pathlib.Path) -> list[str]:
         skill_docs[skill_name] = skill
 
     required_phrases = {
-        "approved knowledge": "Receptionist must constrain factual answers to approved knowledge",
+        "approved business knowledge": "Receptionist must constrain factual answers to approved knowledge",
         "rather than inventing": "Receptionist must fail safely instead of inventing unknown facts",
         "minimum information": "Receptionist must minimize caller data collection",
         "never claim an external action succeeded": "Receptionist must wait for Tool success",
