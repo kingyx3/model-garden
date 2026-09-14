@@ -4,8 +4,9 @@
 The compiler intentionally stays small for the MVP: it validates versioned resources,
 resolves an Agent's references by metadata.name, materializes Agent and Skill instruction
 files, enforces that Skills cannot smuggle in Tools the Agent did not select, and emits
-secret-free JSON. Runtime-specific provisioning remains the responsibility of an adapter
-(Hermes is the reference runtime).
+secret-free JSON. Optional library roots let a separate client workspace consume pinned,
+curated resources without copying them into the client repository. Runtime-specific
+provisioning remains the responsibility of an adapter (Hermes is the reference runtime).
 """
 
 from __future__ import annotations
@@ -29,12 +30,7 @@ SCHEMAS = {
     "KnowledgeSource": "knowledge-source.schema.json",
     "Policy": "policy.schema.json",
 }
-
-REFERENCE_FIELDS = {
-    "skills": "Skill",
-    "tools": "Tool",
-    "knowledge": "KnowledgeSource",
-}
+REFERENCE_FIELDS = {"skills": "Skill", "tools": "Tool", "knowledge": "KnowledgeSource"}
 
 
 def load_validators() -> dict[str, Draft202012Validator]:
@@ -46,85 +42,91 @@ def load_validators() -> dict[str, Draft202012Validator]:
     return validators
 
 
-def load_workspace(workspace: pathlib.Path) -> tuple[dict[str, dict[str, dict[str, Any]]], dict[tuple[str, str], pathlib.Path]]:
+def load_workspace(workspace: pathlib.Path, library_roots: tuple[pathlib.Path, ...] = ()):
     validators = load_validators()
     resources: dict[str, dict[str, dict[str, Any]]] = {kind: {} for kind in SCHEMAS}
     source_paths: dict[tuple[str, str], pathlib.Path] = {}
+    source_roots: dict[tuple[str, str], pathlib.Path] = {}
     errors: list[str] = []
+    roots = [(root, False) for root in library_roots] + [(workspace, True)]
+    seen_library: set[tuple[str, str]] = set()
 
-    for path in sorted(workspace.rglob("*.yaml")):
-        document = yaml.safe_load(path.read_text())
-        if not isinstance(document, dict) or "kind" not in document:
+    for root, is_workspace in roots:
+        if not root.is_dir():
+            errors.append(f"resource root does not exist or is not a directory: {root}")
             continue
-        kind = document.get("kind")
-        if kind not in validators:
-            errors.append(f"{path}: unsupported kind {kind!r}")
-            continue
-        schema_errors = sorted(validators[kind].iter_errors(document), key=lambda e: list(e.path))
-        for error in schema_errors:
-            location = ".".join(str(part) for part in error.path) or "<root>"
-            errors.append(f"{path}:{location}: {error.message}")
-        if schema_errors:
-            continue
-        name = document["metadata"]["name"]
-        if name in resources[kind]:
-            errors.append(f"{path}: duplicate {kind} metadata.name {name!r}")
-            continue
-        resources[kind][name] = document
-        source_paths[(kind, name)] = path
+        seen_in_root: set[tuple[str, str]] = set()
+        for path in sorted(root.rglob("*.yaml")):
+            document = yaml.safe_load(path.read_text())
+            if not isinstance(document, dict) or "kind" not in document:
+                continue
+            kind = document.get("kind")
+            if kind not in validators:
+                errors.append(f"{path}: unsupported kind {kind!r}")
+                continue
+            if not is_workspace and kind == "Agent":
+                continue
+            schema_errors = sorted(validators[kind].iter_errors(document), key=lambda e: list(e.path))
+            for error in schema_errors:
+                location = ".".join(str(part) for part in error.path) or "<root>"
+                errors.append(f"{path}:{location}: {error.message}")
+            if schema_errors:
+                continue
+            name = document["metadata"]["name"]
+            key = (kind, name)
+            if key in seen_in_root:
+                errors.append(f"{path}: duplicate {kind} metadata.name {name!r}")
+                continue
+            seen_in_root.add(key)
+            if not is_workspace and key in seen_library:
+                errors.append(f"{path}: duplicate library {kind} metadata.name {name!r}")
+                continue
+            if not is_workspace:
+                seen_library.add(key)
+            resources[kind][name] = document
+            source_paths[key] = path
+            source_roots[key] = root
 
     if errors:
         raise ValueError("Workspace compilation failed:\n - " + "\n - ".join(errors))
     if not resources["Agent"]:
         raise ValueError(f"Workspace compilation failed: no Agent resources found under {workspace}")
-    return resources, source_paths
+    return resources, source_paths, source_roots
 
 
-def materialize_instruction_file(
-    workspace: pathlib.Path,
-    resource_kind: str,
-    resource_name: str,
-    resource: dict[str, Any],
-    source_paths: dict[tuple[str, str], pathlib.Path],
-) -> tuple[dict[str, str] | None, list[str]]:
+def materialize_instruction_file(workspace, resource_kind, resource_name, resource, source_paths, source_roots):
     instructions = resource.get("spec", {}).get("instructions")
     if not isinstance(instructions, dict) or not instructions.get("file"):
         return None, []
-
-    source_path = source_paths[(resource_kind, resource_name)]
+    key = (resource_kind, resource_name)
+    source_path = source_paths[key]
+    source_root = source_roots[key].resolve()
     instruction_path = (source_path.parent / instructions["file"]).resolve()
-    workspace_root = workspace.resolve()
     errors: list[str] = []
     try:
-        instruction_path.relative_to(workspace_root)
+        relative_instruction = instruction_path.relative_to(source_root)
     except ValueError:
-        errors.append(f"{resource_kind} {resource_name!r} instruction path escapes workspace: {instruction_path}")
+        boundary = "workspace" if source_root == workspace.resolve() else "library root"
+        errors.append(f"{resource_kind} {resource_name!r} instruction path escapes {boundary}: {instruction_path}")
         return None, errors
     if not instruction_path.is_file():
         errors.append(f"{resource_kind} {resource_name!r} instruction file does not exist: {instruction_path}")
         return None, errors
+    try:
+        source = str(instruction_path.relative_to(workspace.resolve()))
+    except ValueError:
+        source = f"library:{relative_instruction.as_posix()}"
+    return {"source": source, "content": instruction_path.read_text()}, errors
 
-    return {
-        "source": str(instruction_path.relative_to(workspace_root)),
-        "content": instruction_path.read_text(),
-    }, errors
 
-
-def resolve_agent(
-    workspace: pathlib.Path,
-    agent: dict[str, Any],
-    resources: dict[str, dict[str, dict[str, Any]]],
-    source_paths: dict[tuple[str, str], pathlib.Path],
-) -> dict[str, Any]:
+def resolve_agent(workspace, agent, resources, source_paths, source_roots):
     name = agent["metadata"]["name"]
     spec = agent["spec"]
     errors: list[str] = []
-
     model_name = spec["model"]["profile"]
     model_profile = resources["ModelProfile"].get(model_name)
     if model_profile is None:
         errors.append(f"Agent {name!r} references missing ModelProfile {model_name!r}")
-
     resolved: dict[str, list[dict[str, Any]]] = {}
     for field, kind in REFERENCE_FIELDS.items():
         resolved[field] = []
@@ -134,42 +136,30 @@ def resolve_agent(
                 errors.append(f"Agent {name!r} references missing {kind} {ref!r}")
             else:
                 resolved[field].append(resource)
-
     agent_instructions, instruction_errors = materialize_instruction_file(
-        workspace, "Agent", name, agent, source_paths
+        workspace, "Agent", name, agent, source_paths, source_roots
     )
     errors.extend(instruction_errors)
-
     selected_tools = set(spec.get("tools", []))
     skill_instructions: dict[str, dict[str, str]] = {}
     for skill in resolved["skills"]:
         skill_name = skill["metadata"]["name"]
         materialized, skill_errors = materialize_instruction_file(
-            workspace, "Skill", skill_name, skill, source_paths
+            workspace, "Skill", skill_name, skill, source_paths, source_roots
         )
         errors.extend(skill_errors)
         if materialized is not None:
             skill_instructions[skill_name] = materialized
-
         for tool_name in skill.get("spec", {}).get("allowedTools", []):
             if tool_name not in selected_tools:
-                errors.append(
-                    f"Skill {skill_name!r} requires Tool {tool_name!r}, but Agent {name!r} did not select it"
-                )
-
+                errors.append(f"Skill {skill_name!r} requires Tool {tool_name!r}, but Agent {name!r} did not select it")
     if errors:
         raise ValueError("Workspace compilation failed:\n - " + "\n - ".join(errors))
-
     agent_path = source_paths[("Agent", name)]
     assert agent_instructions is not None
     return {
         "schemaVersion": 1,
-        "source": {
-            "apiVersion": agent["apiVersion"],
-            "kind": agent["kind"],
-            "name": name,
-            "path": str(agent_path.relative_to(workspace)),
-        },
+        "source": {"apiVersion": agent["apiVersion"], "kind": agent["kind"], "name": name, "path": str(agent_path.relative_to(workspace))},
         "agent": agent,
         "instructions": agent_instructions,
         "modelProfile": model_profile,
@@ -180,8 +170,8 @@ def resolve_agent(
     }
 
 
-def compile_workspace(workspace: pathlib.Path, agent_name: str | None = None) -> list[dict[str, Any]]:
-    resources, source_paths = load_workspace(workspace)
+def compile_workspace(workspace: pathlib.Path, agent_name: str | None = None, library_roots: tuple[pathlib.Path, ...] = ()) -> list[dict[str, Any]]:
+    resources, source_paths, source_roots = load_workspace(workspace, library_roots)
     agents = resources["Agent"]
     if agent_name is not None:
         agent = agents.get(agent_name)
@@ -190,23 +180,23 @@ def compile_workspace(workspace: pathlib.Path, agent_name: str | None = None) ->
         selected = [agent]
     else:
         selected = [agents[name] for name in sorted(agents)]
-    return [resolve_agent(workspace, agent, resources, source_paths) for agent in selected]
+    return [resolve_agent(workspace, agent, resources, source_paths, source_roots) for agent in selected]
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("workspace", nargs="?", default="examples/workspace")
     parser.add_argument("--agent", help="Compile only the named Agent")
+    parser.add_argument("--library", action="append", default=[], help="curated resource root; may be repeated and is overridden by client-local resources")
     parser.add_argument("--output", help="Write JSON to this path instead of stdout")
     args = parser.parse_args()
-
     workspace = pathlib.Path(args.workspace)
+    libraries = tuple(pathlib.Path(path) for path in args.library)
     try:
-        compiled = compile_workspace(workspace, args.agent)
+        compiled = compile_workspace(workspace, args.agent, libraries)
     except ValueError as exc:
         print(str(exc), file=sys.stderr)
         return 1
-
     payload: Any = compiled[0] if args.agent else {"schemaVersion": 1, "agents": compiled}
     text = json.dumps(payload, indent=2, sort_keys=True) + "\n"
     if args.output:
