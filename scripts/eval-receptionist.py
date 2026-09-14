@@ -32,6 +32,17 @@ def find_named(root: pathlib.Path, filename: str, name: str):
     return matches[0]
 
 
+def find_named_yaml(root: pathlib.Path, name: str):
+    matches = []
+    for path in root.rglob("*.yaml"):
+        doc = load_yaml(path)
+        if doc.get("metadata", {}).get("name") == name:
+            matches.append((path, doc))
+    if len(matches) != 1:
+        raise AssertionError(f"expected exactly one {name!r} YAML resource; found {len(matches)}")
+    return matches[0]
+
+
 def evaluate(workspace: pathlib.Path, suite_path: pathlib.Path) -> list[str]:
     failures: list[str] = []
     suite = load_yaml(suite_path)
@@ -69,10 +80,10 @@ def evaluate(workspace: pathlib.Path, suite_path: pathlib.Path) -> list[str]:
             if tool not in selected_tools:
                 failures.append(f"{scenario['id']}: required Tool {tool!r} is not selected by Receptionist")
                 continue
-            _, tool_doc = find_named(workspace / "tools", "tool.yaml", tool)
+            _, tool_doc = find_named_yaml(workspace / "tools", tool)
             if expected.get("approvalRequired") and not tool_doc.get("spec", {}).get("approvalRequired"):
                 failures.append(f"{scenario['id']}: {tool!r} must require approval")
-            skill_tools = set(skill_docs[capability].get("spec", {}).get("tools", []))
+            skill_tools = set(skill_docs[capability].get("spec", {}).get("allowedTools", []))
             if tool not in skill_tools:
                 failures.append(f"{scenario['id']}: Skill {capability!r} does not declare Tool {tool!r}")
 
