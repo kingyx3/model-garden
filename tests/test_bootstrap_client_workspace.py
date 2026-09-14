@@ -28,6 +28,7 @@ class BootstrapClientWorkspaceTests(unittest.TestCase):
             self.assertTrue((workspace / "agents" / "receptionist" / "agent.yaml").is_file())
             self.assertTrue((workspace / "environments" / "dev.yaml").is_file())
             self.assertTrue((workspace / "environments" / "prod.yaml").is_file())
+            self.assertTrue((workspace / ".github" / "workflows" / "model-garden.yml").is_file())
 
             lock = yaml.safe_load((workspace / "platform.lock.yaml").read_text(encoding="utf-8"))
             self.assertEqual(lock["modelgarden"], (ROOT / "VERSION").read_text(encoding="utf-8").strip())
@@ -71,6 +72,24 @@ class BootstrapClientWorkspaceTests(unittest.TestCase):
             self.assertEqual(compiled["skills"], [])
             self.assertEqual(compiled["tools"], [])
             self.assertEqual(compiled["knowledge"], [])
+
+    def test_bootstrap_generates_locked_github_delivery_workflow(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = pathlib.Path(tmp) / "acme-ai-workspace"
+            bootstrapper.bootstrap(workspace, "acme")
+            workflow = (workspace / ".github" / "workflows" / "model-garden.yml").read_text(encoding="utf-8")
+
+            self.assertIn("pull_request:", workflow)
+            self.assertIn("- dev", workflow)
+            self.assertIn("- main", workflow)
+            self.assertIn("platform.lock.yaml", workflow)
+            self.assertIn('git clone --depth 1 --branch "v${version}" --single-branch', workflow)
+            self.assertIn("validate-workspace.py", workflow)
+            self.assertIn("rebuild-client-runtime.py", workflow)
+            self.assertIn("--dry-run", workflow)
+            self.assertIn("github.ref_name == 'main' && 'prod' || 'dev'", workflow)
+            self.assertIn("actions/upload-artifact@v4", workflow)
+            self.assertNotIn("secrets.", workflow)
 
     def test_bootstrap_refuses_nonempty_destination(self):
         with tempfile.TemporaryDirectory() as tmp:
