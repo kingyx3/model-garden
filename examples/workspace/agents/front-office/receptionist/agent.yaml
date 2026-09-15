@@ -16,13 +16,14 @@ spec:
     - human-handoff
     - book-appointment
   tools:
+    - calendar.availability
     - calendar.book
   knowledge:
     - business-information
   security:
     dataClassification: confidential
   approvals:
-    externalActions: required
+    externalActions: none
   evaluation:
     suite: evals/
     minimumScore: 0.9
