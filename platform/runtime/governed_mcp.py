@@ -19,7 +19,7 @@ import pathlib
 import re
 from typing import Any, Mapping
 
-from mcp.server.fastmcp import FastMCP
+from mcp.server.mcpserver import MCPServer
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 REQUEST_ID = re.compile(r"^[0-9a-f]{64}$")
@@ -174,14 +174,9 @@ class GovernedToolRuntime:
         return self._execute("calendar.book", arguments, client.booking_executor())
 
 
-def build_server(runtime: GovernedToolRuntime, *, host: str = "0.0.0.0", port: int = 9120) -> FastMCP:
-    mcp = FastMCP(
-        "Model Garden Governed Tools",
-        host=host,
-        port=port,
-        stateless_http=True,
-        json_response=True,
-    )
+def build_server(runtime: GovernedToolRuntime) -> MCPServer:
+    """Build the MCP 2 server; transport settings are supplied only when it is run."""
+    mcp = MCPServer("Model Garden Governed Tools")
 
     @mcp.tool(name="calendar_availability")
     def calendar_availability(start: str, end: str, timezone: str | None = None) -> dict[str, Any]:
@@ -232,8 +227,14 @@ def main() -> int:
     args = parser.parse_args()
 
     runtime = GovernedToolRuntime(args.desired_state, args.audit_path, args.approval_root)
-    server = build_server(runtime, host=args.host, port=args.port)
-    server.run(transport="streamable-http")
+    server = build_server(runtime)
+    server.run(
+        transport="streamable-http",
+        host=args.host,
+        port=args.port,
+        stateless_http=True,
+        json_response=True,
+    )
     return 0
 
 
