@@ -71,11 +71,46 @@ These are GitHub repository/environment **variables**:
 
 The workflow input chooses `dev`, `test`, `staging` or `prod` and passes that value to Terraform.
 
+## Client workspace Docker target (MVP)
+
+A bootstrapped client workspace can optionally deploy its locked Hermes profile to one isolated Docker host without introducing a separate control plane. The target is a **private self-hosted GitHub Actions runner** with Docker Engine and the Docker Compose plugin. Pull requests never run on this target; only protected `dev`/`main` push jobs can deploy.
+
+Configure this repository/environment variable:
+
+| Variable | Purpose |
+|---|---|
+| `MODEL_GARDEN_DOCKER_RUNNER` | Client-specific self-hosted runner label. When absent, the deploy job is skipped and the workflow remains artifact-only. |
+
+Configure this secret separately in the client repository's `dev` and `prod` GitHub Environments:
+
+| Secret | Purpose |
+|---|---|
+| `MODEL_GARDEN_RUNTIME_SECRETS_JSON` | JSON object whose keys exactly match the `secret://` references in the selected environment file. Missing or extra keys fail closed. |
+
+For the generated bootstrap, the minimum environment values are logically equivalent to:
+
+```json
+{"secret://model/dev":"<dev model credential>"}
+```
+
+and:
+
+```json
+{"secret://model/prod":"<prod model credential>"}
+```
+
+Do not put those values in `environments/*.yaml`. Those files contain only references such as `model_credential_ref: secret://model/dev`.
+
+The Docker target adapter consumes the aggregate JSON only inside the deployment process, removes it before calling Docker, and injects only the credential selected by the generated Hermes model profile. The runtime image is built from the exact Hermes revision pinned by Model Garden and a digest-pinned Python base image. A deployment must become healthy before success is reported; when a previous runtime exists, a failed candidate attempts to restore the immediately preceding image while retaining the client's persistent Hermes volume.
+
+This MVP path is intentionally small. Google Calendar, LiveKit, or other credentials may be added to the same environment-scoped reference map only when the corresponding target binding consumes them; unreferenced keys are rejected rather than silently granting broader access.
+
 ## Production notes
 
 - Restrict Kubernetes API endpoints or use private/self-hosted deployment runners.
 - Put the `ClusterIP` gateway behind enterprise ingress/API management, TLS, SSO and rate limiting.
 - Replace directly created Kubernetes secrets with the customer's cloud secret manager and CSI/External Secrets integration.
 - Pin approved model references per environment and rotate provider credentials independently of Terraform state.
+- Keep client Docker runners private, client-scoped and unavailable to pull-request jobs; use a dedicated runner/host per client where practical for the first production deployments.
 
-Never commit provider API keys, cloud credentials, generated kubeconfigs or rendered LiteLLM configuration.
+Never commit provider API keys, cloud credentials, generated kubeconfigs, rendered LiteLLM configuration, or `MODEL_GARDEN_RUNTIME_SECRETS_JSON` values.
