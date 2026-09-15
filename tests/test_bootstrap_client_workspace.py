@@ -33,6 +33,10 @@ class BootstrapClientWorkspaceTests(unittest.TestCase):
             hermes_lock = dict(line.split("=", 1) for line in (ROOT / "platform" / "hermes.lock").read_text(encoding="utf-8").splitlines() if "=" in line)
             self.assertEqual(lock["hermes"], hermes_lock["version"])
             self.assertEqual(lock["hermes_revision"], hermes_lock["commit"])
+            dev = yaml.safe_load((workspace / "environments" / "dev.yaml").read_text(encoding="utf-8"))
+            prod = yaml.safe_load((workspace / "environments" / "prod.yaml").read_text(encoding="utf-8"))
+            self.assertEqual(dev["runtime"]["model_credential_ref"], "secret://model/dev")
+            self.assertEqual(prod["runtime"]["model_credential_ref"], "secret://model/prod")
             validate = subprocess.run(["python3", str(ROOT / "scripts" / "validate-workspace.py"), str(workspace)], cwd=ROOT, text=True, capture_output=True, check=False)
             self.assertEqual(validate.returncode, 0, validate.stderr)
             self.assertIn("Validated 2 Model Garden resource(s)", validate.stdout)
@@ -63,7 +67,15 @@ class BootstrapClientWorkspaceTests(unittest.TestCase):
             self.assertIn("environment-binding.json", workflow)
             self.assertIn("Upload reproducible deployment inputs", workflow)
             self.assertIn("actions/upload-artifact@v4", workflow)
-            self.assertNotIn("secrets.", workflow)
+            self.assertIn("deploy-client-docker.py", workflow)
+            self.assertIn("MODEL_GARDEN_DOCKER_RUNNER", workflow)
+            self.assertIn("MODEL_GARDEN_RUNTIME_SECRETS_JSON", workflow)
+            self.assertIn("--project-name \"acme-${{ github.ref_name == 'main' && 'prod' || 'dev' }}\"", workflow)
+            self.assertIn("--apply", workflow)
+            self.assertEqual(workflow.count("secrets."), 1)
+            self.assertNotIn("secrets.OPENAI_API_KEY", workflow)
+            self.assertNotIn("secrets.GOOGLE", workflow)
+            self.assertNotIn("secrets.LIVEKIT", workflow)
 
     def test_bootstrap_refuses_nonempty_destination(self):
         with tempfile.TemporaryDirectory() as tmp:
