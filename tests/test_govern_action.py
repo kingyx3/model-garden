@@ -15,68 +15,39 @@ spec.loader.exec_module(govern)
 
 
 def desired_state(*, approval_required: bool = True, agent_requires_approval: bool = False) -> dict:
-    agent = {
-        "spec": {
-            "approvals": {
-                "externalActions": "required" if agent_requires_approval else "none",
-            }
-        }
-    }
+    agent = {"spec": {"approvals": {"externalActions": "required" if agent_requires_approval else "none"}}}
     return {
         "schemaVersion": 1,
         "source": {"name": "receptionist"},
         "agent": agent,
-        "tools": [
-            {
-                "apiVersion": "modelgarden.ai/v1",
-                "kind": "Tool",
-                "metadata": {"name": "calendar.book", "owner": "ai-platform"},
-                "spec": {
-                    "type": "internal",
-                    "risk": "write",
-                    "approvalRequired": approval_required,
-                },
-            }
-        ],
+        "tools": [{"apiVersion": "modelgarden.ai/v1", "kind": "Tool", "metadata": {"name": "calendar.book", "owner": "ai-platform"}, "spec": {"type": "internal", "risk": "write", "approvalRequired": approval_required}}],
     }
 
 
 class GovernActionTests(unittest.TestCase):
     def test_request_id_is_deterministic_and_argument_sensitive(self):
         state = desired_state()
-        first = govern.build_action_request(
-            state,
-            "calendar.book",
-            {"slot": "2026-09-15T10:00:00+08:00", "name": "Alice"},
-        )
-        reordered = govern.build_action_request(
-            state,
-            "calendar.book",
-            {"name": "Alice", "slot": "2026-09-15T10:00:00+08:00"},
-        )
-        changed = govern.build_action_request(
-            state,
-            "calendar.book",
-            {"name": "Alice", "slot": "2026-09-15T11:00:00+08:00"},
-        )
+        first = govern.build_action_request(state, "calendar.book", {"slot": "2026-09-15T10:00:00+08:00", "name": "Alice"})
+        reordered = govern.build_action_request(state, "calendar.book", {"name": "Alice", "slot": "2026-09-15T10:00:00+08:00"})
+        changed = govern.build_action_request(state, "calendar.book", {"name": "Alice", "slot": "2026-09-15T11:00:00+08:00"})
         self.assertEqual(first["requestId"], reordered["requestId"])
         self.assertNotEqual(first["requestId"], changed["requestId"])
 
     def test_request_id_binds_initiating_identity_when_present(self):
         state = desired_state()
-        first = govern.build_action_request(
-            state,
-            "calendar.book",
-            {"slot": "2026-09-15T10:00:00+08:00"},
-            initiating_user="caller-session-1",
-        )
-        second = govern.build_action_request(
-            state,
-            "calendar.book",
-            {"slot": "2026-09-15T10:00:00+08:00"},
-            initiating_user="caller-session-2",
-        )
+        first = govern.build_action_request(state, "calendar.book", {"slot": "2026-09-15T10:00:00+08:00"}, initiating_user="caller-session-1")
+        second = govern.build_action_request(state, "calendar.book", {"slot": "2026-09-15T10:00:00+08:00"}, initiating_user="caller-session-2")
         self.assertNotEqual(first["requestId"], second["requestId"])
+
+    def test_request_id_binds_first_party_governance_context(self):
+        state = desired_state()
+        first = govern.build_action_request(state, "calendar.book", {"slot": "2026-09-15T10:00:00+08:00"}, governance_context={"tenantId": "client-a", "conversationId": "call-1", "modelProvider": "openai", "model": "model-a"})
+        second = govern.build_action_request(state, "calendar.book", {"slot": "2026-09-15T10:00:00+08:00"}, governance_context={"tenantId": "client-a", "conversationId": "call-2", "modelProvider": "openai", "model": "model-a"})
+        self.assertNotEqual(first["requestId"], second["requestId"])
+
+    def test_governance_context_rejects_unbounded_fields(self):
+        with self.assertRaises(ValueError):
+            govern.build_action_request(desired_state(), "calendar.book", {}, governance_context={"rawCredential": "secret"})
 
     def test_unselected_tool_is_denied(self):
         decision = govern.authorize_action(desired_state(), "crm.write", {"lead": "x"})
@@ -85,71 +56,32 @@ class GovernActionTests(unittest.TestCase):
 
     def test_selected_approval_required_tool_waits_without_execution(self):
         calls: list[dict] = []
-        result = govern.execute_action(
-            desired_state(),
-            "calendar.book",
-            {"slot": "2026-09-15T10:00:00+08:00"},
-            calls.append,
-        )
+        result = govern.execute_action(desired_state(), "calendar.book", {"slot": "2026-09-15T10:00:00+08:00"}, calls.append)
         self.assertEqual(result["status"], "pending-approval")
         self.assertEqual(calls, [])
 
     def test_agent_level_requirement_is_stricter_than_tool_allow(self):
-        decision = govern.authorize_action(
-            desired_state(approval_required=False, agent_requires_approval=True),
-            "calendar.book",
-            {"slot": "2026-09-15T10:00:00+08:00"},
-        )
+        decision = govern.authorize_action(desired_state(approval_required=False, agent_requires_approval=True), "calendar.book", {"slot": "2026-09-15T10:00:00+08:00"})
         self.assertEqual(decision["decision"], "require-approval")
         self.assertEqual(decision["reason"], "agent-requires-approval")
 
     def test_approval_binds_to_exact_material_action(self):
         state = desired_state()
-        original = govern.build_action_request(
-            state,
-            "calendar.book",
-            {"slot": "2026-09-15T10:00:00+08:00"},
-        )
-        approval = {
-            "requestId": original["requestId"],
-            "approved": True,
-            "approver": "owner@example.test",
-        }
+        original = govern.build_action_request(state, "calendar.book", {"slot": "2026-09-15T10:00:00+08:00"})
+        approval = {"requestId": original["requestId"], "approved": True, "approver": "owner@example.test"}
         with self.assertRaises(PermissionError):
-            govern.execute_action(
-                state,
-                "calendar.book",
-                {"slot": "2026-09-15T11:00:00+08:00"},
-                lambda args: args,
-                approval=approval,
-            )
+            govern.execute_action(state, "calendar.book", {"slot": "2026-09-15T11:00:00+08:00"}, lambda args: args, approval=approval)
 
     def test_exact_approved_action_executes_and_is_audited(self):
         state = desired_state()
         args = {"slot": "2026-09-15T10:00:00+08:00", "caller": "+15550001"}
-        request = govern.build_action_request(
-            state,
-            "calendar.book",
-            args,
-            initiating_user="caller-session-7",
-        )
-        approval = {
-            "requestId": request["requestId"],
-            "approved": True,
-            "approver": "practice-manager",
-        }
+        context = {"tenantId": "client-a", "conversationId": "call-7", "runtime": "hermes", "runtimeVersion": "0.21.2", "modelProvider": "openai", "model": "model-a", "modelConfigVersion": "release-0.3"}
+        request = govern.build_action_request(state, "calendar.book", args, initiating_user="caller-session-7", governance_context=context)
+        approval = {"requestId": request["requestId"], "approved": True, "approver": "practice-manager"}
         calls: list[dict] = []
         with tempfile.TemporaryDirectory() as tmp:
             audit_path = pathlib.Path(tmp) / "audit.jsonl"
-            result = govern.execute_action(
-                state,
-                "calendar.book",
-                args,
-                lambda payload: calls.append(payload) or {"bookingId": "booking-123"},
-                approval=approval,
-                initiating_user="caller-session-7",
-                audit_path=audit_path,
-            )
+            result = govern.execute_action(state, "calendar.book", args, lambda payload: calls.append(payload) or {"bookingId": "booking-123"}, approval=approval, initiating_user="caller-session-7", governance_context=context, audit_path=audit_path)
             events = [json.loads(line) for line in audit_path.read_text().splitlines()]
 
         self.assertEqual(result["status"], "executed")
@@ -158,16 +90,24 @@ class GovernActionTests(unittest.TestCase):
         self.assertEqual([event["event"] for event in events], ["authorization", "approval", "execution"])
         self.assertEqual(events[1]["details"]["approver"], "practice-manager")
         self.assertTrue(all(event["requestId"] == request["requestId"] for event in events))
-        self.assertTrue(all(event["agent"] == "receptionist" for event in events))
-        self.assertTrue(all(event["initiatingUser"] == "caller-session-7" for event in events))
+        self.assertTrue(all(event["governance"] == context for event in events))
+        self.assertEqual(events[-1]["details"]["resultType"], "dict")
+        self.assertEqual(len(events[-1]["details"]["resultDigest"]), 64)
+        self.assertNotIn("booking-123", json.dumps(events[-1]["details"]))
+
+    def test_failed_execution_is_audited_without_error_message(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            audit_path = pathlib.Path(tmp) / "audit.jsonl"
+            with self.assertRaisesRegex(RuntimeError, "provider secret leaked"):
+                govern.execute_action(desired_state(approval_required=False), "calendar.book", {"slot": "x"}, lambda _: (_ for _ in ()).throw(RuntimeError("provider secret leaked")), governance_context={"tenantId": "client-a", "conversationId": "call-8"}, audit_path=audit_path)
+            events = [json.loads(line) for line in audit_path.read_text().splitlines()]
+        self.assertEqual(events[-1]["event"], "execution")
+        self.assertEqual(events[-1]["outcome"], "failed")
+        self.assertEqual(events[-1]["details"], {"errorType": "RuntimeError"})
+        self.assertNotIn("provider secret leaked", json.dumps(events))
 
     def test_selected_non_approval_tool_executes(self):
-        result = govern.execute_action(
-            desired_state(approval_required=False),
-            "calendar.book",
-            {"slot": "2026-09-15T10:00:00+08:00"},
-            lambda args: "ok",
-        )
+        result = govern.execute_action(desired_state(approval_required=False), "calendar.book", {"slot": "2026-09-15T10:00:00+08:00"}, lambda args: "ok")
         self.assertEqual(result["status"], "executed")
         self.assertEqual(result["result"], "ok")
 
