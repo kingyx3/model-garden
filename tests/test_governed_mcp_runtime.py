@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import importlib.util
 import json
 import pathlib
@@ -57,6 +58,13 @@ class GovernedMcpRuntimeTests(unittest.TestCase):
             },
             calendar_transport=transport,
         )
+
+    def test_mcp2_server_registers_only_the_runtime_tools(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            runtime = self._runtime(pathlib.Path(tmp), FakeCalendarTransport())
+            server = runtime_module.build_server(runtime)
+            tools = asyncio.run(server.list_tools())
+            self.assertEqual(sorted(tool.name for tool in tools), ["calendar_availability", "calendar_book"])
 
     def test_calendar_read_executes_without_approval_and_keeps_token_out_of_audit(self):
         with tempfile.TemporaryDirectory() as tmp:
