@@ -4,13 +4,23 @@ Model Garden platform code stays in this repository. Create one separate private
 
 ## 1. Bootstrap the client workspace
 
-Run the bootstrap command from the exact Model Garden release you intend to deploy:
+Run the operator command from the exact Model Garden release you intend to deploy:
 
 ```bash
-python3 scripts/bootstrap-client-workspace.py acme --output ../acme-ai-workspace
+python3 scripts/model-garden-client.py init acme --output ../acme-ai-workspace
 ```
 
-The command creates a secret-free, compilable Receptionist workspace and `platform.lock.yaml` pinned to the Model Garden `VERSION` and exact Hermes runtime revision from that checkout. It refuses unsafe client slugs and non-empty output directories rather than overwriting client work.
+Receptionist remains the backward-compatible default. For another bounded pilot role, select a role slug rather than forking Model Garden:
+
+```bash
+python3 scripts/model-garden-client.py init acme \
+  --role sales-assistant \
+  --output ../acme-ai-workspace
+```
+
+The command wraps the canonical bootstrap primitive and creates a secret-free, compilable workspace with the selected Agent, matching environment runtime profile, eval directory and locked GitHub delivery workflow. `platform.lock.yaml` is pinned to the Model Garden `VERSION` and exact Hermes runtime revision from that checkout. Unsafe client/role slugs and non-empty output directories fail closed.
+
+`scripts/bootstrap-client-workspace.py` remains supported and continues to create the Receptionist workspace for backward compatibility.
 
 Do not copy Model Garden platform code, generic connectors, generated Hermes state, or raw credentials into the client workspace. Shared/curated Skills should become pinned dependencies as dependency resolution is implemented; client-local Skills are only for genuinely client-specific procedures.
 
@@ -18,23 +28,22 @@ Do not copy Model Garden platform code, generic connectors, generated Hermes sta
 
 In the client workspace repository, create `dev` and `prod` GitHub Environments. Require reviewers for production and restrict deployment branches. Add `staging` only when the engagement needs it.
 
-## 3. Configure non-secret deployment variables
+## 3. Configure the MVP Docker target
 
-Recommended GitHub variables for the current platform deploy workflow:
+For early managed clients, prefer one isolated Docker host per client. Register a private GitHub self-hosted runner on that host with a client-specific label and set repository/environment variable `MODEL_GARDEN_DOCKER_RUNNER` to that label. The generated workflow validates on hosted runners, materializes reproducible deployment inputs, then deploys only when the private runner variable is configured.
+
+The host needs Docker Engine, the Docker Compose plugin and the GitHub runner. GitHub remains the engineering control plane; do not introduce Kubernetes or a separate fleet/control-plane layer until repeated operational evidence justifies it.
+
+## 4. Connect models and runtime secrets
+
+Each protected GitHub Environment supplies `MODEL_GARDEN_RUNTIME_SECRETS_JSON`. Keys must exactly match the logical `secret://` references in that environment file; missing or extra keys fail closed. Keep actual provider credentials in GitHub Environment secrets or provider-native authorization flows, never workspace YAML or Markdown.
+
+The generated bootstrap uses:
 
 ```text
-CLIENT_SLUG=acme
-K8S_NODE_COUNT=2
-GATEWAY_REPLICAS=2
-GATEWAY_SERVICE_TYPE=ClusterIP
-LITELLM_IMAGE=ghcr.io/berriai/litellm:v1.99.1
+secret://model/dev
+secret://model/prod
 ```
-
-Keep the gateway private by default (`ClusterIP`). Put production access behind the customer's ingress/API-management layer. Use `LoadBalancer` only for an explicitly accepted proof-of-value risk.
-
-## 4. Connect cloud and models
-
-Configure one complete cloud OIDC credential set from [`secrets.md`](secrets.md), `LITELLM_MASTER_KEY`, and at least one model provider configuration. Keep these values in GitHub repository/Environment secrets or provider-native authorization flows, not workspace YAML or Markdown.
 
 ## 5. Validate and compile client desired state
 
@@ -42,14 +51,14 @@ Using the Model Garden release pinned by `platform.lock.yaml`:
 
 ```bash
 python3 scripts/validate-workspace.py ../acme-ai-workspace
-python3 scripts/compile-workspace.py ../acme-ai-workspace --agent receptionist --output /tmp/receptionist.json
+python3 scripts/compile-workspace.py ../acme-ai-workspace --agent <role> --output /tmp/employee.json
 ```
 
-The generated bootstrap workspace deliberately starts without business Skills, Tools or KnowledgeSource selections. Add only approved capabilities and representative evals during discovery/configuration.
+The generated workspace deliberately starts without business Skills, Tools or KnowledgeSource selections. Add only approved capabilities and representative evals during discovery/configuration.
 
 ## 6. Deploy and promote
 
-Pull requests validate/test only. Use a non-`main` integration branch to deploy DEV. Merge the approved revision to `main` to deploy PROD through the protected `prod` GitHub Environment.
+Pull requests validate/test only. Use `dev` to deploy DEV. Merge/promote the approved revision to `main` to deploy PROD through the protected `prod` GitHub Environment.
 
 Platform releases do not silently mutate client production. Upgrade a client by changing its `platform.lock.yaml` in a pull request, running validation/evals and a DEV smoke, then promoting that tested revision to PROD.
 
