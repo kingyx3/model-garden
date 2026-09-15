@@ -10,6 +10,7 @@ import unittest
 import yaml
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
+CURRENT_VERSION = (ROOT / "VERSION").read_text(encoding="utf-8").strip()
 MODULE_PATH = ROOT / "scripts" / "rebuild-client-runtime.py"
 spec = importlib.util.spec_from_file_location("rebuild_client_runtime", MODULE_PATH)
 rebuild = importlib.util.module_from_spec(spec)
@@ -24,10 +25,11 @@ bootstrap_spec.loader.exec_module(bootstrap)
 
 
 class RebuildClientRuntimeTests(unittest.TestCase):
-    def _release_repo(self, root: pathlib.Path, version: str = "0.2.0") -> pathlib.Path:
+    def _release_repo(self, root: pathlib.Path, version: str | None = None) -> pathlib.Path:
+        release_version = version or CURRENT_VERSION
         repo = root / "platform-source"
         (repo / "platform").mkdir(parents=True)
-        (repo / "VERSION").write_text(version + "\n", encoding="utf-8")
+        (repo / "VERSION").write_text(release_version + "\n", encoding="utf-8")
         (repo / "platform" / "hermes.lock").write_text(
             (ROOT / "platform" / "hermes.lock").read_text(encoding="utf-8"), encoding="utf-8"
         )
@@ -38,7 +40,7 @@ class RebuildClientRuntimeTests(unittest.TestCase):
         subprocess.run(["git", "-C", str(repo), "config", "user.name", "Model Garden Tests"], check=True)
         subprocess.run(["git", "-C", str(repo), "add", "."], check=True)
         subprocess.run(["git", "-C", str(repo), "commit", "-qm", "release fixture"], check=True)
-        subprocess.run(["git", "-C", str(repo), "tag", f"v{version}"], check=True)
+        subprocess.run(["git", "-C", str(repo), "tag", f"v{release_version}"], check=True)
         return repo
 
     def test_bootstrapped_workspace_rebuilds_disposable_hermes_profile(self) -> None:
@@ -65,9 +67,9 @@ class RebuildClientRuntimeTests(unittest.TestCase):
 
             resolved = rebuild.resolve_platform_release(workspace, root / "cache", str(repository))
 
-            self.assertEqual(resolved, root / "cache" / "v0.2.0")
-            self.assertEqual((resolved / "VERSION").read_text(encoding="utf-8").strip(), "0.2.0")
-            self.assertEqual(rebuild.verify_lock(workspace, resolved)["modelgarden"], "0.2.0")
+            self.assertEqual(resolved, root / "cache" / f"v{CURRENT_VERSION}")
+            self.assertEqual((resolved / "VERSION").read_text(encoding="utf-8").strip(), CURRENT_VERSION)
+            self.assertEqual(rebuild.verify_lock(workspace, resolved)["modelgarden"], CURRENT_VERSION)
 
     def test_locked_release_supplies_selected_curated_skill_and_tool_without_manual_library(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -94,9 +96,9 @@ class RebuildClientRuntimeTests(unittest.TestCase):
             root = pathlib.Path(tmp)
             workspace = bootstrap.bootstrap(root / "acme-ai-workspace", "acme")
             repository = self._release_repo(root, "0.1.0")
-            destination = root / "cache" / "v0.2.0"
+            destination = root / "cache" / f"v{CURRENT_VERSION}"
 
-            with self.assertRaisesRegex(ValueError, "cannot resolve Model Garden release v0.2.0"):
+            with self.assertRaisesRegex(ValueError, rf"cannot resolve Model Garden release v{re.escape(CURRENT_VERSION)}"):
                 rebuild.resolve_platform_release(workspace, root / "cache", str(repository))
 
             self.assertFalse(destination.exists())
@@ -104,7 +106,7 @@ class RebuildClientRuntimeTests(unittest.TestCase):
     def test_missing_curated_resource_root_fails_closed(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = pathlib.Path(tmp)
-            (root / "VERSION").write_text("0.2.0\n", encoding="utf-8")
+            (root / "VERSION").write_text(CURRENT_VERSION + "\n", encoding="utf-8")
             (root / "platform").mkdir()
             (root / "platform" / "hermes.lock").write_text(
                 (ROOT / "platform" / "hermes.lock").read_text(encoding="utf-8"), encoding="utf-8"
