@@ -9,6 +9,7 @@ spec:
   instructions:
     file: instructions.md
   allowedTools:
+    - calendar.availability
     - calendar.book
   inputs:
     - booking-request
