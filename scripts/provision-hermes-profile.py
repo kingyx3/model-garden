@@ -2,8 +2,9 @@
 """Materialize Model Garden runtime desired state into a disposable Hermes profile.
 
 This adapter intentionally owns only runtime-specific file materialization. It never
-writes credentials, starts Hermes, or grants Tools. The generated profile can be used
-as HERMES_HOME after operators provide secrets through the deployment environment.
+writes credentials, starts Hermes, or grants Tools beyond the compiled desired state.
+Selected supported Tools are exposed through the Model Garden governed MCP sidecar;
+connector credentials remain outside this profile.
 """
 
 from __future__ import annotations
@@ -19,6 +20,10 @@ import yaml
 
 SAFE_NAME = re.compile(r"^[A-Za-z0-9._-]+$")
 MANAGED_STATE = pathlib.Path(".modelgarden") / "desired-state.json"
+MCP_TOOL_NAMES = {
+    "calendar.availability": "calendar_availability",
+    "calendar.book": "calendar_book",
+}
 
 
 def _require_mapping(value: Any, label: str) -> dict[str, Any]:
@@ -35,6 +40,31 @@ def _safe_name(name: Any, label: str) -> str:
     return name
 
 
+def _selected_mcp_tools(desired_state: dict[str, Any]) -> list[str]:
+    tools = desired_state.get("tools", [])
+    if not isinstance(tools, list):
+        raise ValueError("Hermes provisioning failed: tools must be an array")
+    selected: list[str] = []
+    unsupported: list[str] = []
+    for value in tools:
+        tool = _require_mapping(value, "Tool")
+        metadata = _require_mapping(tool.get("metadata"), "Tool metadata")
+        name = metadata.get("name")
+        if not isinstance(name, str) or not name:
+            raise ValueError("Hermes provisioning failed: Tool metadata.name must be non-empty")
+        runtime_name = MCP_TOOL_NAMES.get(name)
+        if runtime_name is None:
+            unsupported.append(name)
+        else:
+            selected.append(runtime_name)
+    if unsupported:
+        raise ValueError(
+            "Hermes provisioning failed: no governed runtime implementation for selected Tool(s): "
+            + ", ".join(sorted(unsupported))
+        )
+    return sorted(selected)
+
+
 def _model_config(desired_state: dict[str, Any]) -> dict[str, Any]:
     profile = _require_mapping(desired_state.get("modelProfile"), "modelProfile")
     candidates = profile.get("spec", {}).get("candidates")
@@ -47,7 +77,25 @@ def _model_config(desired_state: dict[str, Any]) -> dict[str, Any]:
         raise ValueError("Hermes provisioning failed: first model candidate has no provider")
     if not isinstance(model, str) or not model:
         raise ValueError("Hermes provisioning failed: first model candidate has no model")
-    return {"model": {"provider": provider, "default": model}}
+    config: dict[str, Any] = {"model": {"provider": provider, "default": model}}
+    tools = _selected_mcp_tools(desired_state)
+    if tools:
+        config["mcp_servers"] = {
+            "model_garden": {
+                "url": "http://governed-tools:9120/mcp",
+                "enabled": True,
+                "timeout": 30,
+                "connect_timeout": 10,
+                "supports_parallel_tool_calls": False,
+                "tools": {
+                    "include": tools,
+                    "exclude": [],
+                    "resources": False,
+                    "prompts": False,
+                },
+            }
+        }
+    return config
 
 
 def _skill_document(skill: dict[str, Any], instructions: str) -> str:

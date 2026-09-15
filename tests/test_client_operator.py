@@ -35,7 +35,7 @@ class ClientOperatorTests(unittest.TestCase):
             workspace = pathlib.Path(tmp) / "workspace"
             (workspace / "environments").mkdir(parents=True)
             (workspace / "environments" / "dev.yaml").write_text(
-                """environment: dev\nruntime:\n  profile: sales-assistant\n  model_credential_ref: secret://model/dev\ncalendar:\n  credential_ref: secret://google/dev\n""",
+                """environment: dev\nruntime:\n  profile: sales-assistant\n  model_credential_ref: secret://model/dev\nconnectors:\n  google_calendar:\n    token_ref: secret://google/dev\n""",
                 encoding="utf-8",
             )
             with mock.patch.object(operator, "_run") as run, mock.patch.object(operator.getpass, "getpass") as getpass:
@@ -48,7 +48,7 @@ class ClientOperatorTests(unittest.TestCase):
             workspace = pathlib.Path(tmp) / "workspace"
             (workspace / "environments").mkdir(parents=True)
             (workspace / "environments" / "prod.yaml").write_text(
-                """environment: prod\nruntime:\n  profile: receptionist\n  model_credential_ref: secret://model/prod\ncalendar:\n  credential_ref: secret://google/prod\n""",
+                """environment: prod\nruntime:\n  profile: receptionist\n  model_credential_ref: secret://model/prod\nconnectors:\n  google_calendar:\n    token_ref: secret://google/prod\n""",
                 encoding="utf-8",
             )
             calls = []
@@ -93,6 +93,52 @@ class ClientOperatorTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "raw credential"):
                     operator.configure(workspace, "kingyx3/acme-ai-workspace", "dev", "acme-docker")
             getpass.assert_not_called()
+
+    def test_runtime_approval_hides_docker_paths_and_targets_governed_sidecar(self):
+        request_id = "a" * 64
+        calls = []
+
+        def fake_run(command, *, cwd=None, input_text=None, capture=True):
+            calls.append(command)
+            if command[:2] == ["docker", "ps"]:
+                return subprocess.CompletedProcess(command, 0, stdout="container-123\n", stderr="")
+            return subprocess.CompletedProcess(command, 0, stdout='{"approved": true}\n', stderr="")
+
+        with mock.patch.object(operator, "_require_command"), mock.patch.object(operator, "_run", side_effect=fake_run):
+            self.assertEqual(
+                operator.runtime_approval(
+                    "acme-prod",
+                    "approve",
+                    request_id=request_id,
+                    approver="owner@example.invalid",
+                ),
+                0,
+            )
+
+        self.assertIn("label=com.docker.compose.project=acme-prod", calls[0])
+        self.assertIn("label=com.docker.compose.service=governed-tools", calls[0])
+        exec_command = calls[1]
+        self.assertEqual(exec_command[:3], ["docker", "exec", "container-123"])
+        self.assertIn("/opt/model-garden-platform/scripts/runtime-approval.py", exec_command)
+        self.assertIn("/opt/data/.modelgarden/approvals", exec_command)
+        self.assertIn(request_id, exec_command)
+        self.assertIn("owner@example.invalid", exec_command)
+
+    def test_runtime_approval_requires_exact_single_governed_container(self):
+        with mock.patch.object(operator, "_require_command"), mock.patch.object(
+            operator,
+            "_run",
+            return_value=subprocess.CompletedProcess(["docker", "ps"], 0, stdout="one\ntwo\n", stderr=""),
+        ):
+            with self.assertRaisesRegex(ValueError, "exactly one"):
+                operator.runtime_approval("acme-dev", "list")
+
+    def test_runtime_approval_rejects_unsafe_project_or_request(self):
+        with self.assertRaisesRegex(ValueError, "project name"):
+            operator.runtime_approval("../acme", "list")
+        with mock.patch.object(operator, "_governed_tool_container", return_value="container"):
+            with self.assertRaisesRegex(ValueError, "request id"):
+                operator.runtime_approval("acme-prod", "approve", request_id="not-a-hash", approver="owner")
 
 
 if __name__ == "__main__":

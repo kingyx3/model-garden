@@ -1,0 +1,10 @@
+apiVersion: modelgarden.ai/v1
+kind: Tool
+metadata:
+  name: calendar.availability
+  owner: ai-platform
+  description: Read free/busy state from an approved calendar for a bounded requested interval.
+spec:
+  type: internal
+  risk: read
+  approvalRequired: false

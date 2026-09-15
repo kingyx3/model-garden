@@ -37,6 +37,10 @@ class CompileWorkspaceTests(unittest.TestCase):
         self.assertEqual(sorted(compiled["skillInstructions"]), ["answer-faq", "book-appointment", "human-handoff", "take-message"])
         self.assertIn("Do not invent availability", compiled["skillInstructions"]["book-appointment"]["content"])
         self.assertTrue(compiled["skillInstructions"]["book-appointment"]["source"].endswith("instructions.md"))
+        self.assertEqual(
+            [tool["metadata"]["name"] for tool in compiled["tools"]],
+            ["calendar.availability", "calendar.book"],
+        )
 
     def test_missing_reference_fails_closed(self) -> None:
         source = ROOT / "examples" / "workspace"
@@ -91,7 +95,10 @@ class CompileWorkspaceTests(unittest.TestCase):
 
             self.assertIn("book-appointment", compiled["skillInstructions"])
             self.assertEqual(compiled["skillInstructions"]["book-appointment"]["source"], "library:skills/book-appointment/instructions.md")
-            self.assertEqual([tool["metadata"]["name"] for tool in compiled["tools"]], ["calendar.book"])
+            self.assertEqual(
+                [tool["metadata"]["name"] for tool in compiled["tools"]],
+                ["calendar.availability", "calendar.book"],
+            )
 
     def test_client_local_resource_overrides_library_resource(self) -> None:
         source = ROOT / "examples" / "workspace"

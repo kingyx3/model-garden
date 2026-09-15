@@ -81,8 +81,12 @@ def evaluate(workspace: pathlib.Path, suite_path: pathlib.Path) -> list[str]:
                 failures.append(f"{scenario['id']}: required Tool {tool!r} is not selected by Receptionist")
                 continue
             _, tool_doc = find_named_yaml(workspace / "tools", tool)
-            if expected.get("approvalRequired") and not tool_doc.get("spec", {}).get("approvalRequired"):
-                failures.append(f"{scenario['id']}: {tool!r} must require approval")
+            if "approvalRequired" in expected:
+                actual_approval = bool(tool_doc.get("spec", {}).get("approvalRequired", False))
+                if actual_approval is not bool(expected["approvalRequired"]):
+                    failures.append(
+                        f"{scenario['id']}: {tool!r} approvalRequired must be {bool(expected['approvalRequired'])}"
+                    )
             skill_tools = set(skill_docs[capability].get("spec", {}).get("allowedTools", []))
             if tool not in skill_tools:
                 failures.append(f"{scenario['id']}: Skill {capability!r} does not declare Tool {tool!r}")
