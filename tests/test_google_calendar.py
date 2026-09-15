@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import pathlib
+import tempfile
 import unittest
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -109,6 +111,53 @@ class GoogleCalendarTests(unittest.TestCase):
         self.assertEqual(payload["summary"], "New patient consultation")
         self.assertEqual(payload["attendees"], [{"email": "caller@example.test"}])
         self.assertNotIn("runtime-secret", repr(payload))
+
+    def test_governed_booking_audit_correlates_conversation_without_storing_provider_result(self):
+        transport = FakeTransport([(200, {"id": "evt-sensitive", "status": "confirmed", "htmlLink": "https://calendar.google.test/private"})])
+        client = calendar.GoogleCalendarClient("runtime-secret", transport=transport)
+        args = {
+            "start": "2026-09-15T10:00:00+08:00",
+            "end": "2026-09-15T10:30:00+08:00",
+            "summary": "Consultation",
+        }
+        governance_context = {
+            "tenantId": "demo-dental",
+            "conversationId": "call-42",
+            "runtime": "hermes",
+            "runtimeVersion": "0.21.2",
+            "modelProvider": "openai",
+            "model": "approved-model",
+            "modelConfigVersion": "profile-sha-123",
+            "credentialScope": "calendar.events.write",
+        }
+        request = govern.build_action_request(
+            desired_state(), "calendar.book", args, initiating_user="caller-1", governance_context=governance_context
+        )
+        approval = {"requestId": request["requestId"], "approved": True, "approver": "practice-manager"}
+        with tempfile.TemporaryDirectory() as tmp:
+            audit_path = pathlib.Path(tmp) / "audit.jsonl"
+            result = govern.execute_action(
+                desired_state(),
+                "calendar.book",
+                args,
+                client.booking_executor(),
+                initiating_user="caller-1",
+                governance_context=governance_context,
+                approval=approval,
+                audit_path=audit_path,
+            )
+            audit_text = audit_path.read_text()
+            events = [json.loads(line) for line in audit_text.splitlines()]
+
+        self.assertEqual(result["result"]["eventId"], "evt-sensitive")
+        self.assertEqual([event["event"] for event in events], ["authorization", "approval", "execution"])
+        self.assertTrue(all(event["governance"]["conversationId"] == "call-42" for event in events))
+        self.assertTrue(all(event["governance"]["tenantId"] == "demo-dental" for event in events))
+        self.assertEqual(events[1]["details"]["approver"], "practice-manager")
+        self.assertIn("resultDigest", events[2]["details"])
+        self.assertNotIn("evt-sensitive", audit_text)
+        self.assertNotIn("calendar.google.test/private", audit_text)
+        self.assertNotIn("runtime-secret", audit_text)
 
     def test_booking_requires_timezone_aware_bounded_window(self):
         client = calendar.GoogleCalendarClient("token", transport=FakeTransport([]))
