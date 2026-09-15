@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import pathlib
+import subprocess
 import tempfile
 import unittest
 
@@ -34,6 +36,24 @@ class RenderClientEnvironmentTests(unittest.TestCase):
             self.assertEqual(rendered["spec"]["voice"]["provider"], "livekit")
             self.assertEqual(rendered["spec"]["calendar"]["connector"], "google-calendar")
             self.assertEqual(rendered["spec"]["calendar"]["credential_ref"], "secret://google/dev-calendar")
+
+    def test_cli_accepts_generated_workflow_environment_flag(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            path = self._write(root, {
+                "environment": "dev",
+                "runtime": {"profile": "receptionist"},
+            })
+            output = root / "binding.json"
+            result = subprocess.run(
+                ["python3", str(SCRIPT), str(path), "--environment", "dev", "--output", str(output)],
+                cwd=ROOT,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(json.loads(output.read_text(encoding="utf-8"))["spec"]["environment"], "dev")
 
     def test_rejects_raw_credentials(self):
         with tempfile.TemporaryDirectory() as tmp:
