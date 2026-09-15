@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import importlib.util
 import json
 import pathlib
@@ -27,7 +28,7 @@ class ProvisionHermesProfileTests(unittest.TestCase):
     def receptionist_desired_state(self) -> dict:
         return compiler.compile_workspace(ROOT / "examples" / "workspace", "receptionist")[0]
 
-    def test_materializes_disposable_profile_without_secrets(self) -> None:
+    def test_materializes_disposable_profile_with_only_selected_governed_mcp_tools(self) -> None:
         desired_state = self.receptionist_desired_state()
         files = adapter.build_profile_files(desired_state)
 
@@ -39,12 +40,48 @@ class ProvisionHermesProfileTests(unittest.TestCase):
         config = yaml.safe_load(files[pathlib.Path("config.yaml")])
         self.assertEqual(config["model"]["provider"], "openai")
         self.assertEqual(config["model"]["default"], "approved-openai-model")
+        governed = config["mcp_servers"]["model_garden"]
+        self.assertEqual(governed["url"], "http://governed-tools:9120/mcp")
+        self.assertTrue(governed["enabled"])
+        self.assertFalse(governed["supports_parallel_tool_calls"])
+        self.assertEqual(
+            governed["tools"]["include"],
+            ["calendar_availability", "calendar_book"],
+        )
+        self.assertFalse(governed["tools"]["resources"])
+        self.assertFalse(governed["tools"]["prompts"])
+        self.assertNotIn("token", json.dumps(config).lower())
+        self.assertNotIn("credential", json.dumps(config).lower())
 
         skill_path = pathlib.Path("skills/model-garden/book-appointment/SKILL.md")
         self.assertIn(skill_path, files)
         self.assertIn("name: book-appointment", files[skill_path])
         self.assertIn("Do not invent availability", files[skill_path])
+        self.assertIn("calendar.availability", files[skill_path])
         self.assertIn("calendar.book", files[skill_path])
+
+    def test_profile_without_tools_has_no_mcp_server(self) -> None:
+        desired_state = self.receptionist_desired_state()
+        desired_state["tools"] = []
+        for skill in desired_state["skills"]:
+            if skill.get("metadata", {}).get("name") == "book-appointment":
+                skill["spec"]["allowedTools"] = []
+        files = adapter.build_profile_files(desired_state)
+        config = yaml.safe_load(files[pathlib.Path("config.yaml")])
+        self.assertNotIn("mcp_servers", config)
+
+    def test_selected_tool_without_runtime_implementation_fails_closed(self) -> None:
+        desired_state = copy.deepcopy(self.receptionist_desired_state())
+        desired_state["tools"].append(
+            {
+                "apiVersion": "modelgarden.ai/v1",
+                "kind": "Tool",
+                "metadata": {"name": "crm.write", "owner": "ai-platform"},
+                "spec": {"type": "internal", "risk": "write", "approvalRequired": True},
+            }
+        )
+        with self.assertRaisesRegex(ValueError, "no governed runtime implementation.*crm.write"):
+            adapter.build_profile_files(desired_state)
 
     def test_apply_is_idempotent(self) -> None:
         files = adapter.build_profile_files(self.receptionist_desired_state())
