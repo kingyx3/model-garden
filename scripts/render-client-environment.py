@@ -54,7 +54,7 @@ def render(path: pathlib.Path, expected_environment: str | None = None) -> dict:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("environment_file", type=pathlib.Path)
-    parser.add_argument("--expect", help="expected environment name, e.g. dev or prod")
+    parser.add_argument("--expect", "--environment", dest="expect", help="expected environment name, e.g. dev or prod")
     parser.add_argument("--output", type=pathlib.Path, help="write JSON here instead of stdout")
     args = parser.parse_args()
     try:
