@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""Thin operator helper for repeatable Model Garden client setup.
+"""Thin operator helper for repeatable Model Garden client setup and operations.
 
 This is intentionally not a control plane. It wraps the existing Git-backed bootstrap,
-GitHub Environment setup, and readiness checks so an operator does not need to remember
-secret-map syntax or the generated deployment workflow details.
+GitHub Environment setup, readiness checks, and exact runtime approval operations so an
+operator does not need to remember secret-map syntax, Docker internals, or generated
+workflow details.
 """
 from __future__ import annotations
 
@@ -23,6 +24,8 @@ import yaml
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 SEMVER = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+$")
 REPO = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
+PROJECT_NAME = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
+REQUEST_ID = re.compile(r"^[0-9a-f]{64}$")
 
 
 def _load_script(module_name: str, filename: str):
@@ -285,6 +288,61 @@ def doctor(
     return 1 if failed else 0
 
 
+def _governed_tool_container(project_name: str) -> str:
+    if not PROJECT_NAME.fullmatch(project_name):
+        raise ValueError("project name must use lowercase letters, numbers, and internal hyphens")
+    _require_command("docker")
+    result = _run(
+        [
+            "docker",
+            "ps",
+            "--filter",
+            f"label=com.docker.compose.project={project_name}",
+            "--filter",
+            "label=com.docker.compose.service=governed-tools",
+            "--format",
+            "{{.ID}}",
+        ]
+    )
+    if result.returncode != 0:
+        raise ValueError(f"cannot inspect governed Tool runtime: {result.stderr.strip()}")
+    containers = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+    if len(containers) != 1:
+        raise ValueError(
+            f"expected exactly one running governed-tools container for {project_name}; found {len(containers)}"
+        )
+    return containers[0]
+
+
+def runtime_approval(
+    project_name: str,
+    command: str,
+    request_id: str | None = None,
+    approver: str | None = None,
+) -> int:
+    if command not in {"list", "approve", "reject"}:
+        raise ValueError("runtime approval command must be list, approve, or reject")
+    container = _governed_tool_container(project_name)
+    inner = [
+        "python",
+        "/opt/model-garden-platform/scripts/runtime-approval.py",
+        "/opt/data/.modelgarden/approvals",
+        command,
+    ]
+    if command != "list":
+        if not isinstance(request_id, str) or not REQUEST_ID.fullmatch(request_id):
+            raise ValueError("request id must be a 64-character lowercase SHA-256 hex value")
+        if not isinstance(approver, str) or not approver.strip():
+            raise ValueError("approver must be non-empty")
+        inner.extend([request_id, "--approver", approver.strip()])
+    result = _run(["docker", "exec", container, *inner])
+    if result.returncode != 0:
+        raise ValueError(result.stderr.strip() or result.stdout.strip() or "runtime approval command failed")
+    if result.stdout:
+        print(result.stdout.strip())
+    return 0
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
@@ -309,6 +367,19 @@ def main() -> int:
     doc.add_argument("--repo", help="optional owner/name; verifies expected GitHub Environment settings")
     doc.add_argument("--host", action="store_true", help="also verify local Docker Engine + Compose")
 
+    approvals = sub.add_parser("approvals", help="list exact material actions waiting for approval")
+    approvals.add_argument("--project-name", required=True)
+
+    approve = sub.add_parser("approve", help="approve one exact material action on a client runtime")
+    approve.add_argument("request_id")
+    approve.add_argument("--project-name", required=True)
+    approve.add_argument("--approver", required=True)
+
+    reject = sub.add_parser("reject", help="reject one exact material action on a client runtime")
+    reject.add_argument("request_id")
+    reject.add_argument("--project-name", required=True)
+    reject.add_argument("--approver", required=True)
+
     args = parser.parse_args()
     try:
         if args.command == "init":
@@ -320,6 +391,15 @@ def main() -> int:
             return 0
         if args.command == "doctor":
             return doctor(args.workspace, args.environment, args.repo, check_host=args.host)
+        if args.command == "approvals":
+            return runtime_approval(args.project_name, "list")
+        if args.command in {"approve", "reject"}:
+            return runtime_approval(
+                args.project_name,
+                args.command,
+                request_id=args.request_id,
+                approver=args.approver,
+            )
     except (OSError, ValueError, yaml.YAMLError) as exc:
         print(f"Client operator failed: {exc}", file=sys.stderr)
         return 1
