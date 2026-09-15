@@ -35,7 +35,7 @@ def _write(path: pathlib.Path, content: str) -> None:
     path.write_text(content, encoding="utf-8")
 
 
-def _client_workflow() -> str:
+def _client_workflow(client_slug: str) -> str:
     return """name: Model Garden client runtime
 
 on:
@@ -121,7 +121,50 @@ jobs:
             ${{ runner.temp }}/environment-binding.json
           if-no-files-found: error
           retention-days: 7
-"""
+
+  deploy:
+    if: github.event_name == 'push' && vars.MODEL_GARDEN_DOCKER_RUNNER != ''
+    needs: materialize
+    runs-on:
+      - self-hosted
+      - ${{ vars.MODEL_GARDEN_DOCKER_RUNNER }}
+    environment:
+      name: ${{ github.ref_name == 'main' && 'prod' || 'dev' }}
+    env:
+      MODEL_GARDEN_RUNTIME_SECRETS_JSON: ${{ secrets.MODEL_GARDEN_RUNTIME_SECRETS_JSON }}
+    steps:
+      - uses: actions/checkout@v7
+      - name: Download reproducible deployment inputs
+        uses: actions/download-artifact@v4
+        with:
+          name: model-garden-deployment-${{ github.ref_name }}-${{ github.sha }}
+          path: ${{ runner.temp }}/model-garden-deployment
+      - name: Resolve locked Model Garden release
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf "$RUNNER_TEMP/model-garden" "$RUNNER_TEMP/model-garden-target" "$RUNNER_TEMP/model-garden-deploy-venv"
+          version="$(awk '$1 == \"modelgarden:\" { print $2; exit }' platform.lock.yaml)"
+          if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "platform.lock.yaml must pin modelgarden as MAJOR.MINOR.PATCH" >&2
+            exit 1
+          fi
+          git clone --depth 1 --branch "v${version}" --single-branch \
+            https://github.com/kingyx3/model-garden.git "$RUNNER_TEMP/model-garden"
+          python3 -m venv "$RUNNER_TEMP/model-garden-deploy-venv"
+          "$RUNNER_TEMP/model-garden-deploy-venv/bin/python" -m pip install --disable-pip-version-check --quiet \
+            -r "$RUNNER_TEMP/model-garden/requirements-dev.txt"
+      - name: Deploy and verify isolated Docker runtime
+        shell: bash
+        run: >-
+          "$RUNNER_TEMP/model-garden-deploy-venv/bin/python"
+          "$RUNNER_TEMP/model-garden/scripts/deploy-client-docker.py"
+          "$RUNNER_TEMP/model-garden-deployment/hermes-profile"
+          "$RUNNER_TEMP/model-garden-deployment/environment-binding.json"
+          "$RUNNER_TEMP/model-garden-target"
+          --project-name "__CLIENT_SLUG__-${{ github.ref_name == 'main' && 'prod' || 'dev' }}"
+          --apply
+""".replace("__CLIENT_SLUG__", client_slug)
 
 
 def bootstrap(output: pathlib.Path, client_slug: str, root: pathlib.Path = ROOT) -> pathlib.Path:
@@ -142,9 +185,9 @@ def bootstrap(output: pathlib.Path, client_slug: str, root: pathlib.Path = ROOT)
     _write(output / "knowledge" / "sources.yaml", "sources: []\n")
     _write(output / "evals" / "receptionist" / "calls.yaml", "scenarios: []\n")
     for environment in ("dev", "prod"):
-        _write(output / "environments" / f"{environment}.yaml", f"""environment: {environment}\nruntime:\n  profile: receptionist\n""")
-    _write(output / ".github" / "workflows" / "model-garden.yml", _client_workflow())
-    _write(output / "README.md", f"""# {client_slug} AI workspace\n\nThis private repository is the portable source of truth for {client_slug}'s business-specific Model Garden desired state.\n\n## Bootstrap pins\n\n- Model Garden: `{modelgarden_version}`\n- Hermes: `{hermes_version}` (`{hermes_revision}`)\n- Contract: `v1`\n\n## GitHub delivery path\n\nThe generated `.github/workflows/model-garden.yml` validates pull requests against the exact Model Garden release pinned in `platform.lock.yaml`. Pushes to `dev` or `main` run through the corresponding GitHub Environment, render the selected non-secret environment binding, and materialize the reproducible Hermes profile. Both are uploaded together as short-lived deployment inputs, not source of truth. Provider deployment and resolution/injection of the logical secret references remain separate target-adapter steps.\n\n## Next steps\n\n1. Replace the Receptionist bootstrap instructions with business-owner-approved behaviour.\n2. Add approved knowledge references and representative evals.\n3. Select curated Skills/Tools only when the pinned Model Garden compiler can resolve them.\n4. Create protected GitHub `dev` and `prod` Environments and keep provider credentials there or in provider-native authorization flows, never in this repository.\n5. Use pull requests for validation, merge approved integration changes to `dev`, then promote the tested revision to `main` for production.\n\nDo not copy Model Garden platform code, generic connectors, generated Hermes state, or raw credentials into this workspace.\n""")
+        _write(output / "environments" / f"{environment}.yaml", f"""environment: {environment}\nruntime:\n  profile: receptionist\n  model_credential_ref: secret://model/{environment}\n""")
+    _write(output / ".github" / "workflows" / "model-garden.yml", _client_workflow(client_slug))
+    _write(output / "README.md", f"""# {client_slug} AI workspace\n\nThis private repository is the portable source of truth for {client_slug}'s business-specific Model Garden desired state.\n\n## Bootstrap pins\n\n- Model Garden: `{modelgarden_version}`\n- Hermes: `{hermes_version}` (`{hermes_revision}`)\n- Contract: `v1`\n\n## GitHub delivery path\n\nThe generated `.github/workflows/model-garden.yml` validates pull requests against the exact Model Garden release pinned in `platform.lock.yaml`. Pushes to `dev` or `main` run through the corresponding GitHub Environment, render the selected non-secret environment binding, and materialize the reproducible Hermes profile. Both are uploaded together as short-lived deployment inputs.\n\nFor the MVP Docker target, configure a private self-hosted GitHub Actions runner with Docker Engine + the Compose plugin and give it a client-specific label. Set repository/environment variable `MODEL_GARDEN_DOCKER_RUNNER` to that label. The deploy job is skipped when the variable is absent, preserving artifact-only operation.\n\nEach `dev`/`prod` GitHub Environment supplies one secret named `MODEL_GARDEN_RUNTIME_SECRETS_JSON`. It must be a JSON object whose keys exactly match the `secret://` references in that environment file; missing or extra keys fail closed. For the generated bootstrap the minimum shapes are `{{\"secret://model/dev\":\"<dev model credential>\"}}` and `{{\"secret://model/prod\":\"<prod model credential>\"}}`. The aggregate map exists only in the deployment process; the Docker adapter removes it before invoking Docker and passes only the selected model credential to Hermes.\n\n## Next steps\n\n1. Replace the Receptionist bootstrap instructions with business-owner-approved behaviour.\n2. Add approved knowledge references and representative evals.\n3. Select curated Skills/Tools only when the pinned Model Garden compiler can resolve them.\n4. Create protected GitHub `dev` and `prod` Environments and configure the environment-scoped runtime secret map; never store credentials in this repository.\n5. For managed deployment, attach the private client-specific Docker runner label through `MODEL_GARDEN_DOCKER_RUNNER`.\n6. Use pull requests for validation, merge approved integration changes to `dev`, then promote the tested revision to `main` for production.\n\nDo not copy Model Garden platform code, generic connectors, generated Hermes state, or raw credentials into this workspace.\n""")
     return output
 
 
