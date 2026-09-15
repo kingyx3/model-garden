@@ -72,14 +72,14 @@ class RebuildClientRuntimeTests(unittest.TestCase):
             self.assertEqual((resolved / "VERSION").read_text(encoding="utf-8").strip(), CURRENT_VERSION)
             self.assertEqual(rebuild.verify_lock(workspace, resolved)["modelgarden"], CURRENT_VERSION)
 
-    def test_locked_release_supplies_selected_curated_skill_and_tool_without_manual_library(self) -> None:
+    def test_locked_release_supplies_selected_curated_skill_and_tools_without_manual_library(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = pathlib.Path(tmp)
             workspace = bootstrap.bootstrap(root / "acme-ai-workspace", "acme")
             agent_path = workspace / "agents" / "receptionist" / "agent.yaml"
             agent = yaml.safe_load(agent_path.read_text(encoding="utf-8"))
             agent["spec"]["skills"] = ["book-appointment"]
-            agent["spec"]["tools"] = ["calendar.book"]
+            agent["spec"]["tools"] = ["calendar.availability", "calendar.book"]
             agent_path.write_text(yaml.safe_dump(agent, sort_keys=False), encoding="utf-8")
             repository = self._release_repo(root)
             resolved = rebuild.resolve_platform_release(workspace, root / "cache", str(repository))
@@ -90,7 +90,14 @@ class RebuildClientRuntimeTests(unittest.TestCase):
             skill_path = pathlib.Path("skills/model-garden/book-appointment/SKILL.md")
             self.assertIn(skill_path, changed)
             self.assertTrue((profile / skill_path).is_file())
-            self.assertIn("calendar.book", (profile / skill_path).read_text(encoding="utf-8"))
+            skill = (profile / skill_path).read_text(encoding="utf-8")
+            self.assertIn("calendar.availability", skill)
+            self.assertIn("calendar.book", skill)
+            config = yaml.safe_load((profile / "config.yaml").read_text(encoding="utf-8"))
+            self.assertEqual(
+                config["mcp_servers"]["model_garden"]["tools"]["include"],
+                ["calendar_availability", "calendar_book"],
+            )
 
     def test_missing_locked_release_tag_fails_closed_and_cleans_cache(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
