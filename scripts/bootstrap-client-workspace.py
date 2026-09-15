@@ -101,16 +101,24 @@ jobs:
           echo "MODEL_GARDEN_ROOT=$RUNNER_TEMP/model-garden" >> "$GITHUB_ENV"
       - name: Install runtime rebuild dependencies
         run: python3 -m pip install -r "$MODEL_GARDEN_ROOT/requirements-dev.txt"
+      - name: Render validated environment binding
+        run: >-
+          python3 "$MODEL_GARDEN_ROOT/scripts/render-client-environment.py"
+          "$GITHUB_WORKSPACE/environments/${{ github.ref_name == 'main' && 'prod' || 'dev' }}.yaml"
+          --environment "${{ github.ref_name == 'main' && 'prod' || 'dev' }}"
+          --output "$RUNNER_TEMP/environment-binding.json"
       - name: Materialize locked Hermes runtime profile
         run: >-
           python3 "$MODEL_GARDEN_ROOT/scripts/rebuild-client-runtime.py"
           "$GITHUB_WORKSPACE" "$RUNNER_TEMP/hermes-profile"
           --agent receptionist
-      - name: Upload reproducible runtime profile
+      - name: Upload reproducible deployment inputs
         uses: actions/upload-artifact@v4
         with:
-          name: hermes-profile-${{ github.ref_name }}-${{ github.sha }}
-          path: ${{ runner.temp }}/hermes-profile
+          name: model-garden-deployment-${{ github.ref_name }}-${{ github.sha }}
+          path: |
+            ${{ runner.temp }}/hermes-profile
+            ${{ runner.temp }}/environment-binding.json
           if-no-files-found: error
           retention-days: 7
 """
@@ -125,39 +133,18 @@ def bootstrap(output: pathlib.Path, client_slug: str, root: pathlib.Path = ROOT)
 
     modelgarden_version, hermes_version, hermes_revision = _platform_versions(root)
 
-    _write(
-        output / "modelgarden.yaml",
-        f"""workspace:\n  client: {client_slug}\n  contract: modelgarden.ai/v1\n  agents:\n    - receptionist\n""",
-    )
-    _write(
-        output / "platform.lock.yaml",
-        f"""modelgarden: {modelgarden_version}\ncontracts: v1\nhermes: {hermes_version}\nhermes_revision: {hermes_revision}\n""",
-    )
-    _write(
-        output / "agents" / "receptionist" / "agent.yaml",
-        f"""apiVersion: modelgarden.ai/v1\nkind: Agent\nmetadata:\n  name: receptionist\n  owner: {client_slug}\n  description: Client receptionist bootstrap; add only approved business capabilities.\nspec:\n  model:\n    profile: reasoning.high\n  instructions:\n    file: instructions.md\n  skills: []\n  tools: []\n  knowledge: []\n  security:\n    dataClassification: internal\n  approvals:\n    externalActions: required\n""",
-    )
-    _write(
-        output / "agents" / "receptionist" / "instructions.md",
-        f"""# Receptionist\n\nYou are the front-office receptionist for {client_slug}.\n\n- Use only approved business knowledge and procedures.\n- Collect only the minimum information needed for the caller's request.\n- Never claim an external action succeeded until its Tool reports success.\n- Respect approval and permission boundaries for every external action.\n- Hand off to a human when safe completion is not possible.\n\nReplace this bootstrap text with business-owner-approved instructions before production.\n""",
-    )
-    _write(
-        output / "model-profiles" / "general.yaml",
-        f"""apiVersion: modelgarden.ai/v1\nkind: ModelProfile\nmetadata:\n  name: reasoning.high\n  owner: {client_slug}\n  description: Bootstrap routing profile; use approved deployment model aliases.\nspec:\n  candidates:\n    - provider: openai\n      model: approved-openai-model\n      priority: 1\n    - provider: anthropic\n      model: approved-anthropic-model\n      priority: 2\n    - provider: internal\n      model: approved-open-weight-model\n      priority: 3\n  constraints:\n    maxDataClassification: confidential\n  routing:\n    strategy: ordered-fallback\n""",
-    )
+    _write(output / "modelgarden.yaml", f"""workspace:\n  client: {client_slug}\n  contract: modelgarden.ai/v1\n  agents:\n    - receptionist\n""")
+    _write(output / "platform.lock.yaml", f"""modelgarden: {modelgarden_version}\ncontracts: v1\nhermes: {hermes_version}\nhermes_revision: {hermes_revision}\n""")
+    _write(output / "agents" / "receptionist" / "agent.yaml", f"""apiVersion: modelgarden.ai/v1\nkind: Agent\nmetadata:\n  name: receptionist\n  owner: {client_slug}\n  description: Client receptionist bootstrap; add only approved business capabilities.\nspec:\n  model:\n    profile: reasoning.high\n  instructions:\n    file: instructions.md\n  skills: []\n  tools: []\n  knowledge: []\n  security:\n    dataClassification: internal\n  approvals:\n    externalActions: required\n""")
+    _write(output / "agents" / "receptionist" / "instructions.md", f"""# Receptionist\n\nYou are the front-office receptionist for {client_slug}.\n\n- Use only approved business knowledge and procedures.\n- Collect only the minimum information needed for the caller's request.\n- Never claim an external action succeeded until its Tool reports success.\n- Respect approval and permission boundaries for every external action.\n- Hand off to a human when safe completion is not possible.\n\nReplace this bootstrap text with business-owner-approved instructions before production.\n""")
+    _write(output / "model-profiles" / "general.yaml", f"""apiVersion: modelgarden.ai/v1\nkind: ModelProfile\nmetadata:\n  name: reasoning.high\n  owner: {client_slug}\n  description: Bootstrap routing profile; use approved deployment model aliases.\nspec:\n  candidates:\n    - provider: openai\n      model: approved-openai-model\n      priority: 1\n    - provider: anthropic\n      model: approved-anthropic-model\n      priority: 2\n    - provider: internal\n      model: approved-open-weight-model\n      priority: 3\n  constraints:\n    maxDataClassification: confidential\n  routing:\n    strategy: ordered-fallback\n""")
     _write(output / "skills" / "README.md", "# Client-specific Skills\n\nAdd only genuinely client-specific Skills here. Prefer pinned curated Model Garden dependencies when available.\n")
     _write(output / "knowledge" / "sources.yaml", "sources: []\n")
     _write(output / "evals" / "receptionist" / "calls.yaml", "scenarios: []\n")
     for environment in ("dev", "prod"):
-        _write(
-            output / "environments" / f"{environment}.yaml",
-            f"""environment: {environment}\nruntime:\n  profile: receptionist\n""",
-        )
+        _write(output / "environments" / f"{environment}.yaml", f"""environment: {environment}\nruntime:\n  profile: receptionist\n""")
     _write(output / ".github" / "workflows" / "model-garden.yml", _client_workflow())
-    _write(
-        output / "README.md",
-        f"""# {client_slug} AI workspace\n\nThis private repository is the portable source of truth for {client_slug}'s business-specific Model Garden desired state.\n\n## Bootstrap pins\n\n- Model Garden: `{modelgarden_version}`\n- Hermes: `{hermes_version}` (`{hermes_revision}`)\n- Contract: `v1`\n\n## GitHub delivery path\n\nThe generated `.github/workflows/model-garden.yml` validates pull requests against the exact Model Garden release pinned in `platform.lock.yaml`. Pushes to `dev` additionally materialize the reproducible Hermes profile through the GitHub `dev` Environment; pushes to `main` do the same through `prod`. The generated profile is a short-lived deployment artifact, not source of truth. Provider/channel/connector deployment and secret injection remain separate target-binding steps.\n\n## Next steps\n\n1. Replace the Receptionist bootstrap instructions with business-owner-approved behaviour.\n2. Add approved knowledge references and representative evals.\n3. Select curated Skills/Tools only when the pinned Model Garden compiler can resolve them.\n4. Create protected GitHub `dev` and `prod` Environments and keep provider credentials there or in provider-native authorization flows, never in this repository.\n5. Use pull requests for validation, merge approved integration changes to `dev`, then promote the tested revision to `main` for production.\n\nDo not copy Model Garden platform code, generic connectors, generated Hermes state, or raw credentials into this workspace.\n""",
-    )
+    _write(output / "README.md", f"""# {client_slug} AI workspace\n\nThis private repository is the portable source of truth for {client_slug}'s business-specific Model Garden desired state.\n\n## Bootstrap pins\n\n- Model Garden: `{modelgarden_version}`\n- Hermes: `{hermes_version}` (`{hermes_revision}`)\n- Contract: `v1`\n\n## GitHub delivery path\n\nThe generated `.github/workflows/model-garden.yml` validates pull requests against the exact Model Garden release pinned in `platform.lock.yaml`. Pushes to `dev` or `main` run through the corresponding GitHub Environment, render the selected non-secret environment binding, and materialize the reproducible Hermes profile. Both are uploaded together as short-lived deployment inputs, not source of truth. Provider deployment and resolution/injection of the logical secret references remain separate target-adapter steps.\n\n## Next steps\n\n1. Replace the Receptionist bootstrap instructions with business-owner-approved behaviour.\n2. Add approved knowledge references and representative evals.\n3. Select curated Skills/Tools only when the pinned Model Garden compiler can resolve them.\n4. Create protected GitHub `dev` and `prod` Environments and keep provider credentials there or in provider-native authorization flows, never in this repository.\n5. Use pull requests for validation, merge approved integration changes to `dev`, then promote the tested revision to `main` for production.\n\nDo not copy Model Garden platform code, generic connectors, generated Hermes state, or raw credentials into this workspace.\n""")
     return output
 
 
