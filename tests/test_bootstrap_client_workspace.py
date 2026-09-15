@@ -25,6 +25,7 @@ class BootstrapClientWorkspaceTests(unittest.TestCase):
             self.assertTrue((workspace / "modelgarden.yaml").is_file())
             self.assertTrue((workspace / "platform.lock.yaml").is_file())
             self.assertTrue((workspace / "agents" / "receptionist" / "agent.yaml").is_file())
+            self.assertTrue((workspace / "evals" / "receptionist" / "scenarios.yaml").is_file())
             self.assertTrue((workspace / "environments" / "dev.yaml").is_file())
             self.assertTrue((workspace / "environments" / "prod.yaml").is_file())
             self.assertTrue((workspace / ".github" / "workflows" / "model-garden.yml").is_file())
@@ -35,6 +36,7 @@ class BootstrapClientWorkspaceTests(unittest.TestCase):
             self.assertEqual(lock["hermes_revision"], hermes_lock["commit"])
             dev = yaml.safe_load((workspace / "environments" / "dev.yaml").read_text(encoding="utf-8"))
             prod = yaml.safe_load((workspace / "environments" / "prod.yaml").read_text(encoding="utf-8"))
+            self.assertEqual(dev["runtime"]["profile"], "receptionist")
             self.assertEqual(dev["runtime"]["model_credential_ref"], "secret://model/dev")
             self.assertEqual(prod["runtime"]["model_credential_ref"], "secret://model/prod")
             validate = subprocess.run(["python3", str(ROOT / "scripts" / "validate-workspace.py"), str(workspace)], cwd=ROOT, text=True, capture_output=True, check=False)
@@ -49,6 +51,30 @@ class BootstrapClientWorkspaceTests(unittest.TestCase):
             self.assertEqual(compiled["tools"], [])
             self.assertEqual(compiled["knowledge"], [])
 
+    def test_bootstrap_supports_generic_initial_employee_without_platform_fork(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = pathlib.Path(tmp) / "acme-sales-ai-workspace"
+            bootstrapper.bootstrap(workspace, "acme", "sales-assistant", "Sales Assistant")
+            agent = workspace / "agents" / "sales-assistant" / "agent.yaml"
+            instructions = workspace / "agents" / "sales-assistant" / "instructions.md"
+            self.assertTrue(agent.is_file())
+            self.assertIn("# Sales Assistant", instructions.read_text(encoding="utf-8"))
+            self.assertTrue((workspace / "evals" / "sales-assistant" / "scenarios.yaml").is_file())
+            root_config = yaml.safe_load((workspace / "modelgarden.yaml").read_text(encoding="utf-8"))
+            self.assertEqual(root_config["workspace"]["agents"], ["sales-assistant"])
+            dev = yaml.safe_load((workspace / "environments" / "dev.yaml").read_text(encoding="utf-8"))
+            self.assertEqual(dev["runtime"]["profile"], "sales-assistant")
+            workflow = (workspace / ".github" / "workflows" / "model-garden.yml").read_text(encoding="utf-8")
+            self.assertIn("--agent sales-assistant", workflow)
+            self.assertNotIn("--agent receptionist", workflow)
+            validate = subprocess.run(["python3", str(ROOT / "scripts" / "validate-workspace.py"), str(workspace)], cwd=ROOT, text=True, capture_output=True, check=False)
+            self.assertEqual(validate.returncode, 0, validate.stderr)
+            desired = pathlib.Path(tmp) / "sales-assistant.json"
+            compile_result = subprocess.run(["python3", str(ROOT / "scripts" / "compile-workspace.py"), str(workspace), "--agent", "sales-assistant", "--output", str(desired)], cwd=ROOT, text=True, capture_output=True, check=False)
+            self.assertEqual(compile_result.returncode, 0, compile_result.stderr)
+            compiled = json.loads(desired.read_text(encoding="utf-8"))
+            self.assertEqual(compiled["source"]["name"], "sales-assistant")
+
     def test_bootstrap_generates_locked_github_delivery_workflow(self):
         with tempfile.TemporaryDirectory() as tmp:
             workspace = pathlib.Path(tmp) / "acme-ai-workspace"
@@ -61,6 +87,7 @@ class BootstrapClientWorkspaceTests(unittest.TestCase):
             self.assertIn('git clone --depth 1 --branch "v${version}" --single-branch', workflow)
             self.assertIn("validate-workspace.py", workflow)
             self.assertIn("rebuild-client-runtime.py", workflow)
+            self.assertIn("--agent receptionist", workflow)
             self.assertIn("--dry-run", workflow)
             self.assertIn("github.ref_name == 'main' && 'prod' || 'dev'", workflow)
             self.assertIn("render-client-environment.py", workflow)
@@ -86,12 +113,18 @@ class BootstrapClientWorkspaceTests(unittest.TestCase):
                 bootstrapper.bootstrap(workspace, "acme")
             self.assertEqual((workspace / "keep.txt").read_text(encoding="utf-8"), "do not replace\n")
 
-    def test_bootstrap_rejects_unsafe_client_slug(self):
+    def test_bootstrap_rejects_unsafe_slugs_and_role_title(self):
         with tempfile.TemporaryDirectory() as tmp:
             for slug in ("../acme", "Acme", "acme/client", "-acme", "acme-"):
-                with self.subTest(slug=slug):
+                with self.subTest(client_slug=slug):
                     with self.assertRaisesRegex(ValueError, "client slug"):
                         bootstrapper.bootstrap(pathlib.Path(tmp) / "workspace", slug)
+            for slug in ("../sales", "Sales", "sales/assistant", "-sales", "sales-"):
+                with self.subTest(agent_slug=slug):
+                    with self.assertRaisesRegex(ValueError, "agent slug"):
+                        bootstrapper.bootstrap(pathlib.Path(tmp) / "workspace", "acme", slug)
+            with self.assertRaisesRegex(ValueError, "role title"):
+                bootstrapper.bootstrap(pathlib.Path(tmp) / "workspace", "acme", "sales-assistant", "bad\nrole")
 
 
 if __name__ == "__main__":
