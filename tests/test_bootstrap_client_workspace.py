@@ -22,50 +22,22 @@ class BootstrapClientWorkspaceTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             workspace = pathlib.Path(tmp) / "acme-ai-workspace"
             bootstrapper.bootstrap(workspace, "acme")
-
             self.assertTrue((workspace / "modelgarden.yaml").is_file())
             self.assertTrue((workspace / "platform.lock.yaml").is_file())
             self.assertTrue((workspace / "agents" / "receptionist" / "agent.yaml").is_file())
             self.assertTrue((workspace / "environments" / "dev.yaml").is_file())
             self.assertTrue((workspace / "environments" / "prod.yaml").is_file())
             self.assertTrue((workspace / ".github" / "workflows" / "model-garden.yml").is_file())
-
             lock = yaml.safe_load((workspace / "platform.lock.yaml").read_text(encoding="utf-8"))
             self.assertEqual(lock["modelgarden"], (ROOT / "VERSION").read_text(encoding="utf-8").strip())
-            hermes_lock = dict(
-                line.split("=", 1)
-                for line in (ROOT / "platform" / "hermes.lock").read_text(encoding="utf-8").splitlines()
-                if "=" in line
-            )
+            hermes_lock = dict(line.split("=", 1) for line in (ROOT / "platform" / "hermes.lock").read_text(encoding="utf-8").splitlines() if "=" in line)
             self.assertEqual(lock["hermes"], hermes_lock["version"])
             self.assertEqual(lock["hermes_revision"], hermes_lock["commit"])
-
-            validate = subprocess.run(
-                ["python3", str(ROOT / "scripts" / "validate-workspace.py"), str(workspace)],
-                cwd=ROOT,
-                text=True,
-                capture_output=True,
-                check=False,
-            )
+            validate = subprocess.run(["python3", str(ROOT / "scripts" / "validate-workspace.py"), str(workspace)], cwd=ROOT, text=True, capture_output=True, check=False)
             self.assertEqual(validate.returncode, 0, validate.stderr)
             self.assertIn("Validated 2 Model Garden resource(s)", validate.stdout)
-
             desired = pathlib.Path(tmp) / "receptionist.json"
-            compile_result = subprocess.run(
-                [
-                    "python3",
-                    str(ROOT / "scripts" / "compile-workspace.py"),
-                    str(workspace),
-                    "--agent",
-                    "receptionist",
-                    "--output",
-                    str(desired),
-                ],
-                cwd=ROOT,
-                text=True,
-                capture_output=True,
-                check=False,
-            )
+            compile_result = subprocess.run(["python3", str(ROOT / "scripts" / "compile-workspace.py"), str(workspace), "--agent", "receptionist", "--output", str(desired)], cwd=ROOT, text=True, capture_output=True, check=False)
             self.assertEqual(compile_result.returncode, 0, compile_result.stderr)
             compiled = json.loads(desired.read_text(encoding="utf-8"))
             self.assertEqual(compiled["source"]["name"], "receptionist")
@@ -78,7 +50,6 @@ class BootstrapClientWorkspaceTests(unittest.TestCase):
             workspace = pathlib.Path(tmp) / "acme-ai-workspace"
             bootstrapper.bootstrap(workspace, "acme")
             workflow = (workspace / ".github" / "workflows" / "model-garden.yml").read_text(encoding="utf-8")
-
             self.assertIn("pull_request:", workflow)
             self.assertIn("- dev", workflow)
             self.assertIn("- main", workflow)
@@ -88,6 +59,9 @@ class BootstrapClientWorkspaceTests(unittest.TestCase):
             self.assertIn("rebuild-client-runtime.py", workflow)
             self.assertIn("--dry-run", workflow)
             self.assertIn("github.ref_name == 'main' && 'prod' || 'dev'", workflow)
+            self.assertIn("render-client-environment.py", workflow)
+            self.assertIn("environment-binding.json", workflow)
+            self.assertIn("Upload reproducible deployment inputs", workflow)
             self.assertIn("actions/upload-artifact@v4", workflow)
             self.assertNotIn("secrets.", workflow)
 
