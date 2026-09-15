@@ -1,20 +1,20 @@
 #!/usr/bin/env python3
-"""Render and optionally deploy one isolated client Hermes runtime with Docker Compose.
+"""Render and optionally deploy one isolated client runtime with Docker Compose.
 
-This is the intentionally small MVP target adapter. It consumes only generated deployment
-outputs (a Hermes profile plus EnvironmentBinding), keeps raw credentials out of those
-outputs, resolves logical secret:// references from one deployment-process environment
-variable, and injects only the model credential into the Hermes container.
+The Docker target keeps the MVP production shape deliberately small:
+- Hermes/model execution runs in one container with only the selected model credential;
+- supported enterprise Tools run in a separate governed MCP sidecar with only their
+  connector credentials;
+- both consume the same compiled desired state and persistent audit/approval volume;
+- raw credentials never enter the generated profile, binding, bundle, or Git repository.
 
-The adapter is designed for a private client repository's protected GitHub Environment
-running on a client-labelled self-hosted runner with Docker Engine + Compose. GitHub remains
-the engineering control plane; the target host is only a runtime/deployment executor.
+GitHub Actions remains the engineering control plane. The target host is only the
+client-scoped runtime/deployment executor.
 """
 from __future__ import annotations
 
 import argparse
 import hashlib
-import importlib.metadata
 import json
 import os
 import pathlib
@@ -34,6 +34,14 @@ PROVIDER_ENV = {
     "openai": "OPENAI_API_KEY",
     "anthropic": "ANTHROPIC_API_KEY",
 }
+CALENDAR_TOOLS = {"calendar.availability", "calendar.book"}
+RUNTIME_SOURCE_PATHS = (
+    pathlib.Path("requirements-runtime.txt"),
+    pathlib.Path("platform/runtime/governed_mcp.py"),
+    pathlib.Path("platform/connectors/google_calendar.py"),
+    pathlib.Path("scripts/govern-action.py"),
+    pathlib.Path("scripts/runtime-approval.py"),
+)
 
 
 def _load_json(path: pathlib.Path, label: str) -> dict[str, Any]:
@@ -81,6 +89,22 @@ def _validate_profile(profile_dir: pathlib.Path) -> str:
     return provider
 
 
+def _selected_tools(profile_dir: pathlib.Path) -> set[str]:
+    desired = _load_json(profile_dir / ".modelgarden" / "desired-state.json", "compiled desired state")
+    tools = desired.get("tools", [])
+    if not isinstance(tools, list):
+        raise ValueError("Docker target failed: compiled desired state tools must be an array")
+    names: set[str] = set()
+    for tool in tools:
+        if not isinstance(tool, dict):
+            raise ValueError("Docker target failed: compiled Tool must be an object")
+        name = tool.get("metadata", {}).get("name")
+        if not isinstance(name, str) or not name:
+            raise ValueError("Docker target failed: compiled Tool metadata.name must be non-empty")
+        names.add(name)
+    return names
+
+
 def _validate_binding(binding: dict[str, Any]) -> tuple[str, str]:
     if binding.get("apiVersion") != "modelgarden.ai/v1" or binding.get("kind") != "EnvironmentBinding":
         raise ValueError("Docker target failed: expected modelgarden.ai/v1 EnvironmentBinding")
@@ -99,6 +123,27 @@ def _validate_binding(binding: dict[str, Any]) -> tuple[str, str]:
             "Docker target failed: runtime.model_credential_ref must be a non-empty secret:// reference"
         )
     return environment, credential_ref
+
+
+def _calendar_binding(binding: dict[str, Any], selected_tools: set[str]) -> tuple[str, str] | None:
+    if not (selected_tools & CALENDAR_TOOLS):
+        return None
+    spec = binding.get("spec")
+    connectors = spec.get("connectors") if isinstance(spec, dict) else None
+    calendar = connectors.get("google_calendar") if isinstance(connectors, dict) else None
+    if not isinstance(calendar, dict):
+        raise ValueError(
+            "Docker target failed: selected Calendar Tools require connectors.google_calendar in the EnvironmentBinding"
+        )
+    token_ref = calendar.get("token_ref")
+    if not isinstance(token_ref, str) or not token_ref.startswith("secret://") or len(token_ref) <= len("secret://"):
+        raise ValueError(
+            "Docker target failed: connectors.google_calendar.token_ref must be a non-empty secret:// reference"
+        )
+    calendar_id = calendar.get("calendar_id", "primary")
+    if not isinstance(calendar_id, str) or not calendar_id:
+        raise ValueError("Docker target failed: connectors.google_calendar.calendar_id must be non-empty")
+    return token_ref, calendar_id
 
 
 def _collect_secret_refs(value: Any) -> set[str]:
@@ -167,9 +212,10 @@ ENV PYTHONDONTWRITEBYTECODE=1 \\
     PYTHONUNBUFFERED=1 \\
     HERMES_HOME=/opt/data
 COPY hermes-source /opt/hermes-agent
+COPY model-garden-platform /opt/model-garden-platform
 RUN test \"$(git -C /opt/hermes-agent rev-parse HEAD 2>/dev/null || true)\" = \"$HERMES_COMMIT\" || \\
       test \"$(cat /opt/hermes-agent/.model-garden-hermes-commit)\" = \"$HERMES_COMMIT\" && \\
-    python -m pip install --no-cache-dir -e /opt/hermes-agent && \\
+    python -m pip install --no-cache-dir -e /opt/hermes-agent -r /opt/model-garden-platform/requirements-runtime.txt && \\
     test \"$(python -c 'import importlib.metadata; print(importlib.metadata.version(\"hermes-agent\"))')\" = \"$HERMES_VERSION\"
 COPY profile /opt/profile-seed
 COPY entrypoint.sh /usr/local/bin/model-garden-entrypoint
@@ -179,41 +225,67 @@ CMD [\"hermes\", \"serve\", \"--host\", \"127.0.0.1\", \"--port\", \"9119\", \"-
 """
 
 
-def _compose(project_name: str, provider: str, lock: dict[str, str]) -> str:
-    provider_env = PROVIDER_ENV[provider]
-    document = {
-        "services": {
-            "hermes": {
-                "build": {
-                    "context": ".",
-                    "args": {
-                        "HERMES_VERSION": lock["version"],
-                        "HERMES_COMMIT": lock["commit"],
-                    },
-                },
-                "image": f"model-garden-{project_name}:current",
-                "restart": "unless-stopped",
-                "environment": {
-                    "HERMES_HOME": "/opt/data",
-                    provider_env: "${MODEL_GARDEN_MODEL_CREDENTIAL:?MODEL_GARDEN_MODEL_CREDENTIAL is required}",
-                },
-                "volumes": ["hermes-data:/opt/data"],
-                "healthcheck": {
-                    "test": [
-                        "CMD",
-                        "python",
-                        "-c",
-                        "import socket; s=socket.create_connection(('127.0.0.1',9119),5); s.close()",
-                    ],
-                    "interval": "10s",
-                    "timeout": "5s",
-                    "retries": 6,
-                    "start_period": "20s",
-                },
-            }
-        },
-        "volumes": {"hermes-data": {}},
+def _healthcheck(port: int) -> dict[str, Any]:
+    return {
+        "test": [
+            "CMD",
+            "python",
+            "-c",
+            f"import socket; s=socket.create_connection(('127.0.0.1',{port}),5); s.close()",
+        ],
+        "interval": "10s",
+        "timeout": "5s",
+        "retries": 6,
+        "start_period": "20s",
     }
+
+
+def _compose(
+    project_name: str,
+    provider: str,
+    lock: dict[str, str],
+    *,
+    calendar: tuple[str, str] | None,
+) -> str:
+    provider_env = PROVIDER_ENV[provider]
+    hermes: dict[str, Any] = {
+        "build": {
+            "context": ".",
+            "args": {
+                "HERMES_VERSION": lock["version"],
+                "HERMES_COMMIT": lock["commit"],
+            },
+        },
+        "image": f"model-garden-{project_name}:current",
+        "restart": "unless-stopped",
+        "environment": {
+            "HERMES_HOME": "/opt/data",
+            provider_env: "${MODEL_GARDEN_MODEL_CREDENTIAL:?MODEL_GARDEN_MODEL_CREDENTIAL is required}",
+        },
+        "volumes": ["hermes-data:/opt/data"],
+        "healthcheck": _healthcheck(9119),
+    }
+    services: dict[str, Any] = {"hermes": hermes}
+    if calendar is not None:
+        _, calendar_id = calendar
+        services["governed-tools"] = {
+            "image": f"model-garden-{project_name}:current",
+            "restart": "unless-stopped",
+            "entrypoint": ["python", "/opt/model-garden-platform/platform/runtime/governed_mcp.py"],
+            "command": ["--host", "0.0.0.0", "--port", "9120"],
+            "environment": {
+                "MODEL_GARDEN_DESIRED_STATE": "/opt/profile-seed/.modelgarden/desired-state.json",
+                "MODEL_GARDEN_AUDIT_PATH": "/opt/data/.modelgarden/audit.jsonl",
+                "MODEL_GARDEN_APPROVAL_ROOT": "/opt/data/.modelgarden/approvals",
+                "MODEL_GARDEN_INITIATING_IDENTITY": "runtime:hermes",
+                "MODEL_GARDEN_GOOGLE_CALENDAR_TOKEN": "${MODEL_GARDEN_GOOGLE_CALENDAR_TOKEN:?MODEL_GARDEN_GOOGLE_CALENDAR_TOKEN is required}",
+                "MODEL_GARDEN_GOOGLE_CALENDAR_ID": calendar_id,
+            },
+            "volumes": ["hermes-data:/opt/data"],
+            "healthcheck": _healthcheck(9120),
+        }
+        hermes["depends_on"] = {"governed-tools": {"condition": "service_healthy"}}
+    document = {"services": services, "volumes": {"hermes-data": {}}}
     return yaml.safe_dump(document, sort_keys=False)
 
 
@@ -249,6 +321,16 @@ def _clone_hermes(lock: dict[str, str], destination: pathlib.Path) -> None:
     (destination / ".model-garden-hermes-commit").write_text(lock["commit"] + "\n", encoding="utf-8")
 
 
+def _copy_runtime_source(platform_root: pathlib.Path, destination: pathlib.Path) -> None:
+    for relative in RUNTIME_SOURCE_PATHS:
+        source = platform_root / relative
+        if not source.is_file() or source.is_symlink():
+            raise ValueError(f"Docker target failed: missing runtime source file {relative.as_posix()}")
+        target = destination / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, target)
+
+
 def render_bundle(
     profile_dir: pathlib.Path,
     binding_path: pathlib.Path,
@@ -263,17 +345,22 @@ def render_bundle(
     if bundle_dir.exists() and any(bundle_dir.iterdir()):
         raise ValueError(f"Docker target failed: refusing to overwrite non-empty bundle directory {bundle_dir}")
     provider = _validate_profile(profile_dir)
+    selected_tools = _selected_tools(profile_dir)
     binding = _load_json(binding_path, "EnvironmentBinding")
     environment, credential_ref = _validate_binding(binding)
+    calendar = _calendar_binding(binding, selected_tools)
     lock = _load_hermes_lock(platform_root)
 
     bundle_dir.mkdir(parents=True, exist_ok=True)
     shutil.copytree(profile_dir, bundle_dir / "profile")
+    _copy_runtime_source(platform_root, bundle_dir / "model-garden-platform")
     normalized_binding = json.dumps(binding, indent=2, sort_keys=True) + "\n"
     (bundle_dir / "environment-binding.json").write_text(normalized_binding, encoding="utf-8")
     (bundle_dir / "entrypoint.sh").write_text(_entrypoint(), encoding="utf-8")
     (bundle_dir / "Dockerfile").write_text(_dockerfile(lock), encoding="utf-8")
-    (bundle_dir / "compose.yaml").write_text(_compose(project_name, provider, lock), encoding="utf-8")
+    (bundle_dir / "compose.yaml").write_text(
+        _compose(project_name, provider, lock, calendar=calendar), encoding="utf-8"
+    )
     metadata = {
         "apiVersion": "modelgarden.ai/v1",
         "kind": "DockerDeploymentBundle",
@@ -281,9 +368,13 @@ def render_bundle(
         "environment": environment,
         "provider": provider,
         "modelCredentialRef": credential_ref,
+        "selectedTools": sorted(selected_tools),
+        "governedToolService": calendar is not None,
         "hermes": {"version": lock["version"], "revision": lock["commit"]},
         "bindingSha256": hashlib.sha256(normalized_binding.encode("utf-8")).hexdigest(),
     }
+    if calendar is not None:
+        metadata["googleCalendarCredentialRef"] = calendar[0]
     (bundle_dir / "deployment-metadata.json").write_text(
         json.dumps(metadata, indent=2, sort_keys=True) + "\n", encoding="utf-8"
     )
@@ -298,23 +389,36 @@ def _run(command: list[str], *, env: dict[str, str], check: bool = True) -> subp
 
 def _wait_healthy(project_name: str, bundle_dir: pathlib.Path, env: dict[str, str], timeout: int) -> bool:
     deadline = time.monotonic() + timeout
-    compose = ["docker", "compose", "-p", project_name, "-f", str(bundle_dir / "compose.yaml")]
+    compose_file = bundle_dir / "compose.yaml"
+    document = yaml.safe_load(compose_file.read_text(encoding="utf-8"))
+    services = sorted(document.get("services", {})) if isinstance(document, dict) else []
+    if not services:
+        return False
+    compose = ["docker", "compose", "-p", project_name, "-f", str(compose_file)]
     while time.monotonic() < deadline:
-        container = _run([*compose, "ps", "-q", "hermes"], env=env, check=False).stdout.strip()
-        if container:
+        all_healthy = True
+        for service in services:
+            container = _run([*compose, "ps", "-q", service], env=env, check=False).stdout.strip()
+            if not container:
+                all_healthy = False
+                continue
             status = _run(
                 [
-                    "docker", "inspect", "--format",
+                    "docker",
+                    "inspect",
+                    "--format",
                     "{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}",
                     container,
                 ],
                 env=env,
                 check=False,
             ).stdout.strip()
-            if status == "healthy":
-                return True
             if status in {"exited", "dead", "unhealthy"}:
                 return False
+            if status != "healthy":
+                all_healthy = False
+        if all_healthy:
+            return True
         time.sleep(2)
     return False
 
@@ -334,6 +438,14 @@ def apply_bundle(
     runtime_env = os.environ.copy()
     runtime_env.pop("MODEL_GARDEN_RUNTIME_SECRETS_JSON", None)
     runtime_env["MODEL_GARDEN_MODEL_CREDENTIAL"] = model_secret
+    spec = binding.get("spec", {})
+    connectors = spec.get("connectors", {}) if isinstance(spec, dict) else {}
+    calendar = connectors.get("google_calendar") if isinstance(connectors, dict) else None
+    if isinstance(calendar, dict):
+        calendar_ref = calendar.get("token_ref")
+        if isinstance(calendar_ref, str) and calendar_ref in resolved:
+            runtime_env["MODEL_GARDEN_GOOGLE_CALENDAR_TOKEN"] = resolved[calendar_ref]
+
     compose = ["docker", "compose", "-p", project_name, "-f", str(bundle_dir / "compose.yaml")]
     image = f"model-garden-{project_name}:current"
     rollback = f"model-garden-{project_name}:rollback"
@@ -347,7 +459,7 @@ def apply_bundle(
         _run([*compose, "build"], env=runtime_env)
         _run([*compose, "up", "-d", "--remove-orphans"], env=runtime_env)
         if not _wait_healthy(project_name, bundle_dir, runtime_env, timeout):
-            raise RuntimeError("candidate Hermes container did not become healthy")
+            raise RuntimeError("candidate client runtime did not become healthy")
     except (OSError, subprocess.CalledProcessError, RuntimeError) as exc:
         if had_previous:
             _run(["docker", "tag", rollback, image], env=runtime_env, check=False)
@@ -368,7 +480,7 @@ def main() -> int:
     parser.add_argument("bundle_dir", type=pathlib.Path, help="empty directory for the Docker deployment bundle")
     parser.add_argument("--project-name", required=True, help="stable lowercase client-environment deployment name")
     parser.add_argument("--apply", action="store_true", help="build/update the target runtime using Docker Compose")
-    parser.add_argument("--health-timeout", type=int, default=90, help="seconds to wait for a healthy Hermes container")
+    parser.add_argument("--health-timeout", type=int, default=90, help="seconds to wait for all runtime services to become healthy")
     args = parser.parse_args()
 
     try:
