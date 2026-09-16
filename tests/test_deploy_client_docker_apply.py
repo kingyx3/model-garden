@@ -36,7 +36,11 @@ class DeployClientDockerApplyTests(unittest.TestCase):
             class Result:
                 returncode = 1 if command[:3] == ["docker", "image", "inspect"] else 0
                 stdout = ""
-                stderr = ""
+                stderr = (
+                    "Error response from daemon: No such image: model-garden-acme-dev:current"
+                    if command[:3] == ["docker", "image", "inspect"]
+                    else ""
+                )
             return Result()
 
         with tempfile.TemporaryDirectory() as tmp, mock.patch.object(deployer, "_run", side_effect=fake_run), mock.patch.object(deployer, "_wait_healthy", return_value=True):
@@ -90,6 +94,45 @@ class DeployClientDockerApplyTests(unittest.TestCase):
         self.assertIn(["docker", "tag", "model-garden-acme-prod:current", "model-garden-acme-prod:rollback"], commands)
         self.assertIn(["docker", "tag", "model-garden-acme-prod:rollback", "model-garden-acme-prod:current"], commands)
         self.assertTrue(any("--force-recreate" in command for command in commands))
+
+    def test_image_inspect_operational_failure_aborts_before_candidate_deployment(self):
+        binding = {
+            "apiVersion": "modelgarden.ai/v1",
+            "kind": "EnvironmentBinding",
+            "spec": {
+                "environment": "prod",
+                "runtime": {
+                    "profile": "receptionist",
+                    "model_credential_ref": "secret://model/prod",
+                },
+            },
+        }
+        commands: list[list[str]] = []
+
+        def fake_run(command, *, env, check=True):
+            commands.append(command)
+            class Result:
+                returncode = 1 if command[:3] == ["docker", "image", "inspect"] else 0
+                stdout = ""
+                stderr = (
+                    "Cannot connect to the Docker daemon"
+                    if command[:3] == ["docker", "image", "inspect"]
+                    else ""
+                )
+            return Result()
+
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(deployer, "_run", side_effect=fake_run):
+            with self.assertRaisesRegex(ValueError, "cannot inspect current runtime image"):
+                deployer.apply_bundle(
+                    pathlib.Path(tmp),
+                    binding,
+                    "acme-prod",
+                    secrets_json=json.dumps({"secret://model/prod": "model-secret"}),
+                    timeout=1,
+                )
+
+        self.assertFalse(any("build" in command for command in commands))
+        self.assertFalse(any("up" in command for command in commands))
 
 
 if __name__ == "__main__":
