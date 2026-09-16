@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# Legacy LiteLLM/Kubernetes reference helper only.
+# The current Model Garden Hermes/Docker client path does not consume this file.
+# Keep it only for manually validating the retained legacy Kubernetes reference.
 set -euo pipefail
 
 out="${1:-/tmp/litellm-config.yaml}"
@@ -24,7 +27,7 @@ if [[ -n "${OPEN_WEIGHT_API_BASE:-}" && -n "${OPEN_WEIGHT_MODEL_REF:-}" ]]; then
 fi
 
 if [[ -z "$models" ]]; then
-  echo "No model provider is fully configured. See docs/secrets.md." >&2
+  echo "No legacy model provider is fully configured. See docs/secrets.md." >&2
   exit 1
 fi
 
@@ -40,5 +43,5 @@ litellm_settings:
 EOF
 } >"$out"
 
-echo "Rendered model aliases:"
+echo "Rendered legacy LiteLLM model aliases:"
 grep 'model_name:' "$out" | sed 's/^/ -/'
