@@ -46,6 +46,7 @@ class FakeCalendarTransport:
 class GovernedMcpRuntimeTests(unittest.TestCase):
     def _runtime(self, root: pathlib.Path, transport: FakeCalendarTransport):
         desired = compiler.compile_workspace(ROOT / "examples" / "workspace", "receptionist")[0]
+        desired["source"]["client"] = "acme"
         desired_path = root / "desired.json"
         desired_path.write_text(json.dumps(desired), encoding="utf-8")
         return runtime_module.GovernedToolRuntime(
@@ -80,11 +81,19 @@ class GovernedMcpRuntimeTests(unittest.TestCase):
 
             self.assertEqual(result["status"], "executed")
             self.assertTrue(result["result"]["available"])
+            self.assertEqual(result["request"]["tenantId"], "acme")
+            self.assertEqual(result["request"]["runtime"], "hermes")
+            self.assertEqual(result["request"]["runtimeVersion"], "0.21.2")
+            self.assertEqual(result["request"]["modelProvider"], "openai")
+            self.assertEqual(result["request"]["model"], "approved-openai-model")
             self.assertEqual(len(transport.calls), 1)
             self.assertEqual(transport.calls[0][2]["Authorization"], "Bearer calendar-secret")
             audit = (root / "audit.jsonl").read_text(encoding="utf-8")
             self.assertIn('"tool":"calendar.availability"', audit)
             self.assertIn('"outcome":"succeeded"', audit)
+            self.assertIn('"tenantId":"acme"', audit)
+            self.assertIn('"runtimeVersion":"0.21.2"', audit)
+            self.assertIn('"modelProvider":"openai"', audit)
             self.assertNotIn("calendar-secret", audit)
 
     def test_calendar_write_waits_for_exact_single_use_approval_then_executes(self):
