@@ -12,11 +12,13 @@ MVP supported Tools:
 from __future__ import annotations
 
 import argparse
+import importlib.metadata
 import importlib.util
 import json
 import os
 import pathlib
 import re
+import uuid
 from typing import Any, Mapping
 
 from mcp.server.mcpserver import MCPServer
@@ -46,6 +48,13 @@ def _load_json_object(path: pathlib.Path, label: str) -> dict[str, Any]:
 
 
 def _hermes_version() -> str | None:
+    try:
+        installed = importlib.metadata.version("hermes-agent").strip()
+        if installed:
+            return installed
+    except importlib.metadata.PackageNotFoundError:
+        pass
+
     path = ROOT / "platform" / "hermes.lock"
     try:
         for line in path.read_text(encoding="utf-8").splitlines():
@@ -129,14 +138,13 @@ class GovernedToolRuntime:
         )
 
     def _take_approval(self, request_id: str) -> tuple[dict[str, Any] | None, pathlib.Path | None]:
-        """Atomically claim one approval decision so it cannot authorize a later replay."""
+        """Atomically claim one decision without letting a crashed claim block fresh approval."""
         path = _request_path(self.approval_root, "decisions", request_id)
         if not path.is_file():
             return None, None
-        claimed = _request_path(self.approval_root, "claimed", request_id)
-        claimed.parent.mkdir(parents=True, exist_ok=True)
-        if claimed.exists():
-            raise RuntimeError("approval decision is already being consumed")
+        claimed_dir = self.approval_root / "claimed"
+        claimed_dir.mkdir(parents=True, exist_ok=True)
+        claimed = claimed_dir / f"{request_id}.{uuid.uuid4().hex}.json"
         try:
             path.replace(claimed)
         except FileNotFoundError:
@@ -173,6 +181,8 @@ class GovernedToolRuntime:
             governance_context=governance_context,
         )
         approval, claim = self._take_approval(request["requestId"])
+        if approval is not None:
+            self._clear_pending(request["requestId"])
         try:
             result = GOVERN.execute_action(
                 self.desired_state,
@@ -184,10 +194,6 @@ class GovernedToolRuntime:
                 governance_context=governance_context,
                 audit_path=self.audit_path,
             )
-        except PermissionError:
-            if approval is not None:
-                self._clear_pending(request["requestId"])
-            raise
         finally:
             self._discard_claim(claim)
         if result.get("status") == "pending-approval":
