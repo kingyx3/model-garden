@@ -1,0 +1,184 @@
+name: Model Garden keyless GCP deployment
+
+on:
+  workflow_run:
+    workflows: ["Model Garden client runtime"]
+    types: [completed]
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: model-garden-gcp-${{ github.event.workflow_run.head_branch }}
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    if: >-
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'push' &&
+      (github.event.workflow_run.head_branch == 'dev' || github.event.workflow_run.head_branch == 'main') &&
+      github.event.workflow_run.head_commit.message != 'Install Model Garden keyless GCP deployment workflow' &&
+      vars.MODEL_GARDEN_CLOUD_PROVIDER == 'gcp' &&
+      vars.MODEL_GARDEN_CLOUD_READY == 'true'
+    runs-on: ubuntu-latest
+    environment:
+      name: ${{ github.event.workflow_run.head_branch == 'main' && 'prod' || 'dev' }}
+    env:
+      MODEL_GARDEN_RUNTIME_SECRETS_JSON: ${{ secrets.MODEL_GARDEN_RUNTIME_SECRETS_JSON }}
+      MODEL_GARDEN_ENVIRONMENT: ${{ github.event.workflow_run.head_branch == 'main' && 'prod' || 'dev' }}
+    steps:
+      - name: Checkout validated client revision
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+
+      - name: Resolve locked Model Garden release
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="$(awk '$1 == "modelgarden:" { print $2; exit }' platform.lock.yaml)"
+          if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "platform.lock.yaml must pin modelgarden as MAJOR.MINOR.PATCH" >&2
+            exit 1
+          fi
+          git clone --depth 1 --branch "v${version}" --single-branch \
+            https://github.com/kingyx3/model-garden.git "$RUNNER_TEMP/model-garden"
+          echo "MODEL_GARDEN_ROOT=$RUNNER_TEMP/model-garden" >> "$GITHUB_ENV"
+          echo "MODEL_GARDEN_VERSION=$version" >> "$GITHUB_ENV"
+
+      - name: Authenticate to GCP without a service-account key
+        uses: google-github-actions/auth@v3
+        with:
+          project_id: ${{ vars.GCP_PROJECT_ID }}
+          workload_identity_provider: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.GCP_DEPLOY_SERVICE_ACCOUNT }}
+
+      - name: Install gcloud
+        uses: google-github-actions/setup-gcloud@v3
+
+      - name: Install Terraform
+        uses: hashicorp/setup-terraform@v4
+        with:
+          terraform_version: "1.14.6"
+          terraform_wrapper: false
+
+      - name: Rebuild reproducible runtime inputs
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m pip install --disable-pip-version-check --quiet -r "$MODEL_GARDEN_ROOT/requirements-dev.txt"
+          python3 "$MODEL_GARDEN_ROOT/scripts/render-client-environment.py" \
+            "$GITHUB_WORKSPACE/environments/${MODEL_GARDEN_ENVIRONMENT}.yaml" \
+            --environment "$MODEL_GARDEN_ENVIRONMENT" \
+            --output "$RUNNER_TEMP/environment-binding.json"
+          python3 "$MODEL_GARDEN_ROOT/scripts/rebuild-client-runtime.py" \
+            "$GITHUB_WORKSPACE" "$RUNNER_TEMP/hermes-profile" \
+            --agent __AGENT_SLUG__
+          tar -C "$RUNNER_TEMP" -czf "$RUNNER_TEMP/model-garden-deployment.tgz" \
+            hermes-profile environment-binding.json
+
+      - name: Reconcile isolated GCP Docker host with Terraform
+        id: infra
+        shell: bash
+        run: |
+          set -euo pipefail
+          module="$MODEL_GARDEN_ROOT/infra/docker-host/gcp"
+          prefix="clients/__CLIENT_SLUG__/${MODEL_GARDEN_ENVIRONMENT}"
+          terraform -chdir="$module" init -reconfigure -input=false \
+            -backend-config="bucket=${{ vars.MODEL_GARDEN_TF_STATE_BUCKET }}" \
+            -backend-config="prefix=${prefix}"
+          deletion_protection=false
+          if [[ "$MODEL_GARDEN_ENVIRONMENT" == "prod" ]]; then
+            deletion_protection=true
+          fi
+          terraform -chdir="$module" apply -auto-approve -input=false \
+            -var="project_id=${{ vars.GCP_PROJECT_ID }}" \
+            -var="region=${{ vars.GCP_REGION }}" \
+            -var="zone=${{ vars.GCP_ZONE }}" \
+            -var="client_slug=__CLIENT_SLUG__" \
+            -var="environment=${MODEL_GARDEN_ENVIRONMENT}" \
+            -var="platform_version=${MODEL_GARDEN_VERSION}" \
+            -var="runtime_service_account=${{ vars.GCP_RUNTIME_SERVICE_ACCOUNT }}" \
+            -var="infrastructure_owner=${{ vars.MODEL_GARDEN_INFRA_OWNERSHIP }}" \
+            -var="deletion_protection=${deletion_protection}"
+          echo "instance=$(terraform -chdir="$module" output -raw instance_name)" >> "$GITHUB_OUTPUT"
+          echo "zone=$(terraform -chdir="$module" output -raw zone)" >> "$GITHUB_OUTPUT"
+
+      - name: Wait for Docker host bootstrap
+        shell: bash
+        env:
+          INSTANCE: ${{ steps.infra.outputs.instance }}
+          ZONE: ${{ steps.infra.outputs.zone }}
+        run: |
+          set -euo pipefail
+          for attempt in $(seq 1 24); do
+            if gcloud compute ssh "$INSTANCE" \
+              --project "${{ vars.GCP_PROJECT_ID }}" \
+              --zone "$ZONE" \
+              --tunnel-through-iap \
+              --quiet \
+              --command 'test -f /var/lib/model-garden-bootstrap-complete && sudo docker compose version >/dev/null'; then
+              exit 0
+            fi
+            sleep 10
+          done
+          echo "Docker host did not become ready" >&2
+          exit 1
+
+      - name: Transfer reproducible deployment inputs
+        shell: bash
+        env:
+          INSTANCE: ${{ steps.infra.outputs.instance }}
+          ZONE: ${{ steps.infra.outputs.zone }}
+        run: |
+          set -euo pipefail
+          gcloud compute scp "$RUNNER_TEMP/model-garden-deployment.tgz" \
+            "$INSTANCE:/tmp/model-garden-deployment-${GITHUB_RUN_ID}.tgz" \
+            --project "${{ vars.GCP_PROJECT_ID }}" \
+            --zone "$ZONE" \
+            --tunnel-through-iap \
+            --quiet
+
+      - name: Deploy and verify Docker runtime remotely
+        shell: bash
+        env:
+          INSTANCE: ${{ steps.infra.outputs.instance }}
+          ZONE: ${{ steps.infra.outputs.zone }}
+        run: |
+          set -euo pipefail
+          remote_archive="/tmp/model-garden-deployment-${GITHUB_RUN_ID}.tgz"
+          project_name="__CLIENT_SLUG__-${MODEL_GARDEN_ENVIRONMENT}"
+          {
+            printf 'export MODEL_GARDEN_RUNTIME_SECRETS_JSON=%q\n' "$MODEL_GARDEN_RUNTIME_SECRETS_JSON"
+            cat <<'REMOTE_SCRIPT'
+          set -euo pipefail
+          version="$1"
+          project_name="$2"
+          archive="$3"
+          work="/tmp/${project_name}-deploy-$$"
+          cleanup() {
+            rm -rf "$work" "$archive"
+          }
+          trap cleanup EXIT
+          mkdir -p "$work"
+          tar -xzf "$archive" -C "$work"
+          git clone --quiet --depth 1 --branch "v${version}" --single-branch \
+            https://github.com/kingyx3/model-garden.git "$work/model-garden"
+          python3 -m venv "$work/venv"
+          "$work/venv/bin/python" -m pip install --disable-pip-version-check --quiet \
+            -r "$work/model-garden/requirements-dev.txt"
+          sudo -E "$work/venv/bin/python" "$work/model-garden/scripts/deploy-client-docker.py" \
+            "$work/hermes-profile" \
+            "$work/environment-binding.json" \
+            "$work/target" \
+            --project-name "$project_name" \
+            --apply
+          REMOTE_SCRIPT
+          } | gcloud compute ssh "$INSTANCE" \
+            --project "${{ vars.GCP_PROJECT_ID }}" \
+            --zone "$ZONE" \
+            --tunnel-through-iap \
+            --quiet \
+            --command "bash -s -- '${MODEL_GARDEN_VERSION}' '${project_name}' '${remote_archive}'"
