@@ -26,6 +26,17 @@ SEMVER = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+$")
 REPO = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 PROJECT_NAME = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
 REQUEST_ID = re.compile(r"^[0-9a-f]{64}$")
+KEYLESS_GCP_VARIABLES = {
+    "MODEL_GARDEN_CLOUD_PROVIDER",
+    "MODEL_GARDEN_CLOUD_READY",
+    "MODEL_GARDEN_TF_STATE_BUCKET",
+    "GCP_PROJECT_ID",
+    "GCP_REGION",
+    "GCP_ZONE",
+    "GCP_WORKLOAD_IDENTITY_PROVIDER",
+    "GCP_DEPLOY_SERVICE_ACCOUNT",
+    "GCP_RUNTIME_SERVICE_ACCOUNT",
+}
 
 
 def _load_script(module_name: str, filename: str):
@@ -134,24 +145,28 @@ def configure(
     workspace: pathlib.Path,
     repo: str,
     environment: str,
-    runner_label: str,
+    runner_label: str | None = None,
     *,
     dry_run: bool = False,
 ) -> None:
+    """Configure runtime secrets; optionally configure the legacy self-hosted Docker runner."""
     _validate_repo(repo)
     renderer = _load_script("render_client_environment", "render-client-environment.py")
     rendered = renderer.render(workspace / "environments" / f"{environment}.yaml", environment)
     refs = sorted(_secret_refs(rendered))
     if not refs:
         raise ValueError(f"environment {environment!r} has no secret:// references to configure")
-    if not runner_label.strip():
-        raise ValueError("runner label must be non-empty")
+    if runner_label is not None and not runner_label.strip():
+        raise ValueError("runner label must be non-empty when supplied")
 
     print(f"GitHub environment: {repo} / {environment}")
     print("Required runtime secret references:")
     for ref in refs:
         print(f"  - {ref}")
-    print(f"Docker runner label: {runner_label}")
+    if runner_label:
+        print(f"Deployment path: self-hosted Docker runner {runner_label}")
+    else:
+        print("Deployment path: no self-hosted runner requested; use the preferred keyless cloud bootstrap or artifact-only mode.")
     if dry_run:
         print("Dry run only; no GitHub settings or secrets were changed.")
         return
@@ -183,23 +198,28 @@ def configure(
     )
     if secret.returncode != 0:
         raise ValueError(f"cannot set runtime secret map: {secret.stderr.strip()}")
-    variable = _run(
-        [
-            "gh",
-            "variable",
-            "set",
-            "MODEL_GARDEN_DOCKER_RUNNER",
-            "--env",
-            environment,
-            "--repo",
-            repo,
-            "--body",
-            runner_label,
-        ]
-    )
-    if variable.returncode != 0:
-        raise ValueError(f"cannot set Docker runner variable: {variable.stderr.strip()}")
+
+    if runner_label:
+        variable = _run(
+            [
+                "gh",
+                "variable",
+                "set",
+                "MODEL_GARDEN_DOCKER_RUNNER",
+                "--env",
+                environment,
+                "--repo",
+                repo,
+                "--body",
+                runner_label,
+            ]
+        )
+        if variable.returncode != 0:
+            raise ValueError(f"cannot set Docker runner variable: {variable.stderr.strip()}")
+
     print(f"Configured {environment} without writing runtime credentials to the workspace.")
+    if runner_label is None:
+        print("For the preferred GCP path, run scripts/bootstrap-cloud.py once for this repository after both environments are configured.")
     if environment == "prod":
         print("Review the GitHub prod Environment protection/reviewer policy before production traffic.")
 
@@ -210,6 +230,33 @@ def _check_command(command: list[str]) -> tuple[bool, str]:
         text = result.stdout.strip().splitlines()
         return True, text[0] if text else "ok"
     return False, result.stderr.strip() or result.stdout.strip() or "failed"
+
+
+def _parse_gh_variables(result: subprocess.CompletedProcess[str]) -> dict[str, str]:
+    if result.returncode != 0:
+        return {}
+    try:
+        payload = json.loads(result.stdout or "[]")
+    except json.JSONDecodeError:
+        return {}
+    if not isinstance(payload, list):
+        return {}
+    values: dict[str, str] = {}
+    for item in payload:
+        if isinstance(item, dict) and isinstance(item.get("name"), str) and isinstance(item.get("value"), str):
+            values[item["name"]] = item["value"]
+    return values
+
+
+def _keyless_gcp_ready(variables: dict[str, str]) -> tuple[bool, str]:
+    missing = sorted(name for name in KEYLESS_GCP_VARIABLES if not variables.get(name))
+    if variables.get("MODEL_GARDEN_CLOUD_PROVIDER") != "gcp":
+        return False, "cloud provider is not gcp"
+    if variables.get("MODEL_GARDEN_CLOUD_READY") != "true":
+        return False, "MODEL_GARDEN_CLOUD_READY is not true"
+    if missing:
+        return False, "missing: " + ", ".join(missing)
+    return True, "keyless GCP/OIDC configured"
 
 
 def doctor(
@@ -268,9 +315,23 @@ def doctor(
             configured = raw_secret.returncode == 0 and "MODEL_GARDEN_RUNTIME_SECRETS_JSON" in raw_secret.stdout
             detail = "present" if configured else (raw_secret.stderr.strip() or "missing")
             checks.append(("GitHub runtime secret", configured, detail))
-            raw_var = _run(["gh", "variable", "list", "--env", environment, "--repo", repo])
-            has_runner = raw_var.returncode == 0 and "MODEL_GARDEN_DOCKER_RUNNER" in raw_var.stdout
-            checks.append(("GitHub Docker runner variable", has_runner, "present" if has_runner else "missing"))
+
+            env_vars = _parse_gh_variables(
+                _run(["gh", "variable", "list", "--env", environment, "--repo", repo, "--json", "name,value"])
+            )
+            repo_vars = _parse_gh_variables(
+                _run(["gh", "variable", "list", "--repo", repo, "--json", "name,value"])
+            )
+            runner_label = env_vars.get("MODEL_GARDEN_DOCKER_RUNNER")
+            keyless_ready, keyless_detail = _keyless_gcp_ready(repo_vars)
+            deployment_ready = bool(runner_label) or keyless_ready
+            if runner_label:
+                deployment_detail = f"self-hosted runner: {runner_label}"
+            elif keyless_ready:
+                deployment_detail = keyless_detail
+            else:
+                deployment_detail = "no self-hosted runner and keyless cloud is not ready; " + keyless_detail
+            checks.append(("deployment target", deployment_ready, deployment_detail))
         except ValueError as exc:
             checks.append(("GitHub configuration", False, str(exc)))
 
@@ -358,13 +419,16 @@ def main() -> int:
     config.add_argument("workspace", type=pathlib.Path)
     config.add_argument("--repo", required=True)
     config.add_argument("--environment", choices=("dev", "prod"), required=True)
-    config.add_argument("--runner-label", required=True)
+    config.add_argument(
+        "--runner-label",
+        help="optional legacy/self-hosted Docker runner label; omit for preferred keyless cloud deployment",
+    )
     config.add_argument("--dry-run", action="store_true")
 
     doc = sub.add_parser("doctor", help="check workspace/deployment readiness without exposing secrets")
     doc.add_argument("workspace", type=pathlib.Path)
     doc.add_argument("--environment", choices=("dev", "prod"), default="dev")
-    doc.add_argument("--repo", help="optional owner/name; verifies expected GitHub Environment settings")
+    doc.add_argument("--repo", help="optional owner/name; verifies runtime secrets and either keyless cloud or runner readiness")
     doc.add_argument("--host", action="store_true", help="also verify local Docker Engine + Compose")
 
     approvals = sub.add_parser("approvals", help="list exact material actions waiting for approval")
