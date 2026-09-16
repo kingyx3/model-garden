@@ -390,6 +390,19 @@ def _run(command: list[str], *, env: dict[str, str], check: bool = True) -> subp
     return subprocess.run(command, env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=check)
 
 
+def _image_exists(image: str, env: dict[str, str]) -> bool:
+    result = _run(["docker", "image", "inspect", image], env=env, check=False)
+    if result.returncode == 0:
+        return True
+    detail = (result.stderr or result.stdout or "").strip()
+    if "No such image" in detail or "No such object" in detail:
+        return False
+    raise ValueError(
+        "Docker target failed: cannot inspect current runtime image before deployment: "
+        + (detail or "docker image inspect failed")
+    )
+
+
 def _wait_healthy(project_name: str, bundle_dir: pathlib.Path, env: dict[str, str], timeout: int) -> bool:
     deadline = time.monotonic() + timeout
     compose_file = bundle_dir / "compose.yaml"
@@ -454,7 +467,7 @@ def apply_bundle(
     rollback = f"model-garden-{project_name}:rollback"
 
     _run(["docker", "compose", "version"], env=runtime_env)
-    had_previous = _run(["docker", "image", "inspect", image], env=runtime_env, check=False).returncode == 0
+    had_previous = _image_exists(image, runtime_env)
     if had_previous:
         _run(["docker", "tag", image, rollback], env=runtime_env)
 
