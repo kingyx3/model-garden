@@ -15,7 +15,12 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        cloud: [aws, gcp, azure]
+        path:
+          - infra/aws
+          - infra/gcp
+          - infra/azure
+          - infra/bootstrap/gcp
+          - infra/docker-host/gcp
     steps:
       - uses: actions/checkout@v7
       - uses: hashicorp/setup-terraform@v4
@@ -23,11 +28,11 @@ jobs:
           terraform_version: "1.14.6"
           terraform_wrapper: false
       - name: Format
-        run: terraform -chdir=infra/${{ matrix.cloud }} fmt -check
+        run: terraform -chdir=${{ matrix.path }} fmt -check
       - name: Init without backend
-        run: terraform -chdir=infra/${{ matrix.cloud }} init -backend=false -input=false
+        run: terraform -chdir=${{ matrix.path }} init -backend=false -input=false
       - name: Validate
-        run: terraform -chdir=infra/${{ matrix.cloud }} validate
+        run: terraform -chdir=${{ matrix.path }} validate
 
   contracts-and-runtime:
     runs-on: ubuntu-latest
