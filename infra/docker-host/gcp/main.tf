@@ -105,9 +105,9 @@ resource "google_compute_instance" "runtime" {
   }
 
   metadata = {
-    enable-oslogin          = "TRUE"
-    block-project-ssh-keys  = "TRUE"
-    model-garden-client     = var.client_slug
+    enable-oslogin           = "TRUE"
+    block-project-ssh-keys   = "TRUE"
+    model-garden-client      = var.client_slug
     model-garden-environment = var.environment
   }
 
