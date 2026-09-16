@@ -80,10 +80,10 @@ python3 scripts/client-operator.py reject <request-id> \
   --approver operator@example.com
 ```
 
-Changing the Tool arguments creates a different request ID, so an approval cannot authorize a materially different action.
+Changing the Tool arguments creates a different request ID, so an approval cannot authorize a materially different action. Approval decisions are also single-use: once an approved or rejected decision is applied, it is consumed. A later identical material action must pause for a fresh human decision rather than replaying an earlier approval.
 
 This file-backed approval mechanism is intentionally an MVP operator surface. Do not build an approval portal or workflow engine until repeated client evidence justifies one.
 
 ## Current evidence boundary
 
-Credential-free tests cover Tool selection, MCP materialization, governance, approval identity, audit behavior, Calendar connector behavior and Docker credential isolation. A real Google Calendar credential-backed end-to-end booking remains a live acceptance gate and must not be claimed complete until exercised in a deployed client environment.
+Credential-free tests cover Tool selection, MCP materialization, governance, approval identity, single-use approval behavior, audit behavior, Calendar connector behavior and Docker credential isolation. A real Google Calendar credential-backed end-to-end booking remains a live acceptance gate and must not be claimed complete until exercised in a deployed client environment.
