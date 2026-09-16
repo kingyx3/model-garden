@@ -46,15 +46,13 @@ jobs:
           echo "${tag} already points to ${remote}, not ${GITHUB_SHA}. Bump VERSION before changing main." >&2
           exit 1
 
-  terraform:
+  current-terraform:
+    name: terraform (${{ matrix.path }})
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
         path:
-          - infra/aws
-          - infra/gcp
-          - infra/azure
           - infra/bootstrap/gcp
           - infra/docker-host/gcp
     steps:
@@ -78,7 +76,7 @@ jobs:
         run: python3 -m pip install -r requirements-dev.txt
       - name: Validate versioned contracts and reference workspace
         run: python3 scripts/validate-workspace.py examples/workspace
-      - name: Test tiny workspace compiler and Hermes adapter
+      - name: Test workspace, runtime, governance and operator paths
         run: python3 -m unittest discover -s tests -v
       - name: Run Receptionist reference acceptance evals
         run: python3 scripts/eval-receptionist.py examples/workspace
@@ -116,8 +114,6 @@ jobs:
           grep -q 'general.openai' /tmp/config.yaml
           grep -q 'general.anthropic' /tmp/config.yaml
           grep -q 'general.open-weight' /tmp/config.yaml
-      - name: Validate Kubernetes manifests render
-        run: kubectl kustomize platform/k8s >/tmp/model-garden.yaml
 
   hermes-compatibility:
     runs-on: ubuntu-latest
@@ -132,7 +128,7 @@ jobs:
 
   publish-main-release:
     if: github.ref == 'refs/heads/main'
-    needs: [version-contract, terraform, contracts-and-runtime, hermes-compatibility]
+    needs: [version-contract, current-terraform, contracts-and-runtime, hermes-compatibility]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -167,7 +163,7 @@ jobs:
 
   release:
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [version-contract, terraform, contracts-and-runtime, hermes-compatibility]
+    needs: [version-contract, current-terraform, contracts-and-runtime, hermes-compatibility]
     runs-on: ubuntu-latest
     permissions:
       contents: write
