@@ -2,7 +2,7 @@
 
 Model Garden is an OSS-first platform and consulting delivery baseline for deploying governed AI employees for small and mid-sized businesses without requiring a client IT team.
 
-**Current development version:** `0.3.0`
+**Current release line:** `0.3.0`
 
 The platform repository is shared and versioned. Each client gets a separate private workspace repository containing only that client's business-specific desired state, knowledge references, evals, environment references, and platform lockfile.
 
@@ -21,6 +21,9 @@ private client workspace
 GitHub Actions + protected Environments
              |
              v
+GitHub OIDC / workload federation
+             |
+             v
 isolated client Docker host
 ```
 
@@ -30,72 +33,98 @@ isolated client Docker host
 - **Configure roles; do not rebuild the platform for roles.** Receptionist is the reference wedge, but Sales Assistant, Operations Coordinator, Support, Research and other bounded jobs use the same Agent/Skill/Tool contracts.
 - **Secrets stay outside Git.** Client workspace files contain only logical `secret://` references; GitHub Environments hold runtime values.
 - **GitHub is the engineering control plane.** Pull requests validate; `dev` deploys DEV; `main` deploys PROD.
-- **One isolated Docker host per early client.** Keep deployment boring until repeated operational evidence justifies fleet tooling.
+- **Bootstrap cloud trust once, then operate keylessly.** A temporary bootstrap credential establishes remote state and GitHub workload federation; normal deployments use short-lived GitHub OIDC credentials.
+- **One isolated Docker host per early client/environment.** Keep deployment boring until repeated operational evidence justifies fleet tooling.
 - **OSS before proprietary infrastructure.** Hermes provides the Agent runtime; external systems such as LiveKit and Lago remain replaceable integrations.
 
-## Bootstrap a client
+## Preferred client bootstrap — one command
 
-From the exact Model Garden release you intend to deploy:
-
-```bash
-python3 scripts/client-operator.py init acme \
-  --agent receptionist \
-  --role-title "Receptionist" \
-  --output ../acme-ai-workspace
-```
-
-A non-Receptionist role uses the same path:
+Run from a published Model Garden release with authenticated `gh`, `git`, and Terraform available:
 
 ```bash
-python3 scripts/client-operator.py init acme \
-  --agent sales-assistant \
-  --role-title "Sales Assistant" \
-  --output ../acme-sales-ai-workspace
+python3 scripts/launch-client.py acme \
+  --github-repo kingyx3/acme-ai-workspace \
+  --gcp-project acme-model-garden-12345 \
+  --bootstrap-credential ~/Downloads/acme-bootstrap.json \
+  --ownership client
 ```
 
-If `git` and the GitHub CLI are authenticated, the helper can also create the private client repo and push `main` + `dev`:
+That single resumable command:
+
+1. creates or reuses the local client workspace and private GitHub repository;
+2. creates `main` + `dev` through the existing Git-backed bootstrap;
+3. creates/reuses protected `dev` and `prod` GitHub Environments;
+4. derives each environment's exact `secret://` references and prompts only for missing runtime credentials;
+5. runs the one-time GCP bootstrap using the local service-account JSON without copying it into GitHub or the workspace;
+6. provisions remote Terraform state, GitHub Workload Identity Federation, a keyless deploy identity, and a separate runtime identity;
+7. installs the keyless GCP deployment workflow;
+8. triggers an idempotent DEV infrastructure/runtime deployment and waits for GitHub Actions to verify it;
+9. records the bootstrap as verified;
+10. when `gcloud` is available, revokes the temporary service-account key and deletes the local JSON automatically; otherwise it prints the one exact revocation command and leaves the JSON in place;
+11. runs `doctor` for both environments.
+
+The command is safe to rerun after a partial failure: existing workspace/repository state, configured runtime secret maps, cloud bootstrap variables and completed verification are reused instead of recreated.
+
+Use another role without changing Model Garden itself:
+
+```bash
+python3 scripts/launch-client.py acme \
+  --agent operations-coordinator \
+  --role-title "Operations Coordinator" \
+  --github-repo kingyx3/acme-ai-workspace \
+  --gcp-project acme-model-garden-12345 \
+  --bootstrap-credential ~/Downloads/acme-bootstrap.json
+```
+
+The bootstrap credential is infrastructure-only. Model/provider, Calendar, telephony and other business-system credentials remain narrow runtime/integration credentials and are collected only when the selected workspace references them.
+
+## Lower-level operator commands
+
+The component commands remain available for diagnostics, non-GCP targets and unusual environments:
 
 ```bash
 python3 scripts/client-operator.py init acme \
   --github-repo kingyx3/acme-ai-workspace
-```
 
-The older `scripts/bootstrap-client-workspace.py` command remains supported directly and defaults to the Receptionist role for backwards compatibility.
-
-## Configure deployment without hand-writing secret JSON
-
-The generated workspace contains `environments/dev.yaml` and `environments/prod.yaml` with logical secret references. The operator helper derives the exact reference set and prompts for each value without echoing it:
-
-```bash
 python3 scripts/client-operator.py configure ../acme-ai-workspace \
   --repo kingyx3/acme-ai-workspace \
-  --environment dev \
-  --runner-label acme-docker
-```
+  --environment dev
 
-It creates/updates the GitHub Environment, writes `MODEL_GARDEN_RUNTIME_SECRETS_JSON` through `gh secret set` via stdin, and sets the environment-scoped `MODEL_GARDEN_DOCKER_RUNNER` variable. It never writes runtime credential values into the workspace.
+python3 scripts/bootstrap-cloud.py gcp \
+  --project acme-model-garden-12345 \
+  --repo kingyx3/acme-ai-workspace \
+  --client-slug acme \
+  --credential-file ~/Downloads/acme-bootstrap.json
 
-Check readiness before a deployment:
-
-```bash
 python3 scripts/client-operator.py doctor ../acme-ai-workspace \
   --repo kingyx3/acme-ai-workspace \
   --environment dev
 ```
 
-Run `doctor --host` on the target machine to additionally verify Docker Engine and Docker Compose.
+The older self-hosted-runner path remains supported by passing `--runner-label` to `client-operator.py configure`, but it is no longer the preferred managed GCP path.
 
 ## Delivery path
 
 ```text
-feature/business change
-  -> pull request: validate only
-  -> merge to dev: materialize + deploy DEV
-  -> pilot/evals
-  -> promote to main: deploy PROD
+one-time bootstrap
+  -> temporary cloud credential
+  -> remote Terraform state + GitHub WIF/OIDC
+  -> verify keyless DEV
+  -> revoke/delete bootstrap credential
+
+normal operation
+  feature/business change
+    -> pull request: validate only
+    -> merge to dev: reconcile infrastructure + deploy DEV
+    -> pilot/evals
+    -> promote to main: reconcile infrastructure + deploy PROD
 ```
 
-The generated client workflow resolves the exact `v<modelgarden-version>` tag, compiles the selected Agent, renders a secret-free environment binding, materializes the pinned Hermes profile, and optionally deploys it through a client-labelled private self-hosted runner. Failed candidates retain/restore the last known-good Docker image where available.
+The keyless client workflow resolves the exact `v<modelgarden-version>` release, reconciles the isolated GCP Docker host through remote Terraform state, compiles/materializes the selected Agent and invokes the existing Docker deployment/health/rollback adapter through IAP/OS Login. No long-lived cloud deployment key is required after bootstrap.
+
+## Release safety
+
+`VERSION` is part of the client reproducibility contract. CI now prevents a pull request from reusing an already-published version and automatically publishes a validated, previously-unreleased `VERSION` when it lands on `main`. Existing release tags are never moved.
 
 ## Usage metering and billing
 
@@ -113,11 +142,13 @@ examples/workspace/        Reference Agents, Skills, Tools and Knowledge resourc
 platform/connectors/       Thin business-system adapters
 platform/channels/         Replaceable channel adapters
 platform/metering/         Thin external metering adapters; no billing engine
-scripts/                    Bootstrap, compile, govern, deploy and operator helpers
-tests/                      Contract/runtime/operator regression tests
+scripts/                    One-command bootstrap plus lower-level compile/govern/deploy helpers
+tests/                      Contract/runtime/operator/bootstrap regression tests
 docs/                       Repository-facing architecture and operating guidance
-infra/ + platform/k8s/      Earlier/optional multi-cloud baseline; not the default SMB MVP path
-VERSION                     Next Model Garden release version
+infra/bootstrap/gcp/        One-time keyless trust/state bootstrap
+infra/docker-host/gcp/      Default isolated GCP Docker-host desired state
+infra/aws|gcp|azure/        Earlier/optional multi-cloud references; not the default SMB path
+VERSION                     Next publishable Model Garden release version
 ```
 
 ## Development and validation
@@ -128,7 +159,7 @@ python3 -m unittest discover -s tests -v
 python3 scripts/validate-workspace.py examples/workspace
 ```
 
-CI also keeps the existing infrastructure references valid, checks pinned Hermes compatibility, and runs the Receptionist acceptance harness.
+CI validates infrastructure references, release/version safety, pinned Hermes compatibility and the Receptionist acceptance harness.
 
 ## Build-vs-use rule
 
