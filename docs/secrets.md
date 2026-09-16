@@ -81,7 +81,7 @@ Client-owned and Model Garden-owned cloud use the same contract. The temporary b
 
 ## Self-hosted-runner fallback
 
-The earlier Docker deployment path using a private client-labelled self-hosted GitHub runner remains a compatibility/exception option when cloud-native remote administration is unavailable or prohibited.
+The private client-labelled self-hosted GitHub runner path remains a supported compatibility/exception option when cloud-native remote administration is unavailable or prohibited.
 
 When that path is deliberately selected:
 
@@ -92,17 +92,13 @@ When that path is deliberately selected:
 
 Do not provision a self-hosted runner for the preferred managed GCP path merely because the fallback exists.
 
-## Legacy Kubernetes/multi-cloud references
+## Future deployment targets
 
-`infra/aws`, `infra/gcp`, `infra/azure`, `platform/k8s` and the legacy Kubernetes reference workflow are retained for historical/reference purposes. They are **not the standard SMB deployment path** and their older LiteLLM/Kubernetes secret model is not the canonical client onboarding contract.
-
-Do not configure `LITELLM_MASTER_KEY`, `K8S_NODE_COUNT`, `GATEWAY_REPLICAS` or EKS/GKE/AKS deployment credentials for a normal new Model Garden client.
-
-If a future real deployment justifies AWS, Azure, Kubernetes or a model gateway, implement or re-validate that target behind the same current invariants: pinned versions, client isolation, externalized runtime secrets and short-lived workload identity where supported.
+The active repository does not carry deprecated EKS/GKE/AKS, Kubernetes or LiteLLM gateway implementations. If future client evidence justifies AWS, Azure, Kubernetes or a model gateway, implement that target behind the same current invariants: pinned versions, client isolation, externalized runtime secrets, least privilege and short-lived workload identity where supported.
 
 ## Rules that always apply
 
-- Never commit API keys, OAuth tokens, service-account JSON, generated kubeconfigs or runtime secret maps.
+- Never commit API keys, OAuth tokens, service-account JSON or runtime secret maps.
 - DEV and PROD use separate environment-scoped credentials.
 - Store only the minimum credential required by the selected capability.
 - Prompts, Skills and Agent instructions cannot create or expand authority.
