@@ -45,6 +45,18 @@ def _load_json_object(path: pathlib.Path, label: str) -> dict[str, Any]:
     return value
 
 
+def _hermes_version() -> str | None:
+    path = ROOT / "platform" / "hermes.lock"
+    try:
+        for line in path.read_text(encoding="utf-8").splitlines():
+            if line.startswith("version="):
+                value = line.split("=", 1)[1].strip()
+                return value or None
+    except OSError:
+        return None
+    return None
+
+
 def _atomic_json(path: pathlib.Path, payload: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_suffix(path.suffix + ".tmp")
@@ -81,6 +93,29 @@ class GovernedToolRuntime:
     def _identity(self) -> str:
         identity = self.environ.get("MODEL_GARDEN_INITIATING_IDENTITY", "runtime:hermes").strip()
         return identity or "runtime:hermes"
+
+    def _governance_context(self) -> dict[str, Any]:
+        context: dict[str, Any] = {"runtime": "hermes"}
+        source = self.desired_state.get("source")
+        if isinstance(source, dict):
+            client = source.get("client")
+            if isinstance(client, str) and client:
+                context["tenantId"] = client
+        version = _hermes_version()
+        if version:
+            context["runtimeVersion"] = version
+        profile = self.desired_state.get("modelProfile")
+        if isinstance(profile, dict):
+            spec = profile.get("spec")
+            candidates = spec.get("candidates") if isinstance(spec, dict) else None
+            if isinstance(candidates, list) and candidates and isinstance(candidates[0], dict):
+                provider = candidates[0].get("provider")
+                model = candidates[0].get("model")
+                if isinstance(provider, str) and provider:
+                    context["modelProvider"] = provider
+                if isinstance(model, str) and model:
+                    context["model"] = model
+        return context
 
     def _calendar(self):
         token = self.environ.get("MODEL_GARDEN_GOOGLE_CALENDAR_TOKEN")
@@ -129,11 +164,13 @@ class GovernedToolRuntime:
             path.unlink()
 
     def _execute(self, tool_name: str, arguments: dict[str, Any], executor) -> dict[str, Any]:
+        governance_context = self._governance_context()
         request = GOVERN.build_action_request(
             self.desired_state,
             tool_name,
             arguments,
             initiating_user=self._identity(),
+            governance_context=governance_context,
         )
         approval, claim = self._take_approval(request["requestId"])
         try:
@@ -144,6 +181,7 @@ class GovernedToolRuntime:
                 executor,
                 approval=approval,
                 initiating_user=self._identity(),
+                governance_context=governance_context,
                 audit_path=self.audit_path,
             )
         except PermissionError:
