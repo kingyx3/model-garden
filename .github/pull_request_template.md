@@ -1,13 +1,14 @@
 ## What changed
 
-<!-- Keep platform changes and customer/example content changes explicit. -->
+<!-- Keep platform changes and client/example content changes explicit. -->
 
 ## Validation
 
-- [ ] Terraform formatting/validation passes for AWS, GCP and Azure
-- [ ] Contract examples validate
-- [ ] Kubernetes manifests render
-- [ ] Security/upgrade impact considered
+- [ ] Current GCP bootstrap/Docker-host Terraform formats and validates
+- [ ] Contract/reference workspace validation passes
+- [ ] Runtime, governance and operator tests pass
+- [ ] Pinned Hermes compatibility passes when runtime/materialization changes
+- [ ] Security, upgrade and live-provider acceptance impact considered
 
 ## Compatibility
 
