@@ -36,27 +36,36 @@ class MinimalLaunchTests(unittest.TestCase):
             self.assertEqual(repo, "kingyx3/acme-ai-workspace")
             self.assertEqual(project, "acme-project-12345")
 
-    def test_explicit_repo_and_project_do_not_require_github_lookup(self):
-        fake_cloud = types.SimpleNamespace(
-            load_service_account_key=lambda path: {
-                "project_id": "bootstrap-project-12345",
-                "private_key_id": "key",
-                "private_key": "secret",
-                "client_email": "bootstrap@example.invalid",
-            }
-        )
-        with mock.patch.object(launch, "_load_bootstrap_cloud", return_value=fake_cloud), mock.patch.object(
+    def test_explicit_repo_and_project_do_not_require_bootstrap_key_or_github_lookup(self):
+        with mock.patch.object(launch, "_load_bootstrap_cloud") as cloud, mock.patch.object(
             launch, "_github_login"
-        ) as github_login:
+        ) as github_login, mock.patch.object(launch, "_existing_gcp_project") as existing:
             repo, project = launch.resolve_defaults(
                 "acme",
-                pathlib.Path("bootstrap.json"),
+                None,
                 "client-org/custom-workspace",
                 "client-target-12345",
             )
+        cloud.assert_not_called()
         github_login.assert_not_called()
+        existing.assert_not_called()
         self.assertEqual(repo, "client-org/custom-workspace")
         self.assertEqual(project, "client-target-12345")
+
+    def test_rerun_without_deleted_bootstrap_key_reuses_recorded_gcp_project(self):
+        with mock.patch.object(launch, "_github_login", return_value="kingyx3"), mock.patch.object(
+            launch, "_existing_gcp_project", return_value="acme-project-12345"
+        ):
+            repo, project = launch.resolve_defaults("acme", None, None, None)
+        self.assertEqual(repo, "kingyx3/acme-ai-workspace")
+        self.assertEqual(project, "acme-project-12345")
+
+    def test_first_launch_without_key_project_or_existing_config_fails_closed(self):
+        with mock.patch.object(launch, "_github_login", return_value="kingyx3"), mock.patch.object(
+            launch, "_existing_gcp_project", return_value=None
+        ):
+            with self.assertRaisesRegex(ValueError, "bootstrap credential is required"):
+                launch.resolve_defaults("acme", None, None, None)
 
     def test_github_login_requires_authenticated_cli(self):
         result = subprocess.CompletedProcess(["gh"], 1, stdout="", stderr="not logged in")
