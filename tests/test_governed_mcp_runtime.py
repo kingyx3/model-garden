@@ -87,7 +87,7 @@ class GovernedMcpRuntimeTests(unittest.TestCase):
             self.assertIn('"outcome":"succeeded"', audit)
             self.assertNotIn("calendar-secret", audit)
 
-    def test_calendar_write_waits_for_exact_approval_then_executes(self):
+    def test_calendar_write_waits_for_exact_single_use_approval_then_executes(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = pathlib.Path(tmp)
             transport = FakeCalendarTransport()
@@ -103,6 +103,7 @@ class GovernedMcpRuntimeTests(unittest.TestCase):
             self.assertEqual(transport.calls, [])
             request_id = pending["request"]["requestId"]
             pending_path = root / "approvals" / "pending" / f"{request_id}.json"
+            decision_path = root / "approvals" / "decisions" / f"{request_id}.json"
             self.assertTrue(pending_path.is_file())
             self.assertEqual(
                 approval_module.pending(root / "approvals")[0]["arguments"],
@@ -121,6 +122,13 @@ class GovernedMcpRuntimeTests(unittest.TestCase):
             self.assertEqual(executed["result"]["eventId"], "evt-123")
             self.assertEqual(len(transport.calls), 1)
             self.assertFalse(pending_path.exists())
+            self.assertFalse(decision_path.exists())
+
+            repeated = runtime.calendar_book(**arguments)
+            self.assertEqual(repeated["status"], "pending-approval")
+            self.assertEqual(len(transport.calls), 1)
+            self.assertTrue(pending_path.is_file())
+
             audit = (root / "audit.jsonl").read_text(encoding="utf-8")
             self.assertIn('"outcome":"pending"', audit)
             self.assertIn('"outcome":"approved"', audit)
