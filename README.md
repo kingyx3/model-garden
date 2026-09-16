@@ -2,9 +2,9 @@
 
 Model Garden is an OSS-first platform and consulting delivery baseline for deploying governed AI employees for small and mid-sized businesses without requiring a client IT team.
 
-**Current release line:** `0.3.1`
+**Current development release:** `0.3.2`
 
-The platform repository is shared and versioned. Each client gets a separate private workspace repository containing only that client's business-specific desired state, knowledge references, evals, environment references, and platform lockfile.
+The platform repository is shared and versioned. Each client gets a separate private workspace repository containing only that client's business-specific desired state, knowledge references, evals, environment references and platform lockfile.
 
 ```text
 model-garden release
@@ -36,6 +36,7 @@ isolated client Docker host
 - **Bootstrap cloud trust once, then operate keylessly.** A temporary bootstrap credential establishes remote state and GitHub workload federation; normal deployments use short-lived GitHub OIDC credentials.
 - **One isolated Docker host per early client/environment.** Keep deployment boring until repeated operational evidence justifies fleet tooling.
 - **OSS before proprietary infrastructure.** Hermes provides the Agent runtime; external systems such as LiveKit and Lago remain replaceable integrations.
+- **Evidence before platform layers.** Kubernetes, broad multi-cloud parity, a control plane, Connector SDK or portal are not standard-path requirements until real deployments prove the need.
 
 ## Preferred client bootstrap — minimum inputs
 
@@ -68,7 +69,7 @@ The launch flow is resumable and composes the existing safety boundaries. It:
 3. creates/reuses protected `dev` and `prod` GitHub Environments;
 4. derives each environment's exact `secret://` references and prompts only for missing runtime credentials;
 5. runs the one-time GCP bootstrap using the local service-account JSON without copying it into GitHub or the workspace;
-6. provisions remote Terraform state, GitHub Workload Identity Federation, a keyless deploy identity, and a separate runtime identity;
+6. provisions remote Terraform state, GitHub Workload Identity Federation, a keyless deploy identity and a separate runtime identity;
 7. installs the keyless GCP deployment workflow;
 8. triggers an idempotent DEV infrastructure/runtime deployment and waits for GitHub Actions to verify it;
 9. records the bootstrap as verified;
@@ -111,7 +112,7 @@ python3 scripts/client-operator.py doctor ../acme-ai-workspace \
   --environment dev
 ```
 
-The older self-hosted-runner path remains supported by passing `--runner-label` to `client-operator.py configure`, but it is no longer the preferred managed GCP path.
+The older self-hosted-runner Docker path remains supported by passing `--runner-label` to `client-operator.py configure`, but it is no longer the preferred managed GCP path.
 
 ## Delivery path
 
@@ -130,11 +131,13 @@ normal operation
     -> promote to main: reconcile infrastructure + deploy PROD
 ```
 
-The keyless client workflow resolves the exact `v<modelgarden-version>` release, reconciles the isolated GCP Docker host through remote Terraform state, compiles/materializes the selected Agent and invokes the existing Docker deployment/health/rollback adapter through IAP/OS Login. No long-lived cloud deployment key is required after bootstrap.
+The keyless client workflow resolves the exact `v<modelgarden-version>` release, reconciles the isolated GCP Docker host through remote Terraform state, compiles/materializes the selected Agent and invokes the Docker deployment/health/rollback adapter through IAP/OS Login. No long-lived cloud deployment key is required after bootstrap.
 
 ## Release safety
 
 `VERSION` is part of the client reproducibility contract. CI prevents a pull request from reusing an already-published version and automatically publishes a validated, previously-unreleased `VERSION` when it lands on `main`. Existing release tags are never moved.
+
+The release gate validates the **current product path**: GCP bootstrap/Docker-host Terraform, contracts/compiler/runtime/operator tests, Receptionist acceptance evals and exact pinned Hermes compatibility. Legacy Kubernetes/multi-cloud reference prototypes are intentionally not release gates.
 
 ## Usage metering and billing
 
@@ -147,18 +150,21 @@ See [`docs/metering.md`](docs/metering.md).
 ## Repository layout
 
 ```text
-contracts/v1/              Stable business-facing resource contracts
-examples/workspace/        Reference Agents, Skills, Tools and Knowledge resources
-platform/connectors/       Thin business-system adapters
-platform/channels/         Replaceable channel adapters
-platform/metering/         Thin external metering adapters; no billing engine
-scripts/                    Minimal-input launch + lower-level compile/govern/deploy helpers
-tests/                      Contract/runtime/operator/bootstrap regression tests
-docs/                       Repository-facing architecture and operating guidance
-infra/bootstrap/gcp/        One-time keyless trust/state bootstrap
-infra/docker-host/gcp/      Default isolated GCP Docker-host desired state
-infra/aws|gcp|azure/        Earlier/optional multi-cloud references; not the default SMB path
-VERSION                     Next publishable Model Garden release version
+contracts/v1/                 Stable business-facing resource contracts
+examples/workspace/           Reference Agents, Skills, Tools and Knowledge resources
+platform/connectors/          Thin business-system adapters
+platform/channels/            Replaceable channel adapters
+platform/metering/            Thin external metering adapters; no billing engine
+scripts/                       Minimum-input launch + lower-level compile/govern/deploy helpers
+tests/                         Contract/runtime/operator/bootstrap regression tests
+docs/                          Repository-facing architecture and operating guidance
+infra/bootstrap/gcp/           Current one-time keyless trust/state bootstrap
+infra/docker-host/gcp/         Current isolated GCP Docker-host desired state
+infra/aws|gcp|azure/           Legacy Kubernetes/multi-cloud reference prototypes
+platform/k8s/                  Legacy portable Kubernetes reference manifests
+.github/workflows/legacy-kubernetes-reference.yml
+                               Manual reference validation only; not a release gate
+VERSION                        Next publishable Model Garden release version
 ```
 
 ## Development and validation
@@ -169,7 +175,7 @@ python3 -m unittest discover -s tests -v
 python3 scripts/validate-workspace.py examples/workspace
 ```
 
-CI validates infrastructure references, release/version safety, pinned Hermes compatibility and the Receptionist acceptance harness.
+CI validates the current infrastructure path, release/version safety, contracts/runtime/operator behavior, pinned Hermes compatibility and the Receptionist acceptance harness. The legacy Kubernetes/multi-cloud references can be checked manually with the separate legacy reference workflow when intentionally needed.
 
 ## Build-vs-use rule
 
