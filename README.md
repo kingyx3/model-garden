@@ -2,7 +2,7 @@
 
 Model Garden is an OSS-first platform and consulting delivery baseline for deploying governed AI employees for small and mid-sized businesses without requiring a client IT team.
 
-**Current development release:** `0.3.4`
+**Current development release:** `0.3.5`
 
 ## Architecture in one screen
 
@@ -45,7 +45,7 @@ Core rules:
 - build only the Model Garden differentiation layer; prefer client systems, open standards and mature OSS for commodity capabilities;
 - do not add Kubernetes, a control plane, Connector SDK, custom gateway or portal without evidence from live deployments.
 
-See [`docs/architecture.md`](docs/architecture.md) and [`docs/secrets.md`](docs/secrets.md) for repository-facing detail.
+See [`docs/architecture.md`](docs/architecture.md), [`docs/security.md`](docs/security.md) and [`docs/secrets.md`](docs/secrets.md) for repository-facing detail.
 
 ## Preferred client launch
 
@@ -96,25 +96,22 @@ contracts/v1/                 Versioned portable resource contracts
 examples/workspace/           Reference employees and resources
 platform/connectors/          Thin business-system adapters
 platform/channels/            Replaceable channel adapters
+platform/runtime/             Governed runtime/MCP boundary
 platform/metering/            Thin external metering adapters
 scripts/                       Launch, compile, govern and deploy helpers
 tests/                         Regression/acceptance coverage
 infra/bootstrap/gcp/           Current keyless trust/state bootstrap
 infra/docker-host/gcp/         Current isolated GCP Docker-host desired state
-infra/aws|gcp|azure/           Legacy Kubernetes/multi-cloud references
-platform/k8s/                  Legacy Kubernetes reference manifests
-.github/workflows/legacy-kubernetes-reference.yml
-                               Manual reference validation; not a release gate
+templates/client-workflows/    Current generated client deployment workflow
 ```
 
-The retained legacy Kubernetes/LiteLLM artifacts are historical/exception references. They are not the current client deployment architecture and do not block current releases.
+Historical Kubernetes/LiteLLM and EKS/GKE/AKS prototypes were removed from the active repository after the Docker/keyless architecture became canonical. Git history and older immutable releases preserve them if future evidence ever justifies revisiting those approaches.
 
 ## Development
 
 ```bash
 python3 -m pip install -r requirements-dev.txt
-python3 -m unittest discover -s tests -v
-python3 scripts/validate-workspace.py examples/workspace
+make validate
 ```
 
 Release CI gates the current GCP bootstrap/Docker-host Terraform, contracts/compiler/runtime/operator tests, Receptionist acceptance evals and exact pinned Hermes compatibility. Validated unreleased `VERSION` values publish automatically after landing on `main`; existing tags are never moved.

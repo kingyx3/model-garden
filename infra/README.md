@@ -1,20 +1,16 @@
 # Infrastructure
 
-Model Garden has two infrastructure generations in this repository.
+Model Garden intentionally keeps the supported infrastructure surface small.
 
-## Default early-client path
+## Current early-client path
 
-- `bootstrap/gcp` — one-time GCP bootstrap: remote Terraform state, GitHub Workload Identity Federation, keyless deployment identity and runtime VM identity.
+- `bootstrap/gcp` — one-time GCP bootstrap for remote Terraform state, GitHub Workload Identity Federation, keyless deployment identity and runtime VM identity.
 - `docker-host/gcp` — idempotent isolated Docker host reconciled on normal client deployments.
 
-This is the preferred production-shaped path for the first clients. It works identically in a Model Garden-owned or client-owned GCP project.
+This is the supported production-shaped path for early clients and works in either a Model Garden-owned or client-owned GCP project.
 
 See [`docs/cloud-bootstrap.md`](../docs/cloud-bootstrap.md).
 
-## Legacy / non-default Kubernetes paths
+## Adding another target
 
-- `aws` — EKS reference infrastructure.
-- `gcp` — GKE reference infrastructure.
-- `azure` — AKS reference infrastructure.
-
-These remain validation/reference assets but are **not** the default SMB deployment architecture. Do not choose Kubernetes merely because these modules already exist. The Docker-host path is intentionally smaller and should remain the default until workload evidence requires cluster orchestration.
+Do not copy the removed EKS/GKE/AKS or Kubernetes prototypes back into the repository. Add AWS, Azure, Kubernetes or another hosting target only when a real deployment requires it, and implement the smallest adapter that preserves the same client workspace, release pinning, isolation, secret and workload-identity contracts.

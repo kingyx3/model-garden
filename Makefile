@@ -1,4 +1,4 @@
-.PHONY: dev validate contracts compiler terraform kubernetes
+.PHONY: dev validate contracts tests terraform hermes
 
 dev:
 	python3 -m pip install -r requirements-dev.txt
@@ -6,18 +6,22 @@ dev:
 contracts:
 	python3 scripts/validate-workspace.py examples/workspace
 
-compiler:
+tests:
 	python3 -m unittest discover -s tests -v
+	python3 scripts/eval-receptionist.py examples/workspace
 	python3 scripts/compile-workspace.py examples/workspace --agent account-researcher --output /tmp/model-garden-account-researcher.json
 	python3 scripts/compile-workspace.py examples/workspace --agent receptionist --output /tmp/model-garden-receptionist.json
 
 terraform:
-	terraform -chdir=infra/aws fmt -check
-	terraform -chdir=infra/gcp fmt -check
-	terraform -chdir=infra/azure fmt -check
+	terraform -chdir=infra/bootstrap/gcp fmt -check
+	terraform -chdir=infra/bootstrap/gcp init -backend=false -input=false >/dev/null
+	terraform -chdir=infra/bootstrap/gcp validate
+	terraform -chdir=infra/docker-host/gcp fmt -check
+	terraform -chdir=infra/docker-host/gcp init -backend=false -input=false >/dev/null
+	terraform -chdir=infra/docker-host/gcp validate
 
-kubernetes:
-	kubectl kustomize platform/k8s >/dev/null
+hermes:
+	bash scripts/smoke-hermes-runtime.sh
 
-validate: contracts compiler terraform kubernetes
+validate: contracts tests terraform hermes
 	bash -n scripts/*.sh

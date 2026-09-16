@@ -48,11 +48,11 @@ Terraform -> isolated client Docker host
 - **Deployment**: isolated Docker host with pinned runtime, health verification and rollback.
 - **Metering**: thin attributable usage events to Lago; Model Garden does not implement billing.
 
-## Deliberately not the default architecture
+## Evidence-gated expansion
 
-The repository retains earlier Kubernetes/multi-cloud reference code under `infra/aws`, `infra/gcp`, `infra/azure` and `platform/k8s`. These are **legacy/reference prototypes**, not the standard SMB deployment path and not release-blocking current architecture.
+The repository intentionally contains only the deployment architecture that Model Garden currently supports. Earlier EKS/GKE/AKS, Kubernetes and LiteLLM gateway prototypes were removed once the keyless GCP + isolated Docker-host design became canonical.
 
-Do not introduce Kubernetes, a fleet control plane, a Connector SDK, a custom model gateway, a dedicated policy engine or a client portal until repeated live deployments justify the additional layer.
+If a real client later requires AWS, Azure, Kubernetes, a model gateway, a Connector SDK, a fleet control plane, a dedicated policy engine or a client portal, add the smallest compatible implementation behind the existing client-workspace/runtime contracts. Do not restore old prototypes merely because they once existed.
 
 ## Desired end state
 
