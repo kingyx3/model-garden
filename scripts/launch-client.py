@@ -178,8 +178,20 @@ def _repo_variables(repo: str, runner: Run) -> dict[str, str]:
 
 
 def _runtime_secret_present(repo: str, environment: str, runner: Run) -> bool:
-    result = runner(["gh", "secret", "list", "--env", environment, "--repo", repo])
-    return result.returncode == 0 and "MODEL_GARDEN_RUNTIME_SECRETS_JSON" in (result.stdout or "")
+    result = runner(["gh", "secret", "list", "--env", environment, "--repo", repo, "--json", "name"])
+    raw = _checked(result, f"read GitHub {environment} environment secrets")
+    try:
+        payload = json.loads(raw or "[]")
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"cannot parse GitHub {environment} environment secrets") from exc
+    if not isinstance(payload, list):
+        raise ValueError(f"GitHub {environment} environment secrets returned an unexpected response shape")
+    names: set[str] = set()
+    for item in payload:
+        if not isinstance(item, dict) or not isinstance(item.get("name"), str):
+            raise ValueError(f"GitHub {environment} environment secrets returned an invalid item")
+        names.add(item["name"])
+    return "MODEL_GARDEN_RUNTIME_SECRETS_JSON" in names
 
 
 def _cloud_ready(variables: dict[str, str]) -> bool:
