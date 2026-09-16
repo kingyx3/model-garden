@@ -20,6 +20,7 @@ import yaml
 
 SAFE_NAME = re.compile(r"^[A-Za-z0-9._-]+$")
 MANAGED_STATE = pathlib.Path(".modelgarden") / "desired-state.json"
+MANAGED_SKILL_ROOT = pathlib.Path("skills") / "model-garden"
 MCP_TOOL_NAMES = {
     "calendar.availability": "calendar_availability",
     "calendar.book": "calendar_book",
@@ -152,15 +153,53 @@ def build_profile_files(desired_state: dict[str, Any]) -> dict[pathlib.Path, str
         materialized = skill_instructions.get(name)
         if not isinstance(materialized, dict) or not isinstance(materialized.get("content"), str):
             raise ValueError(f"Hermes provisioning failed: Skill {name!r} has no materialized instructions")
-        files[pathlib.Path("skills") / "model-garden" / name / "SKILL.md"] = _skill_document(
+        files[MANAGED_SKILL_ROOT / name / "SKILL.md"] = _skill_document(
             skill, materialized["content"]
         )
 
     return files
 
 
+def _stale_managed_skill_files(
+    profile_dir: pathlib.Path,
+    files: dict[pathlib.Path, str],
+) -> list[pathlib.Path]:
+    managed_root = profile_dir / MANAGED_SKILL_ROOT
+    if not managed_root.exists():
+        return []
+    if managed_root.is_symlink():
+        raise ValueError("Hermes provisioning failed: managed Skill root may not be a symlink")
+    desired = {path for path in files if path.parts[:2] == MANAGED_SKILL_ROOT.parts}
+    stale: list[pathlib.Path] = []
+    for path in managed_root.rglob("*"):
+        if path.is_symlink():
+            raise ValueError(f"Hermes provisioning failed: managed Skill path may not be a symlink: {path}")
+        if path.is_file():
+            relative = path.relative_to(profile_dir)
+            if relative not in desired:
+                stale.append(relative)
+    return sorted(stale, key=lambda path: path.as_posix())
+
+
+def _remove_empty_managed_skill_dirs(profile_dir: pathlib.Path) -> None:
+    managed_root = profile_dir / MANAGED_SKILL_ROOT
+    if not managed_root.is_dir():
+        return
+    directories = [path for path in managed_root.rglob("*") if path.is_dir()]
+    for path in sorted(directories, key=lambda value: len(value.parts), reverse=True):
+        try:
+            path.rmdir()
+        except OSError:
+            pass
+    try:
+        managed_root.rmdir()
+    except OSError:
+        pass
+
+
 def apply_profile(profile_dir: pathlib.Path, files: dict[pathlib.Path, str], dry_run: bool = False) -> list[pathlib.Path]:
-    changed: list[pathlib.Path] = []
+    stale = _stale_managed_skill_files(profile_dir, files)
+    changed: list[pathlib.Path] = list(stale)
     for relative_path in sorted(files, key=lambda path: path.as_posix()):
         destination = profile_dir / relative_path
         current = destination.read_text() if destination.is_file() else None
@@ -170,7 +209,11 @@ def apply_profile(profile_dir: pathlib.Path, files: dict[pathlib.Path, str], dry
         if not dry_run:
             destination.parent.mkdir(parents=True, exist_ok=True)
             destination.write_text(files[relative_path])
-    return changed
+    if not dry_run:
+        for relative_path in stale:
+            (profile_dir / relative_path).unlink()
+        _remove_empty_managed_skill_dirs(profile_dir)
+    return sorted(set(changed), key=lambda path: path.as_posix())
 
 
 def load_desired_state(path: pathlib.Path) -> dict[str, Any]:
