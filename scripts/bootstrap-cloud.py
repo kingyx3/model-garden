@@ -243,6 +243,11 @@ def bootstrap_gcp(
     _require_command("terraform")
     _require_command("gh")
 
+    # Invalidate prior deployment proof before the first cloud mutation. If any later
+    # bootstrap step fails or the operator process crashes, launch remains fail-closed.
+    _set_github_variable(runner, github_repo, VERIFIED_VARIABLE, "false")
+    _set_github_variable(runner, github_repo, "MODEL_GARDEN_CLOUD_READY", "false")
+
     state_root = _state_root(project_id, github_repo, state_base)
     module_dir = state_root / "module"
     _sync_bootstrap_module(module_dir)
@@ -280,8 +285,6 @@ def bootstrap_gcp(
     outputs = _terraform_outputs(output_raw)
     variables = github_variables(outputs, zone=zone)
 
-    _set_github_variable(runner, github_repo, VERIFIED_VARIABLE, "false")
-    _set_github_variable(runner, github_repo, "MODEL_GARDEN_CLOUD_READY", "false")
     for name, value in sorted(variables.items()):
         _set_github_variable(runner, github_repo, name, value)
     install_cloud_workflow(runner, github_repo, workflow)
