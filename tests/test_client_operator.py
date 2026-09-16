@@ -154,6 +154,7 @@ class ClientOperatorTests(unittest.TestCase):
         self.assertFalse(ready)
         self.assertIn("missing", detail)
         self.assertIn("GCP_WORKLOAD_IDENTITY_PROVIDER", detail)
+        self.assertIn("MODEL_GARDEN_INFRA_OWNERSHIP", detail)
 
     def test_runtime_approval_hides_docker_paths_and_targets_governed_sidecar(self):
         request_id = "a" * 64
