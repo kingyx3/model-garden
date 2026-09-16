@@ -81,11 +81,12 @@ class GovernedMcpRuntimeTests(unittest.TestCase):
 
             self.assertEqual(result["status"], "executed")
             self.assertTrue(result["result"]["available"])
-            self.assertEqual(result["request"]["tenantId"], "acme")
-            self.assertEqual(result["request"]["runtime"], "hermes")
-            self.assertEqual(result["request"]["runtimeVersion"], "0.21.2")
-            self.assertEqual(result["request"]["modelProvider"], "openai")
-            self.assertEqual(result["request"]["model"], "approved-openai-model")
+            governance = result["request"]["governance"]
+            self.assertEqual(governance["tenantId"], "acme")
+            self.assertEqual(governance["runtime"], "hermes")
+            self.assertEqual(governance["runtimeVersion"], "0.21.2")
+            self.assertEqual(governance["modelProvider"], "openai")
+            self.assertEqual(governance["model"], "approved-openai-model")
             self.assertEqual(len(transport.calls), 1)
             self.assertEqual(transport.calls[0][2]["Authorization"], "Bearer calendar-secret")
             audit = (root / "audit.jsonl").read_text(encoding="utf-8")
