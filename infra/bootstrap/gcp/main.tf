@@ -15,12 +15,12 @@ provider "google" {
 }
 
 locals {
-  repository_hash        = substr(sha256(var.github_repository), 0, 8)
-  state_bucket           = "model-garden-${var.project_id}-${local.repository_hash}-tfstate"
-  deployer_id            = "mg-deploy-${local.repository_hash}"
-  runtime_id             = "mg-runtime-${local.repository_hash}"
-  pool_id                = "mg-github-${local.repository_hash}"
-  provider_id            = "github"
+  repository_hash         = substr(sha256(var.github_repository), 0, 8)
+  state_bucket            = "model-garden-${var.project_id}-${local.repository_hash}-tfstate"
+  deployer_id             = "mg-deploy-${local.repository_hash}"
+  runtime_id              = "mg-runtime-${local.repository_hash}"
+  pool_id                 = "mg-github-${local.repository_hash}"
+  provider_id             = "github"
   deployment_workflow_ref = "${var.github_repository}/.github/workflows/model-garden-cloud.yml@refs/heads/main"
 
   labels = {
