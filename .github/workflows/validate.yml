@@ -99,21 +99,6 @@ jobs:
           python3 scripts/provision-hermes-profile.py /tmp/receptionist.json /tmp/hermes-receptionist | grep -q 'already matches desired state'
       - name: Validate shell scripts
         run: bash -n scripts/*.sh
-      - name: Smoke-test model config renderer
-        env:
-          OPENAI_API_KEY: test-openai
-          OPENAI_MODEL_REF: openai/test-model
-          ANTHROPIC_API_KEY: test-anthropic
-          ANTHROPIC_MODEL_REF: anthropic/test-model
-          OPEN_WEIGHT_API_BASE: https://example.invalid/v1
-          OPEN_WEIGHT_MODEL_REF: openai/test-open-weight
-          OPEN_WEIGHT_API_KEY: test-open-weight
-        run: |
-          chmod +x scripts/render-model-config.sh
-          scripts/render-model-config.sh /tmp/config.yaml
-          grep -q 'general.openai' /tmp/config.yaml
-          grep -q 'general.anthropic' /tmp/config.yaml
-          grep -q 'general.open-weight' /tmp/config.yaml
 
   hermes-compatibility:
     runs-on: ubuntu-latest

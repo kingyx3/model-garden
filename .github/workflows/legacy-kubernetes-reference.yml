@@ -40,3 +40,17 @@ jobs:
       - uses: actions/checkout@v7
       - name: Render legacy Kubernetes reference manifests
         run: kubectl kustomize platform/k8s >/tmp/model-garden-legacy-k8s.yaml
+      - name: Render legacy LiteLLM gateway configuration
+        env:
+          OPENAI_API_KEY: test-openai
+          OPENAI_MODEL_REF: openai/test-model
+          ANTHROPIC_API_KEY: test-anthropic
+          ANTHROPIC_MODEL_REF: anthropic/test-model
+          OPEN_WEIGHT_API_BASE: https://example.invalid/v1
+          OPEN_WEIGHT_MODEL_REF: openai/test-open-weight
+          OPEN_WEIGHT_API_KEY: test-open-weight
+        run: |
+          scripts/render-model-config.sh /tmp/litellm-config.yaml
+          grep -q 'general.openai' /tmp/litellm-config.yaml
+          grep -q 'general.anthropic' /tmp/litellm-config.yaml
+          grep -q 'general.open-weight' /tmp/litellm-config.yaml
