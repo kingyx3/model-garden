@@ -7,18 +7,20 @@ Model Garden exposes supported business Tools to Hermes through standard MCP whi
 ```text
 Hermes / model
   model credential only
+  hermes-data only
        |
        | MCP (internal Docker network)
        v
 governed-tools sidecar
   selected connector credential only
+  governance-data only
        |
        +-> Model Garden allow / approval / deny
        +-> JSONL audit
        +-> approved connector
 ```
 
-The sidecar is not a control plane and is not exposed on a host port. It is part of the same isolated client Docker deployment and consumes the same compiled single-Agent desired state.
+The sidecar is not a control plane and is not exposed on a host port. It is part of the same isolated client Docker deployment and consumes the same compiled single-Agent desired state. Persistent approval and audit state is mounted only into the governed Tool sidecar; Hermes does not mount that governance volume and therefore cannot create approval evidence by writing directly to the file-backed operator store.
 
 Hermes only receives MCP Tool names corresponding to Tools explicitly selected by that Agent. Provisioning fails closed if a selected Tool has no implemented governed runtime binding.
 
@@ -55,7 +57,7 @@ The aggregate secret map exists only in the deployment process. Docker Compose i
 
 ## Exact-action approval
 
-An approval-required Tool call returns `pending-approval` and persists the exact request material under the client's existing runtime volume. The request ID binds Agent, Tool, exact arguments and initiating identity.
+An approval-required Tool call returns `pending-approval` and persists the exact request material on the sidecar-only `governance-data` volume. The request ID binds Agent, Tool, exact arguments and initiating identity.
 
 List pending requests from the Docker host:
 
@@ -80,10 +82,10 @@ python3 scripts/client-operator.py reject <request-id> \
   --approver operator@example.com
 ```
 
-Changing the Tool arguments creates a different request ID, so an approval cannot authorize a materially different action.
+Changing the Tool arguments creates a different request ID, so an approval cannot authorize a materially different action. Approval decisions are also single-use: once an approved or rejected decision is applied, it is consumed. A later identical material action must pause for a fresh human decision rather than replaying an earlier approval.
 
 This file-backed approval mechanism is intentionally an MVP operator surface. Do not build an approval portal or workflow engine until repeated client evidence justifies one.
 
 ## Current evidence boundary
 
-Credential-free tests cover Tool selection, MCP materialization, governance, approval identity, audit behavior, Calendar connector behavior and Docker credential isolation. A real Google Calendar credential-backed end-to-end booking remains a live acceptance gate and must not be claimed complete until exercised in a deployed client environment.
+Credential-free tests cover Tool selection, MCP materialization, governance, approval identity, single-use approval behavior, governance-volume isolation, audit behavior, Calendar connector behavior and Docker credential isolation. A real Google Calendar credential-backed end-to-end booking remains a live acceptance gate and must not be claimed complete until exercised in a deployed client environment.

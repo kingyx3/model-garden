@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 """Launch a managed Model Garden client with the minimum operator inputs.
 
-Normal usage needs only a client slug and one temporary local GCP service-account JSON.
+A first launch needs a client slug and one temporary local GCP service-account JSON.
 The target GCP project defaults to the JSON's project_id and the private workspace repo
-defaults to <authenticated GitHub user>/<client>-ai-workspace. Advanced callers can
-override either value without changing the underlying launch-client contract.
+defaults to <authenticated GitHub user>/<client>-ai-workspace. After keyless bootstrap is
+verified, reruns can omit the deleted bootstrap credential and reuse the recorded GCP
+project. Advanced callers can override either value without changing the underlying
+launch-client contract.
 """
 from __future__ import annotations
 
@@ -43,25 +45,52 @@ def _github_login() -> str:
     return result.stdout.strip()
 
 
+def _existing_gcp_project(repo: str) -> str | None:
+    if shutil.which("gh") is None:
+        return None
+    result = subprocess.run(
+        ["gh", "variable", "get", "GCP_PROJECT_ID", "--repo", repo],
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+    if result.returncode != 0:
+        return None
+    value = result.stdout.strip()
+    return value or None
+
+
 def resolve_defaults(
     client_slug: str,
-    credential_file: pathlib.Path,
+    credential_file: pathlib.Path | None,
     github_repo: str | None,
     gcp_project: str | None,
 ) -> tuple[str, str]:
-    cloud = _load_bootstrap_cloud()
-    key = cloud.load_service_account_key(credential_file)
-    project = gcp_project or key["project_id"]
     repo = github_repo or f"{_github_login()}/{client_slug}-ai-workspace"
-    return repo, project
+    if gcp_project:
+        return repo, gcp_project
+
+    if credential_file is not None and credential_file.is_file():
+        cloud = _load_bootstrap_cloud()
+        key = cloud.load_service_account_key(credential_file)
+        return repo, key["project_id"]
+
+    existing = _existing_gcp_project(repo)
+    if existing:
+        return repo, existing
+    raise ValueError(
+        "bootstrap credential is required for the first launch unless --gcp-project is supplied; "
+        "after keyless bootstrap the recorded GCP project can be reused without the deleted key"
+    )
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("client_slug")
-    parser.add_argument("--bootstrap-credential", required=True, type=pathlib.Path, help="temporary local GCP service-account JSON key")
+    parser.add_argument("--bootstrap-credential", type=pathlib.Path, help="temporary local GCP service-account JSON key; required for first bootstrap only")
     parser.add_argument("--github-repo", help="override private workspace repo; default: <authenticated-user>/<client>-ai-workspace")
-    parser.add_argument("--gcp-project", help="override target project; default: project_id from bootstrap JSON")
+    parser.add_argument("--gcp-project", help="override target project; otherwise bootstrap JSON or existing repository configuration is used")
     parser.add_argument("--workspace", type=pathlib.Path)
     parser.add_argument("--agent", default="receptionist")
     parser.add_argument("--role-title")
@@ -94,8 +123,6 @@ def main() -> int:
         repo,
         "--gcp-project",
         project,
-        "--bootstrap-credential",
-        str(args.bootstrap_credential),
         "--agent",
         args.agent,
         "--region",
@@ -105,6 +132,8 @@ def main() -> int:
         "--ownership",
         args.ownership,
     ]
+    if args.bootstrap_credential is not None:
+        command.extend(["--bootstrap-credential", str(args.bootstrap_credential)])
     if args.workspace is not None:
         command.extend(["--workspace", str(args.workspace)])
     if args.role_title:

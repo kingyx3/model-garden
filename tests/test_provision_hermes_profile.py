@@ -99,6 +99,49 @@ class ProvisionHermesProfileTests(unittest.TestCase):
             persisted = json.loads((profile_dir / ".modelgarden/desired-state.json").read_text())
             self.assertEqual(persisted["source"]["name"], "receptionist")
 
+    def test_apply_removes_only_stale_model_garden_managed_skills(self) -> None:
+        desired_state = self.receptionist_desired_state()
+        files = adapter.build_profile_files(desired_state)
+        with tempfile.TemporaryDirectory() as tmp:
+            profile_dir = pathlib.Path(tmp) / "receptionist"
+            adapter.apply_profile(profile_dir, files)
+            stale = profile_dir / "skills/model-garden/take-message/SKILL.md"
+            client_skill = profile_dir / "skills/client-owned/local/SKILL.md"
+            client_skill.parent.mkdir(parents=True, exist_ok=True)
+            client_skill.write_text("client-owned\n", encoding="utf-8")
+            self.assertTrue(stale.is_file())
+
+            reduced = copy.deepcopy(desired_state)
+            reduced["skills"] = [
+                skill for skill in reduced["skills"]
+                if skill.get("metadata", {}).get("name") != "take-message"
+            ]
+            reduced["skillInstructions"].pop("take-message", None)
+            changed = adapter.apply_profile(profile_dir, adapter.build_profile_files(reduced))
+
+            self.assertIn(pathlib.Path("skills/model-garden/take-message/SKILL.md"), changed)
+            self.assertFalse(stale.exists())
+            self.assertTrue(client_skill.is_file())
+
+    def test_dry_run_reports_stale_managed_skill_without_deleting_it(self) -> None:
+        desired_state = self.receptionist_desired_state()
+        files = adapter.build_profile_files(desired_state)
+        with tempfile.TemporaryDirectory() as tmp:
+            profile_dir = pathlib.Path(tmp) / "receptionist"
+            adapter.apply_profile(profile_dir, files)
+            stale = profile_dir / "skills/model-garden/take-message/SKILL.md"
+
+            reduced = copy.deepcopy(desired_state)
+            reduced["skills"] = [
+                skill for skill in reduced["skills"]
+                if skill.get("metadata", {}).get("name") != "take-message"
+            ]
+            reduced["skillInstructions"].pop("take-message", None)
+            changed = adapter.apply_profile(profile_dir, adapter.build_profile_files(reduced), dry_run=True)
+
+            self.assertIn(pathlib.Path("skills/model-garden/take-message/SKILL.md"), changed)
+            self.assertTrue(stale.is_file())
+
     def test_dry_run_does_not_write(self) -> None:
         files = adapter.build_profile_files(self.receptionist_desired_state())
         with tempfile.TemporaryDirectory() as tmp:

@@ -5,7 +5,8 @@ The Docker target keeps the MVP production shape deliberately small:
 - Hermes/model execution runs in one container with only the selected model credential;
 - supported enterprise Tools run in a separate governed MCP sidecar with only their
   connector credentials;
-- both consume the same compiled desired state and persistent audit/approval volume;
+- both consume the same compiled desired state; persistent audit/approval state is
+  mounted only into the governed sidecar so the Agent runtime cannot manufacture authority;
 - raw credentials never enter the generated profile, binding, bundle, or Git repository.
 
 GitHub Actions remains the engineering control plane. The target host is only the
@@ -266,6 +267,7 @@ def _compose(
         "healthcheck": _healthcheck(9119),
     }
     services: dict[str, Any] = {"hermes": hermes}
+    volumes: dict[str, Any] = {"hermes-data": {}}
     if calendar is not None:
         _, calendar_id = calendar
         services["governed-tools"] = {
@@ -281,11 +283,12 @@ def _compose(
                 "MODEL_GARDEN_GOOGLE_CALENDAR_TOKEN": "${MODEL_GARDEN_GOOGLE_CALENDAR_TOKEN:?MODEL_GARDEN_GOOGLE_CALENDAR_TOKEN is required}",
                 "MODEL_GARDEN_GOOGLE_CALENDAR_ID": calendar_id,
             },
-            "volumes": ["hermes-data:/opt/data"],
+            "volumes": ["governance-data:/opt/data"],
             "healthcheck": _healthcheck(9120),
         }
+        volumes["governance-data"] = {}
         hermes["depends_on"] = {"governed-tools": {"condition": "service_healthy"}}
-    document = {"services": services, "volumes": {"hermes-data": {}}}
+    document = {"services": services, "volumes": volumes}
     return yaml.safe_dump(document, sort_keys=False)
 
 
@@ -387,6 +390,19 @@ def _run(command: list[str], *, env: dict[str, str], check: bool = True) -> subp
     return subprocess.run(command, env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=check)
 
 
+def _image_exists(image: str, env: dict[str, str]) -> bool:
+    result = _run(["docker", "image", "inspect", image], env=env, check=False)
+    if result.returncode == 0:
+        return True
+    detail = (result.stderr or result.stdout or "").strip()
+    if "No such image" in detail or "No such object" in detail:
+        return False
+    raise ValueError(
+        "Docker target failed: cannot inspect current runtime image before deployment: "
+        + (detail or "docker image inspect failed")
+    )
+
+
 def _wait_healthy(project_name: str, bundle_dir: pathlib.Path, env: dict[str, str], timeout: int) -> bool:
     deadline = time.monotonic() + timeout
     compose_file = bundle_dir / "compose.yaml"
@@ -451,7 +467,7 @@ def apply_bundle(
     rollback = f"model-garden-{project_name}:rollback"
 
     _run(["docker", "compose", "version"], env=runtime_env)
-    had_previous = _run(["docker", "image", "inspect", image], env=runtime_env, check=False).returncode == 0
+    had_previous = _image_exists(image, runtime_env)
     if had_previous:
         _run(["docker", "tag", image, rollback], env=runtime_env)
 

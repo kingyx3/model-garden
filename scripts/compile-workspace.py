@@ -42,6 +42,21 @@ def load_validators() -> dict[str, Draft202012Validator]:
     return validators
 
 
+def _workspace_client(workspace: pathlib.Path) -> str | None:
+    path = workspace / "modelgarden.yaml"
+    if not path.is_file():
+        return None
+    try:
+        document = yaml.safe_load(path.read_text(encoding="utf-8"))
+    except yaml.YAMLError as exc:
+        raise ValueError(f"Workspace compilation failed: cannot parse {path}") from exc
+    config = document.get("workspace") if isinstance(document, dict) else None
+    client = config.get("client") if isinstance(config, dict) else None
+    if not isinstance(client, str) or not client.strip():
+        raise ValueError("Workspace compilation failed: modelgarden.yaml workspace.client must be a non-empty string")
+    return client.strip()
+
+
 def load_workspace(workspace: pathlib.Path, library_roots: tuple[pathlib.Path, ...] = ()):
     validators = load_validators()
     resources: dict[str, dict[str, dict[str, Any]]] = {kind: {} for kind in SCHEMAS}
@@ -157,9 +172,18 @@ def resolve_agent(workspace, agent, resources, source_paths, source_roots):
         raise ValueError("Workspace compilation failed:\n - " + "\n - ".join(errors))
     agent_path = source_paths[("Agent", name)]
     assert agent_instructions is not None
+    source: dict[str, Any] = {
+        "apiVersion": agent["apiVersion"],
+        "kind": agent["kind"],
+        "name": name,
+        "path": str(agent_path.relative_to(workspace)),
+    }
+    client = _workspace_client(workspace)
+    if client is not None:
+        source["client"] = client
     return {
         "schemaVersion": 1,
-        "source": {"apiVersion": agent["apiVersion"], "kind": agent["kind"], "name": name, "path": str(agent_path.relative_to(workspace))},
+        "source": source,
         "agent": agent,
         "instructions": agent_instructions,
         "modelProfile": model_profile,

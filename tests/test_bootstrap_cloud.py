@@ -118,6 +118,7 @@ class BootstrapCloudTests(unittest.TestCase):
             self.assertNotIn(str(credential), command_text)
 
             variable_calls = [command for command, _ in calls if command[:3] == ["gh", "variable", "set"]]
+            self.assertTrue(any(bootstrap.VERIFIED_VARIABLE in command and "false" in command for command in variable_calls))
             self.assertTrue(any("MODEL_GARDEN_CLOUD_READY" in command and "false" in command for command in variable_calls))
             self.assertTrue(any("MODEL_GARDEN_CLOUD_READY" in command and "true" in command for command in variable_calls))
             self.assertTrue(any("GCP_WORKLOAD_IDENTITY_PROVIDER" in command for command in variable_calls))

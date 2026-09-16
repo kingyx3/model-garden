@@ -2,7 +2,7 @@
 
 Model Garden is an OSS-first platform and consulting delivery baseline for deploying governed AI employees for small and mid-sized businesses without requiring a client IT team.
 
-**Current development release:** `0.3.3`
+**Current development release:** `0.3.4`
 
 ## Architecture in one screen
 
@@ -58,7 +58,7 @@ python3 scripts/launch.py acme \
 
 In the normal managed GCP path Model Garden derives the target project from the JSON and the private repo as `<authenticated-github-user>/acme-ai-workspace`. Use explicit `--github-repo`, `--gcp-project` and `--ownership` overrides only when the target differs.
 
-The resumable launch flow creates/reuses the workspace and private repo, protected DEV/PROD environments, required runtime secret maps, remote Terraform state, Workload Identity Federation, deploy/runtime identities and the keyless deployment workflow; triggers and verifies DEV; and revokes/deletes the temporary bootstrap key where local tooling permits.
+The resumable launch flow creates/reuses the workspace and private repo, protected DEV/PROD environments, required runtime secret maps, remote Terraform state, Workload Identity Federation, deploy/runtime identities and the keyless deployment workflow; triggers and verifies DEV; and revokes/deletes the temporary bootstrap key where local tooling permits. Resume checks fail closed if the local workspace belongs to a different client/repository or if an existing keyless cloud target differs from the requested project/region/ownership.
 
 Runtime credentials such as model, Calendar and telephony credentials remain separate capability-scoped secrets and are requested only when the selected environment needs them.
 
@@ -79,7 +79,7 @@ Client upgrades normally change only `platform.lock.yaml` to a newer published M
 
 ## Governance
 
-Enterprise actions are not granted by prompts. Selected Tools are exposed through the governed MCP boundary and evaluated as `allow | approval | deny`; approval-required actions bind to the exact material request and produce audit evidence.
+Enterprise actions are not granted by prompts. Selected Tools are exposed through the governed MCP boundary and evaluated as `allow | approval | deny`; approval-required actions bind to the exact material request, consume each human decision once, and produce audit evidence.
 
 ## OSS boundaries
 

@@ -12,11 +12,13 @@ MVP supported Tools:
 from __future__ import annotations
 
 import argparse
+import importlib.metadata
 import importlib.util
 import json
 import os
 import pathlib
 import re
+import uuid
 from typing import Any, Mapping
 
 from mcp.server.mcpserver import MCPServer
@@ -43,6 +45,25 @@ def _load_json_object(path: pathlib.Path, label: str) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise ValueError(f"{label} must be a JSON object")
     return value
+
+
+def _hermes_version() -> str | None:
+    try:
+        installed = importlib.metadata.version("hermes-agent").strip()
+        if installed:
+            return installed
+    except importlib.metadata.PackageNotFoundError:
+        pass
+
+    path = ROOT / "platform" / "hermes.lock"
+    try:
+        for line in path.read_text(encoding="utf-8").splitlines():
+            if line.startswith("version="):
+                value = line.split("=", 1)[1].strip()
+                return value or None
+    except OSError:
+        return None
+    return None
 
 
 def _atomic_json(path: pathlib.Path, payload: dict[str, Any]) -> None:
@@ -82,6 +103,29 @@ class GovernedToolRuntime:
         identity = self.environ.get("MODEL_GARDEN_INITIATING_IDENTITY", "runtime:hermes").strip()
         return identity or "runtime:hermes"
 
+    def _governance_context(self) -> dict[str, Any]:
+        context: dict[str, Any] = {"runtime": "hermes"}
+        source = self.desired_state.get("source")
+        if isinstance(source, dict):
+            client = source.get("client")
+            if isinstance(client, str) and client:
+                context["tenantId"] = client
+        version = _hermes_version()
+        if version:
+            context["runtimeVersion"] = version
+        profile = self.desired_state.get("modelProfile")
+        if isinstance(profile, dict):
+            spec = profile.get("spec")
+            candidates = spec.get("candidates") if isinstance(spec, dict) else None
+            if isinstance(candidates, list) and candidates and isinstance(candidates[0], dict):
+                provider = candidates[0].get("provider")
+                model = candidates[0].get("model")
+                if isinstance(provider, str) and provider:
+                    context["modelProvider"] = provider
+                if isinstance(model, str) and model:
+                    context["model"] = model
+        return context
+
     def _calendar(self):
         token = self.environ.get("MODEL_GARDEN_GOOGLE_CALENDAR_TOKEN")
         if not token:
@@ -93,14 +137,31 @@ class GovernedToolRuntime:
             transport=self.calendar_transport,
         )
 
-    def _approval(self, request_id: str) -> dict[str, Any] | None:
+    def _take_approval(self, request_id: str) -> tuple[dict[str, Any] | None, pathlib.Path | None]:
+        """Atomically claim one decision without letting a crashed claim block fresh approval."""
         path = _request_path(self.approval_root, "decisions", request_id)
         if not path.is_file():
-            return None
-        decision = _load_json_object(path, "approval decision")
-        if decision.get("requestId") != request_id:
-            raise ValueError("approval decision requestId does not match its filename")
-        return decision
+            return None, None
+        claimed_dir = self.approval_root / "claimed"
+        claimed_dir.mkdir(parents=True, exist_ok=True)
+        claimed = claimed_dir / f"{request_id}.{uuid.uuid4().hex}.json"
+        try:
+            path.replace(claimed)
+        except FileNotFoundError:
+            return None, None
+        try:
+            decision = _load_json_object(claimed, "approval decision")
+            if decision.get("requestId") != request_id:
+                raise ValueError("approval decision requestId does not match its filename")
+            return decision, claimed
+        except Exception:
+            claimed.unlink(missing_ok=True)
+            raise
+
+    @staticmethod
+    def _discard_claim(path: pathlib.Path | None) -> None:
+        if path is not None:
+            path.unlink(missing_ok=True)
 
     def _pending(self, request: dict[str, Any]) -> None:
         _atomic_json(_request_path(self.approval_root, "pending", request["requestId"]), request)
@@ -111,13 +172,17 @@ class GovernedToolRuntime:
             path.unlink()
 
     def _execute(self, tool_name: str, arguments: dict[str, Any], executor) -> dict[str, Any]:
+        governance_context = self._governance_context()
         request = GOVERN.build_action_request(
             self.desired_state,
             tool_name,
             arguments,
             initiating_user=self._identity(),
+            governance_context=governance_context,
         )
-        approval = self._approval(request["requestId"])
+        approval, claim = self._take_approval(request["requestId"])
+        if approval is not None:
+            self._clear_pending(request["requestId"])
         try:
             result = GOVERN.execute_action(
                 self.desired_state,
@@ -126,12 +191,11 @@ class GovernedToolRuntime:
                 executor,
                 approval=approval,
                 initiating_user=self._identity(),
+                governance_context=governance_context,
                 audit_path=self.audit_path,
             )
-        except PermissionError:
-            if approval is not None:
-                self._clear_pending(request["requestId"])
-            raise
+        finally:
+            self._discard_claim(claim)
         if result.get("status") == "pending-approval":
             self._pending(result["request"])
         else:

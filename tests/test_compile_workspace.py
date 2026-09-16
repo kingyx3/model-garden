@@ -31,6 +31,20 @@ class CompileWorkspaceTests(unittest.TestCase):
         self.assertIn("account brief", compiled["instructions"]["content"])
         self.assertIn("account-summary", compiled["skillInstructions"])
 
+    def test_client_workspace_identity_is_carried_into_desired_state(self) -> None:
+        source = ROOT / "examples" / "workspace"
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = pathlib.Path(tmp) / "workspace"
+            shutil.copytree(source, workspace)
+            (workspace / "modelgarden.yaml").write_text(
+                "workspace:\n  client: acme\n  agents:\n    - receptionist\n",
+                encoding="utf-8",
+            )
+
+            compiled = compiler.compile_workspace(workspace, "receptionist")[0]
+
+            self.assertEqual(compiled["source"]["client"], "acme")
+
     def test_receptionist_materializes_skill_instructions(self) -> None:
         workspace = ROOT / "examples" / "workspace"
         compiled = compiler.compile_workspace(workspace, "receptionist")[0]
