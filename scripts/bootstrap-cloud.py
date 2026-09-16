@@ -33,6 +33,7 @@ ZONE = re.compile(r"^[a-z]+-[a-z]+[0-9]+-[a-z]$")
 SLUG = re.compile(r"^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$")
 CLOUD_WORKFLOW_PATH = ".github/workflows/model-garden-cloud.yml"
 CLOUD_WORKFLOW_COMMIT = "Install Model Garden keyless GCP deployment workflow"
+VERIFIED_VARIABLE = "MODEL_GARDEN_BOOTSTRAP_VERIFIED"
 
 Run = Callable[..., subprocess.CompletedProcess[str]]
 
@@ -279,6 +280,7 @@ def bootstrap_gcp(
     outputs = _terraform_outputs(output_raw)
     variables = github_variables(outputs, zone=zone)
 
+    _set_github_variable(runner, github_repo, VERIFIED_VARIABLE, "false")
     _set_github_variable(runner, github_repo, "MODEL_GARDEN_CLOUD_READY", "false")
     for name, value in sorted(variables.items()):
         _set_github_variable(runner, github_repo, name, value)
