@@ -5,7 +5,8 @@ The Docker target keeps the MVP production shape deliberately small:
 - Hermes/model execution runs in one container with only the selected model credential;
 - supported enterprise Tools run in a separate governed MCP sidecar with only their
   connector credentials;
-- both consume the same compiled desired state and persistent audit/approval volume;
+- both consume the same compiled desired state; persistent audit/approval state is
+  mounted only into the governed sidecar so the Agent runtime cannot manufacture authority;
 - raw credentials never enter the generated profile, binding, bundle, or Git repository.
 
 GitHub Actions remains the engineering control plane. The target host is only the
@@ -266,6 +267,7 @@ def _compose(
         "healthcheck": _healthcheck(9119),
     }
     services: dict[str, Any] = {"hermes": hermes}
+    volumes: dict[str, Any] = {"hermes-data": {}}
     if calendar is not None:
         _, calendar_id = calendar
         services["governed-tools"] = {
@@ -281,11 +283,12 @@ def _compose(
                 "MODEL_GARDEN_GOOGLE_CALENDAR_TOKEN": "${MODEL_GARDEN_GOOGLE_CALENDAR_TOKEN:?MODEL_GARDEN_GOOGLE_CALENDAR_TOKEN is required}",
                 "MODEL_GARDEN_GOOGLE_CALENDAR_ID": calendar_id,
             },
-            "volumes": ["hermes-data:/opt/data"],
+            "volumes": ["governance-data:/opt/data"],
             "healthcheck": _healthcheck(9120),
         }
+        volumes["governance-data"] = {}
         hermes["depends_on"] = {"governed-tools": {"condition": "service_healthy"}}
-    document = {"services": services, "volumes": {"hermes-data": {}}}
+    document = {"services": services, "volumes": volumes}
     return yaml.safe_dump(document, sort_keys=False)
 
 
