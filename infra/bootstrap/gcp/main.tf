@@ -15,12 +15,13 @@ provider "google" {
 }
 
 locals {
-  repository_hash = substr(sha256(var.github_repository), 0, 8)
-  state_bucket    = "model-garden-${var.project_id}-${local.repository_hash}-tfstate"
-  deployer_id     = "mg-deploy-${local.repository_hash}"
-  runtime_id      = "mg-runtime-${local.repository_hash}"
-  pool_id         = "mg-github-${local.repository_hash}"
-  provider_id     = "github"
+  repository_hash        = substr(sha256(var.github_repository), 0, 8)
+  state_bucket           = "model-garden-${var.project_id}-${local.repository_hash}-tfstate"
+  deployer_id            = "mg-deploy-${local.repository_hash}"
+  runtime_id             = "mg-runtime-${local.repository_hash}"
+  pool_id                = "mg-github-${local.repository_hash}"
+  provider_id            = "github"
+  deployment_workflow_ref = "${var.github_repository}/.github/workflows/model-garden-cloud.yml@refs/heads/main"
 
   labels = {
     project     = "model-garden"
@@ -87,14 +88,14 @@ resource "google_iam_workload_identity_pool_provider" "github" {
   workload_identity_pool_id          = google_iam_workload_identity_pool.github.workload_identity_pool_id
   workload_identity_pool_provider_id = local.provider_id
   display_name                       = "GitHub Actions"
-  description                        = "Trust only ${var.github_repository} GitHub Actions OIDC tokens."
+  description                        = "Trust only the Model Garden cloud deployment workflow in ${var.github_repository}."
 
   attribute_mapping = {
     "google.subject"       = "assertion.sub"
     "attribute.repository" = "assertion.repository"
     "attribute.ref"        = "assertion.ref"
   }
-  attribute_condition = "assertion.repository == '${var.github_repository}'"
+  attribute_condition = "assertion.repository == '${var.github_repository}' && assertion.workflow_ref == '${local.deployment_workflow_ref}' && assertion.event_name == 'workflow_run'"
 
   oidc {
     issuer_uri = "https://token.actions.githubusercontent.com"
