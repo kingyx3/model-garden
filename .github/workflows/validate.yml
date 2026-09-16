@@ -10,6 +10,42 @@ permissions:
   contents: read
 
 jobs:
+  version-contract:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: Verify VERSION is safe to publish or matches this tag
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="$(tr -d '[:space:]' < VERSION)"
+          if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "VERSION must be MAJOR.MINOR.PATCH" >&2
+            exit 1
+          fi
+          tag="v${version}"
+          remote="$(git ls-remote --tags origin "refs/tags/${tag}" | awk '{print $1}')"
+          if [[ -z "$remote" ]]; then
+            echo "${tag} is not published yet; this revision may publish it after validation."
+            exit 0
+          fi
+          if [[ "$GITHUB_EVENT_NAME" == "pull_request" ]]; then
+            echo "${tag} is already published. Bump VERSION before merging another change so client lockfiles never point at stale code." >&2
+            exit 1
+          fi
+          if [[ "$GITHUB_REF" == "refs/tags/${tag}" && "$remote" == "$GITHUB_SHA" ]]; then
+            echo "Tag ${tag} matches this revision."
+            exit 0
+          fi
+          if [[ "$GITHUB_REF" == "refs/heads/main" && "$remote" == "$GITHUB_SHA" ]]; then
+            echo "Main already matches published ${tag}."
+            exit 0
+          fi
+          echo "${tag} already points to ${remote}, not ${GITHUB_SHA}. Bump VERSION before changing main." >&2
+          exit 1
+
   terraform:
     runs-on: ubuntu-latest
     strategy:
@@ -94,9 +130,44 @@ jobs:
       - name: Smoke-test pinned Hermes runtime against Receptionist profile
         run: bash scripts/smoke-hermes-runtime.sh
 
+  publish-main-release:
+    if: github.ref == 'refs/heads/main'
+    needs: [version-contract, terraform, contracts-and-runtime, hermes-compatibility]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: Publish validated VERSION from main
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          version="$(tr -d '[:space:]' < VERSION)"
+          tag="v${version}"
+          remote="$(git ls-remote --tags origin "refs/tags/${tag}" | awk '{print $1}')"
+          if [[ -n "$remote" && "$remote" != "$GITHUB_SHA" ]]; then
+            echo "${tag} already points to ${remote}; refusing to move an existing release tag." >&2
+            exit 1
+          fi
+          if [[ -z "$remote" ]]; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git tag "$tag" "$GITHUB_SHA"
+            git push origin "refs/tags/${tag}"
+          fi
+          if gh release view "$tag" >/dev/null 2>&1; then
+            echo "Release ${tag} already exists."
+          else
+            gh release create "$tag" --verify-tag --generate-notes --title "Model Garden ${tag}"
+          fi
+
   release:
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [terraform, contracts-and-runtime, hermes-compatibility]
+    needs: [version-contract, terraform, contracts-and-runtime, hermes-compatibility]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -107,4 +178,9 @@ jobs:
       - name: Publish immutable GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "$GITHUB_REF_NAME" --verify-tag --generate-notes --title "Model Garden $GITHUB_REF_NAME"
+        run: |
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            echo "Release $GITHUB_REF_NAME already exists."
+          else
+            gh release create "$GITHUB_REF_NAME" --verify-tag --generate-notes --title "Model Garden $GITHUB_REF_NAME"
+          fi
