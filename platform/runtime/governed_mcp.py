@@ -93,14 +93,32 @@ class GovernedToolRuntime:
             transport=self.calendar_transport,
         )
 
-    def _approval(self, request_id: str) -> dict[str, Any] | None:
+    def _take_approval(self, request_id: str) -> tuple[dict[str, Any] | None, pathlib.Path | None]:
+        """Atomically claim one approval decision so it cannot authorize a later replay."""
         path = _request_path(self.approval_root, "decisions", request_id)
         if not path.is_file():
-            return None
-        decision = _load_json_object(path, "approval decision")
-        if decision.get("requestId") != request_id:
-            raise ValueError("approval decision requestId does not match its filename")
-        return decision
+            return None, None
+        claimed = _request_path(self.approval_root, "claimed", request_id)
+        claimed.parent.mkdir(parents=True, exist_ok=True)
+        if claimed.exists():
+            raise RuntimeError("approval decision is already being consumed")
+        try:
+            path.replace(claimed)
+        except FileNotFoundError:
+            return None, None
+        try:
+            decision = _load_json_object(claimed, "approval decision")
+            if decision.get("requestId") != request_id:
+                raise ValueError("approval decision requestId does not match its filename")
+            return decision, claimed
+        except Exception:
+            claimed.unlink(missing_ok=True)
+            raise
+
+    @staticmethod
+    def _discard_claim(path: pathlib.Path | None) -> None:
+        if path is not None:
+            path.unlink(missing_ok=True)
 
     def _pending(self, request: dict[str, Any]) -> None:
         _atomic_json(_request_path(self.approval_root, "pending", request["requestId"]), request)
@@ -117,7 +135,7 @@ class GovernedToolRuntime:
             arguments,
             initiating_user=self._identity(),
         )
-        approval = self._approval(request["requestId"])
+        approval, claim = self._take_approval(request["requestId"])
         try:
             result = GOVERN.execute_action(
                 self.desired_state,
@@ -132,6 +150,8 @@ class GovernedToolRuntime:
             if approval is not None:
                 self._clear_pending(request["requestId"])
             raise
+        finally:
+            self._discard_claim(claim)
         if result.get("status") == "pending-approval":
             self._pending(result["request"])
         else:
