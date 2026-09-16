@@ -18,10 +18,11 @@ spec.loader.exec_module(launch)
 
 
 class LaunchClientTests(unittest.TestCase):
-    def test_cloud_ready_requires_complete_keyless_contract(self):
-        values = {
+    def ready_variables(self, *, verified: str = "false", ownership: str = "model-garden") -> dict[str, str]:
+        return {
             "MODEL_GARDEN_CLOUD_PROVIDER": "gcp",
             "MODEL_GARDEN_CLOUD_READY": "true",
+            "MODEL_GARDEN_INFRA_OWNERSHIP": ownership,
             "MODEL_GARDEN_TF_STATE_BUCKET": "bucket",
             "GCP_PROJECT_ID": "acme-project-12345",
             "GCP_REGION": "asia-southeast1",
@@ -29,10 +30,67 @@ class LaunchClientTests(unittest.TestCase):
             "GCP_WORKLOAD_IDENTITY_PROVIDER": "provider",
             "GCP_DEPLOY_SERVICE_ACCOUNT": "deploy@example.invalid",
             "GCP_RUNTIME_SERVICE_ACCOUNT": "runtime@example.invalid",
+            launch.VERIFIED_VARIABLE: verified,
         }
+
+    def test_cloud_ready_requires_complete_keyless_contract(self):
+        values = self.ready_variables()
         self.assertTrue(launch._cloud_ready(values))
         values.pop("GCP_RUNTIME_SERVICE_ACCOUNT")
         self.assertFalse(launch._cloud_ready(values))
+
+        values = self.ready_variables()
+        values.pop("MODEL_GARDEN_INFRA_OWNERSHIP")
+        self.assertFalse(launch._cloud_ready(values))
+
+    def test_cloud_mismatch_is_reported_instead_of_silently_reusing_other_target(self):
+        values = self.ready_variables(ownership="client")
+        values["GCP_PROJECT_ID"] = "other-project-12345"
+        mismatches = launch._cloud_mismatches(
+            values,
+            project_id="acme-project-12345",
+            region="asia-southeast1",
+            zone="asia-southeast1-b",
+            ownership="client",
+        )
+        self.assertEqual(len(mismatches), 1)
+        self.assertIn("GCP_PROJECT_ID", mismatches[0])
+        self.assertIn("other-project-12345", mismatches[0])
+
+    def test_existing_workspace_must_match_client_and_requested_origin(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = pathlib.Path(tmp)
+            (workspace / "modelgarden.yaml").write_text("workspace:\n  client: acme\n", encoding="utf-8")
+            (workspace / "platform.lock.yaml").write_text("modelgarden: 0.3.3\n", encoding="utf-8")
+
+            def origin_runner(command, *, cwd=None, **kwargs):
+                self.assertEqual(cwd, workspace)
+                return subprocess.CompletedProcess(command, 0, stdout="git@github.com:kingyx3/acme-ai-workspace.git\n", stderr="")
+
+            launch._validate_workspace_identity(workspace, "acme", "kingyx3/acme-ai-workspace", origin_runner)
+            with self.assertRaisesRegex(ValueError, "cross-client launch"):
+                launch._validate_workspace_identity(workspace, "other", "kingyx3/acme-ai-workspace", origin_runner)
+            with self.assertRaisesRegex(ValueError, "cross-repository launch"):
+                launch._validate_workspace_identity(workspace, "acme", "kingyx3/other-ai-workspace", origin_runner)
+
+    def test_public_client_repo_is_rejected_before_configuration(self):
+        runner = mock.Mock(
+            return_value=subprocess.CompletedProcess(
+                [],
+                0,
+                stdout=json.dumps({"nameWithOwner": "kingyx3/acme-ai-workspace", "isPrivate": False}),
+                stderr="",
+            )
+        )
+        with self.assertRaisesRegex(ValueError, "must be private"):
+            launch._require_private_repo("kingyx3/acme-ai-workspace", runner)
+
+    def test_repository_variable_and_run_reads_fail_closed(self):
+        failed = mock.Mock(return_value=subprocess.CompletedProcess([], 1, stdout="", stderr="auth failed"))
+        with self.assertRaisesRegex(ValueError, "repository variables"):
+            launch._repo_variables("kingyx3/acme-ai-workspace", failed)
+        with self.assertRaisesRegex(ValueError, "deployment runs"):
+            launch._run_ids("kingyx3/acme-ai-workspace", failed)
 
     def test_runtime_secret_setup_skips_existing_environments_on_resume(self):
         calls = []
@@ -105,10 +163,10 @@ class LaunchClientTests(unittest.TestCase):
 
             with mock.patch.object(launch, "_require_command"), mock.patch.object(
                 launch, "_load_script", return_value=fake_cloud
-            ), mock.patch.object(launch, "_ensure_release_exists", return_value="0.3.0"), mock.patch.object(
+            ), mock.patch.object(launch, "_ensure_release_exists", return_value="0.3.3"), mock.patch.object(
                 launch, "_ensure_workspace_and_repo"
             ) as ensure_workspace, mock.patch.object(launch, "_ensure_runtime_secrets") as ensure_secrets, mock.patch.object(
-                launch, "_repo_variables", side_effect=[{}, {}]
+                launch, "_repo_variables", side_effect=[{}, self.ready_variables()]
             ), mock.patch.object(launch, "_run_cloud_bootstrap") as cloud_bootstrap, mock.patch.object(
                 launch, "_run_ids", return_value={10}
             ), mock.patch.object(launch, "_activate_dev") as activate, mock.patch.object(
@@ -134,6 +192,33 @@ class LaunchClientTests(unittest.TestCase):
             revoke.assert_called_once()
             self.assertEqual([call[-1] for call in doctors], ["dev", "prod"])
             self.assertTrue(all(call[0] == "doctor" for call in doctors))
+
+    def test_ready_cloud_configuration_with_different_project_fails_before_bootstrap(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            credential = pathlib.Path(tmp) / "bootstrap.json"
+            credential.write_text("{}", encoding="utf-8")
+            workspace = pathlib.Path(tmp) / "workspace"
+            variables = self.ready_variables()
+            variables["GCP_PROJECT_ID"] = "other-project-12345"
+            fake_cloud = types.SimpleNamespace(load_service_account_key=lambda path: {"type": "service_account"})
+
+            with mock.patch.object(launch, "_require_command"), mock.patch.object(
+                launch, "_load_script", return_value=fake_cloud
+            ), mock.patch.object(launch, "_ensure_release_exists", return_value="0.3.3"), mock.patch.object(
+                launch, "_ensure_workspace_and_repo"
+            ), mock.patch.object(launch, "_ensure_runtime_secrets"), mock.patch.object(
+                launch, "_repo_variables", return_value=variables
+            ), mock.patch.object(launch, "_run_cloud_bootstrap") as cloud_bootstrap:
+                with self.assertRaisesRegex(ValueError, "deliberate migration"):
+                    launch.launch(
+                        client_slug="acme",
+                        github_repo="kingyx3/acme-ai-workspace",
+                        project_id="acme-project-12345",
+                        credential_file=credential,
+                        workspace=workspace,
+                        runner=mock.Mock(),
+                    )
+            cloud_bootstrap.assert_not_called()
 
     def test_release_preflight_rejects_unpublished_version(self):
         runner = mock.Mock(return_value=subprocess.CompletedProcess([], 1, stdout="", stderr="not found"))
