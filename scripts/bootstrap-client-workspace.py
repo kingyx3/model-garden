@@ -76,7 +76,7 @@ jobs:
         run: |
           set -euo pipefail
           version="$(awk '$1 == \"modelgarden:\" { print $2; exit }' platform.lock.yaml)"
-          if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+          if [[ ! "$version" =~ ^[0-9]+[.][0-9]+[.][0-9]+$ ]]; then
             echo "platform.lock.yaml must pin modelgarden as MAJOR.MINOR.PATCH" >&2
             exit 1
           fi
@@ -106,7 +106,7 @@ jobs:
         run: |
           set -euo pipefail
           version="$(awk '$1 == \"modelgarden:\" { print $2; exit }' platform.lock.yaml)"
-          if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+          if [[ ! "$version" =~ ^[0-9]+[.][0-9]+[.][0-9]+$ ]]; then
             echo "platform.lock.yaml must pin modelgarden as MAJOR.MINOR.PATCH" >&2
             exit 1
           fi
@@ -159,7 +159,7 @@ jobs:
           set -euo pipefail
           rm -rf "$RUNNER_TEMP/model-garden" "$RUNNER_TEMP/model-garden-target" "$RUNNER_TEMP/model-garden-deploy-venv"
           version="$(awk '$1 == \"modelgarden:\" { print $2; exit }' platform.lock.yaml)"
-          if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+          if [[ ! "$version" =~ ^[0-9]+[.][0-9]+[.][0-9]+$ ]]; then
             echo "platform.lock.yaml must pin modelgarden as MAJOR.MINOR.PATCH" >&2
             exit 1
           fi
