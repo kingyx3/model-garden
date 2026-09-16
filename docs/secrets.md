@@ -1,116 +1,110 @@
-# GitHub Actions secrets and variables
+# Secrets and credentials
 
-The deploy workflow can auto-detect target clouds from complete credential sets, or you can explicitly select `aws`, `gcp`, `azure` or `all`. Configure production values in a protected GitHub **Environment** wherever possible.
+Model Garden separates **one-time cloud bootstrap authority** from **runtime/integration credentials**. Neither belongs in client business-authored Agent, Skill or Knowledge content.
 
-## Shared model-garden secrets
+## Preferred managed GCP path
 
-Required:
+The normal bootstrap command is:
 
-| Secret | Purpose |
-|---|---|
-| `LITELLM_MASTER_KEY` | Bearer token required by the gateway |
+```bash
+python3 scripts/launch.py acme \
+  --bootstrap-credential ~/Downloads/acme-bootstrap.json
+```
 
-Configure at least one model provider:
+The service-account JSON is a **temporary local bootstrap credential**. It is used only to establish:
 
-| Secret | Example shape | Purpose |
-|---|---|---|
-| `OPENAI_API_KEY` | `sk-...` | OpenAI credential |
-| `OPENAI_MODEL_REF` | `openai/<model-id>` | LiteLLM model reference |
-| `ANTHROPIC_API_KEY` | `sk-ant-...` | Anthropic credential |
-| `ANTHROPIC_MODEL_REF` | `anthropic/<model-id>` | LiteLLM model reference |
-| `OPEN_WEIGHT_API_BASE` | `https://.../v1` | OpenAI-compatible endpoint such as vLLM |
-| `OPEN_WEIGHT_MODEL_REF` | `openai/<served-model-name>` | Model reference used against that endpoint |
-| `OPEN_WEIGHT_API_KEY` | provider-specific | Optional endpoint credential |
+- remote Terraform state;
+- GitHub Workload Identity Federation restricted to the exact client repository;
+- a least-privilege deployment identity;
+- a separate runtime identity; and
+- the non-secret repository variables required by the generated keyless deployment workflow.
 
-The renderer publishes aliases only for fully configured providers. Provider credentials are never passed through Terraform.
+The JSON must never be:
 
-## AWS
+- committed to Git;
+- copied into the client workspace;
+- stored as a long-lived GitHub secret;
+- embedded in workflow source;
+- passed as a Terraform variable; or
+- intentionally persisted in Terraform state.
 
-Required to activate AWS:
+After the first keyless GitHub OIDC DEV deployment succeeds, the launch flow records verification. When local `gcloud` is available it revokes the exact bootstrap key and deletes the local JSON by default. Otherwise it prints one explicit revocation command and leaves the file in place until revocation succeeds.
 
-- `AWS_ROLE_ARN`
-- `AWS_REGION`
+Normal DEV/PROD deployment must continue without that bootstrap credential.
 
-Use GitHub OIDC. The role must trust the intended repository/environment and be able to create the VPC/EKS resources plus the remote-state S3 bucket. Avoid static AWS access keys.
+## Runtime and integration credentials
 
-## GCP
+Application credentials remain separate from cloud bootstrap identity. Examples include:
 
-Required to activate GCP:
+- model-provider API credentials;
+- Google Calendar or Microsoft authorization;
+- LiveKit/telephony credentials;
+- CRM, email or other selected connector credentials.
 
-- `GCP_WORKLOAD_IDENTITY_PROVIDER`
-- `GCP_SERVICE_ACCOUNT`
-- `GCP_PROJECT_ID`
-- `GCP_REGION`
+Client environment files contain only logical references, for example:
 
-Use Workload Identity Federation. The service account needs permissions for GKE, Compute networking, Service Usage and the Terraform-state GCS bucket.
+```yaml
+environment: dev
+runtime:
+  profile: receptionist
+  model_credential_ref: secret://model/dev
+calendar:
+  connector: google-calendar
+  credential_ref: secret://google/dev-calendar
+```
 
-## Azure
-
-Required to activate Azure:
-
-- `AZURE_CLIENT_ID`
-- `AZURE_TENANT_ID`
-- `AZURE_SUBSCRIPTION_ID`
-- `AZURE_LOCATION`
-
-Use a federated credential for the repository/environment. The deployment identity needs the least privilege required to create the resource group, VNet, AKS cluster and state storage account.
-
-The current bootstrap workflow uses AKS admin kubeconfig after cluster creation. Production environments should move to Entra/Kubernetes RBAC and disable local AKS accounts once the deployment runner has the required cluster-user permissions.
-
-## Deployment variables
-
-These are GitHub repository/environment **variables**:
-
-| Variable | Default | Purpose |
-|---|---|---|
-| `CLIENT_SLUG` | `client` | DNS/resource-safe client identifier |
-| `K8S_NODE_COUNT` | `2` | Cluster worker count |
-| `GATEWAY_REPLICAS` | `2` | Gateway replica count |
-| `GATEWAY_SERVICE_TYPE` | `ClusterIP` | `ClusterIP` or `LoadBalancer`; keep private for production |
-| `LITELLM_IMAGE` | `ghcr.io/berriai/litellm:v1.99.1` | Gateway image pinned by the deployment |
-
-The workflow input chooses `dev`, `test`, `staging` or `prod` and passes that value to Terraform.
-
-## Client workspace Docker target (MVP)
-
-A bootstrapped client workspace can optionally deploy its locked Hermes profile to one isolated Docker host without introducing a separate control plane. The target is a **private self-hosted GitHub Actions runner** with Docker Engine and the Docker Compose plugin. Pull requests never run on this target; only protected `dev`/`main` push jobs can deploy.
-
-Configure this repository/environment variable:
-
-| Variable | Purpose |
-|---|---|
-| `MODEL_GARDEN_DOCKER_RUNNER` | Client-specific self-hosted runner label. When absent, the deploy job is skipped and the workflow remains artifact-only. |
-
-Configure this secret separately in the client repository's `dev` and `prod` GitHub Environments:
+The actual values are stored in the protected GitHub `dev` and `prod` Environments as the aggregate secret:
 
 | Secret | Purpose |
 |---|---|
-| `MODEL_GARDEN_RUNTIME_SECRETS_JSON` | JSON object whose keys exactly match the `secret://` references in the selected environment file. Missing or extra keys fail closed. |
+| `MODEL_GARDEN_RUNTIME_SECRETS_JSON` | JSON object whose keys exactly match the `secret://` references required by that environment. Missing or extra keys fail closed. |
 
-For the generated bootstrap, the minimum environment values are logically equivalent to:
+A minimal DEV value is logically equivalent to:
 
 ```json
 {"secret://model/dev":"<dev model credential>"}
 ```
 
-and:
+Do not put the value in `environments/*.yaml`.
 
-```json
-{"secret://model/prod":"<prod model credential>"}
-```
+The deployment process resolves the aggregate map, removes it before Docker execution and injects only the credentials required by the selected runtime processes/capabilities. The Hermes/model process must not receive connector credentials it does not need; governed Tool sidecars receive only their connector-specific credentials.
 
-Do not put those values in `environments/*.yaml`. Those files contain only references such as `model_credential_ref: secret://model/dev`.
+## GitHub/cloud identity after bootstrap
 
-The Docker target adapter consumes the aggregate JSON only inside the deployment process, removes it before calling Docker, and injects only the credential selected by the generated Hermes model profile. The runtime image is built from the exact Hermes revision pinned by Model Garden and a digest-pinned Python base image. A deployment must become healthy before success is reported; when a previous runtime exists, a failed candidate attempts to restore the immediately preceding image while retaining the client's persistent Hermes volume.
+The generated keyless client workflow uses non-secret repository variables for identifiers such as the GCP project, region, Workload Identity Provider, deployment service account and Terraform state location. GitHub exchanges its OIDC identity for short-lived cloud credentials at deployment time.
 
-This MVP path is intentionally small. Google Calendar, LiveKit, or other credentials may be added to the same environment-scoped reference map only when the corresponding target binding consumes them; unreferenced keys are rejected rather than silently granting broader access.
+Do not create a permanent cloud JSON key merely to make routine deployment easier.
 
-## Production notes
+## Client-owned cloud
 
-- Restrict Kubernetes API endpoints or use private/self-hosted deployment runners.
-- Put the `ClusterIP` gateway behind enterprise ingress/API management, TLS, SSO and rate limiting.
-- Replace directly created Kubernetes secrets with the customer's cloud secret manager and CSI/External Secrets integration.
-- Pin approved model references per environment and rotate provider credentials independently of Terraform state.
-- Keep client Docker runners private, client-scoped and unavailable to pull-request jobs; use a dedicated runner/host per client where practical for the first production deployments.
+Client-owned and Model Garden-owned cloud use the same contract. The temporary bootstrap credential points at the target project/account, then federation takes over. Ownership changes who controls the cloud account and break-glass administration; it does not change the client workspace or runtime model.
 
-Never commit provider API keys, cloud credentials, generated kubeconfigs, rendered LiteLLM configuration, or `MODEL_GARDEN_RUNTIME_SECRETS_JSON` values.
+## Self-hosted-runner fallback
+
+The earlier Docker deployment path using a private client-labelled self-hosted GitHub runner remains a compatibility/exception option when cloud-native remote administration is unavailable or prohibited.
+
+When that path is deliberately selected:
+
+| Variable / secret | Purpose |
+|---|---|
+| `MODEL_GARDEN_DOCKER_RUNNER` | Client-specific private self-hosted runner label. |
+| `MODEL_GARDEN_RUNTIME_SECRETS_JSON` | The same environment-scoped runtime secret map described above. |
+
+Do not provision a self-hosted runner for the preferred managed GCP path merely because the fallback exists.
+
+## Legacy Kubernetes/multi-cloud references
+
+`infra/aws`, `infra/gcp`, `infra/azure`, `platform/k8s` and the legacy Kubernetes reference workflow are retained for historical/reference purposes. They are **not the standard SMB deployment path** and their older LiteLLM/Kubernetes secret model is not the canonical client onboarding contract.
+
+Do not configure `LITELLM_MASTER_KEY`, `K8S_NODE_COUNT`, `GATEWAY_REPLICAS` or EKS/GKE/AKS deployment credentials for a normal new Model Garden client.
+
+If a future real deployment justifies AWS, Azure, Kubernetes or a model gateway, implement or re-validate that target behind the same current invariants: pinned versions, client isolation, externalized runtime secrets and short-lived workload identity where supported.
+
+## Rules that always apply
+
+- Never commit API keys, OAuth tokens, service-account JSON, generated kubeconfigs or runtime secret maps.
+- DEV and PROD use separate environment-scoped credentials.
+- Store only the minimum credential required by the selected capability.
+- Prompts, Skills and Agent instructions cannot create or expand authority.
+- Record integration account ownership and revocation paths.
+- Rotate provider/runtime credentials independently of Terraform state and client business definitions.
