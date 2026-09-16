@@ -1,42 +1,59 @@
 # Architecture
 
-Model Garden separates the **platform plane** from **business-owned AI definitions**.
+Model Garden separates **portable client business desired state** from the **replaceable Agent runtime** and from **cloud infrastructure desired state**.
 
 ```text
-Business-owned definitions
-agents / skills / model profiles / tools / knowledge / policies
-                         |
-                         v
-                 modelgarden.ai/v1
-                         |
-                         v
-Platform runtime ---- Model gateway ---- OpenAI / Anthropic / open-weight
-       |
-       +---- policy / identity / audit / evaluation extension points
-       |
-       +---- EKS / GKE / AKS
+private client workspace
+Agent + selected Skills/Tools + Knowledge refs + evals
+                     |
+                     v
+             modelgarden.ai/v1
+                     |
+             validate / compile
+                     |
+                     v
+          Hermes runtime profile
+                     |
+             governed MCP Tools
+                     |
+          business-system adapters
+
+cloud bootstrap (once)
+  -> remote Terraform state
+  -> GitHub OIDC / workload federation
+  -> deploy + runtime identities
+                     |
+                     v
+Terraform -> isolated client Docker host
 ```
 
-## Current v1 components
+## Current deployment contract
 
-- Terraform deployment targets for AWS, GCP and Azure.
-- Portable Kubernetes runtime for the model gateway.
-- Stable logical model aliases rendered from deployment configuration.
-- Versioned resource contracts under `contracts/v1`.
-- Reference workspace under `examples/workspace`.
-- GitHub Actions validation and OIDC-first deployment.
+- One shared, versioned Model Garden platform repository.
+- One separate private workspace repository per client.
+- GitHub is the engineering control plane: PRs validate, `dev` deploys DEV, `main` deploys PROD.
+- A temporary local cloud bootstrap credential may establish trust and remote state; normal deployment must use short-lived federation afterwards.
+- Terraform owns cloud infrastructure convergence.
+- The Model Garden compiler, Hermes adapter and Docker deployer own application/runtime convergence.
+- Raw secrets never belong in client business definitions or Terraform state.
+- GCP is the first complete reference cloud path: Workload Identity Federation + isolated Compute Engine Docker host + IAP/OS Login.
 
-## Deliberate extension points
+## Current platform boundaries
 
-The current repo does not yet pretend to be the full control plane. Add these behind stable contracts rather than embedding them into agent definitions:
+- **Hermes**: reasoning loop, sessions, model execution and runtime Skill discovery.
+- **Model Garden workspace/compiler**: portable business-facing Agent/Skill/Tool/Knowledge/eval contracts and deterministic resolution.
+- **Governed MCP Tool path**: explicit selected Tools, scoped credentials, `allow | approval | deny`, exact-action approval and audit.
+- **Channel adapters**: replaceable phone/web/other channel boundaries. LiveKit is the reference voice adapter.
+- **Direct connectors**: narrow external-system capabilities required by proven workflows. Google Calendar is the current reference.
+- **Deployment**: isolated Docker host with pinned runtime, health verification and rollback.
+- **Metering**: thin attributable usage events to Lago; Model Garden does not implement billing.
 
-1. persistent model/agent registry;
-2. policy engine;
-3. tool/MCP gateway;
-4. SSO and per-team credentials;
-5. OpenTelemetry and audit export;
-6. evaluation service;
-7. managed PostgreSQL and budget/usage metadata;
-8. Agent Studio / self-service UI.
+## Deliberately not the default architecture
 
-This keeps business content portable while the infrastructure can evolve independently.
+The repository retains earlier Kubernetes/multi-cloud reference code under `infra/aws`, `infra/gcp`, `infra/azure` and `platform/k8s`. These are **legacy/reference prototypes**, not the standard SMB deployment path and not release-blocking current architecture.
+
+Do not introduce Kubernetes, a fleet control plane, a Connector SDK, a custom model gateway, a dedicated policy engine or a client portal until repeated live deployments justify the additional layer.
+
+## Desired end state
+
+Clients can change business-facing employee behaviour without runtime/cloud knowledge; Model Garden can upgrade runtimes/models/connectors without rewriting client definitions; hosting can move between Model Garden-owned and client-owned cloud without changing the business contract; and every material external action remains attributable, policy-controlled and regression-tested.
