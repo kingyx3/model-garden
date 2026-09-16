@@ -492,7 +492,7 @@ def launch(
     client_slug: str,
     github_repo: str,
     project_id: str,
-    credential_file: pathlib.Path,
+    credential_file: pathlib.Path | None,
     workspace: pathlib.Path,
     agent_slug: str = "receptionist",
     role_title: str | None = None,
@@ -504,10 +504,8 @@ def launch(
     no_wait: bool = False,
     runner: Run = _run,
 ) -> int:
-    for command in ("git", "gh", "terraform"):
+    for command in ("git", "gh"):
         _require_command(command)
-    cloud = _load_script("bootstrap_cloud_preflight", "bootstrap-cloud.py")
-    cloud.load_service_account_key(credential_file)
     version = _ensure_release_exists(runner)
     print(f"Using published Model Garden v{version}.")
 
@@ -542,6 +540,11 @@ def launch(
             )
         print("Reusing existing keyless GCP/OIDC bootstrap.")
     else:
+        if credential_file is None:
+            raise ValueError("bootstrap credential is required until keyless GCP/OIDC bootstrap is complete")
+        _require_command("terraform")
+        cloud = _load_script("bootstrap_cloud_preflight", "bootstrap-cloud.py")
+        cloud.load_service_account_key(credential_file)
         _run_cloud_bootstrap(
             project_id=project_id,
             repo=github_repo,
@@ -580,7 +583,7 @@ def launch(
     else:
         print("Reusing previously verified keyless DEV deployment.")
 
-    if credential_file.exists():
+    if credential_file is not None and credential_file.exists():
         _revoke_bootstrap_key(
             credential_file,
             runner=runner,
@@ -602,7 +605,7 @@ def main() -> int:
     parser.add_argument("client_slug")
     parser.add_argument("--github-repo", required=True, help="private client workspace repository owner/name")
     parser.add_argument("--gcp-project", required=True, help="GCP project used for the isolated client runtime")
-    parser.add_argument("--bootstrap-credential", required=True, type=pathlib.Path, help="temporary local GCP service-account JSON key")
+    parser.add_argument("--bootstrap-credential", type=pathlib.Path, help="temporary local GCP service-account JSON key; required only until keyless bootstrap completes")
     parser.add_argument("--workspace", type=pathlib.Path, help="local workspace path; defaults to <client>-ai-workspace")
     parser.add_argument("--agent", default="receptionist")
     parser.add_argument("--role-title")
