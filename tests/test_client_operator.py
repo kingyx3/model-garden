@@ -39,11 +39,11 @@ class ClientOperatorTests(unittest.TestCase):
                 encoding="utf-8",
             )
             with mock.patch.object(operator, "_run") as run, mock.patch.object(operator.getpass, "getpass") as getpass:
-                operator.configure(workspace, "kingyx3/acme-ai-workspace", "dev", "acme-docker", dry_run=True)
+                operator.configure(workspace, "kingyx3/acme-ai-workspace", "dev", None, dry_run=True)
             run.assert_not_called()
             getpass.assert_not_called()
 
-    def test_configure_writes_exact_secret_map_to_github_environment_via_stdin(self):
+    def test_configure_writes_exact_secret_map_without_requiring_runner(self):
         with tempfile.TemporaryDirectory() as tmp:
             workspace = pathlib.Path(tmp) / "workspace"
             (workspace / "environments").mkdir(parents=True)
@@ -62,24 +62,45 @@ class ClientOperatorTests(unittest.TestCase):
                 "getpass",
                 side_effect=["google-secret", "model-secret"],
             ):
-                operator.configure(workspace, "kingyx3/acme-ai-workspace", "prod", "acme-prod-docker")
+                operator.configure(workspace, "kingyx3/acme-ai-workspace", "prod")
 
             secret_calls = [(command, stdin) for command, stdin in calls if command[:3] == ["gh", "secret", "set"]]
             self.assertEqual(len(secret_calls), 1)
             command, stdin = secret_calls[0]
             self.assertNotIn("google-secret", " ".join(command))
             self.assertNotIn("model-secret", " ".join(command))
-            payload = json.loads(stdin)
             self.assertEqual(
-                payload,
+                json.loads(stdin),
                 {
                     "secret://google/prod": "google-secret",
                     "secret://model/prod": "model-secret",
                 },
             )
+            self.assertFalse(any(command[:3] == ["gh", "variable", "set"] for command, _ in calls))
+
+    def test_configure_can_still_set_legacy_self_hosted_runner(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = pathlib.Path(tmp) / "workspace"
+            (workspace / "environments").mkdir(parents=True)
+            (workspace / "environments" / "dev.yaml").write_text(
+                """environment: dev\nruntime:\n  profile: receptionist\n  model_credential_ref: secret://model/dev\n""",
+                encoding="utf-8",
+            )
+            calls = []
+
+            def fake_run(command, *, cwd=None, input_text=None, capture=True):
+                calls.append((command, input_text))
+                return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+            with mock.patch.object(operator, "_require_command"), mock.patch.object(operator, "_run", side_effect=fake_run), mock.patch.object(
+                operator.getpass, "getpass", return_value="model-secret"
+            ):
+                operator.configure(workspace, "kingyx3/acme-ai-workspace", "dev", "acme-docker")
+
             variable_calls = [command for command, _ in calls if command[:3] == ["gh", "variable", "set"]]
             self.assertEqual(len(variable_calls), 1)
-            self.assertIn("acme-prod-docker", variable_calls[0])
+            self.assertIn("MODEL_GARDEN_DOCKER_RUNNER", variable_calls[0])
+            self.assertIn("acme-docker", variable_calls[0])
 
     def test_configure_rejects_raw_credential_fields_before_prompting(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -91,8 +112,48 @@ class ClientOperatorTests(unittest.TestCase):
             )
             with mock.patch.object(operator.getpass, "getpass") as getpass:
                 with self.assertRaisesRegex(ValueError, "raw credential"):
-                    operator.configure(workspace, "kingyx3/acme-ai-workspace", "dev", "acme-docker")
+                    operator.configure(workspace, "kingyx3/acme-ai-workspace", "dev")
             getpass.assert_not_called()
+
+    def test_doctor_accepts_keyless_gcp_instead_of_runner_variable(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = pathlib.Path(tmp) / "workspace"
+            bootstrapper.bootstrap(workspace, "acme")
+            repo_vars = {name: "configured" for name in operator.KEYLESS_GCP_VARIABLES}
+            repo_vars["MODEL_GARDEN_CLOUD_PROVIDER"] = "gcp"
+            repo_vars["MODEL_GARDEN_CLOUD_READY"] = "true"
+
+            def completed(command, code=0, stdout=""):
+                return subprocess.CompletedProcess(command, code, stdout=stdout, stderr="")
+
+            original_run = operator._run
+
+            def fake_run(command, *, cwd=None, input_text=None, capture=True):
+                if command[:3] == ["gh", "secret", "list"]:
+                    return completed(command, stdout="MODEL_GARDEN_RUNTIME_SECRETS_JSON\tupdated\n")
+                if command[:3] == ["gh", "variable", "list"]:
+                    if "--env" in command:
+                        return completed(command, stdout="[]")
+                    return completed(
+                        command,
+                        stdout=json.dumps([{"name": key, "value": value} for key, value in repo_vars.items()]),
+                    )
+                return original_run(command, cwd=cwd, input_text=input_text, capture=capture)
+
+            with mock.patch.object(operator, "_require_command"), mock.patch.object(operator, "_run", side_effect=fake_run):
+                self.assertEqual(operator.doctor(workspace, "dev", "kingyx3/acme-ai-workspace"), 0)
+
+    def test_keyless_gcp_readiness_fails_closed_when_provider_config_is_incomplete(self):
+        ready, detail = operator._keyless_gcp_ready(
+            {
+                "MODEL_GARDEN_CLOUD_PROVIDER": "gcp",
+                "MODEL_GARDEN_CLOUD_READY": "true",
+                "GCP_PROJECT_ID": "acme",
+            }
+        )
+        self.assertFalse(ready)
+        self.assertIn("missing", detail)
+        self.assertIn("GCP_WORKLOAD_IDENTITY_PROVIDER", detail)
 
     def test_runtime_approval_hides_docker_paths_and_targets_governed_sidecar(self):
         request_id = "a" * 64
