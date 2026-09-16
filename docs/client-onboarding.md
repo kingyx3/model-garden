@@ -2,24 +2,32 @@
 
 Model Garden platform code stays in this repository. Create one separate private workspace repository per client and keep it limited to client-owned desired state, version pins and evals. Do not fork Model Garden per client.
 
-## Default managed path — one command
+## Default managed path — minimum operator input
 
 For early SMB clients, the normal operator path is one resumable command from a published Model Garden release:
 
 ```bash
-python3 scripts/launch-client.py acme \
-  --github-repo kingyx3/acme-ai-workspace \
-  --gcp-project acme-model-garden-12345 \
+python3 scripts/launch.py acme \
+  --bootstrap-credential ~/Downloads/acme-bootstrap.json
+```
+
+By default Model Garden derives the target GCP project from the JSON's `project_id` and creates/reuses `<authenticated-github-user>/acme-ai-workspace`. Use overrides only when the target differs:
+
+```bash
+python3 scripts/launch.py acme \
   --bootstrap-credential ~/Downloads/acme-bootstrap.json \
+  --github-repo client-org/acme-ai-workspace \
+  --gcp-project client-target-project \
   --ownership client
 ```
 
-Use `--ownership model-garden` when Model Garden owns the GCP project. Ownership changes metadata/account responsibility, not the deployment architecture.
+`--ownership model-garden` is the default. Ownership changes metadata/account responsibility, not the deployment architecture.
 
-The command performs the technical onboarding sequence for you:
+The launch flow performs the technical onboarding sequence for you:
 
 ```text
 published Model Garden release
+  -> infer target project + private repo where possible
   -> create/reuse private client workspace repo
   -> configure missing dev/prod runtime secret maps
   -> use one temporary local GCP service-account JSON
@@ -46,12 +54,10 @@ The one-command bootstrap removes technical choreography; it does not guess the 
 Receptionist is the reference wedge, not a mandatory platform shape. For another bounded role:
 
 ```bash
-python3 scripts/launch-client.py acme \
+python3 scripts/launch.py acme \
+  --bootstrap-credential ~/Downloads/acme-bootstrap.json \
   --agent operations-coordinator \
-  --role-title "Operations Coordinator" \
-  --github-repo kingyx3/acme-ai-workspace \
-  --gcp-project acme-model-garden-12345 \
-  --bootstrap-credential ~/Downloads/acme-bootstrap.json
+  --role-title "Operations Coordinator"
 ```
 
 A new role normally changes only the client workspace. Change Model Garden core only when a reusable Skill, connector, governance capability or runtime seam is genuinely missing.
@@ -60,15 +66,16 @@ A new role normally changes only the client workspace. Change Model Garden core 
 
 Only information that Model Garden cannot safely invent or derive should require operator input:
 
-- client slug/repository name;
-- target GCP project and whether the account is client-owned or Model Garden-owned;
+- client slug;
 - one temporary bootstrap service-account JSON with sufficient bootstrap permissions;
+- an ownership override only when the GCP project is client-owned;
+- repository/project overrides only when the inferred defaults are not the desired targets;
 - runtime/integration credentials actually referenced by the selected environment, prompted without echoing;
 - business-approved Agent/Skill/Knowledge/eval content;
 - provider/end-user OAuth consent where an external system requires the account owner to authorize access;
 - production business approval before live traffic.
 
-Do not turn cloud deployment steps, runner registration, Terraform state creation, WIF setup, GitHub variable creation, Docker installation or release publication into recurring manual checklists.
+Do not turn cloud deployment steps, repository naming, target-project re-entry, runner registration, Terraform state creation, WIF setup, GitHub variable creation, Docker installation or release publication into recurring manual checklists when they can be derived or automated safely.
 
 ## Normal delivery after bootstrap
 
@@ -96,7 +103,7 @@ No long-lived cloud deployment JSON is needed after bootstrap. Platform releases
 
 ## Lower-level/manual path — diagnostics or exceptions only
 
-The underlying operations remain available independently when troubleshooting or supporting a non-default environment:
+`scripts/launch.py` derives the common inputs and calls `scripts/launch-client.py`, which composes the underlying operations. Those lower-level operations remain available independently when troubleshooting or supporting a non-default environment:
 
 ```bash
 python3 scripts/client-operator.py init acme \

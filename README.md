@@ -2,7 +2,7 @@
 
 Model Garden is an OSS-first platform and consulting delivery baseline for deploying governed AI employees for small and mid-sized businesses without requiring a client IT team.
 
-**Current release line:** `0.3.0`
+**Current release line:** `0.3.1`
 
 The platform repository is shared and versioned. Each client gets a separate private workspace repository containing only that client's business-specific desired state, knowledge references, evals, environment references, and platform lockfile.
 
@@ -37,19 +37,31 @@ isolated client Docker host
 - **One isolated Docker host per early client/environment.** Keep deployment boring until repeated operational evidence justifies fleet tooling.
 - **OSS before proprietary infrastructure.** Hermes provides the Agent runtime; external systems such as LiveKit and Lago remain replaceable integrations.
 
-## Preferred client bootstrap — one command
+## Preferred client bootstrap — minimum inputs
 
-Run from a published Model Garden release with authenticated `gh`, `git`, and Terraform available:
+Run from a published Model Garden release with authenticated `gh`, `git`, Terraform, and ideally `gcloud` available:
 
 ```bash
-python3 scripts/launch-client.py acme \
-  --github-repo kingyx3/acme-ai-workspace \
-  --gcp-project acme-model-garden-12345 \
+python3 scripts/launch.py acme \
+  --bootstrap-credential ~/Downloads/acme-bootstrap.json
+```
+
+That is the normal Model Garden-managed path. By default it derives:
+
+- the GCP target project from `project_id` in the supplied service-account JSON; and
+- the private client repository as `<authenticated-github-user>/acme-ai-workspace`.
+
+Override either only when the target differs:
+
+```bash
+python3 scripts/launch.py acme \
   --bootstrap-credential ~/Downloads/acme-bootstrap.json \
+  --github-repo client-org/acme-ai-workspace \
+  --gcp-project client-target-project \
   --ownership client
 ```
 
-That single resumable command:
+The launch flow is resumable and composes the existing safety boundaries. It:
 
 1. creates or reuses the local client workspace and private GitHub repository;
 2. creates `main` + `dev` through the existing Git-backed bootstrap;
@@ -63,24 +75,22 @@ That single resumable command:
 10. when `gcloud` is available, revokes the temporary service-account key and deletes the local JSON automatically; otherwise it prints the one exact revocation command and leaves the JSON in place;
 11. runs `doctor` for both environments.
 
-The command is safe to rerun after a partial failure: existing workspace/repository state, configured runtime secret maps, cloud bootstrap variables and completed verification are reused instead of recreated.
+A rerun reuses existing workspace/repository state, configured runtime secret maps, cloud bootstrap variables and completed verification instead of recreating them.
 
 Use another role without changing Model Garden itself:
 
 ```bash
-python3 scripts/launch-client.py acme \
+python3 scripts/launch.py acme \
+  --bootstrap-credential ~/Downloads/acme-bootstrap.json \
   --agent operations-coordinator \
-  --role-title "Operations Coordinator" \
-  --github-repo kingyx3/acme-ai-workspace \
-  --gcp-project acme-model-garden-12345 \
-  --bootstrap-credential ~/Downloads/acme-bootstrap.json
+  --role-title "Operations Coordinator"
 ```
 
 The bootstrap credential is infrastructure-only. Model/provider, Calendar, telephony and other business-system credentials remain narrow runtime/integration credentials and are collected only when the selected workspace references them.
 
 ## Lower-level operator commands
 
-The component commands remain available for diagnostics, non-GCP targets and unusual environments:
+`scripts/launch-client.py` is the explicit orchestration layer used by `scripts/launch.py`. The component commands remain available for diagnostics, non-GCP targets and unusual environments:
 
 ```bash
 python3 scripts/client-operator.py init acme \
@@ -124,7 +134,7 @@ The keyless client workflow resolves the exact `v<modelgarden-version>` release,
 
 ## Release safety
 
-`VERSION` is part of the client reproducibility contract. CI now prevents a pull request from reusing an already-published version and automatically publishes a validated, previously-unreleased `VERSION` when it lands on `main`. Existing release tags are never moved.
+`VERSION` is part of the client reproducibility contract. CI prevents a pull request from reusing an already-published version and automatically publishes a validated, previously-unreleased `VERSION` when it lands on `main`. Existing release tags are never moved.
 
 ## Usage metering and billing
 
@@ -142,7 +152,7 @@ examples/workspace/        Reference Agents, Skills, Tools and Knowledge resourc
 platform/connectors/       Thin business-system adapters
 platform/channels/         Replaceable channel adapters
 platform/metering/         Thin external metering adapters; no billing engine
-scripts/                    One-command bootstrap plus lower-level compile/govern/deploy helpers
+scripts/                    Minimal-input launch + lower-level compile/govern/deploy helpers
 tests/                      Contract/runtime/operator/bootstrap regression tests
 docs/                       Repository-facing architecture and operating guidance
 infra/bootstrap/gcp/        One-time keyless trust/state bootstrap
