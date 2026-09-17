@@ -1,0 +1,105 @@
+version: 1
+updated: 2026-09-17
+
+principles:
+  - Repository and CI evidence is a snapshot of a specific commit, not proof of continuous compliance.
+  - Manual, legal-entity, provider, client and certification facts must have explicit owners and review cadence.
+  - Expired or absent evidence must remain visible; it must never be silently converted into a supported DDQ claim.
+  - Scanner scope and accepted exceptions must be explicit so a clean report is not mistaken for broader assurance than was actually tested.
+
+repository_snapshot:
+  owner: Model Garden engineering
+  verification: GitHub CI on each validated commit
+  freshness: per_commit
+  controls:
+    - client_isolation
+    - least_privilege
+    - keyless_deployment
+    - secret_management
+    - governed_actions
+    - auditability
+    - human_oversight
+    - versioning_and_rollback
+    - secure_sdlc
+    - ai_evaluation
+    - ai_risk_bounding
+    - ai_prompt_injection_controls
+
+automated_checks:
+  dependency_vulnerability_scan:
+    owner: Model Garden engineering
+    tool: pip-audit
+    evidence_file: scans/pip-audit.json
+    scope: Python runtime and development dependency manifests.
+    controls: [vulnerability_and_patch_management, secure_sdlc]
+  python_security_scan:
+    owner: Model Garden engineering
+    tool: bandit
+    evidence_file: scans/bandit.json
+    scope: Medium/high-severity findings in executable Python under scripts/ and platform/. Low-severity tooling/subprocess notices remain code-review concerns rather than enterprise evidence failures. B104 and B310 are narrow documented exceptions below.
+    controls: [secure_sdlc, vulnerability_and_patch_management]
+  infrastructure_as_code_scan:
+    owner: Model Garden engineering
+    tool: checkov
+    evidence_file: scans/checkov.json
+    scope: Active Terraform under infra/. Inline Checkov skips are permitted only with a specific documented rationale.
+    controls: [secure_sdlc, least_privilege, secret_management]
+  repository_secret_scan:
+    owner: Model Garden engineering
+    tool: bc-detect-secrets
+    evidence_file: scans/detect-secrets.json
+    scope: Repository content except .git, generated evidence, virtual environments, deterministic test fixtures and the two scanner implementation files that otherwise self-match their own configuration. The pinned container-image digest is a narrow line-level allowlist.
+    controls: [secret_management, secure_sdlc]
+  python_sbom:
+    owner: Model Garden engineering
+    tool: pip-audit CycloneDX output
+    evidence_file: scans/python-sbom.cdx.json
+    scope: Python dependency manifests; this is not yet a complete OS/container SBOM.
+    controls: [subprocessor_inventory, open_source_governance, vulnerability_and_patch_management]
+
+accepted_scanner_exceptions:
+  CKV_GCP_38:
+    scope: infra/docker-host/gcp google_compute_instance.runtime
+    rationale: The baseline uses Google-managed encryption at rest. Customer-managed encryption keys are a client/configuration requirement when procurement or regulation demands separate key control; Model Garden does not create customer-supplied disk keys by default.
+  CKV_GCP_62:
+    scope: infra/bootstrap/gcp google_storage_bucket.terraform_state
+    rationale: The bootstrap bucket is private, uniform-access, versioned and restricted to deployment identities. Legacy per-bucket access logging is not added to the minimal baseline; cloud audit/logging requirements are deployment-specific and should be enabled when the target organisation requires them.
+  CKV_GCP_125:
+    scope: infra/bootstrap/gcp google_iam_workload_identity_pool_provider.github
+    rationale: Trust is explicitly constrained to the exact repository, exact deployment workflow_ref and workflow_run event, with service-account impersonation additionally scoped to the repository principal set. Checkov does not recognise this workflow_ref-based condition shape.
+  B104:
+    scope: governed MCP container bind
+    rationale: The governed Tool service binds all interfaces inside its private Docker network so the Hermes container can reach it; Docker Compose does not publish that port to the host/public network.
+  B310:
+    scope: Google Calendar and Lago HTTP transports
+    rationale: Google Calendar transport explicitly permits only HTTPS to www.googleapis.com. Lago transport validates http/https, requires a hostname and rejects embedded credentials. Bandit does not perform the data-flow reasoning needed to recognise these checks at urlopen.
+
+manual_evidence:
+  privacy_program:
+    owner: Model Garden privacy/accountability owner
+    review_interval_days: 90
+    expected_evidence: DPO/accountability owner, privacy policies, data inventory, DSAR and breach procedures.
+  subprocessor_inventory:
+    owner: Model Garden operator
+    review_interval_days: 90
+    expected_evidence: Current provider/subprocessor, data-flow, residency, retention/training and replacement-path register.
+  incident_response:
+    owner: Model Garden operator
+    review_interval_days: 180
+    expected_evidence: Incident runbook review and retained incident/tabletop evidence where available.
+  business_continuity:
+    owner: Model Garden operator
+    review_interval_days: 180
+    expected_evidence: Backup/restore, rollback and recovery test records plus agreed RTO/RPO where applicable.
+  penetration_testing:
+    owner: Model Garden security owner
+    review_interval_days: 365
+    expected_evidence: Current independent penetration-test report or attestation and remediation record.
+  formal_certifications:
+    owner: Model Garden business/security owner
+    review_interval_days: 365
+    expected_evidence: Current in-scope certificate and surveillance/audit evidence.
+  cyber_insurance:
+    owner: Model Garden business owner
+    review_interval_days: 365
+    expected_evidence: Current policy/certificate of insurance and coverage period.

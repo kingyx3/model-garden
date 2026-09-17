@@ -48,6 +48,7 @@ resource "google_project_service" "bootstrap" {
 }
 
 resource "google_storage_bucket" "terraform_state" {
+  #checkov:skip=CKV_GCP_62:The minimal baseline uses a private uniform-access state bucket restricted to deployment identities. Legacy per-bucket access logging is deployment-specific; enable the target organisation's cloud audit/logging policy where required.
   name                        = local.state_bucket
   location                    = var.region
   project                     = var.project_id
@@ -84,6 +85,7 @@ resource "google_iam_workload_identity_pool" "github" {
 }
 
 resource "google_iam_workload_identity_pool_provider" "github" {
+  #checkov:skip=CKV_GCP_125:Trust is constrained to the exact repository, exact deployment workflow_ref and workflow_run event; service-account impersonation is additionally scoped to that repository principal set. Checkov does not recognise this workflow_ref condition shape.
   project                            = var.project_id
   workload_identity_pool_id          = google_iam_workload_identity_pool.github.workload_identity_pool_id
   workload_identity_pool_provider_id = local.provider_id

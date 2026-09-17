@@ -29,15 +29,19 @@ Model Garden's early-client deployment is intentionally small: one isolated clie
 
 ## Network and host hardening
 
-1. Prefer private or tightly controlled administration paths. The current GCP reference uses IAP/OS Login rather than opening routine SSH administration to the internet.
-2. Do not expose Hermes or governed Tool services publicly unless the selected channel/integration contract explicitly requires it.
-3. Keep host firewall rules minimal and scope provider/channel ingress narrowly.
-4. Apply regular OS/container dependency updates through a tested Model Garden release rather than mutating production hosts ad hoc.
-5. Enable image/dependency scanning where the operating environment supports it.
+1. The current GCP reference VM has no public IP. Administration uses IAP/OS Login and outbound internet access uses Cloud NAT.
+2. The isolated subnet enables Private Google Access and VPC Flow Logs; Cloud NAT error logging is enabled for outbound troubleshooting/evidence.
+3. The runtime VM enables Shielded VM Secure Boot, vTPM and integrity monitoring.
+4. Do not expose Hermes or governed Tool services publicly unless the selected channel/integration contract explicitly requires it. The governed Tool service may bind inside the private Docker network so the Hermes container can reach it; no host port is published by the baseline.
+5. Keep host firewall rules minimal and scope provider/channel ingress narrowly.
+6. Apply regular OS/container dependency updates through a tested Model Garden release rather than mutating production hosts ad hoc.
+7. CI produces dependency-vulnerability, Python security, Terraform/IaC, repository-secret and Python SBOM evidence for each validated revision. Scanner scope and accepted exceptions are retained with the evidence artifact; scanner success is not a certification.
 
 ## Terraform state
 
 The current GCP bootstrap under `infra/bootstrap/gcp` creates the remote Terraform state used by normal keyless deployment. Limit state access to the deployment/admin identities that require it. State can contain infrastructure metadata and may become sensitive if future resources expose generated values, so do not treat the state bucket as public operational documentation.
+
+The baseline state bucket is private, uniform-access, public-access-prevention enforced and versioned. Legacy per-bucket access logging is not enabled by default; use the target organisation's Cloud Audit Logging requirements where procurement/security policy requires stronger storage-access evidence.
 
 Business definitions and raw runtime credentials must not be intentionally stored in Terraform state.
 
@@ -48,6 +52,12 @@ Business definitions and raw runtime credentials must not be intentionally store
 - Export relevant application, governed-action and cloud audit records to the client's or Model Garden's existing logging/SIEM stack when required.
 - Use protected production GitHub Environments and business/operator approval before promotion.
 - Test prohibited actions, approval-required actions, credential revocation and rollback as part of production acceptance.
+
+## Assurance evidence
+
+Every validated repository revision generates a commit-scoped Enterprise Evidence Pack. It includes canonical control status, automated scan summaries, evidence ownership/freshness metadata, Singapore assurance references and unresolved gaps. The exact scanner outputs are retained as a CI artifact.
+
+The evidence pack does not convert architecture into a legal/compliance claim. Independent penetration testing, formal certifications, cyber insurance, an operating privacy/DPO programme, provider retention/training/residency terms and client-specific controls require their own current evidence.
 
 ## Threat boundary
 

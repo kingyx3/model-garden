@@ -57,7 +57,7 @@ Keep one authority per topic and link to it instead of copying the same operatin
 - [`docs/cloud-bootstrap.md`](docs/cloud-bootstrap.md): keyless infrastructure bootstrap internals.
 - [`docs/secrets.md`](docs/secrets.md): credential ownership, secret storage and authorization boundaries.
 - [`docs/security.md`](docs/security.md): production hardening.
-- [`docs/assurance.md`](docs/assurance.md): evidence-backed enterprise DDQ answering and Singapore assurance mapping.
+- [`docs/assurance.md`](docs/assurance.md): evidence-backed enterprise DDQ answering, commit-scoped evidence packs and Singapore assurance mapping.
 - [`docs/self-hosting.md`](docs/self-hosting.md): hosting/TCO decisions and provider-specific implementation facts that may change over time.
 - [`docs/governed-tools.md`](docs/governed-tools.md): governed Tool/MCP execution and approval semantics.
 - [`docs/metering.md`](docs/metering.md): thin usage-event integration; Lago remains the external billing/metering system.
@@ -107,6 +107,15 @@ python3 scripts/ddq.py answer "Do you use customer prompts to train models?"
 python3 scripts/ddq.py readiness
 ```
 
+Generate a commit-scoped customer/reviewer evidence snapshot from the same registry:
+
+```bash
+make assurance       # registry + evidence metadata
+make assurance-scan  # adds dependency, code, IaC, secret and SBOM scan evidence
+```
+
+CI produces an `enterprise-evidence-<commit>` artifact for every validated revision. Scanner output, evidence freshness/ownership and unresolved assurance gaps remain visible; they do not silently turn certifications, penetration testing, privacy operations or client-specific facts into supported claims.
+
 The assurance layer maps repository evidence to common DDQ questions and Singapore references such as the PDPA/PDPC guidance, IMDA's Model AI Governance Framework for Agentic AI and relevant CSA assurance schemes. Provider-, legal-entity-, certification- and sector-specific answers remain explicitly review-gated. See [`docs/assurance.md`](docs/assurance.md).
 
 ## OSS and hosting boundaries
@@ -123,7 +132,7 @@ Detailed and time-sensitive hosting/provider guidance lives only in [`docs/self-
 ## Repository layout
 
 ```text
-assurance/                    DDQ catalog, evidence registry and Singapore assurance map
+assurance/                    DDQ catalog, evidence registry/metadata and Singapore assurance map
 contracts/v1/                 Versioned portable resource contracts
 examples/workspace/           Reference employees and resources
 platform/connectors/          Thin business-system adapters
@@ -146,6 +155,6 @@ python3 -m pip install -r requirements-dev.txt
 make validate
 ```
 
-Release CI gates the current GCP bootstrap/Docker-host Terraform, contracts/compiler/runtime/operator tests, Receptionist acceptance evals and exact pinned Hermes compatibility. Validated unreleased `VERSION` values publish automatically after landing on `main`; existing tags are never moved.
+Release CI gates the current GCP bootstrap/Docker-host Terraform, contracts/compiler/runtime/operator tests, Receptionist acceptance evals, exact pinned Hermes compatibility and successful generation of the enterprise evidence artifact. Validated unreleased `VERSION` values publish automatically after landing on `main`; existing tags are never moved.
 
 The current product priority is not another infrastructure layer: it is proving the reference deployment live end to end with real cloud/model/Calendar/voice credentials and a stable human fallback path.

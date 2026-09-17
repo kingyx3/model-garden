@@ -59,10 +59,36 @@ resource "google_compute_network" "main" {
 }
 
 resource "google_compute_subnetwork" "main" {
-  name          = local.name
-  region        = var.region
-  network       = google_compute_network.main.id
-  ip_cidr_range = var.subnet_cidr
+  name                     = local.name
+  region                   = var.region
+  network                  = google_compute_network.main.id
+  ip_cidr_range            = var.subnet_cidr
+  private_ip_google_access = true
+
+  log_config {
+    aggregation_interval = "INTERVAL_5_SEC"
+    flow_sampling        = 0.5
+    metadata             = "INCLUDE_ALL_METADATA"
+  }
+}
+
+resource "google_compute_router" "main" {
+  name    = "${local.name}-nat"
+  region  = var.region
+  network = google_compute_network.main.id
+}
+
+resource "google_compute_router_nat" "main" {
+  name                               = "${local.name}-nat"
+  router                             = google_compute_router.main.name
+  region                             = var.region
+  nat_ip_allocate_option             = "AUTO_ONLY"
+  source_subnetwork_ip_ranges_to_nat = "ALL_SUBNETWORKS_ALL_IP_RANGES"
+
+  log_config {
+    enable = true
+    filter = "ERRORS_ONLY"
+  }
 }
 
 resource "google_compute_firewall" "iap_ssh" {
@@ -80,6 +106,7 @@ resource "google_compute_firewall" "iap_ssh" {
 }
 
 resource "google_compute_instance" "runtime" {
+  #checkov:skip=CKV_GCP_38:The managed baseline relies on Google-managed disk encryption. Customer-managed/supplied keys are enabled only when a client or regulatory requirement justifies separate key control.
   name         = local.name
   machine_type = var.machine_type
   zone         = var.zone
@@ -98,10 +125,6 @@ resource "google_compute_instance" "runtime" {
 
   network_interface {
     subnetwork = google_compute_subnetwork.main.id
-
-    # Ephemeral public egress keeps the early-client host simple. SSH ingress is
-    # still restricted to Google's IAP range; no public SSH source is allowed.
-    access_config {}
   }
 
   metadata = {
@@ -118,6 +141,12 @@ resource "google_compute_instance" "runtime" {
     scopes = ["https://www.googleapis.com/auth/cloud-platform"]
   }
 
+  shielded_instance_config {
+    enable_secure_boot          = true
+    enable_vtpm                 = true
+    enable_integrity_monitoring = true
+  }
+
   lifecycle {
     precondition {
       condition     = var.environment != "prod" || var.deletion_protection
@@ -126,6 +155,8 @@ resource "google_compute_instance" "runtime" {
   }
 
   deletion_protection = var.deletion_protection
+
+  depends_on = [google_compute_router_nat.main]
 }
 
 variable "project_id" {
@@ -227,8 +258,4 @@ output "network" {
 
 output "internal_ip" {
   value = google_compute_instance.runtime.network_interface[0].network_ip
-}
-
-output "external_ip" {
-  value = google_compute_instance.runtime.network_interface[0].access_config[0].nat_ip
 }

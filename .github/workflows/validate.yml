@@ -100,46 +100,6 @@ jobs:
       - name: Validate shell scripts
         run: bash -n scripts/*.sh
 
-  enterprise-assurance:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-      - name: Install assurance dependencies
-        run: python3 -m pip install -r requirements-dev.txt pip-audit
-      - name: Validate assurance registry and repository guardrails
-        run: |
-          python3 scripts/enterprise-evidence.py verify
-          python3 scripts/enterprise-evidence.py scan
-      - name: Audit runtime Python dependencies
-        id: dependency_audit
-        shell: bash
-        run: |
-          mkdir -p /tmp/model-garden-enterprise-evidence
-          set +e
-          pip-audit -r requirements-runtime.txt --format json --output /tmp/model-garden-enterprise-evidence/pip-audit.json
-          code=$?
-          set -e
-          echo "exit_code=$code" >> "$GITHUB_OUTPUT"
-          exit 0
-      - name: Generate enterprise evidence pack
-        run: |
-          python3 scripts/enterprise-evidence.py pack \
-            --output /tmp/model-garden-enterprise-evidence \
-            --pip-audit /tmp/model-garden-enterprise-evidence/pip-audit.json
-      - name: Upload enterprise evidence artifact
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: enterprise-evidence-${{ github.sha }}
-          path: /tmp/model-garden-enterprise-evidence
-          if-no-files-found: error
-          retention-days: 90
-      - name: Enforce dependency vulnerability result
-        if: steps.dependency_audit.outputs.exit_code != '0'
-        run: |
-          echo "pip-audit found a runtime dependency vulnerability or could not complete successfully." >&2
-          exit 1
-
   hermes-compatibility:
     runs-on: ubuntu-latest
     steps:
@@ -151,9 +111,32 @@ jobs:
       - name: Smoke-test pinned Hermes runtime against Receptionist profile
         run: bash scripts/smoke-hermes-runtime.sh
 
+  enterprise-evidence:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install assurance dependencies
+        run: python3 -m pip install -r requirements-dev.txt -r requirements-assurance.txt
+      - name: Generate scanner evidence and enterprise pack
+        run: bash scripts/run-assurance-scans.sh
+      - name: Verify evidence pack exists
+        run: |
+          test -s .enterprise-evidence/enterprise-evidence-pack.md
+          test -s .enterprise-evidence/manifest.json
+          python3 -m json.tool .enterprise-evidence/manifest.json >/dev/null
+      - name: Upload enterprise evidence artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: enterprise-evidence-${{ github.sha }}
+          path: .enterprise-evidence/
+          if-no-files-found: error
+          include-hidden-files: true
+          retention-days: 30
+
   publish-main-release:
     if: github.ref == 'refs/heads/main'
-    needs: [version-contract, current-terraform, contracts-and-runtime, enterprise-assurance, hermes-compatibility]
+    needs: [version-contract, current-terraform, contracts-and-runtime, hermes-compatibility, enterprise-evidence]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -188,7 +171,7 @@ jobs:
 
   release:
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [version-contract, current-terraform, contracts-and-runtime, enterprise-assurance, hermes-compatibility]
+    needs: [version-contract, current-terraform, contracts-and-runtime, hermes-compatibility, enterprise-evidence]
     runs-on: ubuntu-latest
     permissions:
       contents: write

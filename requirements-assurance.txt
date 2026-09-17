@@ -1,0 +1,4 @@
+pip-audit==2.10.1
+bandit==1.9.4
+checkov==3.3.18
+bc-detect-secrets==1.5.50

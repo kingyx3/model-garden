@@ -1,4 +1,4 @@
-.PHONY: dev validate contracts tests terraform hermes enterprise-evidence
+.PHONY: dev validate contracts tests terraform hermes assurance assurance-scan
 
 dev:
 	python3 -m pip install -r requirements-dev.txt
@@ -23,9 +23,12 @@ terraform:
 hermes:
 	bash scripts/smoke-hermes-runtime.sh
 
-enterprise-evidence:
-	python3 scripts/enterprise-evidence.py verify
-	python3 scripts/enterprise-evidence.py pack --output /tmp/model-garden-enterprise-evidence
+assurance:
+	python3 scripts/enterprise-evidence.py
 
-validate: contracts tests terraform hermes enterprise-evidence
+assurance-scan:
+	python3 -m pip install -r requirements-assurance.txt
+	bash scripts/run-assurance-scans.sh
+
+validate: contracts tests terraform hermes
 	bash -n scripts/*.sh
