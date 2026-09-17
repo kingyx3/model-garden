@@ -48,7 +48,7 @@ Scanner findings are preserved in the evidence pack instead of being converted i
 
 ## CI evidence artifact
 
-Every validated pull request/main revision runs the enterprise-evidence job. CI uploads an `enterprise-evidence-<commit>` artifact containing the scanner outputs, evidence pack and manifest. The artifact is retained for 30 days by default and the normal main/release publication path depends on successful evidence-pack generation.
+Every validated pull request/main revision runs the enterprise-evidence job. CI uploads an `enterprise-evidence-<commit>` artifact containing the scanner outputs, evidence pack and manifest. The artifact is retained for 90 days by default and the normal main/release publication path depends on successful evidence-pack generation.
 
 The scanner stage is initially evidence-producing rather than an automatic claim of security. Where scanners report findings, those findings remain visible for review and remediation. Formal penetration tests, certifications, insurance, DPO/privacy operations, provider residency/training facts and client-specific controls still require their own evidence.
 
