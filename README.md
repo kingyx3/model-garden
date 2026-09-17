@@ -2,7 +2,7 @@
 
 Model Garden is an OSS-first platform and consulting delivery baseline for deploying governed AI employees for small and mid-sized businesses without requiring a client IT team.
 
-**Current development release:** `0.3.6`
+**Release source of truth:** [`VERSION`](VERSION) plus immutable GitHub Releases. Client workspaces pin a published Model Garden release in `platform.lock.yaml`; prose documentation should not become a competing version registry.
 
 ## Architecture in one screen
 
@@ -43,9 +43,25 @@ Core rules:
 - one temporary cloud bootstrap credential may establish trust, then normal deployment is keyless;
 - Model Garden-owned and client-owned hosting use the same application/workspace contract;
 - build only the Model Garden differentiation layer; prefer client systems, open standards and mature OSS for commodity capabilities;
+- OSS-first does not mean self-host-at-all-costs: use the lowest-TCO replaceable option that preserves portability, isolation and governance;
 - do not add Kubernetes, a control plane, Connector SDK, custom gateway or portal without evidence from live deployments.
 
-See [`docs/architecture.md`](docs/architecture.md), [`docs/security.md`](docs/security.md), [`docs/secrets.md`](docs/secrets.md) and [`docs/self-hosting.md`](docs/self-hosting.md) for repository-facing detail.
+## Documentation authority
+
+Keep one authority per topic and link to it instead of copying the same operating detail across files or systems.
+
+- **Confluence — Model Garden Documentation:** business/product architecture, roadmap, commercial/engagement process, founder/operator checklists and client-facing operating decisions.
+- **This repository:** executable implementation contracts, code-specific deployment mechanics and engineering evidence.
+- [`docs/architecture.md`](docs/architecture.md): implementation architecture and boundaries.
+- [`docs/client-onboarding.md`](docs/client-onboarding.md): the normal operator entry point and only the unavoidable onboarding inputs.
+- [`docs/cloud-bootstrap.md`](docs/cloud-bootstrap.md): keyless infrastructure bootstrap internals.
+- [`docs/secrets.md`](docs/secrets.md): credential ownership, secret storage and authorization boundaries.
+- [`docs/security.md`](docs/security.md): production hardening.
+- [`docs/self-hosting.md`](docs/self-hosting.md): hosting/TCO decisions and provider-specific implementation facts that may change over time.
+- [`docs/governed-tools.md`](docs/governed-tools.md): governed Tool/MCP execution and approval semantics.
+- [`docs/metering.md`](docs/metering.md): thin usage-event integration; Lago remains the external billing/metering system.
+
+Confluence should reference repository implementation docs for exact commands/workflow internals rather than duplicate them. Repository docs should reference Confluence for business/engagement policy rather than re-state commercial process.
 
 ## Preferred client launch
 
@@ -56,13 +72,13 @@ python3 scripts/launch.py acme \
   --bootstrap-credential ~/Downloads/acme-bootstrap.json
 ```
 
-In the normal managed GCP path Model Garden derives the target project from the JSON and the private repo as `<authenticated-github-user>/acme-ai-workspace`. Use explicit `--github-repo`, `--gcp-project` and `--ownership` overrides only when the target differs.
+`scripts/launch.py` is the public operator entry point for the standard managed GCP path. It derives the target project from the temporary JSON and the private repo as `<authenticated-github-user>/acme-ai-workspace` where possible. Use explicit `--github-repo`, `--gcp-project` and `--ownership` overrides only when the target differs.
 
-The resumable launch flow creates/reuses the workspace and private repo, protected DEV/PROD environments, required runtime secret maps, remote Terraform state, Workload Identity Federation, deploy/runtime identities and the keyless deployment workflow; triggers and verifies DEV; and revokes/deletes the temporary bootstrap key where local tooling permits. Resume checks fail closed if the local workspace belongs to a different client/repository or if an existing keyless cloud target differs from the requested project/region/ownership.
+The resumable launch flow creates/reuses the workspace and private repo, protected DEV/PROD environments, required runtime secret maps, remote Terraform state, Workload Identity Federation, deploy/runtime identities and the keyless deployment workflow; triggers and verifies DEV; and revokes/deletes the temporary bootstrap key where local tooling permits.
 
-Runtime credentials such as model, Calendar and telephony credentials remain separate capability-scoped secrets and are requested only when the selected environment needs them.
+Runtime credentials such as model, Calendar and telephony credentials remain separate capability-scoped secrets and are requested only when the selected environment needs them. Credential/account ownership follows the target account or commercial relationship; see [`docs/secrets.md`](docs/secrets.md).
 
-Lower-level `scripts/launch-client.py`, `scripts/client-operator.py` and `scripts/bootstrap-cloud.py` commands exist for diagnostics and exceptional targets; they are not the normal onboarding checklist.
+Lower-level `scripts/launch-client.py`, `scripts/client-operator.py` and `scripts/bootstrap-cloud.py` commands exist for orchestration, diagnostics and exceptional targets. They are not separate onboarding authorities.
 
 ## Delivery lifecycle
 
@@ -81,16 +97,16 @@ Client upgrades normally change only `platform.lock.yaml` to a newer published M
 
 Enterprise actions are not granted by prompts. Selected Tools are exposed through the governed MCP boundary and evaluated as `allow | approval | deny`; approval-required actions bind to the exact material request, consume each human decision once, and produce audit evidence.
 
-## OSS boundaries
+## OSS and hosting boundaries
 
 - **Hermes**: reference Agent runtime.
-- **LiveKit / existing PBX**: replaceable voice/media layer.
+- **LiveKit / existing PBX**: replaceable voice/media layer; managed or self-hosted according to measured TCO and client requirements.
 - **Lago**: default external usage metering/billing system; Model Garden emits attributable usage events only.
 - **Langfuse**: optional observability when existing telemetry is insufficient.
 - **Cloud provider**: GCP is the first current keyless Docker-host reference; add other clouds only when demanded by real deployment evidence.
-- **Cloudflare**: optional low-cost DNS/HTTP edge; never required for Model Garden authority, and not a Free-tier substitute for LiveKit/SIP realtime UDP transport.
+- **Cloudflare**: optional DNS/HTTP edge where useful; never a required authority layer or a substitute for realtime UDP/SIP transport.
 
-The self-hosting and Cloudflare cost/TCO decision rules are documented in [`docs/self-hosting.md`](docs/self-hosting.md).
+Detailed and time-sensitive hosting/provider guidance lives only in [`docs/self-hosting.md`](docs/self-hosting.md).
 
 ## Repository layout
 
