@@ -15,7 +15,7 @@ Model Garden's early-client deployment is intentionally small: one isolated clie
 1. Keep raw credentials outside Agent, Skill, Knowledge and environment YAML; those files contain only logical `secret://` references.
 2. Store DEV and PROD credentials separately in protected GitHub Environments or the relevant provider authorization store.
 3. Inject only the credential required by each runtime process or connector. Hermes/model execution must not receive unrelated Calendar, CRM or telephony credentials.
-4. Pin the Model Garden release, Hermes revision, base image and client workspace revision used in production.
+4. Pin the Model Garden release, Hermes revision, base image, voice runtime dependency and client workspace revision used in production.
 5. Keep the Docker host isolated per early client/environment until evidence justifies a different tenancy model.
 
 ## Tool authority and business actions
@@ -25,7 +25,8 @@ Model Garden's early-client deployment is intentionally small: one isolated clie
 3. Enforce `allow | approval | deny` before provider execution.
 4. Bind approvals to the exact material action/arguments and consume each approval once.
 5. Audit material actions with client/tenant, Agent, initiating identity where available, Tool/action, result, approval metadata and timestamp.
-6. Connector credentials must be least-privilege and independently revocable.
+6. Governed-action audit records use a locked, fsynced schema-v2 hash chain so record modification/reordering/insertion or deletion inside the retained chain is detectable. Treat the local chain as tamper-evident rather than immutable; export it to a separately administered log/SIEM/object store where independent retention or non-repudiation is required.
+7. Connector credentials must be least-privilege and independently revocable.
 
 ## Network and host hardening
 
@@ -35,7 +36,22 @@ Model Garden's early-client deployment is intentionally small: one isolated clie
 4. Do not expose Hermes or governed Tool services publicly unless the selected channel/integration contract explicitly requires it. The governed Tool service may bind inside the private Docker network so the Hermes container can reach it; no host port is published by the baseline.
 5. Keep host firewall rules minimal and scope provider/channel ingress narrowly.
 6. Apply regular OS/container dependency updates through a tested Model Garden release rather than mutating production hosts ad hoc.
-7. CI produces dependency-vulnerability, Python security, Terraform/IaC, repository-secret and Python SBOM evidence for each validated revision. Scanner scope and accepted exceptions are retained with the evidence artifact; scanner success is not a certification.
+7. Treat the current Debian-image-family and Docker-package installation path as a rebuild dependency: before regulated/high-assurance production, either pin/attest the host image and package set or retain equivalent rebuild evidence proving the replacement host consumed the approved versions. Do not claim bit-for-bit host reproducibility while those sources remain provider/package-repository resolved.
+
+## Secure software supply chain
+
+- Third-party GitHub Actions in the validation workflow are referenced by immutable commit SHA rather than mutable major-version tags.
+- Runtime-critical Python dependencies use exact pins where they are deployed into the production bundle; automated weekly dependency update checks cover Python, GitHub Actions and supported Terraform modules.
+- CI runs dependency vulnerability, Python security, Terraform/IaC, repository-secret and SBOM scans inside a branch-ruleset-required validation job. Scanner failure therefore fails that required check rather than producing advisory-only evidence.
+- Enterprise Evidence Pack artifacts are retained for 90 days by CI; customer/contracts may require longer external retention.
+- Dependency automation does not authorize an upgrade: every change still follows the normal version contract, tests/evals and DEV-to-PROD promotion path.
+- See `SECURITY.md` for vulnerability disclosure and triage scope.
+
+## Repository governance
+
+The repository ruleset must be treated as part of the enterprise control plane, not merely developer convenience. At minimum it should require the validation contexts that cover release/version, Terraform, runtime/evals/Hermes compatibility and assurance scanning. For a multi-person production team, require independent approval for protected-branch changes, resolve review threads, use CODEOWNERS where ownership is meaningful, and restrict administrative bypass to documented break-glass use.
+
+The current software can enforce CI content but cannot itself prove that a GitHub administrator never bypassed repository policy. Repository-setting evidence and audit logs remain part of deployment/operating assurance.
 
 ## Terraform state
 
@@ -51,7 +67,7 @@ Business definitions and raw runtime credentials must not be intentionally store
 - Document ownership and backup/restore requirements for persistent Hermes/runtime data.
 - Export relevant application, governed-action and cloud audit records to the client's or Model Garden's existing logging/SIEM stack when required.
 - Use protected production GitHub Environments and business/operator approval before promotion.
-- Test prohibited actions, approval-required actions, credential revocation and rollback as part of production acceptance.
+- Test prohibited actions, approval-required actions, credential revocation, audit-chain verification and rollback as part of production acceptance.
 
 ## Assurance evidence
 
