@@ -175,6 +175,10 @@ jobs:
             "$work/target" \
             --project-name "$project_name" \
             --apply
+          sudo -E "$work/venv/bin/python" "$work/model-garden/scripts/deploy-reference-voice.py" \
+            "$work/environment-binding.json" \
+            "$work/target" \
+            --project-name "$project_name"
           REMOTE_SCRIPT
           } | gcloud compute ssh "$INSTANCE" \
             --project "${{ vars.GCP_PROJECT_ID }}" \
