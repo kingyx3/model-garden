@@ -71,14 +71,20 @@ controls:
   auditability:
     status: implemented
     statement: >-
-      Material actions are designed to record client/tenant, Agent, initiating identity where
-      available, Tool/action, result, approval metadata, timestamp and correlation context.
+      Material actions record client/tenant, Agent, initiating identity where available,
+      Tool/action, result receipt, approval metadata, timestamp and bounded correlation context.
+      Schema-v2 local audit records are sequence-numbered, SHA-256 chained, file-locked,
+      fsynced and written with restrictive filesystem permissions so mutation, reordering,
+      insertion or deletion inside the retained chain is detectable.
     evidence:
       - docs/security.md
       - docs/governed-tools.md
-      - platform/runtime
+      - scripts/govern-action.py
+      - tests/test_govern_action.py
     limitations: >-
-      Retention duration and export to a client SIEM are deployment-specific.
+      The local chain is tamper-evident, not independently immutable: a host/storage administrator
+      could replace or delete the complete local log/head. Retention duration and export to a
+      separately administered SIEM/immutable store remain deployment-specific controls.
 
   human_oversight:
     status: implemented
@@ -101,17 +107,25 @@ controls:
       - docs/security.md
 
   vulnerability_and_patch_management:
-    status: policy_required
+    status: implemented_live_proof_pending
     statement: >-
-      The production hardening baseline requires regular OS/container dependency updates,
-      tested releases and image/dependency scanning where the operating environment supports it.
+      Every validated revision runs dependency-vulnerability, Python security, IaC, secret and
+      SBOM scans inside a protected-branch-required CI job. Runtime-critical voice dependencies
+      and third-party CI Actions are pinned, weekly dependency-update monitoring covers Python,
+      GitHub Actions and supported Terraform modules, and a vulnerability disclosure policy is
+      published.
     evidence:
       - docs/security.md
-      - .github/workflows
+      - SECURITY.md
+      - .github/workflows/validate.yml
+      - .github/dependabot.yml
+      - requirements-assurance.txt
+      - requirements-voice.txt
     limitations: >-
-      A buyer-specific answer about scan frequency, penetration testing or remediation SLA must
-      be supported by current operational evidence; no certification or penetration-test claim
-      is implied by this control.
+      Buyer-specific remediation SLAs, operating-system patch cadence, independent penetration
+      testing and proof that a production host consumed approved package/image versions require
+      current operational evidence. The current host bootstrap resolves the Debian image family
+      and Docker packages from provider/package repositories rather than a fully immutable host BOM.
 
   encryption_in_transit:
     status: client_configured
@@ -135,21 +149,30 @@ controls:
       - infra/docker-host/gcp
 
   data_minimisation:
-    status: policy_required
+    status: implemented_live_proof_pending
     statement: >-
       Workflows should collect only information needed for the business task, prefer authoritative
       client systems over copied datasets, and avoid unnecessary or indefinite audio/transcript retention.
+      The reference voice worker hashes internal call/transfer identifiers before persistence,
+      applies restrictive file permissions and has a bounded configurable message-retention window.
     evidence:
       - docs/security.md
+      - platform/channels/livekit_receptionist.py
+      - scripts/reference-proof.py
+    limitations: >-
+      Fallback caller name/number/message remain intentionally retained long enough for human follow-up;
+      production retention must be set to the client's approved value and verified operationally.
 
   retention_and_deletion:
     status: client_configured
     statement: >-
       Retention and deletion are defined per client, data class, provider and legal/business need.
-      Model Garden does not make a universal retention-period claim.
+      Model Garden does not make a universal retention-period claim. The reference voice fallback
+      store supports a configurable bounded retention interval with a seven-day default.
     evidence:
       - docs/security.md
       - docs/client-onboarding.md
+      - platform/channels/livekit_receptionist.py
 
   data_residency:
     status: not_verified
@@ -206,9 +229,12 @@ controls:
     statement: >-
       Incident handling follows contain/preserve evidence/fallback/assess/notify/remediate/regression
       steps, with operational severity and response commitments defined by the managed-service policy.
+      Private vulnerability reporting is directed through the repository security policy rather than
+      public issue disclosure.
     evidence:
       - docs/security.md
       - docs/client-onboarding.md
+      - SECURITY.md
     limitations: >-
       Contractual response targets and regulatory notification duties are engagement-specific.
 
@@ -238,11 +264,19 @@ controls:
     statement: >-
       Changes are version controlled, validated in CI, tested before production promotion and deployed
       through repeatable infrastructure/application workflows rather than untracked production mutation.
+      Third-party GitHub Actions are commit-SHA pinned and assurance scans/evidence generation execute
+      inside the existing protected-branch-required contracts-and-runtime validation context.
     evidence:
       - README.md
       - Makefile
-      - .github/workflows
+      - .github/workflows/validate.yml
+      - .github/dependabot.yml
+      - tests/test_enterprise_sdlc.py
       - tests
+    limitations: >-
+      Repository ruleset settings are an external administrative control. Independent reviewer count,
+      CODEOWNER enforcement, review-thread resolution and administrative bypass policy must be evidenced
+      separately for the operating repository/team; software tests cannot prove an administrator did not bypass them.
 
   ai_evaluation:
     status: implemented
