@@ -115,18 +115,44 @@ class GovernActionTests(unittest.TestCase):
             audit_path = pathlib.Path(tmp) / "audit.jsonl"
             result = govern.execute_action(state, "calendar.book", args, lambda payload: calls.append(payload) or {"bookingId": "booking-123"}, approval=approval, initiating_user="caller-session-7", governance_context=context, audit_path=audit_path)
             events = [json.loads(line) for line in audit_path.read_text().splitlines()]
+            verification = govern.verify_audit_chain(audit_path)
+            mode = audit_path.stat().st_mode & 0o777
 
         self.assertEqual(result["status"], "executed")
         self.assertEqual(result["result"], {"bookingId": "booking-123"})
         self.assertEqual(calls, [args])
         self.assertEqual([event["event"] for event in events], ["authorization", "approval", "execution"])
         self.assertTrue(all(event["schemaVersion"] == govern.AUDIT_SCHEMA_VERSION for event in events))
+        self.assertEqual([event["sequence"] for event in events], [1, 2, 3])
+        self.assertIsNone(events[0]["previousEventHash"])
+        self.assertEqual(events[1]["previousEventHash"], events[0]["eventHash"])
+        self.assertEqual(events[2]["previousEventHash"], events[1]["eventHash"])
+        self.assertTrue(all(len(event["eventHash"]) == 64 for event in events))
+        self.assertEqual(verification["events"], 3)
+        self.assertEqual(verification["headHash"], events[-1]["eventHash"])
+        self.assertEqual(mode, 0o600)
         self.assertEqual(events[1]["details"]["approver"], "practice-manager")
         self.assertTrue(all(event["requestId"] == request["requestId"] for event in events))
         self.assertTrue(all(event["governance"] == context for event in events))
         self.assertEqual(events[-1]["details"]["resultType"], "dict")
         self.assertEqual(len(events[-1]["details"]["resultDigest"]), 64)
         self.assertNotIn("booking-123", json.dumps(events[-1]["details"]))
+
+    def test_audit_chain_detects_tampering(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            audit_path = pathlib.Path(tmp) / "audit.jsonl"
+            govern.execute_action(
+                desired_state(approval_required=False),
+                "calendar.book",
+                {"slot": "2026-09-15T10:00:00+08:00"},
+                lambda _: {"bookingId": "booking-123"},
+                audit_path=audit_path,
+            )
+            events = [json.loads(line) for line in audit_path.read_text(encoding="utf-8").splitlines()]
+            events[0]["outcome"] = "deny"
+            audit_path.write_text("\n".join(json.dumps(event) for event in events) + "\n", encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "event hash mismatch"):
+                govern.verify_audit_chain(audit_path)
 
     def test_failed_execution_is_audited_without_error_message(self):
         with tempfile.TemporaryDirectory() as tmp:
