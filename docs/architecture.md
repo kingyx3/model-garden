@@ -1,6 +1,8 @@
-# Architecture
+# Implementation architecture
 
-Model Garden separates **portable client business desired state** from the **replaceable Agent runtime** and from **cloud infrastructure desired state**.
+This document owns the **repository-side implementation architecture** for the currently supported Model Garden release. Business/product invariants, build-vs-reuse decisions and future platform expansion belong in Confluence: [Business Model](https://modelgarden.atlassian.net/wiki/spaces/BA/pages/327686/Model+Garden+Business+Model+Minimum+Viable+Platform), [Build Plan](https://modelgarden.atlassian.net/wiki/spaces/BA/pages/917506/Model+Garden+Build+Plan+Hermes+vs+Model+Garden+Responsibilities) and [Roadmap](https://modelgarden.atlassian.net/wiki/spaces/BA/pages/950302/Model+Garden+Roadmap+MVP+to+Ideal+State).
+
+## Current implementation
 
 ```text
 private client workspace
@@ -27,33 +29,39 @@ cloud bootstrap (once)
 Terraform -> isolated client Docker host
 ```
 
-## Current deployment contract
+## Implementation boundaries
 
-- One shared, versioned Model Garden platform repository.
-- One separate private workspace repository per client.
-- GitHub is the engineering control plane: PRs validate, `dev` deploys DEV, `main` deploys PROD.
-- A temporary local cloud bootstrap credential may establish trust and remote state; normal deployment must use short-lived federation afterwards.
-- Terraform owns cloud infrastructure convergence.
-- The Model Garden compiler, Hermes adapter and Docker deployer own application/runtime convergence.
-- Raw secrets never belong in client business definitions or Terraform state.
-- GCP is the first complete reference cloud path: Workload Identity Federation + isolated Compute Engine Docker host + IAP/OS Login.
+| Seam | Current implementation |
+| --- | --- |
+| Client desired state | One separate private workspace repository per client, pinned to a published Model Garden release. |
+| Validation/materialization | Versioned `modelgarden.ai/v1` contracts, deterministic workspace validation/compiler and Hermes profile materialization. |
+| Agent runtime | Hermes reference runtime; runtime implementation remains behind the Model Garden client contract. |
+| Business actions | Governed MCP Tool boundary with explicit Tool selection, scoped credentials, `allow | approval | deny`, exact-action approval and attributable audit. |
+| Business-system integration | Thin connectors for proven capabilities; Google Calendar is the reference connector. |
+| Channels | Replaceable channel adapters; LiveKit is the reference voice path. |
+| Usage/cost attribution | Canonical non-secret attribution events emitted to the external Lago metering/billing seam. |
+| Infrastructure | Terraform-managed keyless GCP bootstrap and isolated Compute Engine Docker host. |
+| Delivery control | GitHub PR validation plus generated keyless environment deployment workflow. |
 
-## Current platform boundaries
+## Deployment contract
 
-- **Hermes**: reasoning loop, sessions, model execution and runtime Skill discovery.
-- **Model Garden workspace/compiler**: portable business-facing Agent/Skill/Tool/Knowledge/eval contracts and deterministic resolution.
-- **Governed MCP Tool path**: explicit selected Tools, scoped credentials, `allow | approval | deny`, exact-action approval and audit.
-- **Channel adapters**: replaceable phone/web/other channel boundaries. LiveKit is the reference voice adapter.
-- **Direct connectors**: narrow external-system capabilities required by proven workflows. Google Calendar is the current reference.
-- **Deployment**: isolated Docker host with pinned runtime, health verification and rollback.
-- **Metering**: thin attributable usage events to Lago; Model Garden does not implement billing.
+- The shared Model Garden repository contains platform code; client business desired state stays in the separate private client workspace.
+- GitHub controls tested software promotion; Terraform controls infrastructure convergence; Model Garden controls runtime convergence.
+- Initial GCP bootstrap may use one temporary local service-account credential. Normal deployment uses GitHub OIDC / Workload Identity Federation after bootstrap verification.
+- Deployment and runtime identities are separate. Raw runtime credentials do not belong in workspace business content or Terraform state.
+- DEV and PROD are separate deployment/secret boundaries and production promotion uses the tested workspace/platform revisions.
+- The current reference runtime target is isolated per client/environment and has no public VM IP; administration uses the supported private GCP path described in [`security.md`](security.md) and [`cloud-bootstrap.md`](cloud-bootstrap.md).
+- Runtime/model, governed-action and usage/cost evidence use bounded attributable identifiers; they do not depend on private chain-of-thought.
 
-## Evidence-gated expansion
+## Detailed authorities
 
-The repository intentionally contains only the deployment architecture that Model Garden currently supports. Earlier EKS/GKE/AKS, Kubernetes and LiteLLM gateway prototypes were removed once the keyless GCP + isolated Docker-host design became canonical.
+- Operator entry point: [`client-onboarding.md`](client-onboarding.md)
+- Bootstrap and federation: [`cloud-bootstrap.md`](cloud-bootstrap.md)
+- Credential boundaries: [`secrets.md`](secrets.md)
+- Production hardening: [`security.md`](security.md)
+- Governed actions/audit: [`governed-tools.md`](governed-tools.md)
+- Usage/cost attribution: [`metering.md`](metering.md)
+- Live acceptance evidence: [`live-proof.md`](live-proof.md)
+- Enterprise assurance evidence: [`assurance.md`](assurance.md)
 
-If a real client later requires AWS, Azure, Kubernetes, a model gateway, a Connector SDK, a fleet control plane, a dedicated policy engine or a client portal, add the smallest compatible implementation behind the existing client-workspace/runtime contracts. Do not restore old prototypes merely because they once existed.
-
-## Desired end state
-
-Clients can change business-facing employee behaviour without runtime/cloud knowledge; Model Garden can upgrade runtimes/models/connectors without rewriting client definitions; hosting can move between Model Garden-owned and client-owned cloud without changing the business contract; and every material external action remains attributable, policy-controlled and regression-tested.
+Expansion decisions such as additional clouds, Kubernetes, a control plane, Connector SDK, model gateway, dedicated policy engine or client portal are intentionally **not** decided in this implementation document. Their evidence gates belong to the Confluence Build Plan and Roadmap; when approved, this document should change only after the implementation exists.
