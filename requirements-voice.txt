@@ -1,1 +1,2 @@
 livekit-agents[openai]==1.5.17
+httpx==0.28.1
