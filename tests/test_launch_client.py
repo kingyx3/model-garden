@@ -11,6 +11,7 @@ from unittest import mock
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "scripts" / "launch-client.py"
+TEST_RELEASE = "9.9.9"
 spec = importlib.util.spec_from_file_location("launch_client", SCRIPT)
 launch = importlib.util.module_from_spec(spec)
 assert spec.loader is not None
@@ -61,7 +62,7 @@ class LaunchClientTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             workspace = pathlib.Path(tmp)
             (workspace / "modelgarden.yaml").write_text("workspace:\n  client: acme\n", encoding="utf-8")
-            (workspace / "platform.lock.yaml").write_text("modelgarden: 0.3.3\n", encoding="utf-8")
+            (workspace / "platform.lock.yaml").write_text(f"modelgarden: {TEST_RELEASE}\n", encoding="utf-8")
 
             def origin_runner(command, *, cwd=None, **kwargs):
                 self.assertEqual(cwd, workspace)
@@ -163,7 +164,7 @@ class LaunchClientTests(unittest.TestCase):
 
             with mock.patch.object(launch, "_require_command"), mock.patch.object(
                 launch, "_load_script", return_value=fake_cloud
-            ), mock.patch.object(launch, "_ensure_release_exists", return_value="0.3.3"), mock.patch.object(
+            ), mock.patch.object(launch, "_ensure_release_exists", return_value=TEST_RELEASE), mock.patch.object(
                 launch, "_ensure_workspace_and_repo"
             ) as ensure_workspace, mock.patch.object(launch, "_ensure_runtime_secrets") as ensure_secrets, mock.patch.object(
                 launch, "_repo_variables", side_effect=[{}, self.ready_variables()]
@@ -204,7 +205,7 @@ class LaunchClientTests(unittest.TestCase):
 
             with mock.patch.object(launch, "_require_command"), mock.patch.object(
                 launch, "_load_script", return_value=fake_cloud
-            ), mock.patch.object(launch, "_ensure_release_exists", return_value="0.3.3"), mock.patch.object(
+            ), mock.patch.object(launch, "_ensure_release_exists", return_value=TEST_RELEASE), mock.patch.object(
                 launch, "_ensure_workspace_and_repo"
             ), mock.patch.object(launch, "_ensure_runtime_secrets"), mock.patch.object(
                 launch, "_repo_variables", return_value=variables
