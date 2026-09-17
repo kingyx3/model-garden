@@ -28,6 +28,12 @@ DEFAULT_SINGAPORE = ASSURANCE / "singapore.yaml"
 
 SUPPORTED_STATUSES = {"implemented"}
 TOKEN_RE = re.compile(r"[a-z0-9]+")
+STOPWORDS = {
+    "a", "an", "and", "are", "as", "at", "be", "by", "can", "describe", "do",
+    "does", "for", "from", "how", "i", "in", "is", "it", "of", "on", "or", "our",
+    "the", "their", "this", "to", "we", "what", "when", "where", "which", "who",
+    "with", "you", "your",
+}
 
 
 def load_yaml(path: pathlib.Path) -> dict[str, Any]:
@@ -39,7 +45,7 @@ def load_yaml(path: pathlib.Path) -> dict[str, Any]:
 
 
 def tokenize(text: str) -> list[str]:
-    return TOKEN_RE.findall(text.lower())
+    return [token for token in TOKEN_RE.findall(text.lower()) if token not in STOPWORDS]
 
 
 def _weighted_terms(text: str) -> Counter[str]:
@@ -85,7 +91,7 @@ def find_question(query: str, catalog: dict[str, Any], question_id: str | None =
         key=lambda pair: pair[0],
         reverse=True,
     )
-    if not ranked or ranked[0][0] < 0.08:
+    if not ranked or ranked[0][0] < 0.12:
         return None, ranked[0][0] if ranked else 0.0
     return ranked[0][1], ranked[0][0]
 
