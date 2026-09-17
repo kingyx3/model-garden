@@ -2,7 +2,7 @@
 
 Model Garden is an OSS-first platform and consulting delivery baseline for deploying governed AI employees for small and mid-sized businesses without requiring a client IT team.
 
-**Current development release:** `0.3.5`
+**Current development release:** `0.3.6`
 
 ## Architecture in one screen
 
@@ -45,7 +45,7 @@ Core rules:
 - build only the Model Garden differentiation layer; prefer client systems, open standards and mature OSS for commodity capabilities;
 - do not add Kubernetes, a control plane, Connector SDK, custom gateway or portal without evidence from live deployments.
 
-See [`docs/architecture.md`](docs/architecture.md), [`docs/security.md`](docs/security.md) and [`docs/secrets.md`](docs/secrets.md) for repository-facing detail.
+See [`docs/architecture.md`](docs/architecture.md), [`docs/security.md`](docs/security.md), [`docs/secrets.md`](docs/secrets.md) and [`docs/self-hosting.md`](docs/self-hosting.md) for repository-facing detail.
 
 ## Preferred client launch
 
@@ -88,6 +88,9 @@ Enterprise actions are not granted by prompts. Selected Tools are exposed throug
 - **Lago**: default external usage metering/billing system; Model Garden emits attributable usage events only.
 - **Langfuse**: optional observability when existing telemetry is insufficient.
 - **Cloud provider**: GCP is the first current keyless Docker-host reference; add other clouds only when demanded by real deployment evidence.
+- **Cloudflare**: optional low-cost DNS/HTTP edge; never required for Model Garden authority, and not a Free-tier substitute for LiveKit/SIP realtime UDP transport.
+
+The self-hosting and Cloudflare cost/TCO decision rules are documented in [`docs/self-hosting.md`](docs/self-hosting.md).
 
 ## Repository layout
 
