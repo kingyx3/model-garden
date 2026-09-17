@@ -116,10 +116,13 @@ jobs:
           python3 -m pip install -r requirements-voice.txt
           python3 -c 'from livekit import api, rtc; from livekit.agents import Agent, AgentServer, AgentSession, JobContext, RunContext, cli, function_tool, get_job_context; from livekit.plugins import openai; print("LiveKit voice API imports verified")'
       - name: Install assurance dependencies
+        if: always()
         run: python3 -m pip install -r requirements-assurance.txt
       - name: Generate scanner evidence and enterprise pack
+        if: always()
         run: bash scripts/run-assurance-scans.sh
       - name: Verify evidence pack exists
+        if: always()
         run: |
           test -s .enterprise-evidence/enterprise-evidence-pack.md
           test -s .enterprise-evidence/manifest.json
