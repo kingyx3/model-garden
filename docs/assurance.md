@@ -62,7 +62,7 @@ Use official sources and treat each according to its actual legal status:
 6. **PDPC Data Protection Trustmark (SS 714:2025)** — voluntary privacy assurance target; never claim certification without a current certificate.
 7. **Cybersecurity Act** — conditional legal overlay for CII and other regulated categories; assess actual applicability.
 8. **MAS technology-risk requirements** — conditional financial-sector overlay; determine the client's exact regulated entity and applicable notice/guidance.
-9. **Health Information Act / healthcare cyber and data-security requirements** — conditional healthcare overlay.
+9. **Health Information Act / healthcare cyber and data-security requirements** — conditional healthcare overlay. The HIA was enacted in February 2026, but key NEHR contribution obligations are scheduled to begin progressively from September 2027; current healthcare security obligations may instead arise from the Healthcare Services Act, PDPA and other applicable requirements.
 
 The authoritative URLs and current scope notes are maintained in `assurance/singapore.yaml`.
 
