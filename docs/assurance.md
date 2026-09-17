@@ -5,11 +5,61 @@ Model Garden keeps a version-controlled assurance layer for common enterprise se
 ## Files
 
 - `assurance/evidence.yaml` — canonical Model Garden control statements, current evidence status, repository evidence and limitations.
+- `assurance/evidence-metadata.yaml` — evidence ownership, CI verification mapping and manual evidence review cadence.
 - `assurance/ddq-catalog.yaml` — common enterprise DDQ questions and the controls needed to answer them.
 - `assurance/singapore.yaml` — Singapore regulatory/guidance map and procurement evidence targets.
 - `scripts/ddq.py` — single-question, CSV batch and readiness-gap interface.
+- `scripts/enterprise-evidence.py` — commit-scoped enterprise evidence pack and machine-readable manifest generator.
+- `scripts/run-assurance-scans.sh` — reproducible dependency, Python security, IaC, secret and SBOM evidence collection.
+- `requirements-assurance.txt` — pinned scanner toolchain used by CI.
 
-Confluence remains the business/security policy authority. These repository files are the executable/evidence-facing representation used to prepare DDQ answers and identify proof gaps.
+Confluence remains the business/security policy authority. These repository files are the executable/evidence-facing representation used to prepare DDQ answers, identify proof gaps and retain commit-scoped evidence.
+
+## Generate an Enterprise Evidence Pack
+
+Generate a pack from the canonical repository evidence without installing the optional scanners:
+
+```bash
+make assurance
+```
+
+This writes:
+
+- `.enterprise-evidence/enterprise-evidence-pack.md` — reviewer-friendly evidence snapshot;
+- `.enterprise-evidence/manifest.json` — machine-readable controls, statuses, scanner summaries, manual-evidence requirements and Singapore source map.
+
+The pack is tied to the current Model Garden version and repository commit. It is **not** a certification, legal opinion or universal statement about every customer deployment.
+
+For the fuller scanner-backed pack:
+
+```bash
+make assurance-scan
+```
+
+The scanner workflow records:
+
+- Python dependency vulnerabilities with `pip-audit`;
+- Python security findings with `bandit`;
+- Terraform/IaC findings with `checkov`;
+- potential repository secrets with `detect-secrets`;
+- a Python CycloneDX SBOM using `pip-audit`'s CycloneDX output.
+
+Scanner findings are preserved in the evidence pack instead of being converted into false positive assurance. A scanner run also does not upgrade `policy_required`, `client_configured` or `not_verified` controls to `implemented`.
+
+## CI evidence artifact
+
+Every validated pull request/main revision runs the enterprise-evidence job. CI uploads an `enterprise-evidence-<commit>` artifact containing the scanner outputs, evidence pack and manifest. The artifact is retained for 30 days by default and the normal main/release publication path depends on successful evidence-pack generation.
+
+The scanner stage is initially evidence-producing rather than an automatic claim of security. Where scanners report findings, those findings remain visible for review and remediation. Formal penetration tests, certifications, insurance, DPO/privacy operations, provider residency/training facts and client-specific controls still require their own evidence.
+
+## Evidence freshness
+
+`assurance/evidence-metadata.yaml` separates two evidence classes:
+
+- **repository snapshot evidence** — re-verified against each validated commit by CI;
+- **manual/external evidence** — assigned an owner and review interval because source code cannot prove facts such as current insurance, independent penetration testing, certifications or an operating privacy programme.
+
+Expired, missing or deployment-specific evidence must remain visible. Do not silently turn it into a supported customer answer.
 
 ## Answer one question
 
