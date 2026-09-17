@@ -29,11 +29,13 @@ sources:
       - Overseas transfers must meet prescribed requirements so transferred personal data receives protection comparable to the PDPA unless an exception applies.
       - A notifiable breach must be notified to the PDPC as soon as practicable and in any case no later than three calendar days after determining it is notifiable; affected individuals are notified where required.
       - The statutory data-portability obligation remains subject to commencement by regulations; do not claim it is generally in force without checking current commencement status.
+      - PDPC's January 2026 advisory highlights recurring protection lapses including migration/change failures and inadequate monitoring or breach-detection measures.
     urls:
       - https://www.pdpc.gov.sg/overview-of-pdpa/the-legislation/personal-data-protection-act/data-protection-obligations
       - https://www.pdpc.gov.sg/help-and-resources/2021/09/accountability
       - https://www.pdpc.gov.sg/guidelines-and-consultation/2020/03/advisory-guidelines-on-key-concepts-in-the-personal-data-protection-act
       - https://www.pdpc.gov.sg/report-data-breach/before-you-report-a-data-breach-3/info
+      - https://www.pdpc.gov.sg/help-and-resources/2026/01/advisory-on-common-data-protection-lapses-and-recommended-measures
     controls:
       - privacy_program
       - data_minimisation
@@ -43,6 +45,7 @@ sources:
       - incident_response
       - least_privilege
       - auditability
+      - vulnerability_and_patch_management
 
   pdpc_ai_personal_data:
     name: PDPC Advisory Guidelines on use of Personal Data in AI Recommendation and Decision Systems
@@ -197,8 +200,11 @@ sources:
       Conditional overlay for Singapore financial institutions and vendors supporting regulated financial workloads. Determine the client's exact licence/entity type and applicable MAS Notice/Guidelines before making a compliance claim.
     notes:
       - MAS technology-risk notices apply to multiple categories of financial institutions and include requirements that differ by entity type.
+      - Current MAS notices can impose specific availability, recovery-testing and incident-notification requirements on regulated entities; do not transpose an FI's direct regulatory obligation onto Model Garden without assessing the contract and outsourcing/vendor role.
       - Financial-sector DDQs commonly require stronger evidence around availability, cyber risk, outsourcing/service-provider risk, incident management, access control and business continuity.
-    url: https://www.mas.gov.sg/-/media/mas-media-library/regulation/faqs/trpd/faqs---notice-on-technology-risk-management/updated-faqs-trm-notice-feb-2024-final.pdf
+    urls:
+      - https://www.mas.gov.sg/-/media/mas-media-library/regulation/faqs/trpd/faqs---notice-on-technology-risk-management/updated-faqs-trm-notice-feb-2024-final.pdf
+      - https://www.mas.gov.sg/-/media/mas-media-library/regulation/notices/trpd/psn05/psn05-technology-risk-management-notice---6-feb-2024.pdf
     controls:
       - vulnerability_and_patch_management
       - least_privilege
@@ -212,13 +218,16 @@ sources:
     name: Health Information Act and healthcare cyber/data-security requirements
     kind: sector_overlay_healthcare
     applicability: >-
-      Conditional overlay for health information, healthcare providers and healthcare IT vendors. Determine whether the client/deployment is an HIA entity, HIMS vendor or otherwise subject to healthcare-specific obligations.
+      Conditional overlay for health information, healthcare providers and healthcare IT vendors. The HIA was enacted in February 2026, but key NEHR contribution obligations are scheduled to begin progressively from September 2027. Determine the deployment's role and the provisions actually in force before describing any HIA obligation as currently applicable.
     notes:
       - MOH states that the HIA includes cybersecurity and data-security requirements for healthcare providers.
+      - MOH stated in May 2026 that licensed providers will progressively be required to contribute key patient health information to the NEHR from September 2027.
       - CSA's 2025 Cyber Essentials scheme includes HIA-entity and HIMS-vendor sub-schemes, with current supporting documents updated in 2026.
-      - MOH stated in August 2026 that data-security requirements apply to AI tools processing patient data whether third-party-cloud hosted or on-premise.
+      - MOH stated in August 2026 that data-security requirements apply to AI tools processing patient data whether third-party-cloud hosted or on-premise under the Healthcare Services Act and PDPA; this requirement should not be mislabelled as an already-commenced HIA requirement.
     urls:
       - https://www.moh.gov.sg/others/health-regulation/health-information-protection/
+      - https://www.moh.gov.sg/newsroom/becoming-a-healthier-population/
+      - https://www.moh.gov.sg/newsroom/speech-by-mr-tan-kiat-how--senior-minister-of-state--ministry-of-digital-development-and-information---ministry-of-health--at-healthtechx-asia--6-may-2026/
       - https://www.csa.gov.sg/our-programmes/support-for-enterprises/sg-cyber-safe-programme/cybersecurity-certification-for-organisations/cyber-essentials/certification-for-the-cyber-essentials-mark/
       - https://www.moh.gov.sg/newsroom/data-security-requirements-apply-to-ai-tools-that-process-patient-data/
     controls:
