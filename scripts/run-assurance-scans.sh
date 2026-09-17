@@ -15,7 +15,7 @@ fi
 run_report() {
   local name="$1"
   shift
-  echo "==> ${name}"
+  echo "==> ${name}" >&2
   set +e
   "$@"
   local rc=$?
@@ -26,8 +26,8 @@ run_report() {
   fi
 }
 
-# Scan tracked repository content before producing reports so the scanner does not inspect its own outputs.
-run_report detect-secrets detect-secrets scan --all-files \
+# Scan repository content before producing reports so the scanner does not inspect its own outputs.
+run_report detect-secrets detect-secrets scan --all-files --no-verify \
   --exclude-files '(^|/)\.git/' \
   --exclude-files '(^|/)\.enterprise-evidence/' \
   --exclude-files '(^|/)\.venv/' \
