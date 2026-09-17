@@ -2,8 +2,9 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://modelgarden.ai/schemas/v1/usage-attribution.schema.json",
   "title": "Model Garden Usage Attribution v1",
+  "description": "Canonical Model Garden attribution dimensions. Additional non-sensitive metering dimensions are allowed for provider/billable-metric facts; canonical fields remain stable and protected by the runtime builder.",
   "type": "object",
-  "additionalProperties": false,
+  "additionalProperties": true,
   "required": ["client", "agent", "environment", "provider"],
   "properties": {
     "client": {"type": "string", "minLength": 1},
