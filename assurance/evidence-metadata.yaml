@@ -36,7 +36,7 @@ automated_checks:
     owner: Model Garden engineering
     tool: bandit
     evidence_file: scans/bandit.json
-    scope: Medium/high-severity findings in executable Python under scripts/ and platform/. Low-severity tooling/subprocess notices remain code-review concerns rather than enterprise evidence failures.
+    scope: Medium/high-severity findings in executable Python under scripts/ and platform/. Low-severity tooling/subprocess notices remain code-review concerns rather than enterprise evidence failures. B104 and B310 are narrow documented exceptions below.
     controls: [secure_sdlc, vulnerability_and_patch_management]
   infrastructure_as_code_scan:
     owner: Model Garden engineering
@@ -46,9 +46,9 @@ automated_checks:
     controls: [secure_sdlc, least_privilege, secret_management]
   repository_secret_scan:
     owner: Model Garden engineering
-    tool: detect-secrets
+    tool: bc-detect-secrets
     evidence_file: scans/detect-secrets.json
-    scope: Repository content except .git, generated evidence, virtual environments and tests containing deterministic fake credentials. A pinned container-image digest and the scanner output filename are narrow line-level allowlists.
+    scope: Repository content except .git, generated evidence, virtual environments, deterministic test fixtures and the two scanner implementation files that otherwise self-match their own configuration. The pinned container-image digest is a narrow line-level allowlist.
     controls: [secret_management, secure_sdlc]
   python_sbom:
     owner: Model Garden engineering
@@ -71,8 +71,8 @@ accepted_scanner_exceptions:
     scope: governed MCP container bind
     rationale: The governed Tool service binds all interfaces inside its private Docker network so the Hermes container can reach it; Docker Compose does not publish that port to the host/public network.
   B310:
-    scope: HTTP transports
-    rationale: Google Calendar requests derive from a fixed HTTPS Google API base; Lago transport accepts only a validated http/https URL with a hostname. Bandit cannot infer those upstream constraints at urlopen.
+    scope: Google Calendar and Lago HTTP transports
+    rationale: Google Calendar transport explicitly permits only HTTPS to www.googleapis.com. Lago transport validates http/https, requires a hostname and rejects embedded credentials. Bandit does not perform the data-flow reasoning needed to recognise these checks at urlopen.
 
 manual_evidence:
   privacy_program:
