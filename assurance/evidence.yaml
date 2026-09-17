@@ -1,0 +1,326 @@
+version: 1
+updated: 2026-09-17
+status_values:
+  - implemented
+  - implemented_live_proof_pending
+  - client_configured
+  - policy_required
+  - not_verified
+  - not_applicable
+
+controls:
+  client_isolation:
+    status: implemented
+    statement: >-
+      Early-client deployments use an isolated client runtime, state and secret boundary.
+      Client workspace definitions cannot grant themselves credentials or permissions.
+    evidence:
+      - docs/security.md
+      - infra/docker-host/gcp
+      - docs/architecture.md
+    limitations: >-
+      The current baseline is one isolated Docker host/environment per early client rather
+      than a shared multi-tenant control plane.
+
+  least_privilege:
+    status: implemented
+    statement: >-
+      Deployment, runtime and business-system identities are separated. Connectors are
+      intended to receive only the scopes and credentials needed for the approved workflow.
+    evidence:
+      - docs/security.md
+      - docs/secrets.md
+      - docs/governed-tools.md
+
+  keyless_deployment:
+    status: implemented_live_proof_pending
+    statement: >-
+      The GCP reference bootstrap provisions remote Terraform state, workload identity
+      federation and separate deploy/runtime identities so normal deployments use GitHub
+      OIDC rather than a long-lived cloud key.
+    evidence:
+      - docs/cloud-bootstrap.md
+      - infra/bootstrap/gcp
+      - scripts/bootstrap-cloud.py
+    limitations: >-
+      The reference path is CI-validated; the business launch authority still requires a
+      retained live proof that deployment continues after the temporary bootstrap JSON is
+      revoked/deleted.
+
+  secret_management:
+    status: implemented
+    statement: >-
+      Raw secrets are excluded from Agent, Skill, Knowledge and workspace business content.
+      Core deployment secrets are kept in protected GitHub Environments or provider/runtime
+      authorization stores, with logical secret references used in desired state.
+    evidence:
+      - docs/secrets.md
+      - docs/security.md
+
+  governed_actions:
+    status: implemented
+    statement: >-
+      Consequential enterprise actions pass through a governed Tool/MCP boundary with
+      allow, approval or deny decisions. Approval-required actions bind to the exact material
+      request and consume the human decision once.
+    evidence:
+      - docs/governed-tools.md
+      - platform/runtime
+      - tests
+
+  auditability:
+    status: implemented
+    statement: >-
+      Material actions are designed to record client/tenant, Agent, initiating identity where
+      available, Tool/action, result, approval metadata, timestamp and correlation context.
+    evidence:
+      - docs/security.md
+      - docs/governed-tools.md
+      - platform/runtime
+    limitations: >-
+      Retention duration and export to a client SIEM are deployment-specific.
+
+  human_oversight:
+    status: implemented
+    statement: >-
+      Human approval and handoff are first-class controls. High-impact or unsupported actions
+      can be denied or routed to a controlled workflow instead of being authorized by prompts.
+    evidence:
+      - docs/governed-tools.md
+      - docs/security.md
+      - evals
+
+  versioning_and_rollback:
+    status: implemented
+    statement: >-
+      Production releases, runtime dependencies and client workspace revisions are pinned;
+      the deployment process retains a known-good revision for rollback and regression testing.
+    evidence:
+      - README.md
+      - docs/releasing.md
+      - docs/security.md
+
+  vulnerability_and_patch_management:
+    status: policy_required
+    statement: >-
+      The production hardening baseline requires regular OS/container dependency updates,
+      tested releases and image/dependency scanning where the operating environment supports it.
+    evidence:
+      - docs/security.md
+      - .github/workflows
+    limitations: >-
+      A buyer-specific answer about scan frequency, penetration testing or remediation SLA must
+      be supported by current operational evidence; no certification or penetration-test claim
+      is implied by this control.
+
+  encryption_in_transit:
+    status: client_configured
+    statement: >-
+      Encryption in transit is provided through the selected cloud/provider protocols and TLS
+      endpoints where applicable. Exact protocol, cipher and certificate statements must be
+      verified against the deployed provider configuration.
+    evidence:
+      - docs/security.md
+      - infra/docker-host/gcp
+    limitations: Do not claim a specific TLS version unless verified for the deployed endpoint.
+
+  encryption_at_rest:
+    status: client_configured
+    statement: >-
+      At-rest encryption relies on the selected cloud, storage and SaaS provider controls.
+      Exact key-management, CMEK and storage statements are deployment-specific and must be
+      verified before answering a customer questionnaire.
+    evidence:
+      - docs/security.md
+      - infra/docker-host/gcp
+
+  data_minimisation:
+    status: policy_required
+    statement: >-
+      Workflows should collect only information needed for the business task, prefer authoritative
+      client systems over copied datasets, and avoid unnecessary or indefinite audio/transcript retention.
+    evidence:
+      - docs/security.md
+
+  retention_and_deletion:
+    status: client_configured
+    statement: >-
+      Retention and deletion are defined per client, data class, provider and legal/business need.
+      Model Garden does not make a universal retention-period claim.
+    evidence:
+      - docs/security.md
+      - docs/client-onboarding.md
+
+  data_residency:
+    status: not_verified
+    statement: >-
+      Data location depends on the selected cloud region, model provider, voice provider and
+      client systems. Model Garden does not claim Singapore-only residency by default.
+    evidence:
+      - docs/security.md
+      - docs/self-hosting.md
+    limitations: >-
+      A Singapore-only or named-region answer requires verification of every relevant provider
+      and data flow for the specific deployment.
+
+  cross_border_transfers:
+    status: client_configured
+    statement: >-
+      Cross-border transfers are identified through the provider/data-flow inventory and must be
+      covered by the contractual or other mechanisms required for the client and jurisdiction.
+    evidence:
+      - docs/security.md
+      - docs/client-onboarding.md
+
+  model_data_usage:
+    status: client_configured
+    statement: >-
+      For every production model provider, the deployment must record what data is sent and the
+      applicable retention/training settings and commercial/data-processing terms.
+    evidence:
+      - docs/security.md
+    limitations: >-
+      Model Garden does not claim that prompts or outputs are never retained or used for training
+      unless this is verified for the actual provider, account tier and configuration.
+
+  subprocessor_inventory:
+    status: policy_required
+    statement: >-
+      Production dependencies are recorded with purpose, version/revision, licence/terms, data
+      exposure, security review status, compatibility evidence and replacement path.
+    evidence:
+      - docs/security.md
+
+  open_source_governance:
+    status: policy_required
+    statement: >-
+      External Skills and OSS are not automatically trusted. Source, revision and licence are
+      reviewed; unsafe instructions/external access are assessed; the component is tested,
+      provenance-pinned and only then exposed through the curated catalogue.
+    evidence:
+      - docs/security.md
+      - docs/contracts.md
+
+  incident_response:
+    status: policy_required
+    statement: >-
+      Incident handling follows contain/preserve evidence/fallback/assess/notify/remediate/regression
+      steps, with operational severity and response commitments defined by the managed-service policy.
+    evidence:
+      - docs/security.md
+      - docs/client-onboarding.md
+    limitations: >-
+      Contractual response targets and regulatory notification duties are engagement-specific.
+
+  business_continuity:
+    status: policy_required
+    statement: >-
+      Recovery relies on known-good releases, workspace revisions, deployable images and agreed
+      backup/restore requirements for persistent runtime data. Provider/channel fallbacks are
+      selected per client workflow.
+    evidence:
+      - docs/security.md
+      - docs/self-hosting.md
+      - docs/client-onboarding.md
+
+  offboarding:
+    status: policy_required
+    statement: >-
+      Offboarding includes revoking Model Garden/application access, rotating or revoking credentials,
+      disabling routes/routines, exporting client business definitions and returning/deleting retained
+      data according to agreement and applicable requirements.
+    evidence:
+      - docs/security.md
+      - docs/client-onboarding.md
+
+  secure_sdlc:
+    status: implemented
+    statement: >-
+      Changes are version controlled, validated in CI, tested before production promotion and deployed
+      through repeatable infrastructure/application workflows rather than untracked production mutation.
+    evidence:
+      - README.md
+      - Makefile
+      - .github/workflows
+      - tests
+
+  ai_evaluation:
+    status: implemented
+    statement: >-
+      Model Garden uses representative EvalSuites and regression checks for business behaviour,
+      prohibited actions, permission failures and selected channel/tool workflows before promotion.
+    evidence:
+      - evals
+      - tests
+      - scripts/eval-receptionist.py
+
+  ai_transparency:
+    status: client_configured
+    statement: >-
+      Client-facing disclosure, AI identity and user instructions are configured according to the
+      interaction channel, use case and applicable business/legal requirements.
+    evidence:
+      - docs/client-onboarding.md
+      - examples/workspace
+
+  ai_risk_bounding:
+    status: implemented
+    statement: >-
+      Agent authority is bounded through explicit Tools, least-privilege credentials, allow/approval/deny
+      policies, human checkpoints and deny/controlled paths for high-impact actions.
+    evidence:
+      - docs/governed-tools.md
+      - docs/security.md
+
+  ai_prompt_injection_controls:
+    status: implemented
+    statement: >-
+      Untrusted content cannot self-grant new Tool authority. Enterprise permissions are enforced outside
+      prompts at the Tool/credential boundary; evals should include malicious-content and unauthorized-action cases.
+    evidence:
+      - docs/governed-tools.md
+      - docs/security.md
+      - evals
+
+  privacy_program:
+    status: policy_required
+    statement: >-
+      Singapore production requires an accountable privacy operating model, including appropriate policies,
+      a DPO/accountability owner, data inventory, retention/transfer handling, access/correction processes and
+      breach procedures as applicable to Model Garden's role.
+    evidence:
+      - docs/security.md
+    limitations: >-
+      This registry is an engineering evidence baseline, not evidence that the operating legal entity has completed
+      every PDPA organisational obligation.
+
+  formal_certifications:
+    status: not_verified
+    statement: >-
+      No ISO 27001, SOC 2, CSA Cyber Essentials/Cyber Trust, PDPC Data Protection Trustmark or other formal
+      certification is claimed by this evidence registry unless a current certificate is separately attached.
+    evidence: []
+    limitations: Formal certifications must be independently verified and kept current.
+
+  penetration_testing:
+    status: not_verified
+    statement: >-
+      The repository contains security controls and automated validation but does not, by itself, evidence a current
+      independent penetration test. Provide a test report only when one has actually been completed and is releasable.
+    evidence: []
+
+  cyber_insurance:
+    status: not_verified
+    statement: >-
+      Cyber-insurance coverage is a company-level commercial control and is not evidenced by the software repository.
+    evidence: []
+
+  data_subject_requests:
+    status: policy_required
+    statement: >-
+      Access, correction and other data-subject handling must be supported through the client/Model Garden operating
+      process according to the parties' roles and applicable law; authoritative data should remain in client systems
+      where practical.
+    evidence:
+      - docs/security.md
+      - docs/client-onboarding.md
