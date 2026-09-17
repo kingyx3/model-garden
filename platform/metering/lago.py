@@ -10,13 +10,25 @@ from __future__ import annotations
 import json
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from typing import Any, Callable
 
 Transport = Callable[[str, str, dict[str, str], dict[str, Any]], tuple[int, dict[str, Any]]]
 
 
+def _validated_http_url(value: str, label: str) -> str:
+    url = _require_text(value, label).rstrip("/")
+    parsed = urllib.parse.urlparse(url)
+    if parsed.scheme not in {"https", "http"} or not parsed.hostname:
+        raise ValueError(f"{label} must be an http(s) URL with a hostname")
+    if parsed.username or parsed.password:
+        raise ValueError(f"{label} must not contain embedded credentials")
+    return url
+
+
 def _http_transport(method: str, url: str, headers: dict[str, str], payload: dict[str, Any]) -> tuple[int, dict[str, Any]]:
+    _validated_http_url(url, "Lago request URL")
     request = urllib.request.Request(
         url,
         data=json.dumps(payload, separators=(",", ":")).encode("utf-8"),
@@ -24,6 +36,7 @@ def _http_transport(method: str, url: str, headers: dict[str, str], payload: dic
         method=method,
     )
     try:
+        # nosec B310 -- URL scheme/hostname and embedded credentials are validated above.
         with urllib.request.urlopen(request, timeout=10) as response:
             status = response.status
             raw = response.read().decode("utf-8")
@@ -90,9 +103,7 @@ class LagoClient:
         transport: Transport = _http_transport,
     ) -> None:
         self.api_key = _require_text(api_key, "Lago API key")
-        self.base_url = _require_text(base_url, "Lago base URL").rstrip("/")
-        if not self.base_url.startswith(("https://", "http://")):
-            raise ValueError("Lago base URL must start with https:// or http://")
+        self.base_url = _validated_http_url(base_url, "Lago base URL")
         self.transport = transport
 
     def send_usage(
