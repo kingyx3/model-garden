@@ -40,7 +40,7 @@ run_report detect-secrets detect-secrets scan --all-files --no-verify \
   --exclude-files '(^|/)scripts/(run-assurance-scans|enterprise-evidence)\.(sh|py)$' \
   --exclude-lines 'BASE_IMAGE = "python:' > "${OUT}/detect-secrets.json"
 
-run_report pip-audit pip-audit -r requirements-dev.txt --format json --output "${OUT}/pip-audit.json"
+run_report pip-audit pip-audit -r requirements-dev.txt -r requirements-voice.txt --format json --output "${OUT}/pip-audit.json"
 # Medium/high severity findings are the enterprise evidence threshold. B104 and B310
 # are documented narrow exceptions: private Docker-network binding and validated HTTP(S)
 # transport respectively. Their exact rationale is retained with the artifact metadata.
@@ -57,7 +57,7 @@ fi
 
 # pip-audit can emit a CycloneDX SBOM while retaining vulnerability information.
 set +e
-pip-audit -r requirements-dev.txt --format cyclonedx-json --output "${OUT}/python-sbom.cdx.json"
+pip-audit -r requirements-dev.txt -r requirements-voice.txt --format cyclonedx-json --output "${OUT}/python-sbom.cdx.json"
 sbom_rc=$?
 set -e
 printf '%s\n' "${sbom_rc}" > "${OUT}/python-sbom.exit-code"

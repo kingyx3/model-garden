@@ -30,7 +30,7 @@ automated_checks:
     owner: Model Garden engineering
     tool: pip-audit
     evidence_file: scans/pip-audit.json
-    scope: Python runtime and development dependency manifests.
+    scope: Python core/development manifests plus the optional production LiveKit voice runtime manifest.
     controls: [vulnerability_and_patch_management, secure_sdlc]
   python_security_scan:
     owner: Model Garden engineering
@@ -54,7 +54,7 @@ automated_checks:
     owner: Model Garden engineering
     tool: pip-audit CycloneDX output
     evidence_file: scans/python-sbom.cdx.json
-    scope: Python dependency manifests; this is not yet a complete OS/container SBOM.
+    scope: Core/development and optional production voice Python dependency manifests; this is not yet a complete OS/container SBOM.
     controls: [subprocessor_inventory, open_source_governance, vulnerability_and_patch_management]
 
 accepted_scanner_exceptions:
