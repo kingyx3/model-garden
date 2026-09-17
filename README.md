@@ -57,6 +57,7 @@ Keep one authority per topic and link to it instead of copying the same operatin
 - [`docs/cloud-bootstrap.md`](docs/cloud-bootstrap.md): keyless infrastructure bootstrap internals.
 - [`docs/secrets.md`](docs/secrets.md): credential ownership, secret storage and authorization boundaries.
 - [`docs/security.md`](docs/security.md): production hardening.
+- [`docs/assurance.md`](docs/assurance.md): evidence-backed enterprise DDQ answering and Singapore assurance mapping.
 - [`docs/self-hosting.md`](docs/self-hosting.md): hosting/TCO decisions and provider-specific implementation facts that may change over time.
 - [`docs/governed-tools.md`](docs/governed-tools.md): governed Tool/MCP execution and approval semantics.
 - [`docs/metering.md`](docs/metering.md): thin usage-event integration; Lago remains the external billing/metering system.
@@ -72,7 +73,7 @@ python3 scripts/launch.py acme \
   --bootstrap-credential ~/Downloads/acme-bootstrap.json
 ```
 
-`scripts/launch.py` is the public operator entry point for the standard managed GCP path. It derives the target project from the temporary JSON and the private repo as `<authenticated-github-user>/acme-ai-workspace` where possible. Use explicit `--github-repo`, `--gcp-project` and `--ownership` overrides only when the target differs.
+`scripts/launch.py` is the public operator entry point for the standard managed GCP path. It derives the target project from the temporary JSON and the private repo as `<authenticated-github-user>/<client>-ai-workspace` where possible. Use explicit `--github-repo`, `--gcp-project` and `--ownership` overrides only when the target differs.
 
 The resumable launch flow creates/reuses the workspace and private repo, protected DEV/PROD environments, required runtime secret maps, remote Terraform state, Workload Identity Federation, deploy/runtime identities and the keyless deployment workflow; triggers and verifies DEV; and revokes/deletes the temporary bootstrap key where local tooling permits.
 
@@ -97,6 +98,17 @@ Client upgrades normally change only `platform.lock.yaml` to a newer published M
 
 Enterprise actions are not granted by prompts. Selected Tools are exposed through the governed MCP boundary and evaluated as `allow | approval | deny`; approval-required actions bind to the exact material request, consume each human decision once, and produce audit evidence.
 
+## Enterprise assurance
+
+Common customer security/privacy/AI DDQs can be answered from the version-controlled assurance registry without inventing compliance claims:
+
+```bash
+python3 scripts/ddq.py answer "Do you use customer prompts to train models?"
+python3 scripts/ddq.py readiness
+```
+
+The assurance layer maps repository evidence to common DDQ questions and Singapore references such as the PDPA/PDPC guidance, IMDA's Model AI Governance Framework for Agentic AI and relevant CSA assurance schemes. Provider-, legal-entity-, certification- and sector-specific answers remain explicitly review-gated. See [`docs/assurance.md`](docs/assurance.md).
+
 ## OSS and hosting boundaries
 
 - **Hermes**: reference Agent runtime.
@@ -111,13 +123,14 @@ Detailed and time-sensitive hosting/provider guidance lives only in [`docs/self-
 ## Repository layout
 
 ```text
+assurance/                    DDQ catalog, evidence registry and Singapore assurance map
 contracts/v1/                 Versioned portable resource contracts
 examples/workspace/           Reference employees and resources
 platform/connectors/          Thin business-system adapters
 platform/channels/            Replaceable channel adapters
 platform/runtime/             Governed runtime/MCP boundary
 platform/metering/            Thin external metering adapters
-scripts/                       Launch, compile, govern and deploy helpers
+scripts/                       Launch, compile, govern, assure and deploy helpers
 tests/                         Regression/acceptance coverage
 infra/bootstrap/gcp/           Current keyless trust/state bootstrap
 infra/docker-host/gcp/         Current isolated GCP Docker-host desired state

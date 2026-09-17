@@ -1,0 +1,237 @@
+version: 1
+updated: 2026-09-17
+questions:
+  - id: ARCH-01
+    category: architecture
+    question: How is each customer's environment and data isolated from other customers?
+    keywords: [tenant, isolation, segregated, customer environment, multi-tenant, cross-client, data isolation]
+    controls: [client_isolation]
+
+  - id: IAM-01
+    category: identity_access
+    question: How do you enforce least privilege and separate administrative, deployment, runtime and business-system access?
+    keywords: [least privilege, iam, access control, role, service account, runtime identity, admin, authorization]
+    controls: [least_privilege, governed_actions]
+
+  - id: IAM-02
+    category: identity_access
+    question: Do you support MFA, SSO or federated identity for administrative and enterprise access?
+    keywords: [mfa, multi-factor, multifactor, sso, single sign-on, federated identity, oidc, authentication]
+    controls: [keyless_deployment, least_privilege]
+    review_required: true
+    review_note: Exact end-user/admin MFA and SSO support depends on the selected GitHub, cloud and client identity providers.
+
+  - id: SEC-01
+    category: secrets
+    question: How are API keys, passwords, OAuth tokens and other secrets stored and rotated?
+    keywords: [secret, api key, password, oauth token, credential, rotate, vault, key management]
+    controls: [secret_management, least_privilege]
+
+  - id: SEC-02
+    category: encryption
+    question: Is customer data encrypted in transit and at rest?
+    keywords: [encryption, encrypted, tls, in transit, at rest, cipher, disk encryption]
+    controls: [encryption_in_transit, encryption_at_rest]
+    review_required: true
+
+  - id: SEC-03
+    category: vulnerability_management
+    question: What are your vulnerability scanning, patching and remediation processes and SLAs?
+    keywords: [vulnerability, scan, patch, remediation, cve, dependency, image scan, sla]
+    controls: [vulnerability_and_patch_management]
+    review_required: true
+
+  - id: SEC-04
+    category: testing
+    question: Do you perform independent penetration testing and can you provide the latest report?
+    keywords: [penetration test, pentest, pen test, independent security test, report]
+    controls: [penetration_testing]
+    review_required: true
+
+  - id: SDL-01
+    category: secure_development
+    question: Describe your secure software development lifecycle, code review, testing and release controls.
+    keywords: [sdlc, secure development, code review, ci, testing, release, change management, deployment]
+    controls: [secure_sdlc, versioning_and_rollback]
+
+  - id: LOG-01
+    category: logging_audit
+    question: What security and business-action logs are maintained and can they be exported to our SIEM?
+    keywords: [logging, log, audit trail, siem, event, trace, monitoring, action record]
+    controls: [auditability]
+    review_required: true
+
+  - id: DAT-01
+    category: data_management
+    question: What customer data do you collect or process and how do you minimise it?
+    keywords: [data collected, data process, personal data, pii, minimise, minimize, data inventory, data flow]
+    controls: [data_minimisation, privacy_program]
+
+  - id: DAT-02
+    category: data_management
+    question: What are your retention and deletion periods and can data be deleted on termination?
+    keywords: [retention, delete, deletion, purge, disposal, termination, destroy]
+    controls: [retention_and_deletion, offboarding]
+    review_required: true
+
+  - id: DAT-03
+    category: data_residency
+    question: Where is our data stored and processed, and can it be restricted to Singapore?
+    keywords: [data residency, location, region, singapore only, hosted, stored, processed, country]
+    controls: [data_residency, cross_border_transfers]
+    review_required: true
+
+  - id: DAT-04
+    category: cross_border_transfer
+    question: How do you manage overseas transfers of personal data and cross-border subprocessors?
+    keywords: [cross-border, overseas transfer, transfer limitation, outside singapore, subprocessor country]
+    controls: [cross_border_transfers, subprocessor_inventory]
+    review_required: true
+
+  - id: DAT-05
+    category: data_subject_rights
+    question: How do you support personal-data access and correction requests?
+    keywords: [access request, correction request, data subject, individual request, dsar, rectify]
+    controls: [data_subject_requests, privacy_program]
+    review_required: true
+
+  - id: PRI-01
+    category: privacy
+    question: Are you compliant with Singapore's PDPA and do you have a DPO and privacy programme?
+    keywords: [pdpa, dpo, data protection officer, privacy programme, privacy policy, personal data protection]
+    controls: [privacy_program]
+    singapore_sources: [pdpa]
+    review_required: true
+
+  - id: PRI-02
+    category: privacy
+    question: What is your role as an organisation or data intermediary under the PDPA?
+    keywords: [data intermediary, organisation, controller, processor, pdpa role, processor role]
+    controls: [privacy_program, subprocessor_inventory]
+    singapore_sources: [pdpa]
+    review_required: true
+
+  - id: IR-01
+    category: incident_response
+    question: Describe your security incident and personal-data breach response and notification process.
+    keywords: [incident response, breach, notification, security incident, data breach, notify]
+    controls: [incident_response]
+    singapore_sources: [pdpa]
+    review_required: true
+
+  - id: BCM-01
+    category: resilience
+    question: Describe your business continuity, disaster recovery, backup and rollback capabilities, including RTO and RPO.
+    keywords: [business continuity, disaster recovery, backup, restore, rto, rpo, resilience, rollback]
+    controls: [business_continuity, versioning_and_rollback]
+    review_required: true
+
+  - id: SUP-01
+    category: third_party_risk
+    question: Which subprocessors, cloud providers, AI model providers and open-source components do you rely on?
+    keywords: [subprocessor, third party, vendor, cloud provider, model provider, open source, oss, dependency]
+    controls: [subprocessor_inventory, open_source_governance]
+    review_required: true
+
+  - id: SUP-02
+    category: third_party_risk
+    question: How do you assess and manage third-party and open-source supply-chain risk?
+    keywords: [supply chain, third-party risk, vendor risk, oss risk, dependency risk, provenance]
+    controls: [open_source_governance, subprocessor_inventory]
+
+  - id: AI-01
+    category: ai_governance
+    question: How do you bound an AI agent's autonomy, tools, data access and ability to take consequential actions?
+    keywords: [agent autonomy, authority, tool access, consequential action, permissions, bound agent, ai agent]
+    controls: [ai_risk_bounding, governed_actions, least_privilege]
+    singapore_sources: [imda_agentic_ai_2026]
+
+  - id: AI-02
+    category: ai_governance
+    question: Where are humans kept accountable and when is human approval required?
+    keywords: [human oversight, human approval, human in the loop, accountability, checkpoint, escalation]
+    controls: [human_oversight, governed_actions]
+    singapore_sources: [imda_agentic_ai_2026]
+
+  - id: AI-03
+    category: ai_governance
+    question: How do you test AI quality, hallucination, unsafe behaviour and regressions before production?
+    keywords: [hallucination, eval, evaluation, testing, regression, safety test, quality, benchmark]
+    controls: [ai_evaluation, secure_sdlc]
+    singapore_sources: [imda_agentic_ai_2026, imda_genai_2024, ai_verify]
+
+  - id: AI-04
+    category: ai_security
+    question: How do you mitigate prompt injection, malicious content and attempts to make the AI bypass permissions?
+    keywords: [prompt injection, jailbreak, malicious content, bypass permissions, indirect prompt injection, ai security]
+    controls: [ai_prompt_injection_controls, governed_actions, least_privilege]
+    singapore_sources: [imda_agentic_ai_2026, cyber_essentials_2025]
+
+  - id: AI-05
+    category: ai_data
+    question: Are customer prompts, files, transcripts or outputs retained or used to train AI models?
+    keywords: [training, train model, prompts retained, outputs retained, transcript, model provider data usage, zero retention]
+    controls: [model_data_usage, retention_and_deletion]
+    singapore_sources: [pdpc_ai_personal_data, imda_genai_2024]
+    review_required: true
+
+  - id: AI-06
+    category: ai_transparency
+    question: Are users told when they are interacting with AI and what the AI is authorised to do?
+    keywords: [ai disclosure, transparency, disclose ai, ai identity, authorised, user notice]
+    controls: [ai_transparency, ai_risk_bounding]
+    singapore_sources: [imda_agentic_ai_2026]
+    review_required: true
+
+  - id: GOV-01
+    category: certifications
+    question: What security, privacy or AI certifications and independent assurance reports do you hold?
+    keywords: [iso 27001, soc 2, certification, cyber essentials, cyber trust, dptm, assurance report, audit]
+    controls: [formal_certifications, penetration_testing]
+    singapore_sources: [cyber_essentials_2025, cyber_trust_2025, dptm_2025]
+    review_required: true
+
+  - id: GOV-02
+    category: insurance
+    question: Do you maintain cyber or professional liability insurance?
+    keywords: [cyber insurance, professional liability, errors omissions, insurance, coverage]
+    controls: [cyber_insurance]
+    review_required: true
+
+  - id: GOV-03
+    category: singapore_cyber
+    question: How does your security programme align with Singapore CSA Cyber Essentials or Cyber Trust?
+    keywords: [csa, cyber essentials, cyber trust, ss 712, singapore cybersecurity]
+    controls: [vulnerability_and_patch_management, secure_sdlc, incident_response, ai_prompt_injection_controls]
+    singapore_sources: [cyber_essentials_2025, cyber_trust_2025]
+    review_required: true
+
+  - id: REG-01
+    category: regulated_financial_services
+    question: Can the service support a Singapore financial institution subject to MAS technology-risk requirements?
+    keywords: [mas, financial institution, technology risk management, trm, bank, payment institution, regulated financial]
+    controls: [least_privilege, auditability, vulnerability_and_patch_management, incident_response, business_continuity, subprocessor_inventory]
+    singapore_sources: [mas_trm]
+    review_required: true
+
+  - id: REG-02
+    category: regulated_healthcare
+    question: Can the service support Singapore healthcare or patient-data workloads subject to the Health Information Act or healthcare security requirements?
+    keywords: [health information act, hia, healthcare, patient data, hims, clinic management, moh]
+    controls: [privacy_program, data_minimisation, retention_and_deletion, incident_response, model_data_usage]
+    singapore_sources: [hia_healthcare, pdpa]
+    review_required: true
+
+  - id: REG-03
+    category: critical_infrastructure
+    question: Does Singapore's Cybersecurity Act apply to this service or deployment?
+    keywords: [cybersecurity act, cii, critical information infrastructure, essential service, csa regulation]
+    controls: [incident_response, business_continuity, vulnerability_and_patch_management]
+    singapore_sources: [cybersecurity_act]
+    review_required: true
+
+  - id: OFF-01
+    category: exit
+    question: What happens to our data, credentials and business configuration when we terminate the service?
+    keywords: [offboarding, termination, exit, return data, delete data, revoke access, portability]
+    controls: [offboarding, retention_and_deletion]
