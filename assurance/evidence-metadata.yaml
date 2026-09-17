@@ -5,6 +5,7 @@ principles:
   - Repository and CI evidence is a snapshot of a specific commit, not proof of continuous compliance.
   - Manual, legal-entity, provider, client and certification facts must have explicit owners and review cadence.
   - Expired or absent evidence must remain visible; it must never be silently converted into a supported DDQ claim.
+  - Scanner scope and accepted exceptions must be explicit so a clean report is not mistaken for broader assurance than was actually tested.
 
 repository_snapshot:
   owner: Model Garden engineering
@@ -29,27 +30,49 @@ automated_checks:
     owner: Model Garden engineering
     tool: pip-audit
     evidence_file: scans/pip-audit.json
+    scope: Python runtime and development dependency manifests.
     controls: [vulnerability_and_patch_management, secure_sdlc]
   python_security_scan:
     owner: Model Garden engineering
     tool: bandit
     evidence_file: scans/bandit.json
+    scope: Medium/high-severity findings in executable Python under scripts/ and platform/. Low-severity tooling/subprocess notices remain code-review concerns rather than enterprise evidence failures.
     controls: [secure_sdlc, vulnerability_and_patch_management]
   infrastructure_as_code_scan:
     owner: Model Garden engineering
     tool: checkov
     evidence_file: scans/checkov.json
+    scope: Active Terraform under infra/. Inline Checkov skips are permitted only with a specific documented rationale.
     controls: [secure_sdlc, least_privilege, secret_management]
   repository_secret_scan:
     owner: Model Garden engineering
     tool: detect-secrets
     evidence_file: scans/detect-secrets.json
+    scope: Repository content except .git, generated evidence, virtual environments and tests containing deterministic fake credentials. A pinned container-image digest and the scanner output filename are narrow line-level allowlists.
     controls: [secret_management, secure_sdlc]
   python_sbom:
     owner: Model Garden engineering
     tool: pip-audit CycloneDX output
     evidence_file: scans/python-sbom.cdx.json
+    scope: Python dependency manifests; this is not yet a complete OS/container SBOM.
     controls: [subprocessor_inventory, open_source_governance, vulnerability_and_patch_management]
+
+accepted_scanner_exceptions:
+  CKV_GCP_38:
+    scope: infra/docker-host/gcp google_compute_instance.runtime
+    rationale: The baseline uses Google-managed encryption at rest. Customer-managed encryption keys are a client/configuration requirement when procurement or regulation demands separate key control; Model Garden does not create customer-supplied disk keys by default.
+  CKV_GCP_62:
+    scope: infra/bootstrap/gcp google_storage_bucket.terraform_state
+    rationale: The bootstrap bucket is private, uniform-access, versioned and restricted to deployment identities. Legacy per-bucket access logging is not added to the minimal baseline; cloud audit/logging requirements are deployment-specific and should be enabled when the target organisation requires them.
+  CKV_GCP_125:
+    scope: infra/bootstrap/gcp google_iam_workload_identity_pool_provider.github
+    rationale: Trust is explicitly constrained to the exact repository, exact deployment workflow_ref and workflow_run event, with service-account impersonation additionally scoped to the repository principal set. Checkov does not recognise this workflow_ref-based condition shape.
+  B104:
+    scope: governed MCP container bind
+    rationale: The governed Tool service binds all interfaces inside its private Docker network so the Hermes container can reach it; Docker Compose does not publish that port to the host/public network.
+  B310:
+    scope: HTTP transports
+    rationale: Google Calendar requests derive from a fixed HTTPS Google API base; Lago transport accepts only a validated http/https URL with a hostname. Bandit cannot infer those upstream constraints at urlopen.
 
 manual_evidence:
   privacy_program:
