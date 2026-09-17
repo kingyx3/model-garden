@@ -1,0 +1,276 @@
+version: 1
+updated: 2026-09-17
+jurisdiction: Singapore
+
+principles:
+  - This map supports enterprise due diligence and control design; it is not legal advice.
+  - Applicability must be assessed for the actual Model Garden legal entity, client, sector, data role and deployment.
+  - Guidance and certification frameworks are not presented as laws.
+  - A technical capability is not the same thing as formal compliance or certification.
+
+sources:
+  pdpa:
+    name: Personal Data Protection Act 2012 and PDPC guidance
+    kind: law_and_regulator_guidance
+    applicability: >-
+      Core privacy baseline where Model Garden or a client collects, uses, discloses or processes personal data in a role subject to Singapore's PDPA.
+    enterprise_topics:
+      - accountability and DPO
+      - notification, consent and purpose limitation
+      - accuracy
+      - protection/security arrangements
+      - retention limitation
+      - overseas transfer limitation
+      - access and correction
+      - data breach notification
+      - organisation versus data intermediary roles
+    notes:
+      - PDPC states that organisations must designate a DPO and implement accountable data-protection policies and practices.
+      - Overseas transfers must meet prescribed requirements so transferred personal data receives protection comparable to the PDPA unless an exception applies.
+      - A notifiable breach must be notified to the PDPC as soon as practicable and in any case no later than three calendar days after determining it is notifiable; affected individuals are notified where required.
+      - The statutory data-portability obligation remains subject to commencement by regulations; do not claim it is generally in force without checking current commencement status.
+    urls:
+      - https://www.pdpc.gov.sg/overview-of-pdpa/the-legislation/personal-data-protection-act/data-protection-obligations
+      - https://www.pdpc.gov.sg/help-and-resources/2021/09/accountability
+      - https://www.pdpc.gov.sg/guidelines-and-consultation/2020/03/advisory-guidelines-on-key-concepts-in-the-personal-data-protection-act
+      - https://www.pdpc.gov.sg/report-data-breach/before-you-report-a-data-breach-3/info
+    controls:
+      - privacy_program
+      - data_minimisation
+      - retention_and_deletion
+      - cross_border_transfers
+      - data_subject_requests
+      - incident_response
+      - least_privilege
+      - auditability
+
+  pdpc_ai_personal_data:
+    name: PDPC Advisory Guidelines on use of Personal Data in AI Recommendation and Decision Systems
+    kind: regulator_guidance
+    applicability: >-
+      Relevant when personal data is used to develop, train or deploy AI recommendation or decision systems, including where a third-party AI developer acts as a data intermediary.
+    enterprise_topics:
+      - purpose and consent information
+      - data intermediary responsibilities
+      - AI lifecycle data protection
+      - accountability and data protection by design
+    url: https://www.pdpc.gov.sg/guidelines-and-consultation/2024/02/advisory-guidelines-on-use-of-personal-data-in-ai-recommendation-and-decision-systems
+    controls:
+      - privacy_program
+      - model_data_usage
+      - data_minimisation
+      - ai_evaluation
+      - ai_transparency
+
+  imda_agentic_ai_2026:
+    name: IMDA Model AI Governance Framework for Agentic AI v1.5
+    kind: governance_guidance
+    applicability: >-
+      Primary Singapore AI-governance reference for organisations deploying agentic AI, whether built in-house or obtained from third parties.
+    enterprise_topics:
+      - assess and bound agent powers upfront
+      - meaningful human accountability and approval checkpoints
+      - technical controls and lifecycle processes
+      - end-user transparency, responsibility and training
+      - multi-agent and third-party-agent risk
+      - automation-bias safeguards
+    notes:
+      - Launched in January 2026 and updated in May 2026 with case studies and additional best practices.
+      - The framework is guidance, not a general-purpose AI statute.
+    urls:
+      - https://www.imda.gov.sg/resources/press-releases-factsheets-and-speeches/press-releases/2026/new-model-ai-governance-framework-for-agentic-ai
+      - https://www.imda.gov.sg/resources/press-releases-factsheets-and-speeches/factsheets/2026/updated-model-ai-governance-framework-for-agentic-ai
+    controls:
+      - ai_risk_bounding
+      - human_oversight
+      - governed_actions
+      - auditability
+      - ai_evaluation
+      - ai_transparency
+      - ai_prompt_injection_controls
+      - subprocessor_inventory
+
+  imda_genai_2024:
+    name: IMDA / AI Verify Foundation Model AI Governance Framework for Generative AI
+    kind: governance_guidance
+    applicability: >-
+      Useful broader governance reference for generative-AI systems and provider/ecosystem risks not specific to an agentic workflow.
+    enterprise_topics:
+      - accountability
+      - data and model governance
+      - safety and evaluation
+      - security
+      - content provenance and transparency
+      - incident reporting and ecosystem responsibility
+    url: https://www.imda.gov.sg/resources/press-releases-factsheets-and-speeches/factsheets/2024/gen-ai-and-digital-foss-ai-governance-playbook
+    controls:
+      - model_data_usage
+      - ai_evaluation
+      - ai_transparency
+      - incident_response
+      - open_source_governance
+
+  ai_verify:
+    name: AI Verify / AI assurance ecosystem
+    kind: assurance_tooling
+    applicability: >-
+      Optional testing and assurance reference where a customer wants structured AI-governance testing or evidence aligned with Singapore's AI assurance ecosystem.
+    url: https://www.imda.gov.sg/about-imda/emerging-technologies-and-research/artificial-intelligence
+    controls:
+      - ai_evaluation
+      - ai_risk_bounding
+      - ai_transparency
+
+  cyber_essentials_2025:
+    name: CSA Cyber Essentials (SS 712:2025)
+    kind: voluntary_certification_standard
+    applicability: >-
+      Practical baseline for organisations seeking independently assessed cybersecurity hygiene; the enhanced 2025 scheme covers classical cybersecurity, cloud security, OT security and AI security.
+    notes:
+      - Certification is voluntary unless a separate procurement, programme or sector requirement makes it necessary.
+      - Never answer a DDQ as certified unless a current certificate is held and in scope.
+    urls:
+      - https://www.csa.gov.sg/our-programmes/support-for-enterprises/sg-cyber-safe-programme/cybersecurity-certification-for-organisations/cyber-essentials/
+      - https://www.csa.gov.sg/our-programmes/support-for-enterprises/sg-cyber-safe-programme/cybersecurity-certification-for-organisations/cyber-essentials/certification-for-the-cyber-essentials-mark/
+    controls:
+      - least_privilege
+      - secret_management
+      - vulnerability_and_patch_management
+      - incident_response
+      - business_continuity
+      - secure_sdlc
+      - ai_prompt_injection_controls
+
+  cyber_trust_2025:
+    name: CSA Cyber Trust (SS 712:2025)
+    kind: voluntary_certification_standard
+    applicability: >-
+      Risk-based higher-assurance cybersecurity certification for organisations with more extensive digital operations or enterprise buyer expectations.
+    notes:
+      - The 2025 scheme includes cloud, OT and AI security and is valid for three years with annual audits according to CSA's certification page.
+      - Never claim Cyber Trust certification without a current independently issued certificate.
+    url: https://www.csa.gov.sg/our-programmes/support-for-enterprises/sg-cyber-safe-programme/cybersecurity-certification-for-organisations/cyber-trust/certification-for-the-cyber-trust-mark/
+    controls:
+      - formal_certifications
+      - vulnerability_and_patch_management
+      - secure_sdlc
+      - incident_response
+      - business_continuity
+      - subprocessor_inventory
+      - ai_risk_bounding
+
+  dptm_2025:
+    name: Data Protection Trustmark (SS 714:2025)
+    kind: voluntary_certification_standard
+    applicability: >-
+      Optional independent data-protection certification that can provide enterprise buyers evidence of accountable PDPA data-protection practices.
+    notes:
+      - PDPC describes DPTM as an accountability tool and states that the revised DPTM is Singapore Standard SS 714:2025 with annual surveillance audits.
+      - Never claim DPTM certification without a current certificate in scope.
+    url: https://www.pdpc.gov.sg/Overview-of-PDPA/Data-Protection/Business-Owner/Data-Protection-Trustmark
+    controls:
+      - formal_certifications
+      - privacy_program
+      - retention_and_deletion
+      - cross_border_transfers
+      - incident_response
+
+  cybersecurity_act:
+    name: Cybersecurity Act 2018, including 2024 amendments
+    kind: law
+    applicability: >-
+      Conditional overlay. The Act establishes Singapore's cybersecurity framework, including obligations concerning designated Critical Information Infrastructure and other regulated categories introduced or expanded by amendments. Applicability must be determined for the client/service; ordinary SMB software deployment should not be described as subject merely because it uses cloud services.
+    notes:
+      - CSA states that CII sectors include energy, water, banking and finance, healthcare, transport, infocomm, media, security and emergency services, and government.
+      - The 2024 amendments reinforce that CII owners remain responsible for cybersecurity and cyber resilience even when using new operating models such as cloud computing.
+    url: https://www.csa.gov.sg/legislation/cybersecurity-act/
+    controls:
+      - incident_response
+      - business_continuity
+      - subprocessor_inventory
+      - vulnerability_and_patch_management
+
+  mas_trm:
+    name: MAS technology-risk requirements and guidance
+    kind: sector_overlay_financial_services
+    applicability: >-
+      Conditional overlay for Singapore financial institutions and vendors supporting regulated financial workloads. Determine the client's exact licence/entity type and applicable MAS Notice/Guidelines before making a compliance claim.
+    notes:
+      - MAS technology-risk notices apply to multiple categories of financial institutions and include requirements that differ by entity type.
+      - Financial-sector DDQs commonly require stronger evidence around availability, cyber risk, outsourcing/service-provider risk, incident management, access control and business continuity.
+    url: https://www.mas.gov.sg/-/media/mas-media-library/regulation/faqs/trpd/faqs---notice-on-technology-risk-management/updated-faqs-trm-notice-feb-2024-final.pdf
+    controls:
+      - vulnerability_and_patch_management
+      - least_privilege
+      - auditability
+      - incident_response
+      - business_continuity
+      - subprocessor_inventory
+      - penetration_testing
+
+  hia_healthcare:
+    name: Health Information Act and healthcare cyber/data-security requirements
+    kind: sector_overlay_healthcare
+    applicability: >-
+      Conditional overlay for health information, healthcare providers and healthcare IT vendors. Determine whether the client/deployment is an HIA entity, HIMS vendor or otherwise subject to healthcare-specific obligations.
+    notes:
+      - MOH states that the HIA includes cybersecurity and data-security requirements for healthcare providers.
+      - CSA's 2025 Cyber Essentials scheme includes HIA-entity and HIMS-vendor sub-schemes, with current supporting documents updated in 2026.
+      - MOH stated in August 2026 that data-security requirements apply to AI tools processing patient data whether third-party-cloud hosted or on-premise.
+    urls:
+      - https://www.moh.gov.sg/others/health-regulation/health-information-protection/
+      - https://www.csa.gov.sg/our-programmes/support-for-enterprises/sg-cyber-safe-programme/cybersecurity-certification-for-organisations/cyber-essentials/certification-for-the-cyber-essentials-mark/
+      - https://www.moh.gov.sg/newsroom/data-security-requirements-apply-to-ai-tools-that-process-patient-data/
+    controls:
+      - privacy_program
+      - encryption_in_transit
+      - encryption_at_rest
+      - data_minimisation
+      - retention_and_deletion
+      - incident_response
+      - vulnerability_and_patch_management
+      - subprocessor_inventory
+      - model_data_usage
+
+procurement_targets:
+  baseline:
+    description: Controls worth being able to answer coherently for nearly every enterprise DDQ.
+    controls:
+      - client_isolation
+      - least_privilege
+      - secret_management
+      - governed_actions
+      - auditability
+      - human_oversight
+      - secure_sdlc
+      - vulnerability_and_patch_management
+      - encryption_in_transit
+      - encryption_at_rest
+      - data_minimisation
+      - retention_and_deletion
+      - data_residency
+      - cross_border_transfers
+      - model_data_usage
+      - subprocessor_inventory
+      - incident_response
+      - business_continuity
+      - offboarding
+      - ai_evaluation
+      - ai_transparency
+      - ai_risk_bounding
+      - ai_prompt_injection_controls
+      - privacy_program
+      - formal_certifications
+      - penetration_testing
+      - cyber_insurance
+
+  singapore_strong:
+    description: Evidence targets likely to materially reduce Singapore enterprise procurement friction.
+    recommended_next_evidence:
+      - Complete and retain the live keyless-deployment and rollback proof.
+      - Operate a formal DPO/privacy programme for the legal entity where required.
+      - Maintain a current subprocessor/data-flow register with provider retention/training/residency facts.
+      - Establish documented vulnerability remediation cadence and independent security testing.
+      - Consider CSA Cyber Essentials first, then Cyber Trust if buyer profile justifies the cost.
+      - Consider DPTM when personal-data processing and enterprise procurement volume justify independent privacy assurance.
+      - Keep MAS and healthcare/HIA overlays conditional rather than building them into every SMB deployment.
