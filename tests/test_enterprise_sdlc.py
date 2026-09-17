@@ -29,10 +29,30 @@ class EnterpriseSDLCTests(unittest.TestCase):
         self.assertIn("enterprise-evidence-pack.md", rendered)
         self.assertIn("retention-days", rendered)
         self.assertIn("90", rendered)
+        self.assertIn("always()", rendered)
 
-    def test_voice_dependency_is_exactly_pinned(self):
-        requirement = (ROOT / "requirements-voice.txt").read_text(encoding="utf-8").strip()
-        self.assertRegex(requirement, r"^livekit-agents\[openai\]==\d+\.\d+\.\d+$")
+    def test_voice_dependencies_are_exactly_pinned(self):
+        requirements = {
+            line.strip()
+            for line in (ROOT / "requirements-voice.txt").read_text(encoding="utf-8").splitlines()
+            if line.strip() and not line.lstrip().startswith("#")
+        }
+        livekit = next((item for item in requirements if item.startswith("livekit-agents[openai]==")), None)
+        httpx = next((item for item in requirements if item.startswith("httpx==")), None)
+        self.assertIsNotNone(livekit)
+        self.assertIsNotNone(httpx)
+        self.assertRegex(livekit or "", r"^livekit-agents\[openai\]==\d+\.\d+\.\d+$")
+        self.assertRegex(httpx or "", r"^httpx==\d+\.\d+\.\d+$")
+        self.assertEqual(len(requirements), 2, "unexpected unpinned voice dependency added")
+
+    def test_voice_fallback_storage_has_privacy_and_retention_guardrails(self):
+        worker = (ROOT / "platform" / "channels" / "livekit_receptionist.py").read_text(encoding="utf-8")
+        self.assertIn("MODEL_GARDEN_MESSAGE_RETENTION_SECONDS", worker)
+        self.assertIn("roomHash", worker)
+        self.assertIn("os.fchmod(descriptor, 0o600)", worker)
+        self.assertIn("fcntl.LOCK_EX", worker)
+        self.assertNotIn('"room": job_ctx.room.name', worker)
+        self.assertNotIn('"target": target', worker)
 
     def test_security_governance_files_exist(self):
         self.assertTrue((ROOT / "SECURITY.md").is_file())
