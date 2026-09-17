@@ -9,13 +9,19 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: model-garden-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   version-contract:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           fetch-depth: 0
+          persist-credentials: false
       - name: Verify VERSION is safe to publish or matches this tag
         shell: bash
         run: |
@@ -49,6 +55,7 @@ jobs:
   current-terraform:
     name: terraform (${{ matrix.path }})
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:
@@ -56,8 +63,10 @@ jobs:
           - infra/bootstrap/gcp
           - infra/docker-host/gcp
     steps:
-      - uses: actions/checkout@v7
-      - uses: hashicorp/setup-terraform@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4
         with:
           terraform_version: "1.14.6"
           terraform_wrapper: false
@@ -70,8 +79,11 @@ jobs:
 
   contracts-and-runtime:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
       - name: Install contract validator dependencies
         run: python3 -m pip install -r requirements-dev.txt
       - name: Validate versioned contracts and reference workspace
@@ -99,11 +111,39 @@ jobs:
           python3 scripts/provision-hermes-profile.py /tmp/receptionist.json /tmp/hermes-receptionist | grep -q 'already matches desired state'
       - name: Validate shell scripts
         run: bash -n scripts/*.sh
+      - name: Validate pinned voice dependency API
+        run: |
+          python3 -m pip install -r requirements-voice.txt
+          python3 -c 'from livekit import api, rtc; from livekit.agents import Agent, AgentServer, AgentSession, JobContext, RunContext, cli, function_tool, get_job_context; from livekit.plugins import openai; print("LiveKit voice API imports verified")'
+      - name: Install assurance dependencies
+        if: always()
+        run: python3 -m pip install -r requirements-assurance.txt
+      - name: Generate scanner evidence and enterprise pack
+        if: always()
+        run: bash scripts/run-assurance-scans.sh
+      - name: Verify evidence pack exists
+        if: always()
+        run: |
+          test -s .enterprise-evidence/enterprise-evidence-pack.md
+          test -s .enterprise-evidence/manifest.json
+          python3 -m json.tool .enterprise-evidence/manifest.json >/dev/null
+      - name: Upload enterprise evidence artifact
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: enterprise-evidence-${{ github.sha }}
+          path: .enterprise-evidence/
+          if-no-files-found: error
+          include-hidden-files: true
+          retention-days: 90
 
   hermes-compatibility:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
       - name: Install Model Garden validation dependencies
         run: python3 -m pip install -r requirements-dev.txt
       - name: Validate shell scripts
@@ -111,37 +151,15 @@ jobs:
       - name: Smoke-test pinned Hermes runtime against Receptionist profile
         run: bash scripts/smoke-hermes-runtime.sh
 
-  enterprise-evidence:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-      - name: Install assurance dependencies
-        run: python3 -m pip install -r requirements-dev.txt -r requirements-assurance.txt
-      - name: Generate scanner evidence and enterprise pack
-        run: bash scripts/run-assurance-scans.sh
-      - name: Verify evidence pack exists
-        run: |
-          test -s .enterprise-evidence/enterprise-evidence-pack.md
-          test -s .enterprise-evidence/manifest.json
-          python3 -m json.tool .enterprise-evidence/manifest.json >/dev/null
-      - name: Upload enterprise evidence artifact
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: enterprise-evidence-${{ github.sha }}
-          path: .enterprise-evidence/
-          if-no-files-found: error
-          include-hidden-files: true
-          retention-days: 30
-
   publish-main-release:
     if: github.ref == 'refs/heads/main'
-    needs: [version-contract, current-terraform, contracts-and-runtime, hermes-compatibility, enterprise-evidence]
+    needs: [version-contract, current-terraform, contracts-and-runtime, hermes-compatibility]
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           fetch-depth: 0
       - name: Publish validated VERSION from main
@@ -171,12 +189,15 @@ jobs:
 
   release:
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [version-contract, current-terraform, contracts-and-runtime, hermes-compatibility, enterprise-evidence]
+    needs: [version-contract, current-terraform, contracts-and-runtime, hermes-compatibility]
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
       - name: Verify tag matches VERSION
         run: python3 scripts/validate-release-tag.py "$GITHUB_REF_NAME"
       - name: Publish immutable GitHub Release

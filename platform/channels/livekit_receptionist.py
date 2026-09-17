@@ -14,9 +14,12 @@ Optional:
 - MODEL_GARDEN_LIVEKIT_AGENT_NAME (default model-garden-receptionist)
 - MODEL_GARDEN_HUMAN_TRANSFER_TARGET (tel:+... or sip:...)
 - MODEL_GARDEN_MESSAGE_PATH (default /opt/data/messages.jsonl)
+- MODEL_GARDEN_MESSAGE_RETENTION_SECONDS (default 604800 / 7 days)
 """
 from __future__ import annotations
 
+import fcntl
+import hashlib
 import json
 import os
 import pathlib
@@ -30,6 +33,7 @@ from livekit.plugins import openai
 
 MESSAGE_PATH = pathlib.Path(os.environ.get("MODEL_GARDEN_MESSAGE_PATH", "/opt/data/messages.jsonl"))
 AGENT_NAME = os.environ.get("MODEL_GARDEN_LIVEKIT_AGENT_NAME", "model-garden-receptionist").strip() or "model-garden-receptionist"
+DEFAULT_MESSAGE_RETENTION_SECONDS = 7 * 24 * 60 * 60
 
 
 def _required(name: str) -> str:
@@ -39,10 +43,70 @@ def _required(name: str) -> str:
     return value
 
 
+def _retention_seconds() -> int:
+    raw = os.environ.get("MODEL_GARDEN_MESSAGE_RETENTION_SECONDS", str(DEFAULT_MESSAGE_RETENTION_SECONDS)).strip()
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise RuntimeError("MODEL_GARDEN_MESSAGE_RETENTION_SECONDS must be an integer") from exc
+    if value < 0 or value > 365 * 24 * 60 * 60:
+        raise RuntimeError("MODEL_GARDEN_MESSAGE_RETENTION_SECONDS must be between 0 and 31536000")
+    return value
+
+
+def _safe_digest(value: str | None) -> str | None:
+    if not value:
+        return None
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+def _retained_rows(handle: Any, *, now: int, retention_seconds: int) -> list[dict[str, Any]]:
+    if retention_seconds == 0:
+        return []
+    cutoff = now - retention_seconds
+    handle.seek(0)
+    rows: list[dict[str, Any]] = []
+    for raw in handle:
+        if not raw.strip():
+            continue
+        try:
+            value = json.loads(raw)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(value, dict):
+            continue
+        timestamp = value.get("timestamp")
+        if isinstance(timestamp, int) and timestamp >= cutoff:
+            rows.append(value)
+    return rows
+
+
 def _append_message(payload: dict[str, Any]) -> None:
-    MESSAGE_PATH.parent.mkdir(parents=True, exist_ok=True)
-    with MESSAGE_PATH.open("a", encoding="utf-8") as handle:
-        handle.write(json.dumps(payload, sort_keys=True, ensure_ascii=False) + "\n")
+    """Persist minimum fallback data with retention, restrictive mode and durable append."""
+    MESSAGE_PATH.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    try:
+        os.chmod(MESSAGE_PATH.parent, 0o700)
+    except OSError:
+        pass
+    descriptor = os.open(MESSAGE_PATH, os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        os.fchmod(descriptor, 0o600)
+        with os.fdopen(descriptor, "r+", encoding="utf-8", closefd=False) as handle:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+            now = int(time.time())
+            retention = _retention_seconds()
+            rows = _retained_rows(handle, now=now, retention_seconds=retention)
+            if retention > 0:
+                rows.append(payload)
+            handle.seek(0)
+            handle.truncate()
+            for row in rows:
+                handle.write(json.dumps(row, sort_keys=True, ensure_ascii=False, separators=(",", ":")) + "\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+    finally:
+        os.close(descriptor)
 
 
 def _sip_participant(ctx: JobContext):
@@ -88,9 +152,9 @@ class ReceptionistVoiceAgent(Agent):
             {
                 "type": "HumanTransfer",
                 "timestamp": int(time.time()),
-                "room": job_ctx.room.name,
-                "participant": participant.identity,
-                "target": target,
+                "roomHash": _safe_digest(job_ctx.room.name),
+                "participantHash": _safe_digest(participant.identity),
+                "targetHash": _safe_digest(target),
                 "status": "requested",
             }
         )
@@ -98,7 +162,7 @@ class ReceptionistVoiceAgent(Agent):
 
     @function_tool()
     async def capture_message(self, ctx: RunContext, message: str, caller_name: str = "") -> str:
-        """Persist a minimal fallback message when safe transfer is unavailable."""
+        """Persist the minimum data required for a human to follow up when transfer is unavailable."""
         message = message.strip()
         if not message:
             return "No message was provided. Ask the caller what they would like the business to know."
@@ -113,7 +177,7 @@ class ReceptionistVoiceAgent(Agent):
             {
                 "type": "FallbackMessage",
                 "timestamp": int(time.time()),
-                "room": job_ctx.room.name,
+                "roomHash": _safe_digest(job_ctx.room.name),
                 "caller_name": caller_name.strip() or None,
                 "caller_number": caller_number,
                 "message": message,
@@ -151,16 +215,16 @@ server = AgentServer()
 
 @server.rtc_session(agent_name=AGENT_NAME)
 async def receptionist(ctx: JobContext) -> None:
-    ctx.log_context_fields = {"room": ctx.room.name, "agent": AGENT_NAME}
+    ctx.log_context_fields = {"room_hash": _safe_digest(ctx.room.name), "agent": AGENT_NAME}
     started = int(time.time())
-    _append_message({"type": "CallStarted", "timestamp": started, "room": ctx.room.name, "agent": AGENT_NAME})
+    _append_message({"type": "CallStarted", "timestamp": started, "roomHash": _safe_digest(ctx.room.name), "agent": AGENT_NAME})
 
     async def on_shutdown() -> None:
         _append_message(
             {
                 "type": "CallEnded",
                 "timestamp": int(time.time()),
-                "room": ctx.room.name,
+                "roomHash": _safe_digest(ctx.room.name),
                 "agent": AGENT_NAME,
                 "started": started,
             }

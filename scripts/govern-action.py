@@ -17,14 +17,16 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+import fcntl
 import hashlib
 import json
+import os
 import pathlib
 import sys
 from collections.abc import Callable
 from typing import Any
 
-AUDIT_SCHEMA_VERSION = 1
+AUDIT_SCHEMA_VERSION = 2
 GOVERNANCE_CONTEXT_KEYS = (
     "tenantId",
     "environment",
@@ -46,6 +48,10 @@ GOVERNANCE_CONTEXT_KEYS = (
 
 def _canonical_json(value: Any) -> str:
     return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+
+
+def _sha256_json(value: Any) -> str:
+    return hashlib.sha256(_canonical_json(value).encode("utf-8")).hexdigest()
 
 
 def _agent_name(desired_state: dict[str, Any]) -> str:
@@ -157,12 +163,102 @@ def make_audit_event(event_type: str, request: dict[str, Any], *, outcome: str, 
     return event
 
 
+def _last_audit_event(handle: Any) -> tuple[dict[str, Any] | None, int]:
+    handle.seek(0)
+    last: dict[str, Any] | None = None
+    count = 0
+    for raw in handle:
+        if not raw.strip():
+            continue
+        count += 1
+        value = json.loads(raw)
+        if not isinstance(value, dict):
+            raise ValueError("Governed action audit contains a non-object JSONL record")
+        last = value
+    return last, count
+
+
+def _event_chain_hash(event: dict[str, Any]) -> str:
+    material = dict(event)
+    material.pop("eventHash", None)
+    return _sha256_json(material)
+
+
 def append_audit_event(path: pathlib.Path | None, event: dict[str, Any]) -> None:
+    """Append one durable, tamper-evident audit event under an exclusive file lock."""
     if path is None:
         return
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("a", encoding="utf-8") as handle:
-        handle.write(_canonical_json(event) + "\n")
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    try:
+        os.chmod(path.parent, 0o700)
+    except OSError:
+        pass
+    descriptor = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        os.fchmod(descriptor, 0o600)
+        with os.fdopen(descriptor, "r+", encoding="utf-8", closefd=False) as handle:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+            last, count = _last_audit_event(handle)
+            previous_hash: str | None = None
+            if last is not None:
+                stored = last.get("eventHash")
+                previous_hash = stored if isinstance(stored, str) and stored else _sha256_json(last)
+            chained = dict(event)
+            chained["sequence"] = count + 1
+            chained["previousEventHash"] = previous_hash
+            chained["eventHash"] = _event_chain_hash(chained)
+            handle.seek(0, os.SEEK_END)
+            handle.write(_canonical_json(chained) + "\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+    finally:
+        os.close(descriptor)
+
+
+def verify_audit_chain(path: pathlib.Path) -> dict[str, Any]:
+    """Verify ordering and SHA-256 chaining for schema-v2 audit events.
+
+    Legacy schema-v1 records may precede v2 records. Their canonical digest becomes the
+    anchor for the first v2 record, so migration is detectable without rewriting history.
+    """
+    if not path.exists():
+        return {"valid": True, "events": 0, "headHash": None}
+    previous_hash: str | None = None
+    expected_sequence = 1
+    events = 0
+    with path.open("r", encoding="utf-8") as handle:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_SH)
+        try:
+            for line_number, raw in enumerate(handle, start=1):
+                if not raw.strip():
+                    continue
+                try:
+                    event = json.loads(raw)
+                except json.JSONDecodeError as exc:
+                    raise ValueError(f"Audit chain invalid at line {line_number}: invalid JSON") from exc
+                if not isinstance(event, dict):
+                    raise ValueError(f"Audit chain invalid at line {line_number}: record is not an object")
+                events += 1
+                schema_version = event.get("schemaVersion", 1)
+                if schema_version == 1:
+                    previous_hash = _sha256_json(event)
+                    expected_sequence = events + 1
+                    continue
+                if schema_version != AUDIT_SCHEMA_VERSION:
+                    raise ValueError(f"Audit chain invalid at line {line_number}: unsupported schemaVersion {schema_version!r}")
+                if event.get("sequence") != expected_sequence:
+                    raise ValueError(f"Audit chain invalid at line {line_number}: sequence mismatch")
+                if event.get("previousEventHash") != previous_hash:
+                    raise ValueError(f"Audit chain invalid at line {line_number}: previous hash mismatch")
+                stored_hash = event.get("eventHash")
+                if not isinstance(stored_hash, str) or stored_hash != _event_chain_hash(event):
+                    raise ValueError(f"Audit chain invalid at line {line_number}: event hash mismatch")
+                previous_hash = stored_hash
+                expected_sequence += 1
+        finally:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+    return {"valid": True, "events": events, "headHash": previous_hash}
 
 
 def _result_receipt(result: Any) -> dict[str, Any]:

@@ -130,14 +130,24 @@ class OperatingClosureTests(unittest.TestCase):
 
     def test_reference_proof_summaries_do_not_copy_sensitive_payloads(self):
         voice = reference_proof._voice_summary([
-            {"type": "CallStarted", "room": "room-1", "caller_number": "+15550001"},
-            {"type": "FallbackMessage", "room": "room-1", "message": "private message"},
+            {"type": "CallStarted", "roomHash": "a" * 64, "caller_number": "+15550001"},
+            {"type": "FallbackMessage", "roomHash": "a" * 64, "message": "private message"},
         ])
         rendered = repr(voice)
         self.assertEqual(voice["distinctCalls"], 1)
         self.assertEqual(voice["messageFallbackEvidence"], 1)
         self.assertNotIn("+15550001", rendered)
         self.assertNotIn("private message", rendered)
+        self.assertNotIn("a" * 64, rendered)
+
+    def test_reference_proof_audit_summary_exposes_only_chain_head(self):
+        audit = reference_proof._audit_summary([
+            {"event": "authorization", "outcome": "allow", "tool": "calendar.book", "eventHash": "a" * 64},
+            {"event": "execution", "outcome": "succeeded", "tool": "calendar.book", "eventHash": "b" * 64},
+        ])
+        self.assertEqual(audit["records"], 2)
+        self.assertEqual(audit["auditHeadHash"], "b" * 64)
+        self.assertNotIn("arguments", audit)
 
 
 if __name__ == "__main__":
