@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Fail fast on missing external resources required for the live Receptionist MVP proof.
+"""Fail fast on missing external resources required for the live Receptionist proof.
 
-This preflight validates presence only. It never prints secret values and deliberately
-avoids provider API calls: the live proof itself remains the authority for whether a
-credential/resource actually works.
+This preflight validates bindings only. It never prints secret values and deliberately
+avoids provider API calls: scripts/reference-proof.py is the evidence-producing live
+acceptance path once the required accounts/resources exist.
 """
 from __future__ import annotations
 
@@ -15,7 +15,7 @@ import sys
 
 REQUIREMENTS = {
     "model": ("OPENAI_API_KEY",),
-    "calendar": ("GOOGLE_CALENDAR_ID", "GOOGLE_APPLICATION_CREDENTIALS"),
+    "calendar": ("MODEL_GARDEN_GOOGLE_CALENDAR_TOKEN",),
     "voice": ("LIVEKIT_URL", "LIVEKIT_API_KEY", "LIVEKIT_API_SECRET", "LIVEKIT_SIP_TRUNK_ID"),
 }
 
@@ -32,6 +32,10 @@ def check(env: dict[str, str], *, require_docker: bool = True) -> dict:
         "ready": not missing,
         "missing": missing,
         "requiredCapabilities": ["model", "calendar", "voice", "runtime"],
+        "optionalBindings": {
+            "calendar": ["MODEL_GARDEN_GOOGLE_CALENDAR_ID"],
+            "voice": ["MODEL_GARDEN_HUMAN_TRANSFER_TARGET", "LIVEKIT_DISPATCH_RULE_ID"],
+        },
     }
 
 
