@@ -1,4 +1,4 @@
-.PHONY: dev validate contracts tests terraform hermes
+.PHONY: dev validate contracts tests terraform hermes assurance assurance-scan
 
 dev:
 	python3 -m pip install -r requirements-dev.txt
@@ -22,6 +22,13 @@ terraform:
 
 hermes:
 	bash scripts/smoke-hermes-runtime.sh
+
+assurance:
+	python3 scripts/enterprise-evidence.py
+
+assurance-scan:
+	python3 -m pip install -r requirements-assurance.txt
+	bash scripts/run-assurance-scans.sh
 
 validate: contracts tests terraform hermes
 	bash -n scripts/*.sh
