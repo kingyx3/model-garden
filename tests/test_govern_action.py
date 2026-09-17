@@ -45,6 +45,24 @@ class GovernActionTests(unittest.TestCase):
         second = govern.build_action_request(state, "calendar.book", {"slot": "2026-09-15T10:00:00+08:00"}, governance_context={"tenantId": "client-a", "conversationId": "call-2", "modelProvider": "openai", "model": "model-a"})
         self.assertNotEqual(first["requestId"], second["requestId"])
 
+    def test_request_id_binds_enterprise_cost_attribution_context(self):
+        state = desired_state()
+        base = {
+            "tenantId": "client-a",
+            "environment": "prod",
+            "costCenter": "front-office",
+            "billingSubscriptionId": "client-a-enterprise",
+            "sharedPoolId": "client-a-ai-workforce",
+        }
+        first = govern.build_action_request(state, "calendar.book", {"slot": "2026-09-15T10:00:00+08:00"}, governance_context=base)
+        changed = govern.build_action_request(
+            state,
+            "calendar.book",
+            {"slot": "2026-09-15T10:00:00+08:00"},
+            governance_context={**base, "billingSubscriptionId": "client-a-enterprise-v2"},
+        )
+        self.assertNotEqual(first["requestId"], changed["requestId"])
+
     def test_governance_context_rejects_unbounded_fields(self):
         with self.assertRaises(ValueError):
             govern.build_action_request(desired_state(), "calendar.book", {}, governance_context={"rawCredential": "secret"})
@@ -75,7 +93,21 @@ class GovernActionTests(unittest.TestCase):
     def test_exact_approved_action_executes_and_is_audited(self):
         state = desired_state()
         args = {"slot": "2026-09-15T10:00:00+08:00", "caller": "+15550001"}
-        context = {"tenantId": "client-a", "conversationId": "call-7", "runtime": "hermes", "runtimeVersion": "0.21.2", "modelProvider": "openai", "model": "model-a", "modelConfigVersion": "release-0.3"}
+        context = {
+            "tenantId": "client-a",
+            "environment": "prod",
+            "deploymentId": "client-a-prod-01",
+            "conversationId": "call-7",
+            "runtime": "hermes",
+            "runtimeVersion": "0.21.2",
+            "modelProvider": "openai",
+            "model": "model-a",
+            "modelConfigVersion": "release-0.3",
+            "correlationId": "trace-7",
+            "costCenter": "front-office",
+            "billingSubscriptionId": "client-a-enterprise",
+            "sharedPoolId": "client-a-ai-workforce",
+        }
         request = govern.build_action_request(state, "calendar.book", args, initiating_user="caller-session-7", governance_context=context)
         approval = {"requestId": request["requestId"], "approved": True, "approver": "practice-manager"}
         calls: list[dict] = []
@@ -88,6 +120,7 @@ class GovernActionTests(unittest.TestCase):
         self.assertEqual(result["result"], {"bookingId": "booking-123"})
         self.assertEqual(calls, [args])
         self.assertEqual([event["event"] for event in events], ["authorization", "approval", "execution"])
+        self.assertTrue(all(event["schemaVersion"] == govern.AUDIT_SCHEMA_VERSION for event in events))
         self.assertEqual(events[1]["details"]["approver"], "practice-manager")
         self.assertTrue(all(event["requestId"] == request["requestId"] for event in events))
         self.assertTrue(all(event["governance"] == context for event in events))
