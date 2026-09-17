@@ -24,6 +24,34 @@ class FakeTransport:
 
 
 class LagoMeteringTests(unittest.TestCase):
+    def test_build_attribution_properties_supports_showback_and_shared_pool(self):
+        properties = lago.build_attribution_properties(
+            client="acme",
+            agent="receptionist",
+            environment="prod",
+            provider="openai",
+            model="approved-openai-model",
+            usage_type="llm_tokens",
+            quantity=1500,
+            unit="tokens",
+            provider_cost_cents=2.75,
+            currency="sgd",
+            trace_id="call-123",
+            action_request_id="a" * 64,
+            cost_center="front-office",
+            billing_subscription_id="acme-enterprise-2026",
+            shared_pool_id="acme-ai-workforce",
+            extra={"tokens_in": 1200, "tokens_out": 300},
+        )
+        self.assertEqual(properties["client"], "acme")
+        self.assertEqual(properties["agent"], "receptionist")
+        self.assertEqual(properties["currency"], "SGD")
+        self.assertEqual(properties["action_request_id"], "a" * 64)
+        self.assertEqual(properties["shared_pool_id"], "acme-ai-workforce")
+        self.assertEqual(properties["provider_cost_cents"], 2.75)
+        self.assertNotIn("markup", properties)
+        self.assertNotIn("price", properties)
+
     def test_build_usage_event_preserves_idempotency_and_usage_dimensions(self):
         payload = lago.build_usage_event(
             transaction_id="inf_20260915_acme_0001",
@@ -49,6 +77,23 @@ class LagoMeteringTests(unittest.TestCase):
         self.assertEqual(event["properties"]["provider_cost_cents"], 2.75)
         self.assertNotIn("prompt", event["properties"])
         self.assertNotIn("response", event["properties"])
+
+    def test_sensitive_content_keys_are_rejected(self):
+        with self.assertRaisesRegex(ValueError, "sensitive field"):
+            lago.build_attribution_properties(
+                client="acme",
+                agent="receptionist",
+                environment="prod",
+                provider="openai",
+                extra={"prompt": "do not meter this"},
+            )
+        with self.assertRaisesRegex(ValueError, "sensitive field"):
+            lago.build_usage_event(
+                transaction_id="voice_acme_0002",
+                external_subscription_id="acme-prod",
+                code="voice_minutes",
+                properties={"transcript": "customer content"},
+            )
 
     def test_client_posts_only_usage_facts_to_lago_event_endpoint(self):
         transport = FakeTransport()
