@@ -47,9 +47,13 @@ def _urllib_transport(
     headers: dict[str, str],
     payload: dict[str, Any] | None,
 ) -> tuple[int, dict[str, Any]]:
+    parsed = urllib.parse.urlparse(url)
+    if parsed.scheme != "https" or parsed.hostname != "www.googleapis.com":
+        raise ValueError("Google Calendar transport only permits the fixed HTTPS Google API host")
     data = None if payload is None else json.dumps(payload).encode("utf-8")
     request = urllib.request.Request(url, data=data, headers=headers, method=method)
     try:
+        # nosec B310 -- scheme and hostname are explicitly constrained immediately above.
         with urllib.request.urlopen(request, timeout=15) as response:
             raw = response.read().decode("utf-8")
             return response.status, json.loads(raw) if raw else {}
