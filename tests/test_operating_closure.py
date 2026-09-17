@@ -21,6 +21,7 @@ def load_script(name: str, filename: str):
 scorecard = load_script("operating_scorecard", "operating-scorecard.py")
 ops = load_script("operations_readiness", "operations-readiness.py")
 voice_deploy = load_script("deploy_reference_voice", "deploy-reference-voice.py")
+reference_proof = load_script("reference_proof", "reference-proof.py")
 
 
 class OperatingClosureTests(unittest.TestCase):
@@ -98,6 +99,45 @@ class OperatingClosureTests(unittest.TestCase):
             dockerfile = (context / "Dockerfile").read_text(encoding="utf-8")
             self.assertIn("ARG BASE_IMAGE", dockerfile)
             self.assertIn("requirements-voice.txt", dockerfile)
+
+    def test_reference_proof_requires_real_evidence_only_when_requested(self):
+        evidence = {
+            "services": {
+                "hermes": {"running": True},
+                "governed-tools": {"running": True},
+                "voice": {"running": True},
+            },
+            "governance": {"records": 2},
+            "voice": {"distinctCalls": 1, "humanTransferEvidence": 0, "messageFallbackEvidence": 1},
+        }
+        result = reference_proof.evaluate(
+            evidence,
+            require_voice_call=True,
+            require_fallback=True,
+            require_governed_action=True,
+        )
+        self.assertTrue(result["passed"])
+
+        evidence["voice"]["distinctCalls"] = 0
+        result = reference_proof.evaluate(
+            evidence,
+            require_voice_call=True,
+            require_fallback=True,
+            require_governed_action=True,
+        )
+        self.assertFalse(result["passed"])
+        self.assertIn("no real voice call lifecycle evidence exists", result["failures"])
+
+    def test_reference_proof_summaries_do_not_copy_sensitive_payloads(self):
+        voice = reference_proof._voice_summary([
+            {"type": "CallStarted", "room": "room-1", "caller_number": "+15550001"},
+            {"type": "FallbackMessage", "room": "room-1", "message": "private message"},
+        ])
+        rendered = repr(voice)
+        self.assertEqual(voice["distinctCalls"], 1)
+        self.assertEqual(voice["messageFallbackEvidence"], 1)
+        self.assertNotIn("+15550001", rendered)
+        self.assertNotIn("private message", rendered)
 
 
 if __name__ == "__main__":
