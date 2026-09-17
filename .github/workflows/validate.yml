@@ -131,6 +131,7 @@ jobs:
           name: enterprise-evidence-${{ github.sha }}
           path: .enterprise-evidence/
           if-no-files-found: error
+          include-hidden-files: true
           retention-days: 30
 
   publish-main-release:
