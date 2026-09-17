@@ -26,14 +26,18 @@ run_report() {
   fi
 }
 
-# Test fixtures intentionally contain fake tokens/credentials. Scan executable/configuration
-# content and record this scope explicitly in assurance/evidence-metadata.yaml.
+# Test fixtures intentionally contain deterministic fake credentials. The two line
+# allowlists cover a pinned container SHA and the evidence generator's output filename,
+# neither of which is credential material. These scope decisions are recorded in
+# assurance/evidence-metadata.yaml.
 run_report detect-secrets detect-secrets scan --all-files --no-verify \
   --exclude-files '(^|/)\.git/' \
   --exclude-files '(^|/)\.enterprise-evidence/' \
   --exclude-files '(^|/)\.venv/' \
   --exclude-files '(^|/)venv/' \
-  --exclude-files '(^|/)tests/' > "${OUT}/repository-leak-scan.json"
+  --exclude-files '(^|/)tests/' \
+  --exclude-lines 'BASE_IMAGE = "python:' \
+  --exclude-lines '"repository_secret_scan": "detect-secrets\.json"' > "${OUT}/detect-secrets.json"
 
 run_report pip-audit pip-audit -r requirements-dev.txt --format json --output "${OUT}/pip-audit.json"
 # Medium/high severity findings are the enterprise evidence threshold. Low-severity
