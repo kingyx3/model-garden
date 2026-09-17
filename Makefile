@@ -1,4 +1,4 @@
-.PHONY: dev validate contracts tests terraform hermes assurance assurance-scan
+.PHONY: dev validate contracts tests terraform hermes assurance assurance-scan proof scorecard ops
 
 dev:
 	python3 -m pip install -r requirements-dev.txt
@@ -30,5 +30,15 @@ assurance-scan:
 	python3 -m pip install -r requirements-assurance.txt
 	bash scripts/run-assurance-scans.sh
 
+proof:
+	@echo 'Run on a deployed host: python3 scripts/reference-proof.py --project-name <client-env> --require-voice-call --require-fallback --require-governed-action'
+
+scorecard:
+	@echo 'python3 scripts/operating-scorecard.py summary <private-scorecard.yaml>'
+
+ops:
+	@echo 'python3 scripts/operations-readiness.py <client-operations.yaml>'
+
 validate: contracts tests terraform hermes
+	python3 -m py_compile scripts/deploy-reference-voice.py scripts/reference-proof.py scripts/operating-scorecard.py scripts/operations-readiness.py platform/channels/livekit_receptionist.py
 	bash -n scripts/*.sh

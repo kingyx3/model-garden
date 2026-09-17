@@ -17,8 +17,8 @@ class LiveMvpPreflightTests(unittest.TestCase):
     def complete_env(self):
         return {
             "OPENAI_API_KEY": "model-secret",
-            "GOOGLE_CALENDAR_ID": "calendar@example.test",
-            "GOOGLE_APPLICATION_CREDENTIALS": "/run/secrets/google.json",
+            "MODEL_GARDEN_GOOGLE_CALENDAR_TOKEN": "calendar-token",
+            "MODEL_GARDEN_GOOGLE_CALENDAR_ID": "calendar@example.test",
             "LIVEKIT_URL": "wss://livekit.example.test",
             "LIVEKIT_API_KEY": "livekit-key",
             "LIVEKIT_API_SECRET": "livekit-secret",
@@ -30,20 +30,22 @@ class LiveMvpPreflightTests(unittest.TestCase):
         result = preflight.check(self.complete_env())
         self.assertTrue(result["ready"])
         self.assertEqual(result["missing"], {})
+        self.assertIn("MODEL_GARDEN_GOOGLE_CALENDAR_ID", result["optionalBindings"]["calendar"])
 
     @mock.patch.object(preflight.shutil, "which", return_value=None)
     def test_reports_missing_capabilities_without_secret_values(self, _which):
         env = self.complete_env()
-        del env["GOOGLE_APPLICATION_CREDENTIALS"]
+        del env["MODEL_GARDEN_GOOGLE_CALENDAR_TOKEN"]
         del env["LIVEKIT_API_SECRET"]
         result = preflight.check(env)
         self.assertFalse(result["ready"])
-        self.assertEqual(result["missing"]["calendar"], ["GOOGLE_APPLICATION_CREDENTIALS"])
+        self.assertEqual(result["missing"]["calendar"], ["MODEL_GARDEN_GOOGLE_CALENDAR_TOKEN"])
         self.assertEqual(result["missing"]["voice"], ["LIVEKIT_API_SECRET"])
         self.assertEqual(result["missing"]["runtime"], ["docker"])
         rendered = repr(result)
         self.assertNotIn("model-secret", rendered)
         self.assertNotIn("livekit-key", rendered)
+        self.assertNotIn("calendar-token", rendered)
 
     def test_whitespace_binding_counts_as_missing(self):
         env = self.complete_env()

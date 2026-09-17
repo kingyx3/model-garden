@@ -1,0 +1,42 @@
+version: 1
+client: REQUIRED
+environment: prod
+ownership:
+  runtime_operator: REQUIRED
+  cloud_owner: REQUIRED
+  model_provider_owner: REQUIRED
+  voice_provider_owner: REQUIRED
+  business_system_owner: REQUIRED
+access:
+  break_glass_owner: REQUIRED
+  recovery_contact: REQUIRED
+  credential_revocation_record: REQUIRED
+support:
+  primary_channel: REQUIRED
+  escalation_owner: REQUIRED
+  review_cadence: 30/60/90 days then agreed managed-service cadence
+  contracted_coverage: REQUIRED
+  p1_fallback_path: human transfer or message capture
+monitoring:
+  runtime_health: Docker Compose health + deployment verification
+  provider_failures: audit/action evidence + provider diagnostics
+  alert_destination: REQUIRED
+data:
+  retention_policy: REQUIRED
+  recording_transcription_policy: REQUIRED
+  vendor_handling_review: REQUIRED
+  disclosure_requirements: REQUIRED
+continuity:
+  operator_backup: REQUIRED
+  access_recovery_path: REQUIRED
+  rollback_test_record: REQUIRED
+  backup_restore_requirement: REQUIRED
+  client_workspace_export_path: Git repository export/transfer
+  offboarding_owner: REQUIRED
+acceptance:
+  keyless_redeploy_evidence: REQUIRED
+  real_model_turn_evidence: REQUIRED
+  governed_business_action_evidence: REQUIRED
+  inbound_voice_evidence: REQUIRED
+  human_fallback_evidence: REQUIRED
+  production_rollback_evidence: REQUIRED
