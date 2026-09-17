@@ -37,7 +37,7 @@ run_report detect-secrets detect-secrets scan --all-files --no-verify \
   --exclude-files '(^|/)\.venv/' \
   --exclude-files '(^|/)venv/' \
   --exclude-files '(^|/)tests/' \
-  --exclude-files '(^|/)scripts/(run-assurance-scans|enterprise-evidence)\.py?$' \
+  --exclude-files '(^|/)scripts/(run-assurance-scans|enterprise-evidence)\.(sh|py)$' \
   --exclude-lines 'BASE_IMAGE = "python:' > "${OUT}/detect-secrets.json"
 
 run_report pip-audit pip-audit -r requirements-dev.txt --format json --output "${OUT}/pip-audit.json"
