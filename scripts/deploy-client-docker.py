@@ -31,6 +31,9 @@ import yaml
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 PROJECT_NAME = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
 BASE_IMAGE = "python:3.12.14-slim-bookworm@sha256:782412e85d0f0984994c290652577d4018aff08145c85b262bb63dc0c7522254"
+RUNTIME_UID = 10001
+RUNTIME_GID = 10001
+RUNTIME_USER = f"{RUNTIME_UID}:{RUNTIME_GID}"
 PROVIDER_ENV = {
     "openai": "OPENAI_API_KEY",
     "anthropic": "ANTHROPIC_API_KEY",
@@ -211,7 +214,9 @@ ARG HERMES_VERSION={lock['version']}
 ARG HERMES_COMMIT={lock['commit']}
 ENV PYTHONDONTWRITEBYTECODE=1 \\
     PYTHONUNBUFFERED=1 \\
-    HERMES_HOME=/opt/data
+    HERMES_HOME=/opt/data \\
+    HOME=/opt/data \\
+    XDG_CACHE_HOME=/opt/data/.cache
 COPY hermes-source /opt/hermes-agent
 COPY model-garden-platform /opt/model-garden-platform
 RUN test \"$(git -C /opt/hermes-agent rev-parse HEAD 2>/dev/null || true)\" = \"$HERMES_COMMIT\" || \\
@@ -241,6 +246,40 @@ def _healthcheck(port: int) -> dict[str, Any]:
     }
 
 
+def _container_hardening() -> dict[str, Any]:
+    return {
+        "user": RUNTIME_USER,
+        "read_only": True,
+        "cap_drop": ["ALL"],
+        "security_opt": ["no-new-privileges:true"],
+        "init": True,
+        "pids_limit": 256,
+        "tmpfs": ["/tmp:rw,noexec,nosuid,nodev,size=64m"],
+    }
+
+
+def _volume_init(project_name: str, *, include_governance: bool) -> dict[str, Any]:
+    mounts = ["hermes-data:/hermes"]
+    targets = ["/hermes"]
+    if include_governance:
+        mounts.append("governance-data:/governance")
+        targets.append("/governance")
+    command = f"chown -R {RUNTIME_UID}:{RUNTIME_GID} " + " ".join(targets)
+    return {
+        "image": f"model-garden-{project_name}:current",
+        "user": "0:0",
+        "entrypoint": ["/bin/sh", "-c"],
+        "command": command,
+        "volumes": mounts,
+        "network_mode": "none",
+        "restart": "no",
+        "read_only": True,
+        "cap_drop": ["ALL"],
+        "cap_add": ["CHOWN"],
+        "security_opt": ["no-new-privileges:true"],
+    }
+
+
 def _compose(
     project_name: str,
     provider: str,
@@ -261,13 +300,21 @@ def _compose(
         "restart": "unless-stopped",
         "environment": {
             "HERMES_HOME": "/opt/data",
+            "HOME": "/opt/data",
+            "XDG_CACHE_HOME": "/opt/data/.cache",
             provider_env: "${MODEL_GARDEN_MODEL_CREDENTIAL:?MODEL_GARDEN_MODEL_CREDENTIAL is required}",
         },
         "volumes": ["hermes-data:/opt/data"],
         "healthcheck": _healthcheck(9119),
+        "depends_on": {"volume-init": {"condition": "service_completed_successfully"}},
+        **_container_hardening(),
     }
-    services: dict[str, Any] = {"hermes": hermes}
+    services: dict[str, Any] = {
+        "volume-init": _volume_init(project_name, include_governance=calendar is not None),
+        "hermes": hermes,
+    }
     volumes: dict[str, Any] = {"hermes-data": {}}
+    networks: dict[str, Any] = {}
     if calendar is not None:
         _, calendar_id = calendar
         services["governed-tools"] = {
@@ -276,6 +323,8 @@ def _compose(
             "entrypoint": ["python", "/opt/model-garden-platform/platform/runtime/governed_mcp.py"],
             "command": ["--host", "0.0.0.0", "--port", "9120"],
             "environment": {
+                "HOME": "/opt/data",
+                "XDG_CACHE_HOME": "/opt/data/.cache",
                 "MODEL_GARDEN_DESIRED_STATE": "/opt/profile-seed/.modelgarden/desired-state.json",
                 "MODEL_GARDEN_AUDIT_PATH": "/opt/data/.modelgarden/audit.jsonl",
                 "MODEL_GARDEN_APPROVAL_ROOT": "/opt/data/.modelgarden/approvals",
@@ -285,10 +334,17 @@ def _compose(
             },
             "volumes": ["governance-data:/opt/data"],
             "healthcheck": _healthcheck(9120),
+            "depends_on": {"volume-init": {"condition": "service_completed_successfully"}},
+            "networks": ["agent-tools"],
+            **_container_hardening(),
         }
         volumes["governance-data"] = {}
-        hermes["depends_on"] = {"governed-tools": {"condition": "service_healthy"}}
-    document = {"services": services, "volumes": volumes}
+        networks["agent-tools"] = {}
+        hermes["networks"] = ["default", "agent-tools"]
+        hermes["depends_on"]["governed-tools"] = {"condition": "service_healthy"}
+    document: dict[str, Any] = {"services": services, "volumes": volumes}
+    if networks:
+        document["networks"] = networks
     return yaml.safe_dump(document, sort_keys=False)
 
 
@@ -407,7 +463,12 @@ def _wait_healthy(project_name: str, bundle_dir: pathlib.Path, env: dict[str, st
     deadline = time.monotonic() + timeout
     compose_file = bundle_dir / "compose.yaml"
     document = yaml.safe_load(compose_file.read_text(encoding="utf-8"))
-    services = sorted(document.get("services", {})) if isinstance(document, dict) else []
+    service_defs = document.get("services", {}) if isinstance(document, dict) else {}
+    services = sorted(
+        name
+        for name, spec in service_defs.items()
+        if isinstance(spec, dict) and isinstance(spec.get("healthcheck"), dict)
+    ) if isinstance(service_defs, dict) else []
     if not services:
         return False
     compose = ["docker", "compose", "-p", project_name, "-f", str(compose_file)]
