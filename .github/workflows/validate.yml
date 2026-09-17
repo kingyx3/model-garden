@@ -13,7 +13,7 @@ jobs:
   version-contract:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
       - name: Verify VERSION is safe to publish or matches this tag
@@ -56,8 +56,8 @@ jobs:
           - infra/bootstrap/gcp
           - infra/docker-host/gcp
     steps:
-      - uses: actions/checkout@v7
-      - uses: hashicorp/setup-terraform@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
         with:
           terraform_version: "1.14.6"
           terraform_wrapper: false
@@ -68,10 +68,10 @@ jobs:
       - name: Validate
         run: terraform -chdir=${{ matrix.path }} validate
 
-  contracts-and-runtime:
+  contracts-runtime-tests:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Install contract validator dependencies
         run: python3 -m pip install -r requirements-dev.txt
       - name: Validate versioned contracts and reference workspace
@@ -103,7 +103,7 @@ jobs:
   hermes-compatibility:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Install Model Garden validation dependencies
         run: python3 -m pip install -r requirements-dev.txt
       - name: Validate shell scripts
@@ -113,35 +113,69 @@ jobs:
 
   enterprise-evidence:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Install assurance dependencies
         run: python3 -m pip install -r requirements-dev.txt -r requirements-assurance.txt
-      - name: Generate scanner evidence and enterprise pack
-        run: bash scripts/run-assurance-scans.sh
+      - name: Generate scanner evidence and enforce enterprise thresholds
+        id: assurance
+        continue-on-error: true
+        run: bash scripts/run-assurance-scans.sh --enforce
       - name: Verify evidence pack exists
+        if: always()
         run: |
           test -s .enterprise-evidence/enterprise-evidence-pack.md
           test -s .enterprise-evidence/manifest.json
           python3 -m json.tool .enterprise-evidence/manifest.json >/dev/null
+      - name: Archive evidence snapshot
+        if: always()
+        run: tar -C .enterprise-evidence -czf "enterprise-evidence-${GITHUB_SHA}.tgz" .
       - name: Upload enterprise evidence artifact
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: enterprise-evidence-${{ github.sha }}
-          path: .enterprise-evidence/
+          path: |
+            .enterprise-evidence/
+            enterprise-evidence-${{ github.sha }}.tgz
           if-no-files-found: error
           include-hidden-files: true
-          retention-days: 30
+          retention-days: 90
+      - name: Attest evidence provenance
+        if: github.event_name != 'pull_request' && steps.assurance.outcome == 'success'
+        uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # v4.2.1
+        with:
+          subject-path: enterprise-evidence-${{ github.sha }}.tgz
+      - name: Enforce assurance result
+        if: always()
+        shell: bash
+        run: |
+          if [[ "${{ steps.assurance.outcome }}" != "success" ]]; then
+            echo "Enterprise assurance thresholds failed. Review the retained evidence artifact." >&2
+            exit 1
+          fi
+
+  # The repository ruleset already requires this status context. Keep it as an
+  # aggregator so enterprise-evidence failures are merge-blocking without a second
+  # mutable source of branch-protection configuration.
+  contracts-and-runtime:
+    needs: [contracts-runtime-tests, enterprise-evidence]
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "Runtime/contracts and enterprise assurance gates passed."
 
   publish-main-release:
     if: github.ref == 'refs/heads/main'
-    needs: [version-contract, current-terraform, contracts-and-runtime, hermes-compatibility, enterprise-evidence]
+    needs: [version-contract, current-terraform, contracts-and-runtime, hermes-compatibility]
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
       - name: Publish validated VERSION from main
@@ -171,12 +205,12 @@ jobs:
 
   release:
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [version-contract, current-terraform, contracts-and-runtime, hermes-compatibility, enterprise-evidence]
+    needs: [version-contract, current-terraform, contracts-and-runtime, hermes-compatibility]
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Verify tag matches VERSION
         run: python3 scripts/validate-release-tag.py "$GITHUB_REF_NAME"
       - name: Publish immutable GitHub Release
