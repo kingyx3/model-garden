@@ -1,2 +1,2 @@
-livekit-agents[openai]==1.5.17
+livekit-agents[openai]==1.8.1
 httpx==0.28.1
