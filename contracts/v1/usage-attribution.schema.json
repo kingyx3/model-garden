@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://modelgarden.ai/schemas/v1/usage-attribution.schema.json",
+  "title": "Model Garden Usage Attribution v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["client", "agent", "environment", "provider"],
+  "properties": {
+    "client": {"type": "string", "minLength": 1},
+    "agent": {"type": "string", "minLength": 1},
+    "environment": {"type": "string", "minLength": 1},
+    "provider": {"type": "string", "minLength": 1},
+    "model": {"type": "string", "minLength": 1},
+    "usage_type": {"type": "string", "minLength": 1},
+    "quantity": {"type": "number", "minimum": 0},
+    "unit": {"type": "string", "minLength": 1},
+    "provider_cost_cents": {"type": "number", "minimum": 0},
+    "currency": {"type": "string", "pattern": "^[A-Z]{3}$"},
+    "trace_id": {"type": "string", "minLength": 1},
+    "action_request_id": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "cost_center": {"type": "string", "minLength": 1},
+    "billing_subscription_id": {"type": "string", "minLength": 1},
+    "shared_pool_id": {"type": "string", "minLength": 1}
+  }
+}
