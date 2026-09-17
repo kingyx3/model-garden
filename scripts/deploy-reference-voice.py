@@ -4,7 +4,7 @@
 The base deployment remains the small Hermes + governed-Tools contract. This script is
 only active when EnvironmentBinding.spec.channels.voice.provider == livekit. It switches
 Hermes from the local serve process to its authenticated OpenAI-compatible gateway and
-adds a LiveKit worker on the same private Compose network. Failure restores the base
+adds a LiveKit worker on the runtime-facing Compose network. Failure restores the base
 runtime, so adding voice does not weaken the existing rollback path.
 """
 from __future__ import annotations
@@ -87,15 +87,16 @@ def _health(project: str, compose_files: list[pathlib.Path], env: dict[str, str]
                 except json.JSONDecodeError:
                     rows = []
                     break
-            if rows and any(row.get("Service") == "voice" for row in rows):
+            long_running = [row for row in rows if row.get("Service") != "voice-volume-init"]
+            if long_running and any(row.get("Service") == "voice" for row in long_running):
                 bad = {"exited", "dead", "unhealthy"}
-                states = {(row.get("State") or "").lower() for row in rows}
-                health = {(row.get("Health") or "").lower() for row in rows if row.get("Health")}
+                states = {(row.get("State") or "").lower() for row in long_running}
+                health = {(row.get("Health") or "").lower() for row in long_running if row.get("Health")}
                 if states & bad or health & bad:
                     return False
-                hermes_ok = any(row.get("Service") == "hermes" and (row.get("Health") == "healthy" or row.get("State") == "running") for row in rows)
-                voice_ok = any(row.get("Service") == "voice" and row.get("State") == "running" for row in rows)
-                tools_ok = all(row.get("Service") != "governed-tools" or row.get("Health") == "healthy" for row in rows)
+                hermes_ok = any(row.get("Service") == "hermes" and (row.get("Health") == "healthy" or row.get("State") == "running") for row in long_running)
+                voice_ok = any(row.get("Service") == "voice" and row.get("State") == "running" for row in long_running)
+                tools_ok = all(row.get("Service") != "governed-tools" or row.get("Health") == "healthy" for row in long_running)
                 if hermes_ok and voice_ok and tools_ok:
                     return True
         time.sleep(2)
@@ -112,6 +113,22 @@ def _context(root: pathlib.Path) -> pathlib.Path:
         encoding="utf-8",
     )
     return context
+
+
+def _voice_volume_init(project: str) -> dict[str, Any]:
+    return {
+        "image": f"model-garden-{project}:current",
+        "user": "0:0",
+        "entrypoint": ["/bin/sh", "-c"],
+        "command": f"chown -R {DEPLOY.RUNTIME_UID}:{DEPLOY.RUNTIME_GID} /voice",
+        "volumes": ["voice-data:/voice"],
+        "network_mode": "none",
+        "restart": "no",
+        "read_only": True,
+        "cap_drop": ["ALL"],
+        "cap_add": ["CHOWN"],
+        "security_opt": ["no-new-privileges:true"],
+    }
 
 
 def apply(binding_path: pathlib.Path, bundle_dir: pathlib.Path, project: str, secrets_json: str | None, timeout: int) -> str:
@@ -146,6 +163,8 @@ def apply(binding_path: pathlib.Path, bundle_dir: pathlib.Path, project: str, se
         "API_SERVER_KEY": "${MODEL_GARDEN_HERMES_API_KEY:?MODEL_GARDEN_HERMES_API_KEY is required}",
     }
     voice_environment = {
+        "HOME": "/tmp",
+        "XDG_CACHE_HOME": "/tmp/.cache",
         "LIVEKIT_URL": voice["url"],
         "LIVEKIT_API_KEY": "${MODEL_GARDEN_LIVEKIT_API_KEY:?MODEL_GARDEN_LIVEKIT_API_KEY is required}",
         "LIVEKIT_API_SECRET": "${MODEL_GARDEN_LIVEKIT_API_SECRET:?MODEL_GARDEN_LIVEKIT_API_SECRET is required}",
@@ -158,6 +177,19 @@ def apply(binding_path: pathlib.Path, bundle_dir: pathlib.Path, project: str, se
     if voice.get("human_transfer_target"):
         voice_environment["MODEL_GARDEN_HUMAN_TRANSFER_TARGET"] = voice["human_transfer_target"]
 
+    voice_service: dict[str, Any] = {
+        "build": {"context": str(context), "args": {"BASE_IMAGE": f"model-garden-{project}:current"}},
+        "image": f"model-garden-{project}-voice:current",
+        "restart": "unless-stopped",
+        "environment": voice_environment,
+        "volumes": ["voice-data:/opt/data"],
+        "networks": ["default"],
+        "depends_on": {
+            "hermes": {"condition": "service_healthy"},
+            "voice-volume-init": {"condition": "service_completed_successfully"},
+        },
+        **DEPLOY._container_hardening(),
+    }
     document = {
         "services": {
             "hermes": {
@@ -171,14 +203,8 @@ def apply(binding_path: pathlib.Path, bundle_dir: pathlib.Path, project: str, se
                     "start_period": "20s",
                 },
             },
-            "voice": {
-                "build": {"context": str(context), "args": {"BASE_IMAGE": f"model-garden-{project}:current"}},
-                "image": f"model-garden-{project}-voice:current",
-                "restart": "unless-stopped",
-                "environment": voice_environment,
-                "volumes": ["voice-data:/opt/data"],
-                "depends_on": {"hermes": {"condition": "service_healthy"}},
-            },
+            "voice-volume-init": _voice_volume_init(project),
+            "voice": voice_service,
         },
         "volumes": {"voice-data": {}},
     }
