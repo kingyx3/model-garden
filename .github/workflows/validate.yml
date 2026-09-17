@@ -111,9 +111,31 @@ jobs:
       - name: Smoke-test pinned Hermes runtime against Receptionist profile
         run: bash scripts/smoke-hermes-runtime.sh
 
+  enterprise-evidence:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install assurance dependencies
+        run: python3 -m pip install -r requirements-dev.txt -r requirements-assurance.txt
+      - name: Generate scanner evidence and enterprise pack
+        run: bash scripts/run-assurance-scans.sh
+      - name: Verify evidence pack exists
+        run: |
+          test -s .enterprise-evidence/enterprise-evidence-pack.md
+          test -s .enterprise-evidence/manifest.json
+          python3 -m json.tool .enterprise-evidence/manifest.json >/dev/null
+      - name: Upload enterprise evidence artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: enterprise-evidence-${{ github.sha }}
+          path: .enterprise-evidence/
+          if-no-files-found: error
+          retention-days: 30
+
   publish-main-release:
     if: github.ref == 'refs/heads/main'
-    needs: [version-contract, current-terraform, contracts-and-runtime, hermes-compatibility]
+    needs: [version-contract, current-terraform, contracts-and-runtime, hermes-compatibility, enterprise-evidence]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -148,7 +170,7 @@ jobs:
 
   release:
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [version-contract, current-terraform, contracts-and-runtime, hermes-compatibility]
+    needs: [version-contract, current-terraform, contracts-and-runtime, hermes-compatibility, enterprise-evidence]
     runs-on: ubuntu-latest
     permissions:
       contents: write
