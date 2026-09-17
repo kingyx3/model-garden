@@ -84,6 +84,16 @@ class ReceptionistVoiceAgent(Agent):
             )
         except Exception as exc:  # provider failure must fall back safely, not end the call
             return f"Human transfer failed ({type(exc).__name__}). Offer to capture a message instead."
+        _append_message(
+            {
+                "type": "HumanTransfer",
+                "timestamp": int(time.time()),
+                "room": job_ctx.room.name,
+                "participant": participant.identity,
+                "target": target,
+                "status": "requested",
+            }
+        )
         return "Human transfer requested successfully."
 
     @function_tool()
@@ -142,6 +152,21 @@ server = AgentServer()
 @server.rtc_session(agent_name=AGENT_NAME)
 async def receptionist(ctx: JobContext) -> None:
     ctx.log_context_fields = {"room": ctx.room.name, "agent": AGENT_NAME}
+    started = int(time.time())
+    _append_message({"type": "CallStarted", "timestamp": started, "room": ctx.room.name, "agent": AGENT_NAME})
+
+    async def on_shutdown() -> None:
+        _append_message(
+            {
+                "type": "CallEnded",
+                "timestamp": int(time.time()),
+                "room": ctx.room.name,
+                "agent": AGENT_NAME,
+                "started": started,
+            }
+        )
+
+    ctx.add_shutdown_callback(on_shutdown)
     session = build_session()
     await session.start(agent=ReceptionistVoiceAgent(_instructions()), room=ctx.room)
     await ctx.connect()
