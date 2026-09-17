@@ -134,9 +134,14 @@ resource "google_service_account_iam_member" "deployer_uses_runtime" {
   member             = "serviceAccount:${google_service_account.deployer.email}"
 }
 
+# Split compute authority by function instead of granting roles/compute.admin. The
+# deployer can converge the current VM/network/firewall contract, administer the host
+# through IAP/OS Login, and use only the dedicated runtime service account above.
 resource "google_project_iam_member" "deployer_roles" {
   for_each = toset([
-    "roles/compute.admin",
+    "roles/compute.instanceAdmin.v1",
+    "roles/compute.networkAdmin",
+    "roles/compute.securityAdmin",
     "roles/compute.osAdminLogin",
     "roles/iap.tunnelResourceAccessor",
     "roles/serviceusage.serviceUsageConsumer",
