@@ -59,30 +59,40 @@ def _audit_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
     statuses: Counter[str] = Counter()
     tools: Counter[str] = Counter()
     approvals = 0
+    head_hash = None
     for row in rows:
-        status = row.get("status") or row.get("decision") or row.get("result")
+        status = row.get("status") or row.get("decision") or row.get("result") or row.get("outcome")
         if isinstance(status, str):
             statuses[status] += 1
         tool = row.get("tool") or row.get("toolName") or row.get("action")
         if isinstance(tool, str):
             tools[tool] += 1
-        if row.get("approval") or row.get("approver") or row.get("approvalReference"):
+        details = row.get("details")
+        if row.get("approval") or row.get("approver") or row.get("approvalReference") or (isinstance(details, dict) and details.get("approver")):
             approvals += 1
+        event_hash = row.get("eventHash")
+        if isinstance(event_hash, str) and event_hash:
+            head_hash = event_hash
     return {
         "records": len(rows),
         "statuses": dict(sorted(statuses.items())),
         "tools": dict(sorted(tools.items())),
         "approvalEvidenceRecords": approvals,
+        "auditHeadHash": head_hash,
     }
 
 
 def _voice_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
     types = Counter(row.get("type") for row in rows if isinstance(row.get("type"), str))
-    call_rooms = {row.get("room") for row in rows if row.get("type") == "CallStarted" and isinstance(row.get("room"), str)}
+    call_ids = {
+        row.get("roomHash") or row.get("room")
+        for row in rows
+        if row.get("type") == "CallStarted" and isinstance(row.get("roomHash") or row.get("room"), str)
+    }
     return {
         "records": len(rows),
         "eventTypes": dict(sorted(types.items())),
-        "distinctCalls": len(call_rooms),
+        "distinctCalls": len(call_ids),
         "humanTransferEvidence": types.get("HumanTransfer", 0),
         "messageFallbackEvidence": types.get("FallbackMessage", 0),
     }
@@ -109,7 +119,7 @@ def collect(project: str) -> dict[str, Any]:
         "services": service_summary,
         "governance": _audit_summary(audit_rows),
         "voice": _voice_summary(voice_rows),
-        "redaction": "No credentials, prompts, Tool arguments, caller identifiers, or message bodies are included.",
+        "redaction": "No credentials, prompts, Tool arguments, caller identifiers, transfer targets, room identifiers, or message bodies are included.",
     }
 
 
@@ -150,6 +160,7 @@ def _markdown(evidence: dict[str, Any], result: dict[str, Any]) -> str:
         "",
         f"- Governed action records: {evidence['governance']['records']}",
         f"- Approval evidence records: {evidence['governance']['approvalEvidenceRecords']}",
+        f"- Audit head hash present: {'yes' if evidence['governance'].get('auditHeadHash') else 'no'}",
         f"- Distinct live calls: {evidence['voice']['distinctCalls']}",
         f"- Human transfer evidence: {evidence['voice']['humanTransferEvidence']}",
         f"- Message fallback evidence: {evidence['voice']['messageFallbackEvidence']}",
@@ -181,9 +192,9 @@ def main() -> int:
         (args.output_dir / "manifest.json").write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
         (args.output_dir / "reference-proof.md").write_text(_markdown(evidence, result), encoding="utf-8")
     except (OSError, ValueError) as exc:
-        print(f"Reference proof failed: {exc}", file=sys.stderr)
+        print(str(exc), file=sys.stderr)
         return 1
-    print(f"Reference proof {'passed' if result['passed'] else 'incomplete'}: {args.output_dir}")
+    print(args.output_dir / "reference-proof.md")
     return 0 if result["passed"] else 2
 
 
