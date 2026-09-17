@@ -5,8 +5,8 @@ MVP behavior is intentionally small and explicit:
 - an Agent may request only Tools present in its compiled desired state;
 - selected Tools resolve to allow or require-approval from the stricter of Agent and Tool configuration;
 - approvals bind to an immutable requestId derived from agent + tool + exact arguments + initiating identity/context;
-- denied, pending, approved, failed, and executed material actions can be written as JSONL audit events;
-- first-party governance context can correlate tenant, conversation, runtime and model provenance;
+- denied, pending, approved, failed, and executed material actions can be written as versioned JSONL audit events;
+- first-party governance context can correlate tenant, environment, conversation, runtime, model and commercial attribution;
 - execution is injected by the caller, so this module never owns provider credentials.
 
 This is not a general policy engine. Richer policy semantics belong behind the same
@@ -24,8 +24,11 @@ import sys
 from collections.abc import Callable
 from typing import Any
 
+AUDIT_SCHEMA_VERSION = 1
 GOVERNANCE_CONTEXT_KEYS = (
     "tenantId",
+    "environment",
+    "deploymentId",
     "conversationId",
     "sessionId",
     "runtime",
@@ -35,6 +38,9 @@ GOVERNANCE_CONTEXT_KEYS = (
     "modelConfigVersion",
     "credentialScope",
     "correlationId",
+    "costCenter",
+    "billingSubscriptionId",
+    "sharedPoolId",
 )
 
 
@@ -133,6 +139,7 @@ def _utc_timestamp() -> str:
 
 def make_audit_event(event_type: str, request: dict[str, Any], *, outcome: str, details: dict[str, Any] | None = None) -> dict[str, Any]:
     event = {
+        "schemaVersion": AUDIT_SCHEMA_VERSION,
         "timestamp": _utc_timestamp(),
         "event": event_type,
         "outcome": outcome,
