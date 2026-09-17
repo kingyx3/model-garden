@@ -2,7 +2,25 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-OUT="${1:-${ROOT}/.enterprise-evidence/scans}"
+ENFORCE=false
+OUT=""
+
+for arg in "$@"; do
+  case "$arg" in
+    --enforce)
+      ENFORCE=true
+      ;;
+    *)
+      if [[ -n "$OUT" ]]; then
+        echo "Usage: $0 [--enforce] [output-directory]" >&2
+        exit 2
+      fi
+      OUT="$arg"
+      ;;
+  esac
+done
+
+OUT="${OUT:-${ROOT}/.enterprise-evidence/scans}"
 PACK_DIR="$(dirname "${OUT}")"
 mkdir -p "${OUT}"
 cd "${ROOT}"
@@ -65,5 +83,51 @@ if [[ ${sbom_rc} -ne 0 ]]; then
   echo "SBOM generation completed with vulnerability findings or an error (exit ${sbom_rc})." >&2
 fi
 
+# Always generate the reviewable pack before enforcing thresholds. This ensures a
+# failed enterprise gate still leaves the exact scanner evidence available to reviewers.
 python3 scripts/enterprise-evidence.py --scan-dir "${OUT}" --output-dir "${PACK_DIR}"
 cp assurance/evidence-metadata.yaml "${PACK_DIR}/evidence-metadata.yaml"
+
+if [[ "$ENFORCE" == "true" ]]; then
+  python3 - "${PACK_DIR}/manifest.json" <<'PY'
+import json
+import pathlib
+import sys
+
+manifest = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+scans = manifest.get("scans", {})
+required = {
+    "dependency_vulnerability_scan": "pass",
+    "python_security_scan": "pass",
+    "infrastructure_as_code_scan": "pass",
+    "repository_secret_scan": "pass",
+    "python_sbom": "generated",
+}
+failures = []
+for scan_id, expected in required.items():
+    actual = scans.get(scan_id, {}).get("status", "not_run")
+    if actual != expected:
+        failures.append(f"{scan_id}: expected {expected}, got {actual}")
+
+# Scanner exit status is an additional fail-closed signal for controls where a nonzero
+# code means findings or execution failure. SBOM uses pip-audit too, so dependency
+# vulnerability enforcement above is authoritative for that duplicated signal.
+scan_dir = pathlib.Path(sys.argv[1]).parent / "scans"
+for name in ("detect-secrets", "pip-audit", "bandit", "checkov"):
+    path = scan_dir / f"{name}.exit-code"
+    try:
+        code = int(path.read_text(encoding="utf-8").strip())
+    except (OSError, ValueError):
+        failures.append(f"{name}: missing or invalid exit-code evidence")
+        continue
+    if code != 0:
+        failures.append(f"{name}: scanner exit code {code}")
+
+if failures:
+    print("Enterprise assurance gate failed:", file=sys.stderr)
+    for failure in failures:
+        print(f"- {failure}", file=sys.stderr)
+    raise SystemExit(1)
+print("Enterprise assurance gate passed.")
+PY
+fi
