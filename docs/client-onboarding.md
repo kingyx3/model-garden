@@ -84,15 +84,17 @@ Before activating or modifying a Skill, run `python3 scripts/client-operator.py 
 
 Before enabling a Skill that requires a provider, verify the integration's status
 in the canonical registry. Merely listing `connectors.crm.provider: hubspot`
-or `connectors.kb.provider: text-knowledge` is not sufficient until the adapter
-is implemented; the readiness and deployment gates reject such claims.
+or `connectors.crm.provider: built-in-crm` is not sufficient until the adapter
+is implemented; the readiness and deployment gates reject such claims. The Tier 0
+`connectors.kb: {provider: text-knowledge, tier: 0}` binding is shipped and needs no
+credentials, only an approved business-rules file (below).
 Clients can continue to list those Skills under `disabledSkills` until their
 dependencies are implemented and authorized. A shipped Calendar adapter still
 needs actual account consent, working token rotation and live acceptance.
 
 ### Hand-offs and business rules
 
-Name who performs actions the coworker cannot (set `MODEL_GARDEN_HANDOFF_ASSIGNEE` for the governed sidecar, or give a `human-only` policy rule its own `assignee`) and show them `python3 scripts/client-operator.py handoffs --project-name <env>`; they close each item with `handoff-done` or `handoff-decline --by <their identity>`. For a client with no knowledge system, have the owner write one `.md` or `.txt` of business rules, run `python3 scripts/knowledge-check.py rules.md --query "<a real customer question>"`, fix the warnings, and only then set the source's `status: approved` (see [Tier 0 business-rules knowledge](contracts.md#tier-0-business-rules-knowledge-building-block); it is not yet connected to the runtime).
+Name who performs actions the coworker cannot (set `MODEL_GARDEN_HANDOFF_ASSIGNEE` for the governed sidecar, or give a `human-only` policy rule its own `assignee`) and show them `python3 scripts/client-operator.py handoffs --project-name <env>`; they close each item with `handoff-done` or `handoff-decline --by <their identity>`. For a client with no knowledge system, have the owner write one `.md` or `.txt` of business rules, run `python3 scripts/knowledge-check.py rules.md --query "<a real customer question>"`, fix the warnings, and only then set the source's `status: approved`, select the `kb.search` Tool for the Agent and bind `connectors.kb` to `text-knowledge` at tier 0 (see [Tier 0 business-rules knowledge](contracts.md#tier-0-business-rules-knowledge)). `python3 scripts/client-operator.py connect kb --provider text-knowledge --tools kb.search --owner <owner> --operator <you>` prints the non-secret plan. No live deployment has exercised this path yet.
 
 ### Approval policy walkthrough
 

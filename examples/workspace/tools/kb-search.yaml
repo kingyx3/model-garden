@@ -1,0 +1,10 @@
+apiVersion: modelgarden.ai/v1
+kind: Tool
+metadata:
+  name: kb.search
+  owner: ai-platform
+  description: Search approved business knowledge, including a Tier 0 business-rules text file, and cite the section each answer comes from.
+spec:
+  type: internal
+  capability: kb
+  risk: read

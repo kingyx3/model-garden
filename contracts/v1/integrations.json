@@ -135,11 +135,15 @@
       "family": "kb",
       "method": "file",
       "tier": 0,
-      "status": "planned",
+      "status": "built-credential-free",
       "tools": [
         "kb.search"
       ],
-      "issue": 77
+      "issue": 77,
+      "adapter": "platform/core/knowledge.py",
+      "scopeByTool": {
+        "kb.search": []
+      }
     },
     {
       "id": "confluence-knowledge",

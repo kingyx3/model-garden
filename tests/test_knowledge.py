@@ -351,11 +351,13 @@ class CliAndHonestyTests(unittest.TestCase):
                 self.assertEqual(cli.main([str(bad)]), 1)
             self.assertIn("rejected", err.getvalue())
 
-    def test_registry_does_not_yet_claim_the_tier_0_provider_is_built(self):
+    def test_registry_claims_credential_free_build_but_never_live_proof(self):
         registry = json.loads((ROOT / "contracts" / "v1" / "integrations.json").read_text())
         provider = next(item for item in registry["providers"] if item["id"] == "text-knowledge")
-        self.assertEqual(provider["status"], "planned")
-        self.assertNotIn("adapter", provider)
+        self.assertEqual(provider["status"], "built-credential-free")
+        self.assertEqual(provider["adapter"], "platform/core/knowledge.py")
+        self.assertTrue((ROOT / provider["adapter"]).is_file())
+        self.assertNotIn("proof", provider)
 
 
 if __name__ == "__main__":

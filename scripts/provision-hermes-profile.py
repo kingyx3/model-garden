@@ -24,6 +24,7 @@ MANAGED_SKILL_ROOT = pathlib.Path("skills") / "model-garden"
 MCP_TOOL_NAMES = {
     "calendar.availability": "calendar_availability",
     "calendar.book": "calendar_book",
+    "kb.search": "kb_search",
 }
 # Platform built-ins exposed whenever the governed Tool sidecar is present.
 PLATFORM_MCP_TOOLS = ("platform_capabilities", "handoff_request", "handoff_status")
