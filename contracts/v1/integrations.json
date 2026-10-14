@@ -1,0 +1,280 @@
+{
+  "apiVersion": "modelgarden.ai/v1",
+  "kind": "IntegrationRegistry",
+  "registryVersion": "1.0.0",
+  "providers": [
+    {
+      "id": "google-calendar",
+      "name": "Google Calendar",
+      "family": "calendar",
+      "method": "native",
+      "tier": 1,
+      "status": "built-credential-free",
+      "tools": [
+        "calendar.availability",
+        "calendar.book"
+      ],
+      "issue": 66,
+      "adapter": "platform/connectors/google_calendar.py",
+      "scopeByTool": {
+        "calendar.availability": [
+          "https://www.googleapis.com/auth/calendar.freebusy"
+        ],
+        "calendar.book": [
+          "https://www.googleapis.com/auth/calendar.events"
+        ]
+      }
+    },
+    {
+      "id": "microsoft-calendar",
+      "name": "Microsoft Graph Calendar",
+      "family": "calendar",
+      "method": "native",
+      "tier": 1,
+      "status": "built-credential-free",
+      "tools": [
+        "calendar.availability",
+        "calendar.book"
+      ],
+      "issue": 66,
+      "adapter": "platform/connectors/microsoft_calendar.py",
+      "scopeByTool": {
+        "calendar.availability": [
+          "Calendars.Read"
+        ],
+        "calendar.book": [
+          "Calendars.ReadWrite"
+        ]
+      }
+    },
+    {
+      "id": "hubspot",
+      "name": "HubSpot CRM",
+      "family": "crm",
+      "method": "native",
+      "tier": 1,
+      "status": "planned",
+      "tools": [
+        "crm.read",
+        "crm.update"
+      ],
+      "issue": 93
+    },
+    {
+      "id": "salesforce",
+      "name": "Salesforce CRM",
+      "family": "crm",
+      "method": "native",
+      "tier": 1,
+      "status": "planned",
+      "tools": [
+        "crm.read",
+        "crm.update"
+      ],
+      "issue": 93
+    },
+    {
+      "id": "zoho-crm",
+      "name": "Zoho CRM",
+      "family": "crm",
+      "method": "governed-mcp",
+      "tier": 2,
+      "status": "planned",
+      "tools": [
+        "crm.read",
+        "crm.update"
+      ],
+      "issue": 93
+    },
+    {
+      "id": "built-in-crm",
+      "name": "Built-in contact and interaction log",
+      "family": "crm",
+      "method": "built-in",
+      "tier": 0,
+      "status": "planned",
+      "tools": [
+        "crm.read",
+        "crm.update"
+      ],
+      "issue": 77
+    },
+    {
+      "id": "gmail",
+      "name": "Gmail",
+      "family": "mail",
+      "method": "native",
+      "tier": 1,
+      "status": "planned",
+      "tools": [
+        "mail.search",
+        "mail.read",
+        "mail.draft",
+        "mail.send"
+      ],
+      "issue": 90
+    },
+    {
+      "id": "outlook",
+      "name": "Microsoft Outlook shared mailbox",
+      "family": "mail",
+      "method": "native",
+      "tier": 1,
+      "status": "planned",
+      "tools": [
+        "mail.search",
+        "mail.read",
+        "mail.draft",
+        "mail.send"
+      ],
+      "issue": 90
+    },
+    {
+      "id": "text-knowledge",
+      "name": "Business rules .txt",
+      "family": "kb",
+      "method": "file",
+      "tier": 0,
+      "status": "planned",
+      "tools": [
+        "kb.search"
+      ],
+      "issue": 77
+    },
+    {
+      "id": "confluence-knowledge",
+      "name": "Confluence",
+      "family": "kb",
+      "method": "governed-mcp",
+      "tier": 2,
+      "status": "planned",
+      "tools": [
+        "kb.search"
+      ],
+      "issue": 92
+    },
+    {
+      "id": "notion-knowledge",
+      "name": "Notion",
+      "family": "kb",
+      "method": "governed-mcp",
+      "tier": 2,
+      "status": "planned",
+      "tools": [
+        "kb.search"
+      ],
+      "issue": 94
+    },
+    {
+      "id": "google-drive",
+      "name": "Google Drive",
+      "family": "files",
+      "method": "native",
+      "tier": 1,
+      "status": "planned",
+      "tools": [
+        "files.search",
+        "files.read",
+        "files.write",
+        "files.share"
+      ],
+      "issue": 91
+    },
+    {
+      "id": "sharepoint-onedrive",
+      "name": "SharePoint / OneDrive",
+      "family": "files",
+      "method": "native",
+      "tier": 1,
+      "status": "planned",
+      "tools": [
+        "files.search",
+        "files.read",
+        "files.write",
+        "files.share"
+      ],
+      "issue": 91
+    },
+    {
+      "id": "google-docs",
+      "name": "Google Docs",
+      "family": "docs",
+      "method": "native",
+      "tier": 1,
+      "status": "planned",
+      "tools": [
+        "docs.read",
+        "docs.create",
+        "docs.update"
+      ],
+      "issue": 91
+    },
+    {
+      "id": "microsoft-docs",
+      "name": "Microsoft 365 documents",
+      "family": "docs",
+      "method": "native",
+      "tier": 1,
+      "status": "planned",
+      "tools": [
+        "docs.read",
+        "docs.create",
+        "docs.update"
+      ],
+      "issue": 91
+    },
+    {
+      "id": "slack",
+      "name": "Slack",
+      "family": "chat",
+      "method": "governed-mcp",
+      "tier": 2,
+      "status": "planned",
+      "tools": [
+        "chat.read",
+        "chat.post"
+      ],
+      "issue": 82
+    },
+    {
+      "id": "teams",
+      "name": "Microsoft Teams",
+      "family": "chat",
+      "method": "native",
+      "tier": 1,
+      "status": "planned",
+      "tools": [
+        "chat.read",
+        "chat.post"
+      ],
+      "issue": 83
+    },
+    {
+      "id": "jira",
+      "name": "Jira",
+      "family": "tickets",
+      "method": "governed-mcp",
+      "tier": 2,
+      "status": "planned",
+      "tools": [
+        "tickets.search",
+        "tickets.create",
+        "tickets.update"
+      ],
+      "issue": 92
+    },
+    {
+      "id": "github",
+      "name": "GitHub",
+      "family": "code",
+      "method": "governed-mcp",
+      "tier": 2,
+      "status": "planned",
+      "tools": [
+        "code.read",
+        "code.propose-change"
+      ],
+      "issue": 94
+    }
+  ]
+}
