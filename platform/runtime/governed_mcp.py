@@ -173,6 +173,10 @@ class GovernedToolRuntime:
 
     def _record_health(self, family: str, health: str, reason: str | None = None) -> None:
         current = CAPABILITIES.read_connection_health(self.governance_root).get(family, {})
+        # An in-flight provider call may complete after the operator revokes access.
+        # Never let that completion clear revocation; only an explicit operator action may.
+        if current.get("health") == "revoked":
+            return
         if current.get("health") == health and current.get("reason") == reason:
             return
         CAPABILITIES.record_connection_health(self.governance_root, family, health, actor="runtime:governed-tools", reason=reason)
