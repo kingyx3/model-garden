@@ -481,6 +481,11 @@ def main() -> int:
     reject.add_argument("--project-name", required=True)
     reject.add_argument("--approver", required=True)
 
+    skills = sub.add_parser("skills", help="show enabled, disabled and blocked Skills for a client environment")
+    skills.add_argument("workspace", type=pathlib.Path, help="private client workspace")
+    skills.add_argument("--environment", choices=("dev", "prod"), default="dev")
+    skills.add_argument("--agent", help="optional named Agent")
+
     connect = sub.add_parser("connect", help="list provider options or preview exact requested permissions (no credentials handled)")
     connect.add_argument("family", help="portable capability family, e.g. calendar, crm, kb, mail")
     connect.add_argument("--provider", help="registered provider ID; omit to list all provider choices")
@@ -500,6 +505,16 @@ def main() -> int:
 
     args = parser.parse_args()
     try:
+        if args.command == "skills":
+            compiler = _load_script("modelgarden_client_skills", "compile-workspace.py")
+            binding_path = args.workspace / "environments" / f"{args.environment}.yaml"
+            binding = compiler.load_environment_binding(binding_path)
+            report = compiler.workspace_readiness(args.workspace, args.agent, (), binding)
+            sys.stdout.write(compiler.format_readiness(report))
+            return 0 if all(
+                skill["ready"] or not skill.get("enabled", True)
+                for agent in report for skill in agent["skills"]
+            ) else 1
         if args.command == "connect":
             integration_module = _load_script("modelgarden_integration_registry", "integration-directory.py")
             registry = integration_module.integrations
