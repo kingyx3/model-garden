@@ -126,6 +126,9 @@ def _capability_manifest(desired: dict[str, Any], binding: dict[str, Any]) -> di
                 {"required": declared.get("required", []), "optional": declared.get("optional", [])},
                 binding,
                 agent_name=agent,
+                required_by=CAPABILITIES.skills_requiring(
+                    [skill for skill in desired.get("skills", []) if isinstance(skill, dict)]
+                ),
             )
         return CAPABILITIES.build_manifest(desired, binding)
     except ValueError as exc:
