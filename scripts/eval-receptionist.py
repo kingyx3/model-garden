@@ -8,12 +8,23 @@ quality remains a separate credential-backed acceptance gate.
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import pathlib
 import sys
 
 import yaml
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
+# The eval environment binds only the calendar, so every other declared capability is unbound.
+EVAL_BINDING = {"environment": "eval", "connectors": {"calendar": {"provider": "google"}}}
+
+
+def _load_module(name: str, path: pathlib.Path):
+    module_spec = importlib.util.spec_from_file_location(name, path)
+    module = importlib.util.module_from_spec(module_spec)
+    assert module_spec.loader is not None
+    module_spec.loader.exec_module(module)
+    return module
 
 
 def load_yaml(path: pathlib.Path):
@@ -64,17 +75,33 @@ def evaluate(workspace: pathlib.Path, suite_path: pathlib.Path) -> list[str]:
         "never claim an external action succeeded": "Receptionist must wait for Tool success",
         "approval and permission boundaries": "Receptionist must respect governance boundaries",
         "hand off to a human": "Receptionist must retain a human fallback",
+        "not available here": "Receptionist must decline and offer a fallback when a capability is not connected",
     }
     for phrase, message in required_phrases.items():
         if phrase not in instructions:
             failures.append(message)
 
+    manifest = None
     for scenario in suite.get("scenarios", []):
         capability = scenario["capability"]
         if capability not in selected_skills:
             failures.append(f"{scenario['id']}: missing selected Skill {capability!r}")
             continue
         expected = scenario.get("expected", {})
+        unbound = expected.get("unboundCapability")
+        if unbound:
+            if manifest is None:
+                compiler = _load_module("eval_compile_workspace", ROOT / "scripts" / "compile-workspace.py")
+                desired = compiler.compile_workspace(workspace, "receptionist", environment_binding=EVAL_BINDING)[0]
+                manifest = compiler.CAPABILITIES.build_manifest(desired, EVAL_BINDING)
+            entry = next((item for item in manifest["capabilities"] if item["family"] == unbound), None)
+            if entry is None or not (entry["required"] or entry["optional"]):
+                failures.append(f"{scenario['id']}: Receptionist does not declare capability {unbound!r}")
+            elif entry["status"] != "unbound" or entry.get("fallback") != expected.get("fallback"):
+                failures.append(
+                    f"{scenario['id']}: unbound {unbound!r} must report fallback {expected.get('fallback')!r}, "
+                    f"got status {entry['status']!r} fallback {entry.get('fallback')!r}"
+                )
         tool = expected.get("tool")
         if tool:
             if tool not in selected_tools:

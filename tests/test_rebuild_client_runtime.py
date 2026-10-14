@@ -36,6 +36,7 @@ class RebuildClientRuntimeTests(unittest.TestCase):
         )
         for directory in ("contracts", "scripts", "examples"):
             shutil.copytree(ROOT / directory, repo / directory)
+        shutil.copytree(ROOT / "platform" / "core", repo / "platform" / "core")
         subprocess.run(["git", "init", "-q", str(repo)], check=True)
         subprocess.run(["git", "-C", str(repo), "config", "user.email", "tests@modelgarden.invalid"], check=True)
         subprocess.run(["git", "-C", str(repo), "config", "user.name", "Model Garden Tests"], check=True)
@@ -96,7 +97,7 @@ class RebuildClientRuntimeTests(unittest.TestCase):
             config = yaml.safe_load((profile / "config.yaml").read_text(encoding="utf-8"))
             self.assertEqual(
                 config["mcp_servers"]["model_garden"]["tools"]["include"],
-                ["calendar_availability", "calendar_book"],
+                ["calendar_availability", "calendar_book", "platform_capabilities"],
             )
 
     def test_missing_locked_release_tag_fails_closed_and_cleans_cache(self) -> None:

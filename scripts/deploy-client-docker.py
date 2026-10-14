@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import importlib.util
 import json
 import os
 import pathlib
@@ -41,9 +42,28 @@ RUNTIME_SOURCE_PATHS = (
     pathlib.Path("platform/runtime/governed_mcp.py"),
     pathlib.Path("platform/connectors/google_calendar.py"),
     pathlib.Path("platform/connectors/microsoft_calendar.py"),
+    pathlib.Path("platform/core/capabilities.py"),
+    pathlib.Path("platform/channels/text_channel.py"),
+    pathlib.Path("contracts/v1/capabilities.json"),
     pathlib.Path("scripts/govern-action.py"),
     pathlib.Path("scripts/runtime-approval.py"),
+    pathlib.Path("scripts/runtime-connection.py"),
+    pathlib.Path("VERSION"),
 )
+MANIFEST_PATH = pathlib.Path(".modelgarden") / "capability-manifest.json"
+READ_AUDIT = re.compile(r"^(?:full|aggregate|sampled:[1-9][0-9]{0,5})$")
+
+
+def _load_capabilities():
+    path = ROOT / "platform" / "core" / "capabilities.py"
+    module_spec = importlib.util.spec_from_file_location("model_garden_deploy_capabilities", path)
+    module = importlib.util.module_from_spec(module_spec)
+    assert module_spec.loader is not None
+    module_spec.loader.exec_module(module)
+    return module
+
+
+CAPABILITIES = _load_capabilities()
 
 
 def _load_json(path: pathlib.Path, label: str) -> dict[str, Any]:
@@ -91,8 +111,43 @@ def _validate_profile(profile_dir: pathlib.Path) -> str:
     return provider
 
 
+def _desired_state(profile_dir: pathlib.Path) -> dict[str, Any]:
+    return _load_json(profile_dir / ".modelgarden" / "desired-state.json", "compiled desired state")
+
+
+def _capability_manifest(desired: dict[str, Any], binding: dict[str, Any]) -> dict[str, Any]:
+    """Fail closed on unbound required capabilities, then build the non-secret manifest."""
+    declared = desired.get("capabilities")
+    agent = desired.get("source", {}).get("name", "<unknown>")
+    try:
+        if isinstance(declared, dict) and (declared.get("required") or declared.get("optional")):
+            CAPABILITIES.resolve(
+                {"required": declared.get("required", []), "optional": declared.get("optional", [])},
+                binding,
+                agent_name=agent,
+            )
+        return CAPABILITIES.build_manifest(desired, binding)
+    except ValueError as exc:
+        raise ValueError(f"Docker target failed: {exc}") from exc
+
+
+def _read_audit_mode(binding: dict[str, Any]) -> str | None:
+    spec = binding.get("spec")
+    audit = spec.get("audit") if isinstance(spec, dict) else None
+    if audit is None:
+        return None
+    if not isinstance(audit, dict):
+        raise ValueError("Docker target failed: EnvironmentBinding audit must be an object")
+    mode = audit.get("reads")
+    if mode is None:
+        return None
+    if not isinstance(mode, str) or not READ_AUDIT.fullmatch(mode):
+        raise ValueError("Docker target failed: audit.reads must be full, aggregate or sampled:<N>")
+    return mode
+
+
 def _selected_tools(profile_dir: pathlib.Path) -> set[str]:
-    desired = _load_json(profile_dir / ".modelgarden" / "desired-state.json", "compiled desired state")
+    desired = _desired_state(profile_dir)
     tools = desired.get("tools", [])
     if not isinstance(tools, list):
         raise ValueError("Docker target failed: compiled desired state tools must be an array")
@@ -262,6 +317,7 @@ def _compose(
     lock: dict[str, str],
     *,
     calendar: tuple[str, str, str] | None,
+    read_audit: str | None = None,
 ) -> str:
     provider_env = PROVIDER_ENV[provider]
     hermes: dict[str, Any] = {
@@ -302,7 +358,9 @@ def _compose(
                 "MODEL_GARDEN_AUDIT_PATH": "/opt/data/.modelgarden/audit.jsonl",
                 "MODEL_GARDEN_APPROVAL_ROOT": "/opt/data/.modelgarden/approvals",
                 "MODEL_GARDEN_INITIATING_IDENTITY": "runtime:hermes",
+                "MODEL_GARDEN_CAPABILITY_MANIFEST": f"/opt/profile-seed/{MANIFEST_PATH.as_posix()}",
                 "MODEL_GARDEN_CALENDAR_PROVIDER": calendar_provider,
+                **({"MODEL_GARDEN_READ_AUDIT": read_audit} if read_audit else {}),
                 **connector_env,
             },
             "volumes": ["governance-data:/opt/data"],
@@ -374,17 +432,21 @@ def render_bundle(
     binding = _load_json(binding_path, "EnvironmentBinding")
     environment, credential_ref = _validate_binding(binding)
     calendar = _calendar_binding(binding, selected_tools)
+    manifest = _capability_manifest(_desired_state(profile_dir), binding)
+    read_audit = _read_audit_mode(binding)
     lock = _load_hermes_lock(platform_root)
 
     bundle_dir.mkdir(parents=True, exist_ok=True)
     shutil.copytree(profile_dir, bundle_dir / "profile")
+    manifest_text = json.dumps(manifest, indent=2, sort_keys=True) + "\n"
+    (bundle_dir / "profile" / MANIFEST_PATH).write_text(manifest_text, encoding="utf-8")
     _copy_runtime_source(platform_root, bundle_dir / "model-garden-platform")
     normalized_binding = json.dumps(binding, indent=2, sort_keys=True) + "\n"
     (bundle_dir / "environment-binding.json").write_text(normalized_binding, encoding="utf-8")
     (bundle_dir / "entrypoint.sh").write_text(_entrypoint(), encoding="utf-8")
     (bundle_dir / "Dockerfile").write_text(_dockerfile(lock), encoding="utf-8")
     (bundle_dir / "compose.yaml").write_text(
-        _compose(project_name, provider, lock, calendar=calendar), encoding="utf-8"
+        _compose(project_name, provider, lock, calendar=calendar, read_audit=read_audit), encoding="utf-8"
     )
     metadata = {
         "apiVersion": "modelgarden.ai/v1",
@@ -397,6 +459,10 @@ def render_bundle(
         "governedToolService": calendar is not None,
         "hermes": {"version": lock["version"], "revision": lock["commit"]},
         "bindingSha256": hashlib.sha256(normalized_binding.encode("utf-8")).hexdigest(),
+        "capabilityManifestSha256": hashlib.sha256(manifest_text.encode("utf-8")).hexdigest(),
+        "unboundCapabilities": sorted(
+            entry["family"] for entry in manifest["capabilities"] if entry["status"] == "unbound" and (entry["required"] or entry["optional"])
+        ),
     }
     if calendar is not None:
         metadata["calendarProvider"] = calendar[0]

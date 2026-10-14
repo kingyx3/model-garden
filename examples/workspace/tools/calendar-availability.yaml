@@ -6,5 +6,6 @@ metadata:
   description: Read free/busy state from an approved calendar for a bounded requested interval.
 spec:
   type: internal
+  capability: calendar
   risk: read
   approvalRequired: false

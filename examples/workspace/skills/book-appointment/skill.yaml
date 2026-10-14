@@ -11,6 +11,8 @@ spec:
   allowedTools:
     - calendar.availability
     - calendar.book
+  requiredCapabilities:
+    - calendar
   inputs:
     - booking-request
   evaluationSuite: evals/

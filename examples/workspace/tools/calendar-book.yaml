@@ -6,5 +6,6 @@ metadata:
   description: Create an appointment through an approved booking integration using a validated slot and caller details.
 spec:
   type: internal
+  capability: calendar
   risk: write
   approvalRequired: true

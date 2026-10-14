@@ -26,6 +26,8 @@
       "properties": {
         "instructions": {"type": "object", "additionalProperties": false, "required": ["file"], "properties": {"file": {"type": "string"}}},
         "allowedTools": {"type": "array", "items": {"type": "string"}, "uniqueItems": true},
+        "requiredCapabilities": {"type": "array", "items": {"type": "string", "pattern": "^[a-z]+(\\.[a-z][a-z-]*)?$"}, "uniqueItems": true},
+        "optionalCapabilities": {"type": "array", "items": {"type": "string", "pattern": "^[a-z]+(\\.[a-z][a-z-]*)?$"}, "uniqueItems": true},
         "inputs": {"type": "array", "items": {"type": "string"}, "uniqueItems": true},
         "outputSchema": {"type": "string"},
         "evaluationSuite": {"type": "string"}

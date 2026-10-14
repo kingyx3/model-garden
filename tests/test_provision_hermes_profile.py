@@ -46,7 +46,7 @@ class ProvisionHermesProfileTests(unittest.TestCase):
         self.assertFalse(governed["supports_parallel_tool_calls"])
         self.assertEqual(
             governed["tools"]["include"],
-            ["calendar_availability", "calendar_book"],
+            ["calendar_availability", "calendar_book", "platform_capabilities"],
         )
         self.assertFalse(governed["tools"]["resources"])
         self.assertFalse(governed["tools"]["prompts"])

@@ -65,7 +65,7 @@ class GovernedMcpRuntimeTests(unittest.TestCase):
             runtime = self._runtime(pathlib.Path(tmp), FakeCalendarTransport())
             server = runtime_module.build_server(runtime)
             tools = asyncio.run(server.list_tools())
-            self.assertEqual(sorted(tool.name for tool in tools), ["calendar_availability", "calendar_book"])
+            self.assertEqual(sorted(tool.name for tool in tools), ["calendar_availability", "calendar_book", "platform_capabilities"])
 
     def test_calendar_read_executes_without_approval_and_keeps_token_out_of_audit(self):
         with tempfile.TemporaryDirectory() as tmp:

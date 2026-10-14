@@ -73,14 +73,18 @@ controls:
     statement: >-
       Material actions record client/tenant, Agent, initiating identity where available,
       Tool/action, result receipt, approval metadata, timestamp and bounded correlation context.
-      Schema-v2 local audit records are sequence-numbered, SHA-256 chained, file-locked,
+      Schema-v3 local audit records are sequence-numbered, SHA-256 chained, file-locked,
       fsynced and written with restrictive filesystem permissions so mutation, reordering,
-      insertion or deletion inside the retained chain is detectable.
+      insertion or deletion inside the retained chain is detectable. They store arguments
+      redacted plus digest, the originating principal, channel, task and delegation chain,
+      the deciding policy rule, stated justification, capability/provider/tier and external
+      object reference, and read events recording source/record IDs and content digests.
     evidence:
       - docs/security.md
       - docs/governed-tools.md
       - scripts/govern-action.py
       - tests/test_govern_action.py
+      - tests/test_action_ledger.py
     limitations: >-
       The local chain is tamper-evident, not independently immutable: a host/storage administrator
       could replace or delete the complete local log/head. Retention duration and export to a

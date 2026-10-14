@@ -39,6 +39,8 @@
         "skills": {"type": "array", "items": {"type": "string"}, "uniqueItems": true},
         "tools": {"type": "array", "items": {"type": "string"}, "uniqueItems": true},
         "knowledge": {"type": "array", "items": {"type": "string"}, "uniqueItems": true},
+        "requiredCapabilities": {"type": "array", "items": {"type": "string", "pattern": "^[a-z]+(\\.[a-z][a-z-]*)?$"}, "uniqueItems": true},
+        "optionalCapabilities": {"type": "array", "items": {"type": "string", "pattern": "^[a-z]+(\\.[a-z][a-z-]*)?$"}, "uniqueItems": true},
         "security": {
           "type": "object",
           "additionalProperties": false,
