@@ -26,7 +26,7 @@ The `crm` family also carries `crm.create` (risk `write`) and `crm.log-interacti
 
 All of this is additive to `modelgarden.ai/v1`: existing workspaces without declarations validate and compile unchanged.
 
-## Tier 0 business-rules knowledge (building block)
+## Tier 0 business-rules knowledge
 
 A `KnowledgeSource` with `spec.type: text-file` points at one `.txt` or `.md` file of approved business rules (`spec.file`, relative to the resource, at most 256 KiB, UTF-8, confined to the workspace or library root) so a small client needs no knowledge system. Optional `status` (`draft` default, `approved`, `retired`), `version`, `effectiveDate` and `audiences` (Agents allowed to ground answers) travel with it; these fields are rejected on other source types.
 
@@ -34,7 +34,9 @@ A `KnowledgeSource` with `spec.type: text-file` points at one `.txt` or `.md` fi
 - `platform/core/knowledge.py` splits the file into stable numbered sections (Markdown headings, recognisable plain-text headings, or paragraph chunks) and searches them. `search_selected` returns the `kb.search` result shape: each document carries its section citation (`knowledge:<source>#<section-id>`), source SHA-256 and version, and the result is flagged `dataOnly` (retrieved text is reference data, never instructions). Only content that is `approved`, effective today and addressed to this Agent is returned; otherwise there are no documents and a reason (`source-draft`, `source-retired`, `source-not-yet-effective`, `source-not-for-this-agent`, `no-matching-section`) so the caller clarifies or escalates.
 - Each client/environment searches only the content compiled into its own desired state. `read_receipt` turns a result into section IDs and content digests for the existing governed read event (`record_knowledge_read` / `execute_action(read_receipt=...)`), so the ledger never holds the text.
 
-**Not yet delivered:** the runtime does not expose a `kb.search` Tool backed by this module, and the registry keeps `text-knowledge` as `planned`, so a Skill that requires `kb` is still not satisfied by it and the readiness gate still refuses a forged Tier 0 binding. Document-level permissions, external knowledge providers, freshness/refresh policy, conflict detection and the no-system FAQ eval (#116, #77) are also not done.
+**Runtime and activation.** The governed sidecar exposes `kb_search` (the `kb.search` Tool) over this module. It runs only when the Agent selected the `kb.search` Tool (see `examples/workspace/tools/kb-search.yaml`) **and** the capability manifest shows `kb` bound to `text-knowledge` at Tier 0; otherwise it refuses with "not connected here". Each search is a governed read: the ledger records provider `text-knowledge`, `tier: 0` and the section IDs and content digests, never the text. A client binds it with `connectors.kb: {provider: text-knowledge, tier: 0}` in the EnvironmentBinding; the registry lists it as `built-credential-free` (adapter `platform/core/knowledge.py`), so a Skill requiring `kb` is ready and the readiness report shows `kb: text-knowledge tier 0`. A deployment that selects `kb.search` gets the governed sidecar even with no calendar bound, and that sidecar holds no provider credential. This is credential-free build evidence only: no live deployment has exercised it.
+
+**Not yet delivered:** the reference receptionist does not declare `kb` as a required capability (that needs the Tier 0 `crm` too, #108), so its evals do not exercise this path. Document-level permissions, external knowledge providers, freshness/refresh policy, conflict detection and the no-system FAQ eval (#116, #77) are also not done.
 
 ## Client approval policy
 
@@ -98,8 +100,12 @@ compiler, `client-operator skills` readiness report, non-secret coworker
 and a real local adapter satisfy a dependency. Historical `google_calendar`,
 `microsoft_calendar`, `google` and `microsoft` aliases continue to work.
 
-A planned HubSpot/Jira/Zoho/SharePoint/Drive provider, an unregistered provider or
-a forged Tier 0 `built-in-crm`/`text-knowledge` binding **cannot activate a Skill**.
+A planned HubSpot/Jira/Zoho/SharePoint/Drive provider, an unregistered provider,
+a forged Tier 0 `built-in-crm` binding, or `text-knowledge` bound at the wrong tier or
+under the wrong family **cannot activate a Skill**. The Tier 0 `text-knowledge` provider
+(`connectors.kb: {provider: text-knowledge, tier: 0}`) is shipped credential-free and does
+satisfy `kb`; it holds no client credential, so it still needs an approved knowledge file
+and has no live proof.
 Required capabilities remain blocked, optional ones degrade to the declared
 fallback, and production deployment repeats the check even when it receives a
 previously compiled desired-state document. A missing or invalid registry
@@ -127,7 +133,7 @@ python3 scripts/client-operator.py skills <private-client-workspace> --environme
 
 This prints `ready`, `DISABLED` and `BLOCKED`, dependencies, and registry-backed `connect <family>` guidance without exposing tokens. An intentionally disabled Skill does not block the current deployment; enabling it without its required capability does. The `platform.capabilities` coworker response includes the same per-Skill `enabled`, `ready`, `canEnable` and dependency facts. When a connector is failed or revoked, live runtime health overlays mark dependent required Skills unavailable until a named operator reauthorizes the connection.
 
-The receptionist's complete Tier 0 `kb` / `crm` support and interaction logging remain **unimplemented** (#77, #108), as does full consent/provisioning (#110). Do not represent these capability checks as real external provider proof.
+Tier 0 `kb` (a business-rules text file) is implemented credential-free; Tier 0 `crm`, interaction logging (#77, #108) and full consent/provisioning (#110) remain **unimplemented**, and the reference receptionist does not yet declare `kb` as a dependency. Do not represent these capability checks as real external provider proof.
 
 ## Validate a workspace
 

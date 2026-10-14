@@ -22,7 +22,7 @@ class IntegrationRegistryTests(unittest.TestCase):
         providers = registry.load_registry()["providers"]
         self.assertGreaterEqual(len(providers), 18)
         self.assertEqual({p["id"] for p in providers if p["status"] == "built-credential-free"},
-                         {"google-calendar", "microsoft-calendar"})
+                         {"google-calendar", "microsoft-calendar", "text-knowledge"})
         self.assertFalse(any(p["status"] == "live" for p in providers))
         self.assertEqual({p["family"] for p in providers},
                          {"calendar", "crm", "mail", "kb", "docs", "files", "tickets", "chat", "code"})
@@ -70,6 +70,23 @@ class IntegrationRegistryTests(unittest.TestCase):
         self.assertEqual(planned["status"], "planned")
         self.assertIn("not implemented", planned["blocker"])
         self.assertNotIn("scopes", planned)
+
+    def test_tier_zero_text_provider_needs_no_credentials_and_says_what_the_owner_must_do(self):
+        plan = registry.plan("kb", "text-knowledge", ["kb.search"])
+        self.assertEqual((plan["status"], plan["tier"], plan["method"]), ("built-credential-free", 0, "file"))
+        self.assertEqual(plan["scopes"], [])
+        self.assertFalse(plan["readyToConnect"])
+        self.assertIn("No credentials are needed", plan["blocker"])
+        self.assertIn("approved", plan["blocker"])
+        self.assertNotIn("consent", plan["blocker"])
+        entry = next(p for p in registry.load_registry()["providers"] if p["id"] == "text-knowledge")
+        self.assertEqual(entry["adapter"], "platform/core/knowledge.py")
+        self.assertNotIn("proof", entry)
+        self.assertNotEqual(entry["status"], "live")
+        # The other Tier 0 baseline provider is still only planned and cannot be connected.
+        crm = registry.plan("crm", "built-in-crm", ["crm.read"])
+        self.assertEqual(crm["status"], "planned")
+        self.assertIn("not implemented", crm["blocker"])
 
     def test_directory_renderer_uses_registry_and_does_not_claim_live(self):
         result = subprocess.run(

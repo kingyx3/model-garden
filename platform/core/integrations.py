@@ -64,6 +64,12 @@ def plan(family: str, provider_id: str, selected_tools: list[str]):
     if any(t not in scope_map for t in selected_tools):
         raise ValueError("reviewed permission mapping absent for selected Tools")
     result["scopes"] = sorted({scope for tool in selected_tools for scope in scope_map[tool]})
+    if provider["tier"] == 0:
+        # Built-in/file providers hold no third-party credentials: nothing to consent to or rotate.
+        result["blocker"] = ("No credentials are needed. The client owner must supply the business "
+                             "content (for a text file: parse-test it with scripts/knowledge-check.py "
+                             "and mark the KnowledgeSource approved) before it can ground answers")
+        return result
     result["blocker"] = ("Client-owner consent, secure credential lifecycle and live read-only "
                          "test are required before changing the binding")
     return result

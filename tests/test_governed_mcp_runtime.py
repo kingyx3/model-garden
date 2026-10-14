@@ -67,7 +67,7 @@ class GovernedMcpRuntimeTests(unittest.TestCase):
             tools = asyncio.run(server.list_tools())
             self.assertEqual(
                 sorted(tool.name for tool in tools),
-                ["calendar_availability", "calendar_book", "handoff_request", "handoff_status", "platform_capabilities"],
+                ["calendar_availability", "calendar_book", "handoff_request", "handoff_status", "kb_search", "platform_capabilities"],
             )
 
     def test_calendar_read_executes_without_approval_and_keeps_token_out_of_audit(self):

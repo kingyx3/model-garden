@@ -63,22 +63,36 @@ class ConnectorActivationGateTests(unittest.TestCase):
                 capabilities.resolve({"required": ["calendar"], "optional": []}, binding,
                                      agent_name="frontdesk")
 
-    def test_tier_zero_future_crm_and_text_are_not_mistaken_for_implemented_baseline(self):
+    def test_tier_zero_future_crm_is_not_mistaken_for_an_implemented_baseline(self):
         binding = {"environment": "dev", "connectors": {
             "crm": {"provider": "built-in-crm", "tier": 0},
-            "kb": {"provider": "text-knowledge", "tier": 0},
         }}
         self.assertEqual(capabilities.bound_providers(binding), {})
-        skill = {"metadata": {"name": "log-call"}, "spec": {"requiredCapabilities": ["crm", "kb"]}}
+        skill = {"metadata": {"name": "log-call"}, "spec": {"requiredCapabilities": ["crm"]}}
         readiness = capabilities.skill_readiness({"metadata": {"name": "desk"}, "spec": {}},
                                                  [skill], binding)
         self.assertFalse(readiness[0]["ready"])
-        self.assertEqual([x["status"] for x in readiness[0]["dependencies"]],
-                         ["missing", "missing"])
+        self.assertEqual([x["status"] for x in readiness[0]["dependencies"]], ["missing"])
         with self.assertRaisesRegex(ValueError, "log-call"):
-            capabilities.resolve({"required": ["crm", "kb"], "optional": []},
+            capabilities.resolve({"required": ["crm"], "optional": []},
                                  binding, agent_name="desk",
                                  required_by=capabilities.skills_requiring([skill]))
+
+    def test_tier_zero_text_knowledge_satisfies_kb_only_as_a_kb_provider_at_tier_zero(self):
+        shipped = {"environment": "dev", "connectors": {"kb": {"provider": "text-knowledge", "tier": 0}}}
+        self.assertEqual(capabilities.bound_providers(shipped)["kb"]["provider"], "text-knowledge")
+        skill = {"metadata": {"name": "answer-faq"}, "spec": {"requiredCapabilities": ["kb"]}}
+        readiness = capabilities.skill_readiness({"metadata": {"name": "desk"}, "spec": {}}, [skill], shipped)
+        self.assertTrue(readiness[0]["ready"])
+        self.assertEqual(readiness[0]["dependencies"][0]["tier"], 0)
+        # A forged shape is still refused: wrong tier, wrong family, or a different unshipped provider.
+        for connectors in (
+            {"kb": {"provider": "text-knowledge", "tier": 1}},
+            {"crm": {"provider": "text-knowledge", "tier": 0}},
+            {"kb": {"provider": "confluence-knowledge", "tier": 2}},
+            {"kb": {"provider": "notion-knowledge", "tier": 2}},
+        ):
+            self.assertEqual(capabilities.bound_providers({"environment": "dev", "connectors": connectors}), {}, connectors)
 
     def test_optional_unshipped_provider_degrades_instead_of_promising_connectivity(self):
         binding = {"environment": "dev", "connectors": {

@@ -37,6 +37,8 @@ PROVIDER_ENV = {
     "anthropic": "ANTHROPIC_API_KEY",
 }
 CALENDAR_TOOLS = {"calendar.availability", "calendar.book"}
+# Tier 0 tools served by the sidecar from compiled desired state; they need no provider credential.
+BUILT_IN_TOOLS = {"kb.search"}
 RUNTIME_SOURCE_PATHS = (
     pathlib.Path("requirements-runtime.txt"),
     pathlib.Path("platform/runtime/governed_mcp.py"),
@@ -46,6 +48,7 @@ RUNTIME_SOURCE_PATHS = (
     pathlib.Path("platform/core/capabilities.py"),
     pathlib.Path("platform/core/policy.py"),
     pathlib.Path("platform/core/handoff.py"),
+    pathlib.Path("platform/core/knowledge.py"),
     pathlib.Path("platform/channels/text_channel.py"),
     pathlib.Path("contracts/v1/capabilities.json"),
     pathlib.Path("contracts/v1/integrations.json"),
@@ -326,6 +329,7 @@ def _compose(
     *,
     calendar: tuple[str, str, str] | None,
     read_audit: str | None = None,
+    built_in_tools: bool = False,
 ) -> str:
     provider_env = PROVIDER_ENV[provider]
     hermes: dict[str, Any] = {
@@ -347,15 +351,18 @@ def _compose(
     }
     services: dict[str, Any] = {"hermes": hermes}
     volumes: dict[str, Any] = {"hermes-data": {}}
-    if calendar is not None:
-        calendar_provider, _, calendar_id = calendar
-        connector_env = (
-            {"MODEL_GARDEN_GOOGLE_CALENDAR_TOKEN": "${MODEL_GARDEN_GOOGLE_CALENDAR_TOKEN:?required}",
-             "MODEL_GARDEN_GOOGLE_CALENDAR_ID": calendar_id}
-            if calendar_provider == "google" else
-            {"MODEL_GARDEN_MICROSOFT_CALENDAR_TOKEN": "${MODEL_GARDEN_MICROSOFT_CALENDAR_TOKEN:?required}",
-             "MODEL_GARDEN_MICROSOFT_CALENDAR_MAILBOX": calendar_id}
-        )
+    if calendar is not None or built_in_tools:
+        connector_env: dict[str, str] = {}
+        if calendar is not None:
+            calendar_provider, _, calendar_id = calendar
+            connector_env = (
+                {"MODEL_GARDEN_GOOGLE_CALENDAR_TOKEN": "${MODEL_GARDEN_GOOGLE_CALENDAR_TOKEN:?required}",
+                 "MODEL_GARDEN_GOOGLE_CALENDAR_ID": calendar_id}
+                if calendar_provider == "google" else
+                {"MODEL_GARDEN_MICROSOFT_CALENDAR_TOKEN": "${MODEL_GARDEN_MICROSOFT_CALENDAR_TOKEN:?required}",
+                 "MODEL_GARDEN_MICROSOFT_CALENDAR_MAILBOX": calendar_id}
+            )
+            connector_env["MODEL_GARDEN_CALENDAR_PROVIDER"] = calendar_provider
         services["governed-tools"] = {
             "image": f"model-garden-{project_name}:current",
             "restart": "unless-stopped",
@@ -367,7 +374,6 @@ def _compose(
                 "MODEL_GARDEN_APPROVAL_ROOT": "/opt/data/.modelgarden/approvals",
                 "MODEL_GARDEN_INITIATING_IDENTITY": "runtime:hermes",
                 "MODEL_GARDEN_CAPABILITY_MANIFEST": f"/opt/profile-seed/{MANIFEST_PATH.as_posix()}",
-                "MODEL_GARDEN_CALENDAR_PROVIDER": calendar_provider,
                 **({"MODEL_GARDEN_READ_AUDIT": read_audit} if read_audit else {}),
                 **connector_env,
             },
@@ -442,6 +448,7 @@ def render_bundle(
     calendar = _calendar_binding(binding, selected_tools)
     manifest = _capability_manifest(_desired_state(profile_dir), binding)
     read_audit = _read_audit_mode(binding)
+    built_in_tools = bool(selected_tools & BUILT_IN_TOOLS)
     lock = _load_hermes_lock(platform_root)
 
     bundle_dir.mkdir(parents=True, exist_ok=True)
@@ -454,7 +461,8 @@ def render_bundle(
     (bundle_dir / "entrypoint.sh").write_text(_entrypoint(), encoding="utf-8")
     (bundle_dir / "Dockerfile").write_text(_dockerfile(lock), encoding="utf-8")
     (bundle_dir / "compose.yaml").write_text(
-        _compose(project_name, provider, lock, calendar=calendar, read_audit=read_audit), encoding="utf-8"
+        _compose(project_name, provider, lock, calendar=calendar, read_audit=read_audit, built_in_tools=built_in_tools),
+        encoding="utf-8",
     )
     metadata = {
         "apiVersion": "modelgarden.ai/v1",
@@ -464,7 +472,7 @@ def render_bundle(
         "provider": provider,
         "modelCredentialRef": credential_ref,
         "selectedTools": sorted(selected_tools),
-        "governedToolService": calendar is not None,
+        "governedToolService": calendar is not None or built_in_tools,
         "hermes": {"version": lock["version"], "revision": lock["commit"]},
         "bindingSha256": hashlib.sha256(normalized_binding.encode("utf-8")).hexdigest(),
         "capabilityManifestSha256": hashlib.sha256(manifest_text.encode("utf-8")).hexdigest(),

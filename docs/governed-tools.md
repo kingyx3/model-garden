@@ -91,7 +91,7 @@ Other Google/Microsoft capabilities described in Confluence (Gmail/Outlook, Driv
 
 Deployment writes a non-secret capability manifest per environment (`profile/.modelgarden/capability-manifest.json` in the Docker bundle). For every catalog family it states the status (`available`, `not-granted`, `unbound`, or `unavailable` once a connection has failed or been revoked), provider, tier, granted scopes, connection owner, health and fallback. It carries no token references, calendar IDs, mailboxes or tenant identifiers beyond the client and environment name.
 
-The governed sidecar exposes it to the coworker as the read-only `platform.capabilities` MCP Tool (`platform_capabilities`), so "what can you do here?" is answered from what is actually connected. It is a platform built-in rather than a business Tool, so it bypasses Tool selection and is not ledgered; Hermes receives it whenever the governed sidecar is present.
+The governed sidecar exposes it to the coworker as the read-only `platform.capabilities` MCP Tool (`platform_capabilities`), so "what can you do here?" is answered from what is actually connected. It is a platform built-in rather than a business Tool, so it bypasses Tool selection and is not ledgered; Hermes receives it whenever the governed sidecar is present. The sidecar is present when the Agent selects a calendar Tool (with its calendar binding) or the Tier 0 `kb.search` Tool; a deployment with neither has no sidecar.
 
 Connection health is live, not baked into the deployment. The sidecar records `healthy` after a successful connector call, `failed` after a provider 401/403 and `degraded` after other provider errors. Operators can record a revocation or recovery without redeploying Agents:
 

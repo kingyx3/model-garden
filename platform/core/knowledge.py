@@ -14,8 +14,8 @@ prices it may quote, booking and escalation rules). This module is the credentia
 
 Retrieved text is untrusted reference data: results are flagged `dataOnly` and never carry
 instructions. Each client/environment searches only the content compiled into its own desired
-state. This is the building block only: the `text-knowledge` provider stays `planned` in the
-integration registry until the runtime exposes it and live acceptance exists.
+state. The governed runtime exposes it as `kb_search` and the registry lists `text-knowledge` as
+`built-credential-free`; there is no live acceptance evidence yet.
 """
 from __future__ import annotations
 
