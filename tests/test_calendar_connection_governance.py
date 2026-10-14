@@ -73,7 +73,7 @@ class CalendarTokenTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "fields"):
             oauth.CalendarCredential(json.dumps(data), "google")
         cred = oauth.CalendarCredential(secret("google"), "google", transport=lambda *_: (401, {"access_token":"leak"}))
-        with self.assertRaisesRegex(RuntimeError, r"refresh failed \\(401\\)"):
+        with self.assertRaisesRegex(RuntimeError, r"refresh failed [(]401[)]"):
             cred.token()
         with self.assertRaisesRegex(ValueError, "credential JSON"):
             oauth.CalendarCredential("{invalid", "google")
@@ -171,7 +171,7 @@ class CalendarRevocationTests(unittest.TestCase):
                 oauth_transport=lambda *_: (403, {"error": "sensitive"}),
                 api_transport=lambda *args: (api_calls.append(args) or (200, {})),
             )
-            with self.assertRaisesRegex(RuntimeError, r"refresh failed \\(403\\)"):
+            with self.assertRaisesRegex(RuntimeError, r"refresh failed [(]403[)]"):
                 runtime.calendar_availability(start=START, end=END)
             self.assertEqual(health.read_connection_health(root)["calendar"]["health"], "failed")
             with self.assertRaises(PermissionError):
