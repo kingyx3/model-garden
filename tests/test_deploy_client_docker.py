@@ -208,5 +208,55 @@ class DeployClientDockerTests(unittest.TestCase):
                 deployer.render_bundle(profile, binding, bundle, "acme-dev")
 
 
+    def test_microsoft_graph_calendar_uses_same_tools_with_isolated_provider_secret(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            profile = self._profile(root, tools=("calendar.availability", "calendar.book"))
+            binding = self._binding(root, extra={
+                "connectors": {"calendar": {
+                    "provider": "microsoft",
+                    "token_ref": "secret://microsoft/dev-calendar",
+                    "mailbox": "reception@example.com",
+                }}
+            })
+            bundle = root / "bundle"
+            metadata = deployer.render_bundle(profile, binding, bundle, "acme-dev")
+            compose = yaml.safe_load((bundle / "compose.yaml").read_text(encoding="utf-8"))
+            hermes = compose["services"]["hermes"]["environment"]
+            sidecar = compose["services"]["governed-tools"]["environment"]
+            self.assertEqual(metadata["calendarProvider"], "microsoft")
+            self.assertEqual(metadata["calendarCredentialRef"], "secret://microsoft/dev-calendar")
+            self.assertEqual(sidecar["MODEL_GARDEN_CALENDAR_PROVIDER"], "microsoft")
+            self.assertEqual(sidecar["MODEL_GARDEN_MICROSOFT_CALENDAR_MAILBOX"], "reception@example.com")
+            self.assertIn("MODEL_GARDEN_MICROSOFT_CALENDAR_TOKEN", sidecar)
+            self.assertNotIn("MODEL_GARDEN_GOOGLE_CALENDAR_TOKEN", sidecar)
+            self.assertNotIn("MODEL_GARDEN_MICROSOFT_CALENDAR_TOKEN", hermes)
+            self.assertNotIn("OPENAI_API_KEY", sidecar)
+            self.assertTrue((bundle / "model-garden-platform" / "platform" / "connectors" / "microsoft_calendar.py").is_file())
+            self.assertEqual(
+                deployer.resolve_secrets(json.loads(binding.read_text(encoding="utf-8")), json.dumps({
+                    "secret://model/dev": "model", "secret://microsoft/dev-calendar": "graph"
+                }))["secret://microsoft/dev-calendar"], "graph",
+            )
+
+    def test_calendar_configuration_rejects_ambiguous_or_unapproved_providers(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            profile = self._profile(root, tools=("calendar.availability",))
+            binding = self._binding(root, extra={
+                "connectors": {
+                    "google_calendar": {"token_ref": "secret://google/dev-calendar"},
+                    "calendar": {"provider": "microsoft", "token_ref": "secret://ms/dev", "mailbox": "staff@example.com"},
+                }
+            })
+            with self.assertRaisesRegex(ValueError, "exactly one"):
+                deployer.render_bundle(profile, binding, root / "ambiguous", "acme-dev")
+            binding = self._binding(root, extra={"connectors": {
+                "calendar": {"provider": "unapproved", "token_ref": "secret://other/dev"}
+            }})
+            with self.assertRaisesRegex(ValueError, "provider must be google or microsoft"):
+                deployer.render_bundle(profile, binding, root / "unapproved", "acme-dev")
+
+
 if __name__ == "__main__":
     unittest.main()
