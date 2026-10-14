@@ -6,8 +6,8 @@ state before a connector can execute. Connector credentials are injected only in
 service, never into the Hermes/model process.
 
 MVP supported Tools:
-- calendar.availability: Google Calendar free/busy read
-- calendar.book: Google Calendar event creation, with exact-action approval when required
+- calendar.availability: provider-neutral Google/Microsoft free/busy read
+- calendar.book: provider-neutral event creation, with exact-action approval when required
 """
 from __future__ import annotations
 
@@ -37,7 +37,8 @@ def _load_module(name: str, path: pathlib.Path):
 
 
 GOVERN = _load_module("model_garden_govern_action", ROOT / "scripts" / "govern-action.py")
-CALENDAR = _load_module("model_garden_google_calendar", ROOT / "platform" / "connectors" / "google_calendar.py")
+GOOGLE_CALENDAR = _load_module("model_garden_google_calendar", ROOT / "platform" / "connectors" / "google_calendar.py")
+MICROSOFT_CALENDAR = _load_module("model_garden_microsoft_calendar", ROOT / "platform" / "connectors" / "microsoft_calendar.py")
 
 
 def _load_json_object(path: pathlib.Path, label: str) -> dict[str, Any]:
@@ -127,15 +128,26 @@ class GovernedToolRuntime:
         return context
 
     def _calendar(self):
-        token = self.environ.get("MODEL_GARDEN_GOOGLE_CALENDAR_TOKEN")
-        if not token:
-            raise RuntimeError("Google Calendar credential is not configured for the governed Tool service")
-        calendar_id = self.environ.get("MODEL_GARDEN_GOOGLE_CALENDAR_ID", "primary")
-        return CALENDAR.GoogleCalendarClient(
-            token,
-            calendar_id=calendar_id,
-            transport=self.calendar_transport,
-        )
+        provider = self.environ.get("MODEL_GARDEN_CALENDAR_PROVIDER", "google")
+        if provider == "google":
+            token = self.environ.get("MODEL_GARDEN_GOOGLE_CALENDAR_TOKEN")
+            if not token:
+                raise RuntimeError("Google Calendar credential is not configured for the governed Tool service")
+            return GOOGLE_CALENDAR.GoogleCalendarClient(
+                token,
+                calendar_id=self.environ.get("MODEL_GARDEN_GOOGLE_CALENDAR_ID", "primary"),
+                transport=self.calendar_transport,
+            )
+        if provider == "microsoft":
+            token = self.environ.get("MODEL_GARDEN_MICROSOFT_CALENDAR_TOKEN")
+            if not token:
+                raise RuntimeError("Microsoft Calendar credential is not configured for the governed Tool service")
+            return MICROSOFT_CALENDAR.MicrosoftCalendarClient(
+                token,
+                mailbox=self.environ.get("MODEL_GARDEN_MICROSOFT_CALENDAR_MAILBOX", ""),
+                transport=self.calendar_transport,
+            )
+        raise ValueError("Unsupported Calendar provider; choose google or microsoft")
 
     def _take_approval(self, request_id: str) -> tuple[dict[str, Any] | None, pathlib.Path | None]:
         """Atomically claim one decision without letting a crashed claim block fresh approval."""
