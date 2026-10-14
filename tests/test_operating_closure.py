@@ -72,6 +72,36 @@ class OperatingClosureTests(unittest.TestCase):
             current[parts[-1]] = "recorded"
         self.assertTrue(ops.validate(template)["ready"])
 
+    def test_operations_gate_rejects_unfilled_acceptance_and_new_placeholders(self):
+        template = yaml.safe_load((ROOT / "templates" / "operations" / "client-operations.yaml").read_text(encoding="utf-8"))
+        for path in ops.REQUIRED_PATHS:
+            item = template
+            for part in path.split(".")[:-1]:
+                item = item[part]
+            item[path.split(".")[-1]] = "recorded"
+        self.assertTrue(ops.validate(template)["ready"])
+
+        template["acceptance"]["keyless_redeploy_evidence"] = "REQUIRED"
+        template["monitoring"]["new_provider_alert_route"] = "TODO"
+        result = ops.validate(template)
+        self.assertFalse(result["ready"])
+        self.assertIn("acceptance.keyless_redeploy_evidence", result["missing"])
+        self.assertIn("monitoring.new_provider_alert_route", result["missing"])
+
+    def test_operations_gate_rejects_boolean_and_non_substantive_owners(self):
+        template = yaml.safe_load((ROOT / "templates" / "operations" / "client-operations.yaml").read_text(encoding="utf-8"))
+        for path in ops.REQUIRED_PATHS:
+            item = template
+            for part in path.split(".")[:-1]:
+                item = item[part]
+            item[path.split(".")[-1]] = "recorded"
+        template["ownership"]["cloud_owner"] = False
+        template["support"]["contracted_coverage"] = "  N/A  "
+        result = ops.validate(template)
+        self.assertFalse(result["ready"])
+        self.assertIn("ownership.cloud_owner", result["missing"])
+        self.assertIn("support.contracted_coverage", result["missing"])
+
     def test_voice_binding_is_optional_and_secret_scoped(self):
         self.assertIsNone(voice_deploy._voice({"spec": {}}))
         binding = {
