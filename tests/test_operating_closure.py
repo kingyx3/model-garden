@@ -126,7 +126,9 @@ class OperatingClosureTests(unittest.TestCase):
             context = voice_deploy._context(pathlib.Path(temporary))
             self.assertTrue((context / "requirements-voice.txt").is_file())
             self.assertTrue((context / "livekit_receptionist.py").is_file())
+            self.assertTrue((context / "call_transcript.py").is_file())
             dockerfile = (context / "Dockerfile").read_text(encoding="utf-8")
+            self.assertIn("COPY call_transcript.py /opt/call_transcript.py", dockerfile)
             self.assertIn("ARG BASE_IMAGE", dockerfile)
             self.assertIn("requirements-voice.txt", dockerfile)
 

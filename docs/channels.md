@@ -42,6 +42,16 @@ Channel approvals go through `decide_from_channel()`: the responder must be mapp
 
 The LiveKit Receptionist follows the same semantics. A phone caller is an unverified channel user: the SIP participant identity and caller number are transport facts, not a client identity, so a caller maps to a public principal and must never be treated as a client member. Today the voice Receptionist calls governed Tools with the runtime workload identity rather than a channel principal; its only write (`calendar.book`) requires exact-action approval by a human operator, so no caller statement can authorize a write. A deployment that verifies callers (for example a mapped staff line) maps them through the same directory under the `voice` channel.
 
+### Call transcript
+
+`platform/channels/call_transcript.py` records a two-way transcript of each voice call: ordered turns (`caller`, `agent`, and `human` where captured) with offsets, the text actually sent to TTS (interrupted replies stored truncated and marked), a closing outcome (`resolved`, `booked`, `message-taken`, `transferred`, `abandoned`) and a redaction count. Settings are `MODEL_GARDEN_TRANSCRIPT*`:
+
+- A spoken disclosure plays first (`MODEL_GARDEN_TRANSCRIPT_DISCLOSURE`, default notice provided). Setting it to `off` makes the worker refuse to start unless `MODEL_GARDEN_TRANSCRIPT_LAWFUL_BASIS_OVERRIDE_OWNER` names the accountable owner, who is then recorded on every transcript. If the notice cannot be played, the call's transcript is discarded.
+- Payment card numbers (Luhn-checked) and client patterns (`MODEL_GARDEN_TRANSCRIPT_REDACT_PATTERNS`, a JSON array of regular expressions) are redacted before storage and recorded as counts.
+- Records go to `MODEL_GARDEN_TRANSCRIPT_PATH` with mode 0600 in a 0700 directory and the same bounded retention as fallback messages (`MODEL_GARDEN_TRANSCRIPT_RETENTION_SECONDS`, default 7 days; `0` stores nothing). A write failure is logged by error type only, noted as `TranscriptWriteFailed` in the lifecycle log, and never interrupts the call.
+
+Limits today: the model-produced summary, the ledger `requestId`s of the call's governed Tools, STT confidence and the hand-off to CRM filing (#108/#115) are not populated by the worker (the record format and `reference` support them); speech after a transfer is not captured; the LiveKit event wiring is unit-checked statically and has no live-call proof.
+
 ## Status
 
 The contract, directory and governance wiring are implemented and tested credential-free. Slack, Teams, email and web chat adapters are separate stories and must implement this contract rather than bypass it.

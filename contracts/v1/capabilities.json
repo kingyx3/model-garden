@@ -1,7 +1,7 @@
 {
   "apiVersion": "modelgarden.ai/v1",
   "kind": "CapabilityCatalog",
-  "catalogVersion": "1.0.0",
+  "catalogVersion": "1.1.0",
   "tiers": {
     "0": "built-in",
     "1": "native-connector",
@@ -182,7 +182,7 @@
       }
     },
     "crm": {
-      "description": "Read and update approved CRM accounts, contacts and opportunities.",
+      "description": "Read, create and update approved CRM accounts, contacts and opportunities, and log customer interactions against them.",
       "fallbackTier": 4,
       "tools": {
         "crm.read": {
@@ -196,6 +196,32 @@
           "ledgerFields": ["objectType", "objectId"],
           "arguments": {"type": "object", "required": ["objectType", "objectId", "fields"], "properties": {"objectType": {"type": "string"}, "objectId": {"type": "string"}, "fields": {"type": "object"}}},
           "result": {"type": "object", "properties": {"objectId": {"type": "string"}}}
+        },
+        "crm.create": {
+          "risk": "write",
+          "ledgerFields": ["objectType"],
+          "arguments": {"type": "object", "required": ["objectType", "fields"], "properties": {"objectType": {"type": "string", "description": "For example contact or lead"}, "fields": {"type": "object"}}},
+          "result": {"type": "object", "required": ["objectId"], "properties": {"objectId": {"type": "string"}, "externalObjectRef": {"type": "string"}}}
+        },
+        "crm.log-interaction": {
+          "risk": "write",
+          "ledgerFields": ["objectType", "objectId", "interactionType"],
+          "arguments": {
+            "type": "object",
+            "required": ["objectId", "interactionType", "channel", "direction", "timestamp", "summary"],
+            "properties": {
+              "objectType": {"type": "string", "description": "Defaults to contact"},
+              "objectId": {"type": "string"},
+              "interactionType": {"enum": ["call", "email", "chat"]},
+              "channel": {"type": "string"},
+              "direction": {"enum": ["inbound", "outbound"]},
+              "timestamp": {"type": "string", "description": "RFC3339 time the interaction started"},
+              "summary": {"type": "string"},
+              "outcome": {"type": "string"},
+              "transcriptRef": {"type": "string", "description": "Reference to the stored transcript or message, never its text"}
+            }
+          },
+          "result": {"type": "object", "required": ["interactionId"], "properties": {"interactionId": {"type": "string"}, "externalObjectRef": {"type": "string"}}}
         }
       }
     },

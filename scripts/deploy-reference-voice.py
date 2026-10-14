@@ -107,8 +107,9 @@ def _context(root: pathlib.Path) -> pathlib.Path:
     context.mkdir(parents=True, exist_ok=True)
     shutil.copy2(ROOT / "requirements-voice.txt", context / "requirements-voice.txt")
     shutil.copy2(ROOT / "platform" / "channels" / "livekit_receptionist.py", context / "livekit_receptionist.py")
+    shutil.copy2(ROOT / "platform" / "channels" / "call_transcript.py", context / "call_transcript.py")
     (context / "Dockerfile").write_text(
-        """ARG BASE_IMAGE\nFROM ${BASE_IMAGE}\nCOPY requirements-voice.txt /tmp/requirements-voice.txt\nRUN python -m pip install --no-cache-dir -r /tmp/requirements-voice.txt\nCOPY livekit_receptionist.py /opt/model-garden-livekit-receptionist.py\nENTRYPOINT [\"python\", \"/opt/model-garden-livekit-receptionist.py\"]\nCMD [\"start\"]\n""",
+        """ARG BASE_IMAGE\nFROM ${BASE_IMAGE}\nCOPY requirements-voice.txt /tmp/requirements-voice.txt\nRUN python -m pip install --no-cache-dir -r /tmp/requirements-voice.txt\nCOPY livekit_receptionist.py /opt/model-garden-livekit-receptionist.py\nCOPY call_transcript.py /opt/call_transcript.py\nENTRYPOINT [\"python\", \"/opt/model-garden-livekit-receptionist.py\"]\nCMD [\"start\"]\n""",
         encoding="utf-8",
     )
     return context
@@ -154,6 +155,7 @@ def apply(binding_path: pathlib.Path, bundle_dir: pathlib.Path, project: str, se
         "MODEL_GARDEN_HERMES_API_KEY": "${MODEL_GARDEN_HERMES_API_KEY:?MODEL_GARDEN_HERMES_API_KEY is required}",
         "MODEL_GARDEN_LIVEKIT_AGENT_NAME": agent_name.strip(),
         "MODEL_GARDEN_MESSAGE_PATH": "/opt/data/messages.jsonl",
+        "MODEL_GARDEN_TRANSCRIPT_PATH": "/opt/data/transcripts.jsonl",
     }
     if voice.get("human_transfer_target"):
         voice_environment["MODEL_GARDEN_HUMAN_TRANSFER_TARGET"] = voice["human_transfer_target"]

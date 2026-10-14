@@ -97,6 +97,14 @@
           },
           "uniqueItems": true
         },
+        "policies": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "uniqueItems": true,
+          "description": "Policy resources whose rules the governed boundary enforces for this Agent, in order."
+        },
         "requiredCapabilities": {
           "type": "array",
           "items": {

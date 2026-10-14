@@ -16,6 +16,8 @@ spec:
     - crm.read
   knowledge:
     - sales-playbook
+  policies:
+    - default-agent-policy
   security:
     dataClassification: confidential
   approvals:
