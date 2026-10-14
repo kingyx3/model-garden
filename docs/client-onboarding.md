@@ -47,12 +47,21 @@ Only information Model Garden cannot safely invent or derive should require inpu
 - client slug and the bounded employee/workflow being deployed;
 - one temporary bootstrap service-account JSON for the target GCP project on first bootstrap;
 - a repository/project/ownership override only when the inferred default is not the intended target;
-- runtime/integration credentials actually referenced by the selected environment;
+- runtime/integration credentials actually referenced by the selected environment, plus provider authorization and a sustainable renewal/revocation path;
 - client-owned OAuth/account consent for client business systems;
 - business-approved Agent/Skill/Knowledge/eval content and human handoff rules;
 - production business approval before live traffic.
 
 Credential ownership follows the target account/data/commercial relationship. For the managed no-IT path, Model Garden may own the cloud/model/voice provider account; production authorization into Google Workspace, Microsoft 365, CRM, calendar, booking or another client business system remains client-authorized. See [`secrets.md`](secrets.md).
+
+## Connect the client's business stack
+
+- **Google Workspace client:** Model Garden configures the approved Google Calendar OAuth/integration and uses `connectors.calendar.provider: google`; the client authorizes the relevant Calendar account. No Google Cloud administration is demanded from an ordinary SMB business user by default.
+- **Microsoft 365 client:** Model Garden configures the approved Entra/Graph Calendar integration and uses `connectors.calendar.provider: microsoft` with an explicit mailbox. The client supplies the relevant account authorization and an Entra administrator participates only if its consent/policy requires it.
+- Both provider paths expose the *same* `calendar.availability` / `calendar.book` Agent Tools, approvals, audit and client workspace lifecycle. Provider credentials never live in Agent/Skill definitions.
+- **Do not equate a configured short-lived OAuth access token with production onboarding completion.** Refresh/revocation, delegated vs application permission scope, account ownership and live connectivity must be proven for the selected client before autonomous use. Microsoft Outlook mail/Teams/SharePoint and Google Gmail/Drive are not yet built-in governed connectors.
+
+The precise supported calendar binding and current credential limitations live in [`governed-tools.md`](governed-tools.md). Broader business/provider intent is owned by the Google Workspace and Microsoft 365 Confluence integration guides.
 
 ## Business configuration is separate from deployment
 
