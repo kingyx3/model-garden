@@ -22,6 +22,8 @@ from typing import Any, Mapping
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 CATALOG_PATH = ROOT / "contracts" / "v1" / "capabilities.json"
+INTEGRATIONS_PATH = ROOT / "contracts" / "v1" / "integrations.json"
+IMPLEMENTED_STATUSES = {"live", "built-credential-free"}
 MANIFEST_SCHEMA_VERSION = 1
 TIERS = (0, 1, 2, 3, 4)
 HUMAN_HANDOFF_TIER = 4
@@ -133,6 +135,31 @@ def binding_environment(binding: Mapping[str, Any]) -> str | None:
     return value if isinstance(value, str) and value else None
 
 
+
+def _implemented_connector(family: str, provider: str, tier: int) -> bool:
+    """Only a shipped adapter at its declared tier satisfies a dependency.
+
+    The registry is an implementation inventory, not proof of live OAuth consent.
+    Historical Calendar provider aliases remain backward compatible.
+    """
+    try:
+        registry = json.loads(INTEGRATIONS_PATH.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError("Integration registry missing or invalid; refuse capability activation") from exc
+    identifier = (
+        {"google": "google-calendar", "microsoft": "microsoft-calendar"}.get(provider, provider)
+        if family == "calendar" else provider
+    )
+    for entry in registry.get("providers", []):
+        if entry.get("family") != family or entry.get("id") != identifier:
+            continue
+        if entry.get("status") not in IMPLEMENTED_STATUSES or entry.get("tier") != tier:
+            return False
+        adapter = entry.get("adapter")
+        return isinstance(adapter, str) and (ROOT / adapter).is_file()
+    return False
+
+
 def bound_providers(binding: Mapping[str, Any], catalog: dict[str, Any] | None = None) -> dict[str, dict[str, Any]]:
     """Return {family: non-secret connection facts} declared by an EnvironmentBinding.
 
@@ -174,7 +201,9 @@ def bound_providers(binding: Mapping[str, Any], catalog: dict[str, Any] | None =
             if not isinstance(owner, str) or not owner.strip() or len(owner) > 200:
                 raise ValueError(f"EnvironmentBinding connectors.{key}.owner must be a non-empty string")
             facts["owner"] = owner.strip()
-        bound[family] = facts
+        if _implemented_connector(family, provider, tier):
+            bound[family] = facts
+        # A declared but unshipped provider does not satisfy capability readiness.
     return bound
 
 

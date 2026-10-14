@@ -82,6 +82,14 @@ Change Model Garden core only when a reusable Skill, connector, governance capab
 
 Before activating or modifying a Skill, run `python3 scripts/client-operator.py skills <private-client-workspace> --environment dev --agent <name>`. Show the owner the dependency state and next `connect <family>` step. Keep a Skill listed in the Agent's `spec.skills` but inactive with `spec.disabledSkills: [skill-name]` while its permission or data dependency is missing. Re-enable only after connection and explicit DEV validation; it cannot compile with an unbound required capability. The coworker's capability manifest reflects this state, including a runtime failure/revocation of a previously working connection. No nontechnical Agent Studio is shipped.
 
+Before enabling a Skill that requires a provider, verify the integration's status
+in the canonical registry. Merely listing `connectors.crm.provider: hubspot`
+or `connectors.kb.provider: text-knowledge` is not sufficient until the adapter
+is implemented; the readiness and deployment gates reject such claims.
+Clients can continue to list those Skills under `disabledSkills` until their
+dependencies are implemented and authorized. A shipped Calendar adapter still
+needs actual account consent, working token rotation and live acceptance.
+
 ## Client integration discovery and permission preflight
 
 Use the canonical [integration registry and guide](contracts.md#integration-registry-and-readiness-to-connect-boundary) to show a client which CRM, mailbox, calendar and knowledge providers are implemented versus planned. `python3 scripts/client-operator.py connect <family>` lists provider choices by tier and maturity. Add `--provider`, `--tools`, `--owner` and `--operator` for a non-secret permission preview; it does not grant access or change credentials. For incomplete connectors and expired authorization, fail closed and keep live client provisioning manual until the corresponding implementation and real-provider proof gates are met.
