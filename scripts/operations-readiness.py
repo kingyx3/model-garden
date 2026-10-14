@@ -10,7 +10,10 @@ from typing import Any
 
 import yaml
 
+# Every mandatory operator, consent, monitoring, recovery and acceptance field in the
+# canonical template must carry a substantive record, not an unfilled placeholder.
 REQUIRED_PATHS = (
+    "client",
     "ownership.runtime_operator",
     "ownership.cloud_owner",
     "ownership.model_provider_owner",
@@ -18,17 +21,29 @@ REQUIRED_PATHS = (
     "ownership.business_system_owner",
     "access.break_glass_owner",
     "access.recovery_contact",
+    "access.credential_revocation_record",
     "support.primary_channel",
     "support.escalation_owner",
     "support.review_cadence",
+    "support.contracted_coverage",
+    "monitoring.alert_destination",
     "data.retention_policy",
     "data.recording_transcription_policy",
     "data.vendor_handling_review",
+    "data.disclosure_requirements",
     "continuity.operator_backup",
     "continuity.access_recovery_path",
     "continuity.rollback_test_record",
     "continuity.backup_restore_requirement",
+    "continuity.offboarding_owner",
+    "acceptance.keyless_redeploy_evidence",
+    "acceptance.real_model_turn_evidence",
+    "acceptance.governed_business_action_evidence",
+    "acceptance.inbound_voice_evidence",
+    "acceptance.human_fallback_evidence",
+    "acceptance.production_rollback_evidence",
 )
+PLACEHOLDERS = {"REQUIRED", "TODO", "TBD", "PENDING", "N/A", "UNKNOWN"}
 
 
 def _get(value: dict[str, Any], path: str) -> Any:
@@ -40,13 +55,32 @@ def _get(value: dict[str, Any], path: str) -> Any:
     return current
 
 
+def _complete(item: Any) -> bool:
+    return isinstance(item, str) and bool(item.strip()) and item.strip().upper() not in PLACEHOLDERS
+
+
+def _unresolved(value: Any, path: str = "") -> set[str]:
+    """Reject placeholder strings anywhere, including newly introduced template keys."""
+    if isinstance(value, dict):
+        paths: set[str] = set()
+        for key, item in value.items():
+            child = f"{path}.{key}" if path else str(key)
+            paths.update(_unresolved(item, child))
+        return paths
+    if isinstance(value, list):
+        paths = set()
+        for index, item in enumerate(value):
+            paths.update(_unresolved(item, f"{path}[{index}]"))
+        return paths
+    if isinstance(value, str) and value.strip().upper() in PLACEHOLDERS:
+        return {path}
+    return set()
+
+
 def validate(value: dict[str, Any]) -> dict[str, Any]:
-    missing = []
-    for path in REQUIRED_PATHS:
-        item = _get(value, path)
-        if item is None or (isinstance(item, str) and not item.strip()) or item == "REQUIRED":
-            missing.append(path)
-    return {"ready": not missing, "missing": missing, "required": list(REQUIRED_PATHS)}
+    missing = {path for path in REQUIRED_PATHS if not _complete(_get(value, path))}
+    missing.update(_unresolved(value))
+    return {"ready": not missing, "missing": sorted(missing), "required": list(REQUIRED_PATHS)}
 
 
 def main() -> int:
