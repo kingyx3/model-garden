@@ -114,7 +114,7 @@ The following remain external evidence or founder actions rather than missing pl
 - legal entity, bank/payment collection, bookkeeping, tax/invoicing setup;
 - legal review of commercial/privacy terms for the operating jurisdictions and client sectors;
 - insurance purchase/decision;
-- real GCP/model/Calendar/LiveKit credentials and the post-revocation keyless redeploy;
+- real GCP/model/Calendar/LiveKit credentials, live scoped Google or Microsoft Calendar authorization/renewal when selected, and the post-revocation keyless redeploy;
 - an actual inbound call and real business transaction;
 - real client economics, ROI, testimonial/case-study/referral permission and pipeline outcomes.
 
