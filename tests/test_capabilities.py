@@ -121,7 +121,7 @@ class CapabilityResolutionTests(unittest.TestCase):
         self.assertEqual(compiled["capabilities"]["degraded"], ["tickets"])
 
     def test_required_capability_without_binding_fails_closed_with_clear_message(self):
-        with self.assertRaisesRegex(ValueError, r"requires capability 'calendar' but environment 'dev' binds no provider"):
+        with self.assertRaisesRegex(ValueError, r"requires capability 'calendar' \(needed by Skill 'book-appointment'\) but environment 'dev' binds no provider"):
             compiler.compile_workspace(
                 ROOT / "examples" / "workspace", "receptionist", environment_binding={"environment": "dev"}
             )
@@ -178,6 +178,90 @@ class CapabilityResolutionTests(unittest.TestCase):
             )
             self.assertEqual(result.returncode, 1)
             self.assertIn("requires capability 'calendar'", result.stderr)
+
+
+class SkillReadinessTests(unittest.TestCase):
+    def _receptionist(self):
+        resources, _, _ = compiler.load_workspace(ROOT / "examples" / "workspace")
+        agent = resources["Agent"]["receptionist"]
+        return agent, [resources["Skill"][name] for name in agent["spec"]["skills"]]
+
+    def _run_cli(self, binding: dict, *extra: str):
+        import subprocess
+        import sys
+        with tempfile.TemporaryDirectory() as tmp:
+            path = pathlib.Path(tmp) / "binding.json"
+            path.write_text(json.dumps(binding), encoding="utf-8")
+            return subprocess.run(
+                [sys.executable, str(ROOT / "scripts" / "compile-workspace.py"), str(ROOT / "examples" / "workspace"),
+                 "--environment-binding", str(path), *extra],
+                capture_output=True, text=True,
+            )
+
+    def test_readiness_per_skill_with_google_calendar(self):
+        agent, skills = self._receptionist()
+        report = {entry["name"]: entry for entry in capabilities.skill_readiness(agent, skills, GOOGLE_BINDING)}
+        self.assertEqual(sorted(report), ["answer-faq", "book-appointment", "human-handoff", "take-message"])
+        self.assertTrue(all(entry["kind"] == "Skill" and entry["ready"] for entry in report.values()))
+        self.assertEqual(
+            report["book-appointment"]["dependencies"],
+            [{"capability": "calendar", "family": "calendar", "required": True, "status": "bound", "provider": "google", "tier": 1}],
+        )
+        self.assertEqual(
+            report["take-message"]["dependencies"],
+            [{"capability": "tickets", "family": "tickets", "required": False, "status": "degraded", "fallbackTier": 4}],
+        )
+        self.assertEqual(report["answer-faq"]["dependencies"], [])
+        rendered = json.dumps(report)
+        for forbidden in ("token_ref", "secret://", "calendar_id", "frontdesk@acme-tenant.example", "scopes", "owner"):
+            self.assertNotIn(forbidden, rendered)
+
+    def test_compiled_output_carries_readiness(self):
+        compiled = compiler.compile_workspace(
+            ROOT / "examples" / "workspace", "receptionist", environment_binding=GOOGLE_BINDING
+        )[0]
+        names = [entry["name"] for entry in compiled["capabilities"]["skills"]]
+        self.assertEqual(names, ["answer-faq", "take-message", "human-handoff", "book-appointment"])
+        self.assertNotIn("calendar_id", json.dumps(compiled["capabilities"]))
+
+    def test_agent_declarations_get_their_own_entry(self):
+        agent = {"metadata": {"name": "solo"}, "spec": {"optionalCapabilities": ["mail"]}}
+        report = capabilities.skill_readiness(agent, [], {"environment": "dev"})
+        self.assertEqual(report[0]["kind"], "Agent")
+        self.assertEqual(report[0]["dependencies"][0]["status"], "degraded")
+
+    def test_missing_required_capability_blocks_skill_and_error_names_it(self):
+        agent = {"metadata": {"name": "receptionist"}, "spec": {}}
+        skills = [
+            {"metadata": {"name": "log-call"}, "spec": {"requiredCapabilities": ["crm"]}},
+            {"metadata": {"name": "answer-faq"}, "spec": {}},
+        ]
+        report = {entry["name"]: entry for entry in capabilities.skill_readiness(agent, skills, GOOGLE_BINDING)}
+        self.assertFalse(report["log-call"]["ready"])
+        self.assertEqual(report["log-call"]["dependencies"][0]["status"], "missing")
+        self.assertTrue(report["answer-faq"]["ready"])
+        with self.assertRaisesRegex(
+            ValueError,
+            r"Agent 'receptionist' requires capability 'crm' \(needed by Skill 'log-call'\) but environment 'dev' binds no provider",
+        ):
+            capabilities.resolve(
+                capabilities.collect_declarations(agent, skills),
+                GOOGLE_BINDING,
+                agent_name="receptionist",
+                required_by=capabilities.skills_requiring(skills),
+            )
+
+    def test_readiness_cli_prints_table_and_exits_by_blocked_state(self):
+        result = self._run_cli(GOOGLE_BINDING, "--agent", "receptionist", "--readiness")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("book-appointment", result.stdout)
+        self.assertIn("calendar: google tier 1", result.stdout)
+        self.assertIn("tickets (optional): degraded -> fallback tier 4", result.stdout)
+        self.assertNotIn("frontdesk@acme-tenant.example", result.stdout)
+
+        blocked = self._run_cli({"environment": "dev"}, "--agent", "receptionist", "--readiness")
+        self.assertEqual(blocked.returncode, 1)
+        self.assertRegex(blocked.stdout, r"book-appointment\s+BLOCKED\s+calendar: MISSING")
 
 
 class CapabilityManifestTests(unittest.TestCase):

@@ -6,8 +6,8 @@ chooses a provider. This module owns three small, deterministic jobs:
 
 - validate declarations and Tool resources against ``contracts/v1/capabilities.json``;
 - resolve declarations against one EnvironmentBinding, failing closed for unbound
-  required capabilities and reporting unbound optional ones as degraded with their
-  fallback tier;
+  required capabilities (naming the Skills that need them) and reporting unbound
+  optional ones as degraded with their fallback tier, overall and per Skill;
 - generate the non-secret capability manifest an environment exposes to its coworker
   and overlay live connection health without redeploying Agents.
 """
@@ -184,8 +184,13 @@ def resolve(
     *,
     agent_name: str,
     catalog: dict[str, Any] | None = None,
+    required_by: Mapping[str, list[str]] | None = None,
 ) -> dict[str, Any]:
-    """Resolve declarations against one environment; fail closed on unbound required ones."""
+    """Resolve declarations against one environment; fail closed on unbound required ones.
+
+    ``required_by`` maps a required declaration to the Skills that require it, so the
+    fail-closed message can name them (see ``skills_requiring``).
+    """
     providers = bound_providers(binding, catalog)
     environment = binding_environment(binding)
     resolution: list[dict[str, Any]] = []
@@ -207,8 +212,9 @@ def resolve(
             resolution.append(entry)
     if missing:
         where = f"environment {environment!r}" if environment else "the target environment"
+        needed = ", ".join(_with_requirers(name, (required_by or {}).get(name, [])) for name in missing)
         raise ValueError(
-            f"Agent {agent_name!r} requires capability {', '.join(repr(m) for m in missing)} "
+            f"Agent {agent_name!r} requires capability {needed} "
             f"but {where} binds no provider for it; add connectors.<family>.provider to the "
             "EnvironmentBinding or make the capability optional"
         )
@@ -218,6 +224,73 @@ def resolve(
         "resolution": resolution,
         "degraded": [item["capability"] for item in resolution if item["status"] == "degraded"],
     }
+
+
+def _with_requirers(name: str, skills: list[str]) -> str:
+    if not skills:
+        return repr(name)
+    noun = "Skill" if len(skills) == 1 else "Skills"
+    return f"{name!r} (needed by {noun} {', '.join(repr(skill) for skill in sorted(skills))})"
+
+
+def skills_requiring(skills: list[dict[str, Any]]) -> dict[str, list[str]]:
+    """Return {required declaration: sorted Skill names that require it}."""
+    owners: dict[str, set[str]] = {}
+    for skill in skills:
+        skill_name = skill.get("metadata", {}).get("name")
+        for name in skill.get("spec", {}).get("requiredCapabilities", []):
+            owners.setdefault(name, set()).add(skill_name)
+    return {name: sorted(names) for name, names in sorted(owners.items())}
+
+
+def skill_readiness(
+    agent: dict[str, Any],
+    skills: list[dict[str, Any]],
+    binding: Mapping[str, Any],
+    catalog: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
+    """Report, per selected Skill, whether its capability dependencies are met here.
+
+    One entry per Skill, preceded by one for the Agent when it declares capabilities
+    itself. A dependency is ``bound`` (provider and tier), ``missing`` (required and
+    unbound: the entry is not ready) or ``degraded`` (optional and unbound, with its
+    fallback tier). Only provider, tier and fallback tier are copied from the binding:
+    never token references, calendar IDs, scopes or owners.
+    """
+    providers = bound_providers(binding, catalog)
+    owners: list[tuple[str, dict[str, Any]]] = []
+    agent_spec = agent.get("spec", {})
+    if agent_spec.get("requiredCapabilities") or agent_spec.get("optionalCapabilities"):
+        owners.append(("Agent", agent))
+    owners.extend(("Skill", skill) for skill in skills)
+    report: list[dict[str, Any]] = []
+    for kind, resource in owners:
+        name = resource.get("metadata", {}).get("name")
+        spec = resource.get("spec", {})
+        required = sorted(set(spec.get("requiredCapabilities", [])))
+        optional = sorted(set(spec.get("optionalCapabilities", [])) - set(required))
+        dependencies: list[dict[str, Any]] = []
+        for is_required, names in ((True, required), (False, optional)):
+            for capability in names:
+                family = family_of(capability, catalog)
+                if family is None:
+                    raise ValueError(f"{kind} {name!r} declares unknown capability {capability!r}")
+                dependency: dict[str, Any] = {"capability": capability, "family": family, "required": is_required}
+                facts = providers.get(family)
+                if facts is not None:
+                    dependency.update(status="bound", provider=facts["provider"], tier=facts["tier"])
+                elif is_required:
+                    dependency["status"] = "missing"
+                else:
+                    dependency.update(status="degraded", fallbackTier=families(catalog)[family]["fallbackTier"])
+                dependencies.append(dependency)
+        report.append({
+            "name": name,
+            "kind": kind,
+            "ready": all(item["status"] != "missing" for item in dependencies),
+            "dependencies": dependencies,
+        })
+    return report
 
 
 def build_manifest(desired_state: dict[str, Any], binding: Mapping[str, Any], catalog: dict[str, Any] | None = None) -> dict[str, Any]:

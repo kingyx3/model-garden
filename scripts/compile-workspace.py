@@ -193,7 +193,15 @@ def resolve_agent(workspace, agent, resources, source_paths, source_roots, envir
         capabilities = dict(declarations)
         if environment_binding is not None:
             try:
-                capabilities.update(CAPABILITIES.resolve(declarations, environment_binding, agent_name=name))
+                capabilities.update(
+                    CAPABILITIES.resolve(
+                        declarations,
+                        environment_binding,
+                        agent_name=name,
+                        required_by=CAPABILITIES.skills_requiring(resolved["skills"]),
+                    )
+                )
+                capabilities["skills"] = CAPABILITIES.skill_readiness(agent, resolved["skills"], environment_binding)
             except ValueError as exc:
                 errors.append(str(exc))
     if errors:
@@ -238,18 +246,61 @@ def compile_workspace(
     fallback tier.
     """
     resources, source_paths, source_roots = load_workspace(workspace, library_roots)
-    agents = resources["Agent"]
-    if agent_name is not None:
-        agent = agents.get(agent_name)
-        if agent is None:
-            raise ValueError(f"Workspace compilation failed: Agent {agent_name!r} not found")
-        selected = [agent]
-    else:
-        selected = [agents[name] for name in sorted(agents)]
     return [
         resolve_agent(workspace, agent, resources, source_paths, source_roots, environment_binding)
-        for agent in selected
+        for agent in _selected_agents(resources, agent_name)
     ]
+
+
+def _selected_agents(resources, agent_name: str | None) -> list[dict[str, Any]]:
+    agents = resources["Agent"]
+    if agent_name is None:
+        return [agents[name] for name in sorted(agents)]
+    agent = agents.get(agent_name)
+    if agent is None:
+        raise ValueError(f"Workspace compilation failed: Agent {agent_name!r} not found")
+    return [agent]
+
+
+def workspace_readiness(
+    workspace: pathlib.Path,
+    agent_name: str | None,
+    library_roots: tuple[pathlib.Path, ...],
+    environment_binding: dict[str, Any],
+) -> list[dict[str, Any]]:
+    """Per-Skill capability readiness for each selected Agent, without failing closed."""
+    resources, _, _ = load_workspace(workspace, library_roots)
+    report = []
+    for agent in _selected_agents(resources, agent_name):
+        skills = [resources["Skill"][ref] for ref in agent["spec"].get("skills", []) if ref in resources["Skill"]]
+        report.append({
+            "agent": agent["metadata"]["name"],
+            "environment": CAPABILITIES.binding_environment(environment_binding),
+            "skills": CAPABILITIES.skill_readiness(agent, skills, environment_binding),
+        })
+    return report
+
+
+def _dependency_text(dependency: dict[str, Any]) -> str:
+    label = dependency["capability"] + ("" if dependency["required"] else " (optional)")
+    if dependency["status"] == "bound":
+        return f"{label}: {dependency['provider']} tier {dependency['tier']}"
+    if dependency["status"] == "missing":
+        return f"{label}: MISSING"
+    return f"{label}: degraded -> fallback tier {dependency['fallbackTier']}"
+
+
+def format_readiness(report: list[dict[str, Any]]) -> str:
+    lines = []
+    for agent in report:
+        where = agent["environment"] or "target environment"
+        lines.append(f"Agent {agent['agent']} in {where}")
+        width = max([len(entry["name"]) for entry in agent["skills"]] + [5])
+        for entry in agent["skills"]:
+            state = "ready" if entry["ready"] else "BLOCKED"
+            needs = "; ".join(_dependency_text(item) for item in entry["dependencies"]) or "-"
+            lines.append(f"  {entry['kind']:<5} {entry['name']:<{width}}  {state:<7}  {needs}")
+    return "\n".join(lines) + "\n"
 
 
 def load_environment_binding(path: pathlib.Path) -> dict[str, Any]:
@@ -273,9 +324,25 @@ def main() -> int:
         "--environment-binding",
         help="EnvironmentBinding JSON or environment YAML; resolves declared capabilities and fails closed on unbound required ones",
     )
+    parser.add_argument(
+        "--readiness",
+        action="store_true",
+        help="print per-Skill capability readiness for --environment-binding and exit non-zero if any Skill is blocked",
+    )
     args = parser.parse_args()
     workspace = pathlib.Path(args.workspace)
     libraries = tuple(pathlib.Path(path) for path in args.library)
+    if args.readiness:
+        if not args.environment_binding:
+            parser.error("--readiness requires --environment-binding")
+        try:
+            binding = load_environment_binding(pathlib.Path(args.environment_binding))
+            report = workspace_readiness(workspace, args.agent, libraries, binding)
+        except (OSError, ValueError) as exc:
+            print(str(exc), file=sys.stderr)
+            return 1
+        sys.stdout.write(format_readiness(report))
+        return 0 if all(entry["ready"] for agent in report for entry in agent["skills"]) else 1
     try:
         binding = load_environment_binding(pathlib.Path(args.environment_binding)) if args.environment_binding else None
         compiled = compile_workspace(workspace, args.agent, libraries, binding)
