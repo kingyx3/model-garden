@@ -43,6 +43,27 @@ class EnterpriseEvidenceTests(unittest.TestCase):
         self.assertTrue(results)
         self.assertTrue(all(result["status"] == "not_run" for result in results.values()))
 
+    def test_release_scan_gate_fails_on_missing_findings_and_error_exits(self):
+        clean = {
+            scan_id: {"status": "generated" if scan_id == "python_sbom" else "pass"}
+            for scan_id in EVIDENCE_PACK.SCAN_EXIT_STEMS
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            scan_dir = pathlib.Path(tmp)
+            for stem in EVIDENCE_PACK.SCAN_EXIT_STEMS.values():
+                (scan_dir / f"{stem}.exit-code").write_text("0\n", encoding="utf-8")
+            self.assertEqual(EVIDENCE_PACK.scanner_gate_failures(clean, scan_dir), [])
+
+            with_findings = dict(clean)
+            with_findings["dependency_vulnerability_scan"] = {"status": "findings"}
+            self.assertTrue(EVIDENCE_PACK.scanner_gate_failures(with_findings, scan_dir))
+
+            (scan_dir / "checkov.exit-code").write_text("2\n", encoding="utf-8")
+            self.assertTrue(EVIDENCE_PACK.scanner_gate_failures(clean, scan_dir))
+
+            (scan_dir / "checkov.exit-code").unlink()
+            self.assertTrue(EVIDENCE_PACK.scanner_gate_failures(clean, scan_dir))
+
     def test_pack_keeps_formal_assurance_gaps(self):
         scans = {
             scan_id: {"status": "pass", "findings": 0, "source": f"scans/{filename}"}
