@@ -78,6 +78,10 @@ python3 scripts/launch.py acme \
 
 Change Model Garden core only when a reusable Skill, connector, governance capability or runtime seam is genuinely missing.
 
+## Client integration discovery and permission preflight
+
+Use the canonical [integration registry and guide](contracts.md#integration-registry-and-readiness-to-connect-boundary) to show a client which CRM, mailbox, calendar and knowledge providers are implemented versus planned. `python3 scripts/client-operator.py connect <family>` lists provider choices by tier and maturity. Add `--provider`, `--tools`, `--owner` and `--operator` for a non-secret permission preview; it does not grant access or change credentials. For incomplete connectors and expired authorization, fail closed and keep live client provisioning manual until the corresponding implementation and real-provider proof gates are met.
+
 ## Normal delivery after bootstrap
 
 Once bootstrap is verified, GitHub is the engineering control plane:
