@@ -36,9 +36,9 @@ Terraform -> isolated client Docker host
 | Client desired state | One separate private workspace repository per client, pinned to a published Model Garden release. |
 | Validation/materialization | Versioned `modelgarden.ai/v1` contracts, deterministic workspace validation/compiler and Hermes profile materialization. |
 | Agent runtime | Hermes reference runtime; runtime implementation remains behind the Model Garden client contract. |
-| Business actions | Governed MCP Tool boundary with explicit Tool selection, scoped credentials, `allow | approval | deny`, exact-action approval and attributable audit. |
-| Business-system integration | Portable governed Calendar Tools with provider-specific Google Calendar or Microsoft Graph adapters; broader suites are not yet implemented. |
-| Channels | Replaceable channel adapters; LiveKit is the reference voice path. |
+| Business actions | Governed MCP Tool boundary with explicit Tool selection, scoped credentials, `allow | approval | deny`, exact-action approval and a tamper-evident schema-v3 action ledger with read events. |
+| Business-system integration | Provider-neutral capability catalog (`contracts/v1/capabilities.json`) with required/optional declarations and a per-environment capability manifest; Calendar is the only family with live adapters (Google Calendar, Microsoft Graph). |
+| Channels | One text channel adapter contract with verified principal mapping (no text adapters shipped yet); LiveKit is the reference voice path. |
 | Usage/cost attribution | Canonical non-secret attribution events emitted to the external Lago metering/billing seam. |
 | Infrastructure | Terraform-managed keyless GCP bootstrap and isolated Compute Engine Docker host. |
 | Delivery control | GitHub PR validation plus generated keyless environment deployment workflow. |
@@ -60,6 +60,8 @@ Terraform -> isolated client Docker host
 - Credential boundaries: [`secrets.md`](secrets.md)
 - Production hardening: [`security.md`](security.md)
 - Governed actions/audit: [`governed-tools.md`](governed-tools.md)
+- Capability and resource contracts: [`contracts.md`](contracts.md)
+- Channel adapters and principals: [`channels.md`](channels.md)
 - Usage/cost attribution: [`metering.md`](metering.md)
 - Live acceptance evidence: [`live-proof.md`](live-proof.md)
 - Enterprise assurance evidence: [`assurance.md`](assurance.md)
