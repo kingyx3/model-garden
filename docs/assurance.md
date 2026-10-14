@@ -44,7 +44,7 @@ The scanner workflow records:
 - potential repository secrets with `detect-secrets`;
 - a Python CycloneDX SBOM using `pip-audit`'s CycloneDX output.
 
-Scanner findings are preserved in the evidence pack instead of being converted into false positive assurance. A scanner run also does not upgrade `policy_required`, `client_configured` or `not_verified` controls to `implemented`.
+CI preserves the scanner reports and evidence pack, then blocks the required validation job if any required scanner has findings, invalid/missing output or a nonzero execution result. Scanner scope and accepted skips remain explicit in `assurance/evidence-metadata.yaml`; a passing scan does not upgrade `policy_required`, `client_configured` or `not_verified` controls to `implemented`.
 
 ## CI evidence artifact
 

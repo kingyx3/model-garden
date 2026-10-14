@@ -65,5 +65,5 @@ if [[ ${sbom_rc} -ne 0 ]]; then
   echo "SBOM generation completed with vulnerability findings or an error (exit ${sbom_rc})." >&2
 fi
 
-python3 scripts/enterprise-evidence.py --scan-dir "${OUT}" --output-dir "${PACK_DIR}"
 cp assurance/evidence-metadata.yaml "${PACK_DIR}/evidence-metadata.yaml"
+python3 scripts/enterprise-evidence.py --scan-dir "${OUT}" --output-dir "${PACK_DIR}" --require-clean-scans

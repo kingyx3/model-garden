@@ -189,6 +189,37 @@ def summarize_sbom(data: Any) -> dict[str, Any]:
     return _scan_result("generated", 0, components=len(components), bom_format=data.get("bomFormat"))
 
 
+# Report generation remains usable offline. Release CI explicitly opts in to the
+# strict gate, which treats missing evidence, execution errors and any scanner
+# findings as blockers until remediated or covered by narrowly scoped scan rules.
+SCAN_EXIT_STEMS = {
+    "dependency_vulnerability_scan": "pip-audit",
+    "python_security_scan": "bandit",
+    "infrastructure_as_code_scan": "checkov",
+    "repository_secret_scan": "detect-secrets",
+    "python_sbom": "python-sbom",
+}
+
+
+def scanner_gate_failures(scans: dict[str, dict[str, Any]], scan_dir: pathlib.Path) -> list[str]:
+    failures: list[str] = []
+    for scan_id, stem in SCAN_EXIT_STEMS.items():
+        expected = "generated" if scan_id == "python_sbom" else "pass"
+        result = scans.get(scan_id, {})
+        actual = result.get("status", "not_run")
+        if actual != expected:
+            failures.append(f"{scan_id}: expected {expected}, got {actual}")
+        exit_path = scan_dir / f"{stem}.exit-code"
+        try:
+            exit_code = int(exit_path.read_text(encoding="utf-8").strip())
+        except (OSError, ValueError):
+            failures.append(f"{scan_id}: missing or invalid scanner exit code")
+        else:
+            if exit_code != 0:
+                failures.append(f"{scan_id}: scanner exited {exit_code}")
+    return failures
+
+
 SCAN_SUMMARIZERS = {
     "dependency_vulnerability_scan": summarize_pip_audit,
     "python_security_scan": summarize_bandit,
@@ -419,6 +450,7 @@ def main() -> int:
     parser.add_argument("--output-dir", type=pathlib.Path, default=DEFAULT_OUTPUT_DIR)
     parser.add_argument("--generated-at", default=None, help="override generation timestamp for deterministic tests")
     parser.add_argument("--commit", default=None, help="override repository commit")
+    parser.add_argument("--require-clean-scans", action="store_true", help="fail closed if required scans have findings, are incomplete or errored")
     args = parser.parse_args()
 
     try:
@@ -444,6 +476,10 @@ def main() -> int:
         manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
         print(pack_path)
         print(manifest_path)
+        if args.require_clean_scans:
+            failures = scanner_gate_failures(scans, args.scan_dir)
+            if failures:
+                raise ValueError("release assurance gate failed: " + "; ".join(failures))
         return 0
     except (OSError, ValueError, yaml.YAMLError, json.JSONDecodeError) as exc:
         print(f"enterprise evidence error: {exc}", file=os.sys.stderr)

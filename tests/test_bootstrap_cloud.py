@@ -71,7 +71,8 @@ class BootstrapCloudTests(unittest.TestCase):
     def test_rendered_cloud_workflow_is_keyless_and_role_generic(self):
         workflow = bootstrap.render_cloud_workflow("acme", "operations-coordinator")
 
-        self.assertIn("google-github-actions/auth@v3", workflow)
+        self.assertIn("google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093", workflow)
+        self.assertIn("github.event.workflow_run.head_repository.full_name == github.repository", workflow)
         self.assertIn("workload_identity_provider: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}", workflow)
         self.assertIn("service_account: ${{ vars.GCP_DEPLOY_SERVICE_ACCOUNT }}", workflow)
         self.assertIn("--agent operations-coordinator", workflow)

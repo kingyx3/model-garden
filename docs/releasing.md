@@ -10,8 +10,8 @@ The repository version is stored in `VERSION`. Use semantic versioning:
 
 1. `make validate` passes.
 2. All `modelgarden.ai/v1` examples still validate.
-3. Terraform plan impact is reviewed for AWS/GCP/Azure.
+3. Review Terraform plan impact for the supported GCP bootstrap and isolated Docker-host modules; additional clouds are not currently supported.
 4. Security-sensitive defaults are called out in release notes.
 5. Any migration steps are documented before tagging.
 
-Customer workspaces should eventually pin a released platform version rather than track `main`. Infrastructure upgrades and agent/skill changes should be separate deployment lifecycles.
+Client workspaces **must** pin an immutable published Model Garden release in `platform.lock.yaml`, not track `main`. Validate the same client revision through DEV before PROD promotion. Infrastructure upgrades and client Agent/Skill changes follow separately reviewed changes; production release tags are never moved.
