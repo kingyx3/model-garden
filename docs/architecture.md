@@ -37,7 +37,7 @@ Terraform -> isolated client Docker host
 | Validation/materialization | Versioned `modelgarden.ai/v1` contracts, deterministic workspace validation/compiler and Hermes profile materialization. |
 | Agent runtime | Hermes reference runtime; runtime implementation remains behind the Model Garden client contract. |
 | Business actions | Governed MCP Tool boundary with explicit Tool selection, scoped credentials, `allow | approval | deny`, exact-action approval and a tamper-evident schema-v3 action ledger with read events. |
-| Business-system integration | Provider-neutral capability catalog (`contracts/v1/capabilities.json`) with required/optional declarations and a per-environment capability manifest; Calendar is the only family with live adapters (Google Calendar, Microsoft Graph). |
+| Business-system integration | Provider-neutral capability catalog (`contracts/v1/capabilities.json`) with required/optional declarations and a per-environment capability manifest; Calendar has implemented Google Calendar and Microsoft Graph adapters; neither is proven production-live until the [#66](https://github.com/kingyx3/model-garden/issues/66) OAuth and tenant acceptance gates pass. |
 | Channels | One text channel adapter contract with verified principal mapping (no text adapters shipped yet); LiveKit is the reference voice path. |
 | Usage/cost attribution | Canonical non-secret attribution events emitted to the external Lago metering/billing seam. |
 | Infrastructure | Terraform-managed keyless GCP bootstrap and isolated Compute Engine Docker host. |
