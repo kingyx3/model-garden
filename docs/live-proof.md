@@ -89,7 +89,7 @@ Copy `templates/operations/client-operations.yaml` into the private engagement/o
 python3 scripts/operations-readiness.py client-operations.yaml
 ```
 
-It fails closed until runtime/cloud/provider ownership, break-glass and recovery contacts, support/escalation, retention/recording/vendor handling, operator continuity, rollback evidence and backup/restore requirements are explicit.
+It fails closed until the client identity, runtime/cloud/provider owners, break-glass and recovery contacts, credential revocation, support coverage, alert routing, retention/recording/vendor handling, operator continuity, rollback/backup requirements, offboarding owner, and deployment/agent/action/fallback acceptance evidence are recorded. All `REQUIRED`/`TODO`/`TBD` placeholders must be resolved. For a workflow without voice, explicitly document why voice-specific evidence is not applicable rather than inventing a call or leaving a placeholder. A populated record is still not a substitute for independent inspection of the linked evidence.
 
 ## P1 economics and repeatability
 
