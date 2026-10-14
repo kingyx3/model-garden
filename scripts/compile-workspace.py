@@ -31,7 +31,7 @@ SCHEMAS = {
     "KnowledgeSource": "knowledge-source.schema.json",
     "Policy": "policy.schema.json",
 }
-REFERENCE_FIELDS = {"skills": "Skill", "tools": "Tool", "knowledge": "KnowledgeSource"}
+REFERENCE_FIELDS = {"skills": "Skill", "tools": "Tool", "knowledge": "KnowledgeSource", "policies": "Policy"}
 
 
 def _load_capabilities():
@@ -58,6 +58,18 @@ def _load_integrations():
 
 INTEGRATIONS = _load_integrations()
 
+
+def _load_policy():
+    module_spec = importlib.util.spec_from_file_location(
+        "model_garden_policy", ROOT / "platform" / "core" / "policy.py"
+    )
+    module = importlib.util.module_from_spec(module_spec)
+    assert module_spec.loader is not None
+    module_spec.loader.exec_module(module)
+    return module
+
+
+POLICY = _load_policy()
 
 
 def load_validators() -> dict[str, Draft202012Validator]:
@@ -228,6 +240,7 @@ def resolve_agent(workspace, agent, resources, source_paths, source_roots, envir
         for tool_name in skill.get("spec", {}).get("allowedTools", []):
             if tool_name not in selected_tools:
                 errors.append(f"Skill {skill_name!r} requires Tool {tool_name!r}, but Agent {name!r} did not select it")
+    errors.extend(f"Agent {name!r}: {error}" for error in POLICY.relaxation_errors(resolved["policies"], resolved["tools"]))
     declarations = CAPABILITIES.collect_declarations(agent, resolved["skills"])
     errors.extend(CAPABILITIES.declaration_errors(declarations, f"Agent {name!r} or one of its Skills"))
     capabilities: dict[str, Any] | None = None
@@ -272,6 +285,8 @@ def resolve_agent(workspace, agent, resources, source_paths, source_roots, envir
         "tools": resolved["tools"],
         "knowledge": resolved["knowledge"],
     }
+    if resolved["policies"]:
+        compiled["policies"] = resolved["policies"]
     if capabilities is not None:
         compiled["capabilities"] = capabilities
     return compiled
@@ -337,6 +352,79 @@ def workspace_readiness(
     return report
 
 
+def workspace_approvals(
+    workspace: pathlib.Path,
+    agent_name: str | None,
+    library_roots: tuple[pathlib.Path, ...],
+) -> list[dict[str, Any]]:
+    """Per-Skill view of which Tool actions run automatically, need approval or are denied."""
+    resources, _, _ = load_workspace(workspace, library_roots)
+    report = []
+    for agent in _selected_agents(resources, agent_name):
+        spec = agent["spec"]
+        name = agent["metadata"]["name"]
+        missing = [
+            f"{kind} {ref!r}"
+            for field, kind in (("skills", "Skill"), ("tools", "Tool"), ("policies", "Policy"))
+            for ref in spec.get(field, [])
+            if ref not in resources[kind]
+        ]
+        if missing:
+            raise ValueError(f"Agent {name!r} references missing {', '.join(missing)}")
+        policies = [resources["Policy"][ref] for ref in spec.get("policies", [])]
+        tools = {ref: resources["Tool"][ref] for ref in spec.get("tools", [])}
+        classification = spec.get("security", {}).get("dataClassification")
+        agent_requires = spec.get("approvals", {}).get("externalActions") == "required"
+        disabled = set(spec.get("disabledSkills", []))
+
+        def row(tool_name: str) -> dict[str, Any]:
+            tool = tools[tool_name]["spec"]
+            return {
+                "tool": tool_name,
+                "risk": tool["risk"],
+                **POLICY.preview(
+                    policies,
+                    tool_name=tool_name,
+                    risk=tool["risk"],
+                    classification=classification,
+                    agent_requires_approval=agent_requires,
+                    tool_requires_approval=bool(tool.get("approvalRequired", False)),
+                ),
+            }
+
+        skills = []
+        covered: set[str] = set()
+        for ref in spec.get("skills", []):
+            if ref in disabled:
+                continue
+            allowed = [tool for tool in resources["Skill"][ref].get("spec", {}).get("allowedTools", []) if tool in tools]
+            covered.update(allowed)
+            skills.append({"skill": ref, "actions": [row(tool) for tool in allowed]})
+        skills.append({"skill": None, "actions": [row(tool) for tool in sorted(set(tools) - covered)]})
+        report.append({
+            "agent": name,
+            "policyVersion": POLICY.policy_version(policies),
+            "skills": [entry for entry in skills if entry["actions"]],
+        })
+    return report
+
+
+def format_approvals(report: list[dict[str, Any]]) -> str:
+    lines = []
+    for agent in report:
+        lines.append(f"Agent {agent['agent']} (approval policy {agent['policyVersion']})")
+        for entry in agent["skills"]:
+            lines.append(f"  Skill {entry['skill']}" if entry["skill"] else "  Agent-level Tools")
+            width = max(len(action["tool"]) for action in entry["actions"])
+            for action in entry["actions"]:
+                lines.append(
+                    f"    {action['tool']:<{width}}  {action['risk']:<22}"
+                    f" members: {action['member']:<9} public callers: {action['public']}"
+                )
+        lines.append("  Approvals are given by a mapped approver from the client principal directory; public callers never approve.")
+    return "\n".join(lines) + "\n"
+
+
 def _dependency_text(dependency: dict[str, Any]) -> str:
     label = dependency["capability"] + ("" if dependency["required"] else " (optional)")
     if dependency["status"] == "bound":
@@ -391,9 +479,22 @@ def main() -> int:
         action="store_true",
         help="print per-Skill capability readiness for --environment-binding and exit non-zero if any Skill is blocked",
     )
+    parser.add_argument(
+        "--approvals",
+        action="store_true",
+        help="print which Tool actions run automatically, need approval or are denied, per Skill, and exit",
+    )
     args = parser.parse_args()
     workspace = pathlib.Path(args.workspace)
     libraries = tuple(pathlib.Path(path) for path in args.library)
+    if args.approvals:
+        try:
+            report = workspace_approvals(workspace, args.agent, libraries)
+        except (OSError, ValueError) as exc:
+            print(str(exc), file=sys.stderr)
+            return 1
+        sys.stdout.write(format_approvals(report))
+        return 0
     if args.readiness:
         if not args.environment_binding:
             parser.error("--readiness requires --environment-binding")

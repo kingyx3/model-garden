@@ -90,6 +90,10 @@ Clients can continue to list those Skills under `disabledSkills` until their
 dependencies are implemented and authorized. A shipped Calendar adapter still
 needs actual account consent, working token rotation and live acceptance.
 
+### Approval policy walkthrough
+
+Run `python3 scripts/compile-workspace.py <private-client-workspace> --agent <name> --approvals` and walk the client owner through which actions run automatically, which need approval and which are denied for callers or senders who are not staff. Any change that relaxes an approval is an `allow` rule that needs the named client owner's sign-off digest before it compiles (see [Client approval policy](contracts.md#client-approval-policy)); record the owner's agreement outside the repository as well, and keep the sign-off lines under the client's `CODEOWNERS`.
+
 ## Client integration discovery and permission preflight
 
 Use the canonical [integration registry and guide](contracts.md#integration-registry-and-readiness-to-connect-boundary) to show a client which CRM, mailbox, calendar and knowledge providers are implemented versus planned. `python3 scripts/client-operator.py connect <family>` lists provider choices by tier and maturity. Add `--provider`, `--tools`, `--owner` and `--operator` for a non-secret permission preview; it does not grant access or change credentials. For incomplete connectors and expired authorization, fail closed and keep live client provisioning manual until the corresponding implementation and real-provider proof gates are met.

@@ -15,12 +15,14 @@ Optional:
 - MODEL_GARDEN_HUMAN_TRANSFER_TARGET (tel:+... or sip:...)
 - MODEL_GARDEN_MESSAGE_PATH (default /opt/data/messages.jsonl)
 - MODEL_GARDEN_MESSAGE_RETENTION_SECONDS (default 604800 / 7 days)
+- MODEL_GARDEN_TRANSCRIPT* (two-way call transcript, disclosure, redaction and retention; see call_transcript.py)
 """
 from __future__ import annotations
 
 import fcntl
 import hashlib
 import json
+import logging
 import os
 import pathlib
 import time
@@ -30,6 +32,11 @@ from livekit import api, rtc
 from livekit.agents import Agent, AgentServer, AgentSession, JobContext, RunContext, cli, function_tool, get_job_context
 from livekit.plugins import openai
 
+from call_transcript import CallTranscript, config_from_env as transcript_config_from_env, finalize as finalize_transcript
+
+LOGGER = logging.getLogger("model-garden.receptionist")
+# An unsafe transcript configuration (for example no disclosure and no lawful-basis owner) stops the worker at start.
+TRANSCRIPT_CONFIG = transcript_config_from_env()
 
 MESSAGE_PATH = pathlib.Path(os.environ.get("MODEL_GARDEN_MESSAGE_PATH", "/opt/data/messages.jsonl"))
 AGENT_NAME = os.environ.get("MODEL_GARDEN_LIVEKIT_AGENT_NAME", "model-garden-receptionist").strip() or "model-garden-receptionist"
@@ -117,10 +124,19 @@ def _sip_participant(ctx: JobContext):
 
 
 class ReceptionistVoiceAgent(Agent):
-    def __init__(self, instructions: str) -> None:
+    def __init__(self, instructions: str, transcript: CallTranscript | None = None) -> None:
         super().__init__(instructions=instructions)
+        self._transcript = transcript
 
     async def on_enter(self) -> None:
+        notice = self._transcript.disclosure_text if self._transcript is not None else None
+        if notice:
+            try:
+                await self.session.say(notice, allow_interruptions=False)
+                self._transcript.mark_disclosure_played()
+            except Exception as exc:  # no notice, no transcript: never record a call that was not told
+                LOGGER.error("transcript disclosure could not be played (%s); transcript suppressed", type(exc).__name__)
+                self._transcript.suppress()
         self.session.generate_reply(
             instructions="Greet the caller briefly and ask how you can help. Do not claim any external action succeeded unless its Tool reports success."
         )
@@ -158,6 +174,8 @@ class ReceptionistVoiceAgent(Agent):
                 "status": "requested",
             }
         )
+        if self._transcript is not None:
+            self._transcript.note_outcome("transferred")
         return "Human transfer requested successfully."
 
     @function_tool()
@@ -183,6 +201,8 @@ class ReceptionistVoiceAgent(Agent):
                 "message": message,
             }
         )
+        if self._transcript is not None:
+            self._transcript.note_outcome("message-taken")
         return "Message captured for human follow-up."
 
 
@@ -230,9 +250,39 @@ async def receptionist(ctx: JobContext) -> None:
             }
         )
 
+    transcript = CallTranscript(_safe_digest(ctx.room.name) or "", AGENT_NAME, TRANSCRIPT_CONFIG, started=started)
+
+    def record_turn(event: Any) -> None:
+        # Never let a transcript problem reach the call: log the type only and carry on.
+        try:
+            item = event.item
+            role = getattr(item, "role", None)
+            speaker = {"user": "caller", "assistant": "agent"}.get(role)
+            text = getattr(item, "text_content", None)
+            if speaker and isinstance(text, str):
+                transcript.add_turn(speaker, text, interrupted=bool(getattr(item, "interrupted", False)))
+        except Exception as exc:
+            LOGGER.error("call transcript turn not recorded: %s", type(exc).__name__)
+
+    async def on_transcript_shutdown() -> None:
+        def failed(error_type: str) -> None:
+            _append_message(
+                {
+                    "type": "TranscriptWriteFailed",
+                    "timestamp": int(time.time()),
+                    "roomHash": _safe_digest(ctx.room.name),
+                    "agent": AGENT_NAME,
+                    "errorType": error_type,
+                }
+            )
+
+        finalize_transcript(transcript, on_failure=failed)
+
     ctx.add_shutdown_callback(on_shutdown)
+    ctx.add_shutdown_callback(on_transcript_shutdown)
     session = build_session()
-    await session.start(agent=ReceptionistVoiceAgent(_instructions()), room=ctx.room)
+    session.on("conversation_item_added", record_turn)
+    await session.start(agent=ReceptionistVoiceAgent(_instructions(), transcript), room=ctx.room)
     await ctx.connect()
 
 

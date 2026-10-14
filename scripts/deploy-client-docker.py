@@ -44,6 +44,7 @@ RUNTIME_SOURCE_PATHS = (
     pathlib.Path("platform/connectors/microsoft_calendar.py"),
     pathlib.Path("platform/connectors/oauth_refresh.py"),
     pathlib.Path("platform/core/capabilities.py"),
+    pathlib.Path("platform/core/policy.py"),
     pathlib.Path("platform/channels/text_channel.py"),
     pathlib.Path("contracts/v1/capabilities.json"),
     pathlib.Path("contracts/v1/integrations.json"),

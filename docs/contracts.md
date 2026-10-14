@@ -9,7 +9,7 @@ Supported v1 business resources:
 - `ModelProfile` — logical model requirement mapped to approved candidates.
 - `Tool` — executable enterprise capability with an explicit risk class.
 - `KnowledgeSource` — approved source and data classification.
-- `Policy` — portable policy metadata/rules; runtime enforcement can later be backed by OPA or another engine.
+- `Policy` — client-owned approval rules, enforced by the governed boundary (see [Client approval policy](#client-approval-policy)); a dedicated policy engine remains out of scope.
 
 ## Capability contracts
 
@@ -22,7 +22,30 @@ Supported v1 business resources:
 - The fail-closed message also names the Skill(s) that require each missing capability. With a binding, the compiled output carries `capabilities.skills`: one entry per selected Skill (plus the Agent when it declares capabilities itself) with `ready` and each dependency as `bound` (provider, tier), `missing` or `degraded` (fallback tier). It copies no token references, calendar IDs, scopes or owners.
 - `compile-workspace.py --environment-binding <file> --readiness` prints that per-Skill table instead of compiling and exits non-zero if any Skill is blocked.
 
+The `crm` family also carries `crm.create` (risk `write`) and `crm.log-interaction` (risk `write`: channel, direction, timestamp, summary, outcome and a transcript or message *reference*). Their ledger fields are object type/ID and interaction type only, never summary or transcript text. This is the portable contract only: **no provider implements these Tools yet** (HubSpot/Salesforce/Zoho #93, the Tier 0 built-in log #77) and the integration registry does not claim them. Making the internal-record `crm.log-interaction` automatic while `crm.create`/`crm.update` stay approval-gated is a client decision: leave `crm.log-interaction` without `approvalRequired` on its Tool, or add a signed `allow` rule (below).
+
 All of this is additive to `modelgarden.ai/v1`: existing workspaces without declarations validate and compile unchanged.
+
+## Client approval policy
+
+`Agent.spec.policies` names `Policy` resources whose ordered rules the governed boundary enforces for that Agent. A rule has an `effect` (`allow`, `deny`, `require-approval`) and optionally `actions` (Tool names or globs such as `calendar.book`, `*.send`, `crm.*`), `dataClassifications`, `channels` and `principals` (`member`, `public`).
+
+Precedence is fail-closed:
+
+1. a matching `deny` rule wins;
+2. the Agent's `approvals.externalActions: required` and any matching `require-approval` rule always win over an `allow` rule (the stricter source wins);
+3. `privileged` Tools are never auto-approved, and a public principal can never reach `privileged` or `external-communication` Tools;
+4. a Tool's own `approvalRequired` default is waived only by a matching `allow` rule that carries a valid client-owner sign-off.
+
+With no policy, Agent and Tool settings behave exactly as before (plus the `privileged` floor in point 3). Restrictive rules cover every principal and an unknown channel or classification; an `allow` rule covers members only unless it names `public`, and never matches an unknown channel or classification. A public principal may be given one named `write` Tool (for example booking inside published availability) only by an explicit `allow` rule with `principals: [public]` and a sign-off.
+
+**Owner sign-off, checked at compile and deploy time.** An `allow` rule that relaxes an approval requirement (it matches a non-read Tool, or names `public`) must carry `signoff: {owner, ruleDigest}`. `ruleDigest` is the SHA-256 of the rule's canonical JSON without `signoff`, so editing the rule invalidates the sign-off and compilation fails, printing the digest to re-sign, until the named owner approves the new content. The runtime re-checks the digest before it honours an `allow`. Protect the sign-off lines with `CODEOWNERS` in the client repository so only the named client owner can change them; the platform checks that a sign-off exists and matches the rule, not who typed it.
+
+**Ledger.** Every decision records the deciding rule ID as `policyRuleId` (or the built-in reason when no rule decided) and the rule-set version `policy:<digest>` as `policyVersion`. `govern-action.py`'s `record_policy_change(path, before, after, changed_by=...)` appends a chained `policy-change` event with the author and the rule-level diff, flagging rules that loosen control; the deploy path that calls it is not wired yet.
+
+**Preview.** `python3 scripts/compile-workspace.py <workspace> --approvals` prints, per Skill, which Tool actions run automatically, need approval or are denied for members and for public callers.
+
+Not yet supported: bounded conditions (for example "FAQ category only", "max N per day"), which need per-call classification and counters; and consultant/owner role separation beyond the sign-off above.
 
 Stable operational contract:
 

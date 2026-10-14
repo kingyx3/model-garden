@@ -3,7 +3,9 @@
 
 MVP behavior is intentionally small and explicit:
 - an Agent may request only Tools present in its compiled desired state;
-- selected Tools resolve to allow or require-approval from the stricter of Agent and Tool configuration;
+- selected Tools resolve to allow, require-approval or deny from the stricter of Agent, Tool and
+  the client's Policy rules (platform/core/policy.py), with platform safety floors for public
+  principals and privileged Tools;
 - approvals bind to an immutable requestId derived from agent + tool + exact arguments + initiating identity/context;
 - denied, pending, approved, failed, and executed material actions can be written as versioned JSONL audit events;
 - schema-v3 events store arguments redacted plus a digest, a bounded ledger block (delegation chain,
@@ -14,8 +16,9 @@ MVP behavior is intentionally small and explicit:
 - first-party governance context can correlate tenant, environment, conversation, runtime, model and commercial attribution;
 - execution is injected by the caller, so this module never owns provider credentials.
 
-This is not a general policy engine. Richer policy semantics belong behind the same
-boundary only after repeated client requirements justify them.
+This is not a general policy engine: rules are ordered, glob-matched and fail-closed. Richer
+policy semantics (bounded conditions, counters) belong behind the same boundary only after
+repeated client requirements justify them.
 """
 
 from __future__ import annotations
@@ -92,6 +95,18 @@ def _load_capabilities():
 
 
 CAPABILITIES = _load_capabilities()
+
+
+def _load_policy():
+    path = pathlib.Path(__file__).resolve().parents[1] / "platform" / "core" / "policy.py"
+    module_spec = importlib.util.spec_from_file_location("model_garden_policy_for_governance", path)
+    module = importlib.util.module_from_spec(module_spec)
+    assert module_spec.loader is not None
+    module_spec.loader.exec_module(module)
+    return module
+
+
+POLICY = _load_policy()
 
 
 def _canonical_json(value: Any) -> str:
@@ -243,15 +258,19 @@ def authorize_action(
         return {"decision": "deny", "reason": "tool-not-selected", "request": request}
     if principal_access not in (None, "member", "public"):
         raise ValueError("Governed action failed: principal_access must be member or public")
-    if principal_access == "public" and tool.get("spec", {}).get("risk") != "read":
-        return {"decision": "deny", "reason": "principal-not-authorized", "request": request}
 
-    agent_requires_approval = desired_state.get("agent", {}).get("spec", {}).get("approvals", {}).get("externalActions") == "required"
-    tool_requires_approval = tool.get("spec", {}).get("approvalRequired", False)
-    if agent_requires_approval or tool_requires_approval:
-        reason = "agent-requires-approval" if agent_requires_approval else "tool-requires-approval"
-        return {"decision": "require-approval", "reason": reason, "request": request}
-    return {"decision": "allow", "reason": "selected-tool", "request": request}
+    agent_spec = desired_state.get("agent", {}).get("spec", {})
+    outcome = POLICY.evaluate(
+        desired_state.get("policies"),
+        tool_name=tool_name,
+        risk=tool.get("spec", {}).get("risk"),
+        classification=agent_spec.get("security", {}).get("dataClassification"),
+        channel=request.get("governance", {}).get("channel"),
+        principal=principal_access,
+        agent_requires_approval=agent_spec.get("approvals", {}).get("externalActions") == "required",
+        tool_requires_approval=bool(tool.get("spec", {}).get("approvalRequired", False)),
+    )
+    return {"decision": outcome["decision"], "reason": outcome["reason"], "ruleId": outcome["ruleId"], "request": request}
 
 
 def _utc_timestamp() -> str:
@@ -532,7 +551,10 @@ def execute_action(
         principal_access=principal_access,
     )
     request = authorization["request"]
-    base_ledger: dict[str, Any] = {"policyRuleId": authorization["reason"], "policyVersion": POLICY_VERSION}
+    base_ledger: dict[str, Any] = {
+        "policyRuleId": authorization.get("ruleId") or authorization["reason"],
+        "policyVersion": POLICY.policy_version(desired_state.get("policies")),
+    }
     family = CAPABILITIES.family_of(tool_name)
     if family is not None:
         base_ledger["capability"] = family
@@ -548,6 +570,8 @@ def execute_action(
     if authorization["decision"] == "deny":
         if authorization["reason"] == "principal-not-authorized":
             raise PermissionError(f"Tool {tool_name!r} requires a mapped, verified principal")
+        if authorization["reason"] == "policy-deny":
+            raise PermissionError(f"Tool {tool_name!r} is denied by policy rule {authorization['ruleId']!r}")
         raise PermissionError(f"Tool {tool_name!r} is not selected by Agent {request['agent']!r}")
 
     if authorization["decision"] == "require-approval":
@@ -582,6 +606,31 @@ def execute_action(
         if event is not None:
             append_audit_event(audit_path, event)
     return {"status": "executed", "request": request, "result": result}
+
+
+def record_policy_change(
+    path: pathlib.Path | None,
+    before: list[dict[str, Any]] | None,
+    after: list[dict[str, Any]] | None,
+    *,
+    changed_by: str,
+) -> dict[str, Any] | None:
+    """Ledger a policy change with who made it and the rule-level diff; no-op when nothing changed."""
+    if not isinstance(changed_by, str) or not changed_by.strip():
+        raise ValueError("Governed action failed: a policy change must record who made it")
+    diff = POLICY.diff_policies(before, after)
+    if not (diff["added"] or diff["removed"] or diff["modified"]):
+        return None
+    event = {
+        "schemaVersion": AUDIT_SCHEMA_VERSION,
+        "timestamp": _utc_timestamp(),
+        "event": "policy-change",
+        "outcome": "recorded",
+        "changedBy": changed_by.strip()[:MAX_CONTEXT_VALUE],
+        "details": diff,
+    }
+    append_audit_event(path, event)
+    return event
 
 
 def _load_json(path: pathlib.Path) -> dict[str, Any]:

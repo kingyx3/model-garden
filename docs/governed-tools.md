@@ -131,6 +131,8 @@ python3 scripts/client-operator.py reject <request-id> \
   --approver operator@example.com
 ```
 
+Whether a call needs approval is the stricter of the Agent switch, the Tool's `approvalRequired` and the client's `Policy` rules; see [Client approval policy](contracts.md#client-approval-policy) for precedence, the public-principal floors and owner sign-off. Channel approvals already require a mapped `approver`, so a public caller cannot approve their own request.
+
 Changing the Tool arguments or bounded governance context creates a different request ID, so an approval cannot authorize a materially different action. Approval decisions are also single-use: once an approved or rejected decision is applied, it is consumed. A later identical material action must pause for a fresh human decision rather than replaying an earlier approval.
 
 This file-backed approval mechanism is intentionally an MVP operator surface. Do not build an approval portal or workflow engine until repeated client evidence justifies one.

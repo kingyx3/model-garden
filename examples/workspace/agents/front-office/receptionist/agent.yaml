@@ -20,6 +20,8 @@ spec:
     - calendar.book
   knowledge:
     - business-information
+  policies:
+    - default-agent-policy
   security:
     dataClassification: confidential
   approvals:

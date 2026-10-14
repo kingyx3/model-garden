@@ -30,15 +30,38 @@
             "additionalProperties": false,
             "required": ["id", "effect"],
             "properties": {
-              "id": {"type": "string"},
+              "id": {"type": "string", "minLength": 1, "maxLength": 64},
               "effect": {"enum": ["allow", "deny", "require-approval"]},
+              "description": {"type": "string"},
               "actions": {
                 "type": "array",
-                "items": {"type": "string"}
+                "items": {"type": "string", "minLength": 1},
+                "description": "Tool names or glob patterns such as calendar.book, mail.send or crm.*. An allow rule must list its actions."
               },
               "dataClassifications": {
                 "type": "array",
                 "items": {"enum": ["public", "internal", "confidential", "restricted"]}
+              },
+              "channels": {
+                "type": "array",
+                "items": {"type": "string", "minLength": 1, "maxLength": 256},
+                "description": "Narrow the rule to these channels (for example voice, slack, email)."
+              },
+              "principals": {
+                "type": "array",
+                "items": {"enum": ["member", "public"]},
+                "uniqueItems": true,
+                "description": "Principal types the rule covers. Omitted: deny and require-approval cover everyone; allow covers members only. Naming public is the only way to let a public principal use a write Tool."
+              },
+              "signoff": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["owner", "ruleDigest"],
+                "properties": {
+                  "owner": {"type": "string", "minLength": 1},
+                  "ruleDigest": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+                },
+                "description": "Named client owner's sign-off for an allow rule that relaxes an approval requirement. ruleDigest binds the sign-off to the rule's exact content (every field except signoff), so any later edit blocks compilation until the owner re-signs."
               }
             }
           }
