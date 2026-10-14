@@ -90,6 +90,10 @@ Clients can continue to list those Skills under `disabledSkills` until their
 dependencies are implemented and authorized. A shipped Calendar adapter still
 needs actual account consent, working token rotation and live acceptance.
 
+### Hand-offs and business rules
+
+Name who performs actions the coworker cannot (set `MODEL_GARDEN_HANDOFF_ASSIGNEE` for the governed sidecar, or give a `human-only` policy rule its own `assignee`) and show them `python3 scripts/client-operator.py handoffs --project-name <env>`; they close each item with `handoff-done` or `handoff-decline --by <their identity>`. For a client with no knowledge system, have the owner write one `.md` or `.txt` of business rules, run `python3 scripts/knowledge-check.py rules.md --query "<a real customer question>"`, fix the warnings, and only then set the source's `status: approved` (see [Tier 0 business-rules knowledge](contracts.md#tier-0-business-rules-knowledge-building-block); it is not yet connected to the runtime).
+
 ### Approval policy walkthrough
 
 Run `python3 scripts/compile-workspace.py <private-client-workspace> --agent <name> --approvals` and walk the client owner through which actions run automatically, which need approval and which are denied for callers or senders who are not staff. Any change that relaxes an approval is an `allow` rule that needs the named client owner's sign-off digest before it compiles (see [Client approval policy](contracts.md#client-approval-policy)); record the owner's agreement outside the repository as well, and keep the sign-off lines under the client's `CODEOWNERS`.

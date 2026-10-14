@@ -31,8 +31,10 @@
             "required": ["id", "effect"],
             "properties": {
               "id": {"type": "string", "minLength": 1, "maxLength": 64},
-              "effect": {"enum": ["allow", "deny", "require-approval"]},
+              "effect": {"enum": ["allow", "deny", "require-approval", "human-only"]},
               "description": {"type": "string"},
+              "assignee": {"type": "string", "minLength": 1, "maxLength": 256, "description": "Required for human-only: the named person (or role mailbox) who performs the action."},
+              "deadlineHours": {"type": "integer", "minimum": 1, "maximum": 720, "description": "For human-only: hours the assignee has before the hand-off is reported as overdue (default 24)."},
               "actions": {
                 "type": "array",
                 "items": {"type": "string", "minLength": 1},

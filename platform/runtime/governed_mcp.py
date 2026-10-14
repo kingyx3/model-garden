@@ -10,6 +10,8 @@ MVP supported Tools:
 - calendar.book: provider-neutral event creation, with exact-action approval when required
 - platform.capabilities: read-only, non-secret manifest of what this environment can and
   cannot do, with live connection health; it is a platform built-in, not a business Tool
+- handoff_request / handoff_status: Tier 4 human hand-off for actions whose capability is
+  unbound or unavailable (or policy marks human-only); platform built-ins, nothing is executed
 """
 from __future__ import annotations
 
@@ -45,6 +47,7 @@ MICROSOFT_CALENDAR = _load_module("model_garden_microsoft_calendar", ROOT / "pla
 CAPABILITIES = _load_module("model_garden_runtime_capabilities", ROOT / "platform" / "core" / "capabilities.py")
 OAUTH = _load_module("model_garden_oauth_refresh", ROOT / "platform" / "connectors" / "oauth_refresh.py")
 TEXT_CHANNEL = _load_module("model_garden_text_channel", ROOT / "platform" / "channels" / "text_channel.py")
+HANDOFF = _load_module("model_garden_runtime_handoff", ROOT / "platform" / "core" / "handoff.py")
 AUTH_FAILURE = re.compile(r"\((401|403)\)")
 
 
@@ -115,7 +118,10 @@ class GovernedToolRuntime:
         self.audit_path = audit_path
         self.approval_root = approval_root
         self.governance_root = audit_path.parent
+        self.handoff_root = approval_root.parent / "handoffs"
         self.environ = dict(os.environ if environ is None else environ)
+        # Default named person for Tier 4 hand-offs; a human-only policy rule names its own.
+        self.handoff_assignee = self.environ.get("MODEL_GARDEN_HANDOFF_ASSIGNEE", "").strip() or None
         self.calendar_transport = calendar_transport
         self.oauth_transport = oauth_transport
         self._credential_cache = {}
@@ -256,6 +262,17 @@ class GovernedToolRuntime:
         if path.exists():
             path.unlink()
 
+    def _caller(self) -> tuple[str, dict[str, Any], str | None]:
+        """The initiating identity, bounded governance context and principal access for this call."""
+        governance_context = self._governance_context()
+        identity = self._identity()
+        principal_access = None
+        principal = self.principal_resolver() if self.principal_resolver is not None else None
+        if principal is not None:
+            identity, principal_context, principal_access = TEXT_CHANNEL.governance_for_principal(principal)
+            governance_context.update(principal_context)
+        return identity, governance_context, principal_access
+
     def _execute(
         self,
         tool_name: str,
@@ -268,13 +285,7 @@ class GovernedToolRuntime:
         read_receipt=None,
         external_object_ref=None,
     ) -> dict[str, Any]:
-        governance_context = self._governance_context()
-        identity = self._identity()
-        principal_access = None
-        principal = self.principal_resolver() if self.principal_resolver is not None else None
-        if principal is not None:
-            identity, principal_context, principal_access = TEXT_CHANNEL.governance_for_principal(principal)
-            governance_context.update(principal_context)
+        identity, governance_context, principal_access = self._caller()
         request = GOVERN.build_action_request(
             self.desired_state,
             tool_name,
@@ -312,6 +323,8 @@ class GovernedToolRuntime:
                 read_receipt=read_receipt,
                 read_policy=self.read_policy,
                 external_object_ref=external_object_ref,
+                handoff_store=self.handoff_root,
+                handoff_assignee=self.handoff_assignee,
             )
         except RuntimeError as exc:
             if family is not None:
@@ -324,6 +337,9 @@ class GovernedToolRuntime:
             self._discard_claim(claim)
         if result.get("status") == "pending-approval":
             self._pending(result["request"])
+        elif result.get("status") == "handed-off":
+            # A person will act; this was not a provider call, so connection health is unchanged.
+            self._clear_pending(request["requestId"])
         else:
             self._clear_pending(request["requestId"])
             if family is not None:
@@ -390,6 +406,62 @@ class GovernedToolRuntime:
             external_object_ref=event_reference,
         )
 
+    def request_handoff(
+        self,
+        *,
+        tool: str,
+        arguments: dict[str, Any],
+        justification: str | None = None,
+    ) -> dict[str, Any]:
+        """Prepare a write action for a named person when its capability cannot run here.
+
+        Allowed only for a Tool the Agent selected and only when its capability is unbound or
+        unavailable with a human fallback, or policy marks the action human-only. Reads cannot be
+        handed off. Nothing is executed; the result states plainly that a person must do it.
+        """
+        selected = GOVERN._selected_tool(self.desired_state, tool)
+        if selected is None:
+            raise PermissionError(f"Tool {tool!r} is not selected by this Agent")
+        if not isinstance(arguments, dict):
+            raise ValueError("arguments must be a JSON object")
+        if selected.get("spec", {}).get("risk") == "read":
+            raise ValueError("only actions can be handed to a person; use the read Tool or say it is unavailable")
+        contract = CAPABILITIES.catalog_tool(tool)
+        missing = [name for name in (contract or {}).get("arguments", {}).get("required", []) if name not in arguments]
+        if missing:
+            raise ValueError(f"hand-off for {tool} is missing required argument(s): {', '.join(missing)}")
+        identity, governance_context, principal_access = self._caller()
+        decision = GOVERN.authorize_action(
+            self.desired_state, tool, arguments,
+            initiating_user=identity, governance_context=governance_context, principal_access=principal_access,
+        )
+        family = CAPABILITIES.family_of(tool)
+        entry = next((item for item in self.capabilities().get("capabilities", []) if item.get("family") == family), None)
+        status = entry.get("status") if isinstance(entry, dict) else None
+        no_provider = status in ("unbound", "unavailable") and entry.get("fallback") == "human-handoff"
+        if decision["decision"] != "hand-off" and not no_provider:
+            raise ValueError(f"{tool} is available here; call the Tool directly instead of asking a person")
+        return GOVERN.create_handoff(
+            self.desired_state,
+            tool,
+            arguments,
+            self.handoff_root,
+            reason="unavailable" if status == "unavailable" else "unbound",
+            assignee=self.handoff_assignee,
+            initiating_user=identity,
+            governance_context=governance_context,
+            audit_path=self.audit_path,
+            ledger=self._ledger(provider=None, justification=justification),
+            principal_access=principal_access,
+        )
+
+    def handoff_status(self, handoff_id: str) -> dict[str, Any]:
+        """The recorded state of one hand-off: the only basis for telling a caller what a person did."""
+        document = HANDOFF.find(self.handoff_root, handoff_id)
+        if document is None:
+            raise ValueError("no such hand-off")
+        return HANDOFF.describe(document)
+
 
 def build_server(runtime: GovernedToolRuntime) -> MCPServer:
     """Build the MCP 2 server; transport settings are supplied only when it is run."""
@@ -436,6 +508,24 @@ def build_server(runtime: GovernedToolRuntime) -> MCPServer:
             attendees=attendees,
             justification=justification,
         )
+
+    @mcp.tool(name="handoff_request")
+    def handoff_request(tool: str, arguments: dict[str, Any], justification: str | None = None) -> dict[str, Any]:
+        """Ask a named person to perform an action this environment cannot run itself.
+
+        Use when platform_capabilities shows the capability as unbound or unavailable (fallback
+        human-handoff), or a Tool says it must be performed by a person. Pass the exact portable
+        Tool name and arguments you would have used. Nothing is executed: tell the caller a
+        person has been asked and that it is not done until handoff_status says so.
+
+        justification: one short sentence on why a person is needed (recorded in the audit ledger).
+        """
+        return runtime.request_handoff(tool=tool, arguments=arguments, justification=justification)
+
+    @mcp.tool(name="handoff_status")
+    def handoff_status(handoff_id: str) -> dict[str, Any]:
+        """Check whether a person has done or declined a hand-off; report only what this returns."""
+        return runtime.handoff_status(handoff_id)
 
     return mcp
 

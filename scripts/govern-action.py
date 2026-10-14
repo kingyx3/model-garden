@@ -109,6 +109,18 @@ def _load_policy():
 POLICY = _load_policy()
 
 
+def _load_handoff():
+    path = pathlib.Path(__file__).resolve().parents[1] / "platform" / "core" / "handoff.py"
+    module_spec = importlib.util.spec_from_file_location("model_garden_handoff_for_governance", path)
+    module = importlib.util.module_from_spec(module_spec)
+    assert module_spec.loader is not None
+    module_spec.loader.exec_module(module)
+    return module
+
+
+HANDOFF = _load_handoff()
+
+
 def _canonical_json(value: Any) -> str:
     return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
 
@@ -270,7 +282,14 @@ def authorize_action(
         agent_requires_approval=agent_spec.get("approvals", {}).get("externalActions") == "required",
         tool_requires_approval=bool(tool.get("spec", {}).get("approvalRequired", False)),
     )
-    return {"decision": outcome["decision"], "reason": outcome["reason"], "ruleId": outcome["ruleId"], "request": request}
+    return {
+        "decision": outcome["decision"],
+        "reason": outcome["reason"],
+        "ruleId": outcome["ruleId"],
+        "assignee": outcome.get("assignee"),
+        "deadlineHours": outcome.get("deadlineHours"),
+        "request": request,
+    }
 
 
 def _utc_timestamp() -> str:
@@ -526,6 +545,122 @@ def _result_receipt(result: Any) -> dict[str, Any]:
     }
 
 
+def _open_handoff(
+    request: dict[str, Any],
+    store: pathlib.Path | None,
+    *,
+    family: str | None,
+    reason: str,
+    assignee: str | None,
+    deadline_hours: int | None,
+    audit: Callable[..., None],
+) -> dict[str, Any]:
+    """Prepare the exact action for a named person (Tier 4); the action itself is never executed."""
+    if store is None:
+        audit("handoff", "failed", {"reason": "no-handoff-store"}, {"tier": 4, "provider": "human"})
+        raise PermissionError(f"Tool {request['tool']!r} must be performed by a person and no hand-off inbox is configured")
+    if not isinstance(assignee, str) or not assignee.strip():
+        audit("handoff", "failed", {"reason": "no-assignee"}, {"tier": 4, "provider": "human"})
+        raise PermissionError(f"Tool {request['tool']!r} must be performed by a person but no named person is configured")
+    existing = HANDOFF.find(store, request["requestId"])
+    document = HANDOFF.create(
+        store,
+        request,
+        capability=family,
+        reason=reason,
+        assignee=assignee,
+        deadline_hours=deadline_hours or HANDOFF.DEFAULT_DEADLINE_HOURS,
+    )
+    if existing is None or existing.get("status") != "pending":
+        audit(
+            "handoff",
+            "created",
+            {"reason": reason, "assignee": document["assignee"], "handoffId": document["id"], "deadline": document["deadline"]},
+            {"tier": 4, "provider": "human"},
+        )
+    return {"status": "handed-off", "request": request, "handoff": HANDOFF.describe(document)}
+
+
+def create_handoff(
+    desired_state: dict[str, Any],
+    tool_name: str,
+    arguments: dict[str, Any],
+    store: pathlib.Path | None,
+    *,
+    reason: str,
+    assignee: str | None = None,
+    deadline_hours: int | None = None,
+    initiating_user: str | None = None,
+    governance_context: dict[str, Any] | None = None,
+    audit_path: pathlib.Path | None = None,
+    ledger: dict[str, Any] | None = None,
+    principal_access: str | None = None,
+) -> dict[str, Any]:
+    """Hand an unbound or unavailable capability's action to a person instead of failing.
+
+    The Tool must be selected and the policy must not deny it for this principal (a public
+    principal therefore cannot hand off write actions). Deny rules and the public-principal
+    floor still apply; approval is not needed because nothing is executed automatically.
+    """
+    authorization = authorize_action(
+        desired_state, tool_name, arguments,
+        initiating_user=initiating_user, governance_context=governance_context, principal_access=principal_access,
+    )
+    request = authorization["request"]
+    base_ledger: dict[str, Any] = {
+        "policyRuleId": authorization.get("ruleId") or authorization["reason"],
+        "policyVersion": POLICY.policy_version(desired_state.get("policies")),
+    }
+    family = CAPABILITIES.family_of(tool_name)
+    if family is not None:
+        base_ledger["capability"] = family
+    base_ledger.update(ledger or {})
+    base_ledger = ledger_context(base_ledger)
+
+    def audit(event_type: str, outcome: str, details: dict[str, Any] | None = None, extra: dict[str, Any] | None = None) -> None:
+        append_audit_event(
+            audit_path,
+            make_audit_event(event_type, request, outcome=outcome, details=details, ledger={**base_ledger, **(extra or {})}),
+        )
+
+    if authorization["decision"] == "deny":
+        audit("authorization", "deny", {"reason": authorization["reason"]})
+        raise PermissionError(f"Tool {tool_name!r} cannot be handed off: {authorization['reason']}")
+    if authorization["decision"] == "hand-off":  # a human-only rule names its own assignee and deadline
+        reason = "human-only"
+        assignee = authorization.get("assignee") or assignee
+        deadline_hours = authorization.get("deadlineHours") or deadline_hours
+    audit("authorization", "hand-off", {"reason": reason})
+    return _open_handoff(
+        request, store, family=family, reason=reason, assignee=assignee, deadline_hours=deadline_hours, audit=audit
+    )
+
+
+def complete_handoff(
+    store: pathlib.Path,
+    handoff_id: str,
+    outcome: str,
+    by: str,
+    *,
+    audit_path: pathlib.Path | None = None,
+    note: str | None = None,
+) -> dict[str, Any]:
+    """Close a hand-off as done/declined by a named person and ledger it as a tier-4 action."""
+    document = HANDOFF.complete(store, handoff_id, outcome, by, note=note)
+    ledger: dict[str, Any] = {"tier": 4, "provider": "human"}
+    if document.get("capability"):
+        ledger["capability"] = document["capability"]
+    event = make_audit_event(
+        "handoff",
+        document["request"],
+        outcome=document["status"],
+        details={"handoffId": document["id"], "completedBy": document["completedBy"], "late": bool(document.get("late"))},
+        ledger=ledger,
+    )
+    append_audit_event(audit_path, event)
+    return document
+
+
 def execute_action(
     desired_state: dict[str, Any],
     tool_name: str,
@@ -541,6 +676,8 @@ def execute_action(
     read_receipt: Callable[[Any], list[dict[str, Any]]] | None = None,
     read_policy: dict[str, Any] | None = None,
     external_object_ref: Callable[[Any], str | None] | None = None,
+    handoff_store: pathlib.Path | None = None,
+    handoff_assignee: str | None = None,
 ) -> dict[str, Any]:
     authorization = authorize_action(
         desired_state,
@@ -573,6 +710,18 @@ def execute_action(
         if authorization["reason"] == "policy-deny":
             raise PermissionError(f"Tool {tool_name!r} is denied by policy rule {authorization['ruleId']!r}")
         raise PermissionError(f"Tool {tool_name!r} is not selected by Agent {request['agent']!r}")
+
+    if authorization["decision"] == "hand-off":
+        # Policy forbids automation here: nothing is executed and no approval can change that.
+        return _open_handoff(
+            request,
+            handoff_store,
+            family=family,
+            reason="human-only",
+            assignee=authorization.get("assignee") or handoff_assignee,
+            deadline_hours=authorization.get("deadlineHours"),
+            audit=audit,
+        )
 
     if authorization["decision"] == "require-approval":
         if approval is None:

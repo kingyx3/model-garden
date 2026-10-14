@@ -85,10 +85,16 @@ controls:
       - scripts/govern-action.py
       - tests/test_govern_action.py
       - tests/test_action_ledger.py
+      - scripts/ledger-export.py
+      - platform/core/ledger_export.py
+      - tests/test_ledger_export.py
     limitations: >-
       The local chain is tamper-evident, not independently immutable: a host/storage administrator
-      could replace or delete the complete local log/head. Retention duration and export to a
-      separately administered SIEM/immutable store remain deployment-specific controls.
+      could replace or delete the complete local log/head. An export tool and verifier exist
+      (append-only directory sink and generic HTTPS collector, with truncation, divergence and gap
+      detection), but nothing is deployed by default: a separately administered retention-locked
+      target, its separate export identity, scheduling, alert routing and retention duration remain
+      deployment-specific controls with no retained live evidence.
 
   human_oversight:
     status: implemented

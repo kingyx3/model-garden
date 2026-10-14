@@ -102,6 +102,17 @@ def evaluate(workspace: pathlib.Path, suite_path: pathlib.Path) -> list[str]:
                     f"{scenario['id']}: unbound {unbound!r} must report fallback {expected.get('fallback')!r}, "
                     f"got status {entry['status']!r} fallback {entry.get('fallback')!r}"
                 )
+        handoff_tool = expected.get("handoffTool")
+        if handoff_tool:
+            provisioner = _load_module("eval_provision_hermes", ROOT / "scripts" / "provision-hermes-profile.py")
+            status_tool = expected.get("statusTool", "")
+            for name in (handoff_tool, status_tool):
+                if name not in provisioner.PLATFORM_MCP_TOOLS:
+                    failures.append(f"{scenario['id']}: platform Tool {name!r} is not exposed to the runtime")
+                if name not in instructions:
+                    failures.append(f"{scenario['id']}: Receptionist instructions must tell it to use {name!r}")
+            if "not done until the person confirms" not in instructions:
+                failures.append(f"{scenario['id']}: Receptionist must say a handed-off action is not done until a person confirms")
         tool = expected.get("tool")
         if tool:
             if tool not in selected_tools:
