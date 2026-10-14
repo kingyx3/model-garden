@@ -481,6 +481,13 @@ def main() -> int:
     reject.add_argument("--project-name", required=True)
     reject.add_argument("--approver", required=True)
 
+    connect = sub.add_parser("connect", help="list provider options or preview exact requested permissions (no credentials handled)")
+    connect.add_argument("family", help="portable capability family, e.g. calendar, crm, kb, mail")
+    connect.add_argument("--provider", help="registered provider ID; omit to list all provider choices")
+    connect.add_argument("--tools", nargs="+", help="exact portable Tools approved by the client owner")
+    connect.add_argument("--owner", help="named client owner authorizing the connection (non-secret)")
+    connect.add_argument("--operator", help="named Model Garden operator (non-secret)")
+
     connections = sub.add_parser("connections", help="show live connector health on a client runtime")
     connections.add_argument("--project-name", required=True)
 
@@ -493,6 +500,21 @@ def main() -> int:
 
     args = parser.parse_args()
     try:
+        if args.command == "connect":
+            integration_module = _load_script("modelgarden_integration_registry", "integration-directory.py")
+            registry = integration_module.integrations
+            providers = registry.options(args.family)
+            if not args.provider:
+                for item in providers:
+                    print(f"{item['id']:<25} tier {item['tier']} {item['status']:<24} {item['method']:<14} #{item['issue']}")
+                return 0
+            if not args.owner or not args.operator:
+                raise ValueError("connection plan requires --owner and --operator identities (no passwords or tokens)")
+            plan = registry.plan(args.family, args.provider, args.tools or [])
+            plan["clientOwner"] = args.owner
+            plan["operator"] = args.operator
+            print(json.dumps(plan, sort_keys=True, indent=2))
+            return 0 if plan["status"] in registry.BUILT else 1
         if args.command == "connections":
             return runtime_connection(args.project_name, "list")
         if args.command == "connection":
