@@ -75,7 +75,13 @@ The older `connectors.google_calendar` shape remains accepted for existing clien
 | Write permission | Calendar event-write permission | Graph `Calendars.ReadWrite` |
 | Connector boundary | Fixed Google API host | Fixed `graph.microsoft.com` Graph v1.0 host |
 
-**Operational limitation:** The shipped adapter consumes an authorized access token supplied at deployment. It does not perform OAuth user consent, token renewal, service-principal credential rotation, Entra app registration, or Google OAuth app creation. Normal production operation therefore requires a separately managed valid token lifecycle or a subsequent reviewed token-provider integration. Do **not** treat a manually supplied short-lived OAuth access token as an unattended, production-stable connection. Confirm real tenant authorization, refresh/revocation and live read/write actions before go-live.
+**Credential boundary (v0.6.1):** Both provider adapters still accept the existing single bearer-token secret for backwards compatibility. An operator may instead place a **JSON-encoded OAuth refresh-credential bundle as the value of the same environment-scoped** `token_ref`, never in Git or Agent/Skill content. Format (placeholders only; do not commit or paste values into docs):
+```json
+{"type":"oauth2_refresh","provider":"google","client_id":"<approved-oauth-client-id>","client_secret":"<secret>","refresh_token":"<client-authorized-refresh-token>"}
+```
+For Microsoft use `"provider":"microsoft"` and add `"tenant_id":"<specific-client-tenant-GUID>"`. The governed sidecar exchanges that credential only against Google's fixed OAuth token endpoint or the specified Microsoft Entra tenant token endpoint. Short-lived access tokens are cached in the sidecar's memory and refreshed before expiry; neither refresh credentials nor access tokens are included in Agent state or audit. Legacy static bearer tokens still expire and are **not production-stable**.
+
+**Still a P0 go-live limitation:** The platform does not conduct OAuth user consent, create provider applications, securely persist **rotated refresh tokens**, perform tenant-side token revocation, guarantee long-lived delegated grants, or provide owner reauthorization/alert delivery. Provider credentials must be provisioned and scoped by the client/consultant; integrate a durable secret/refresh-token rotation and reauthorization lifecycle before unattended live use. See [#66](https://github.com/kingyx3/model-garden/issues/66) and [#86](https://github.com/kingyx3/model-garden/issues/86). Never equate token-refresh unit tests with live authorization proof.
 
 Microsoft Graph sends invitations when creating events with attendees; approval policy and client consent must cover that external side effect. The adapter normalizes timezone-aware RFC3339 arguments to UTC for Graph. Tentative, out-of-office and unknown schedule statuses block availability.
 
@@ -96,7 +102,7 @@ python3 scripts/client-operator.py connection calendar revoked \
 python3 scripts/client-operator.py connections --project-name acme-prod
 ```
 
-The next `platform.capabilities` read reports the change. The Receptionist eval suite checks that an unbound capability is reported with its human hand-off fallback and that the instructions tell the coworker to decline and offer that fallback instead of claiming success.
+The next `platform.capabilities` read reports the change. **Runtime enforcement:** a connection recorded as `failed` or `revoked` also denies subsequent governed Calendar reads and writes, including those with an earlier approval, and records a redacted denial in the chained action ledger. Only an authorized operator can mark a reauthorized connection healthy; in-flight API responses cannot clear a revocation. Marking a connection `revoked` is a **local execution kill switch**, not a substitute for revoking the underlying client OAuth grant/provider credential or clearing any pending human approvals. The operator must also revoke the upstream grant and rotate/delete the protected secret under the client offboarding runbook. Do not equate a local status update with external revocation. The Receptionist eval suite checks that an unbound capability is reported with its human hand-off fallback and that the instructions tell the coworker to decline and offer that fallback instead of claiming success.
 
 ## Exact-action approval
 

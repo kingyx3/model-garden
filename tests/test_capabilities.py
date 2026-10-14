@@ -263,6 +263,14 @@ class CapabilityManifestTests(unittest.TestCase):
             self.assertEqual((calendar["status"], calendar["health"]), ("unavailable", "failed"))
 
             transport.status = 200
+            # Auth failures no longer recover merely because a retry would succeed.
+            # A named operator must record reauthorization before retry is allowed.
+            with self.assertRaisesRegex(PermissionError, "connection failed"):
+                runtime.calendar_availability(start="2026-09-16T10:00:00+08:00", end="2026-09-16T10:30:00+08:00")
+            capabilities.record_connection_health(
+                root / "governance", "calendar", "healthy",
+                actor="operator", reason="reauthorized after token renewal",
+            )
             runtime.calendar_availability(start="2026-09-16T10:00:00+08:00", end="2026-09-16T10:30:00+08:00")
             calendar = next(e for e in runtime.capabilities()["capabilities"] if e["family"] == "calendar")
             self.assertEqual((calendar["status"], calendar["health"]), ("available", "healthy"))

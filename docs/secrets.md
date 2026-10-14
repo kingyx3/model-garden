@@ -103,4 +103,5 @@ Do not provision a self-hosted runner for the preferred managed GCP path merely 
 - Prompts, Skills and Agent instructions cannot create or expand authority.
 - Record owner, purpose and revocation path for every production integration.
 - Rotate provider/runtime credentials independently of Terraform state and client business definitions.
+- Calendar OAuth refresh credential bundles, when used, are the **string value** of an existing protected `secret://` reference, not workspace YAML. This provides in-memory access-token refresh only; secure upstream consent, persistence of rotated refresh tokens, revocation, expiry alerting and live proof remain open under [#66](https://github.com/kingyx3/model-garden/issues/66).
 - Add another cloud/provider path only from real deployment evidence; preserve the same externalized-secret, least-privilege and short-lived-identity invariants.
