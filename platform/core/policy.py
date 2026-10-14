@@ -1,10 +1,12 @@
 """Client-owned approval policy for the governed action boundary.
 
-A Policy resource holds ordered rules (`allow`, `deny`, `require-approval`) over Tool
-names, data classifications, channels and principal types. Evaluation is deliberately
-small and fail-closed:
+A Policy resource holds ordered rules (`allow`, `deny`, `require-approval`, `human-only`)
+over Tool names, data classifications, channels and principal types. Evaluation is
+deliberately small and fail-closed:
 
 - a matching `deny` rule always wins;
+- a matching `human-only` rule forbids automation: the action is prepared for the rule's named
+  assignee (Tier 4 hand-off) instead of being executed, and no approval can turn it into execution;
 - the Agent's ``approvals.externalActions: required`` switch and any matching
   `require-approval` rule can never be relaxed by an `allow` rule (the stricter source wins);
 - an `allow` rule may waive only a Tool's own ``approvalRequired`` default, and only when it
@@ -25,7 +27,7 @@ import json
 from collections.abc import Iterable, Mapping
 from typing import Any
 
-EFFECTS = ("allow", "deny", "require-approval")
+EFFECTS = ("allow", "deny", "require-approval", "human-only")
 MEMBER = "member"
 PUBLIC = "public"
 DEFAULT_VERSION = "model-garden-governance/1"
@@ -127,6 +129,16 @@ def evaluate(
         if risk != "write" or waiver is None or PUBLIC not in (waiver.get("principals") or []):
             return {"decision": "deny", "reason": "principal-not-authorized", "ruleId": None}
 
+    human_only = next((rule for rule in matched if rule["effect"] == "human-only"), None)
+    if human_only is not None:
+        # Automation is forbidden for this action: prepare it for a named person instead.
+        return {
+            "decision": "hand-off",
+            "reason": "policy-human-only",
+            "ruleId": human_only["id"],
+            "assignee": human_only.get("assignee"),
+            "deadlineHours": human_only.get("deadlineHours"),
+        }
     if agent_requires_approval:
         return {"decision": "require-approval", "reason": "agent-requires-approval", "ruleId": None}
     required = next((rule for rule in matched if rule["effect"] == "require-approval"), None)
@@ -161,6 +173,8 @@ def relaxation_errors(policies: Iterable[Mapping[str, Any]] | None, tools: Itera
         if rule_id in seen:
             errors.append(f"Policy rule id {rule_id!r} is defined more than once")
         seen.add(rule_id)
+        if rule["effect"] == "human-only" and not (isinstance(rule.get("assignee"), str) and rule["assignee"].strip()):
+            errors.append(f"Policy human-only rule {rule_id!r} must name the person (assignee) who performs the action")
         if rule["effect"] != "allow":
             continue
         if not rule.get("actions"):
@@ -233,5 +247,7 @@ def preview(
             agent_requires_approval=agent_requires_approval,
             tool_requires_approval=tool_requires_approval,
         )
-        outcome[who] = {"allow": "automatic", "require-approval": "approval", "deny": "denied"}[result["decision"]]
+        outcome[who] = {
+            "allow": "automatic", "require-approval": "approval", "deny": "denied", "hand-off": "human",
+        }[result["decision"]]
     return outcome

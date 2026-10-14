@@ -72,6 +72,19 @@ def _load_policy():
 POLICY = _load_policy()
 
 
+def _load_knowledge():
+    module_spec = importlib.util.spec_from_file_location(
+        "model_garden_knowledge", ROOT / "platform" / "core" / "knowledge.py"
+    )
+    module = importlib.util.module_from_spec(module_spec)
+    assert module_spec.loader is not None
+    module_spec.loader.exec_module(module)
+    return module
+
+
+KNOWLEDGE = _load_knowledge()
+
+
 def load_validators() -> dict[str, Draft202012Validator]:
     validators: dict[str, Draft202012Validator] = {}
     for kind, filename in SCHEMAS.items():
@@ -178,6 +191,27 @@ def materialize_instruction_file(workspace, resource_kind, resource_name, resour
     return {"source": source, "content": instruction_path.read_text()}, errors
 
 
+def materialize_knowledge_file(workspace, name, resource, source_paths, source_roots):
+    """Bounded, root-confined content of a Tier 0 `text-file` KnowledgeSource, parsed as an upload test."""
+    spec = resource.get("spec", {})
+    if spec.get("type") != "text-file":
+        return None, []
+    key = ("KnowledgeSource", name)
+    source_path = source_paths[key]
+    source_root = source_roots[key].resolve()
+    file_path = (source_path.parent / spec["file"]).resolve()
+    try:
+        text = KNOWLEDGE.read_text_file(file_path, root=source_root)
+        report = KNOWLEDGE.check_source(text, filename=spec["file"])
+    except KNOWLEDGE.KnowledgeError as exc:
+        return None, [f"KnowledgeSource {name!r}: {exc}"]
+    try:
+        label = str(file_path.relative_to(workspace.resolve()))
+    except ValueError:
+        label = f"library:{file_path.relative_to(source_root).as_posix()}"
+    return {"source": label, "content": text, "sha256": report["sha256"], "sectionCount": report["sectionCount"]}, []
+
+
 def resolve_agent(workspace, agent, resources, source_paths, source_roots, environment_binding=None):
     name = agent["metadata"]["name"]
     spec = agent["spec"]
@@ -227,6 +261,15 @@ def resolve_agent(workspace, agent, resources, source_paths, source_roots, envir
         workspace, "Agent", name, agent, source_paths, source_roots
     )
     errors.extend(instruction_errors)
+    knowledge_content: dict[str, dict[str, Any]] = {}
+    for knowledge in resolved["knowledge"]:
+        knowledge_name = knowledge["metadata"]["name"]
+        materialized_knowledge, knowledge_errors = materialize_knowledge_file(
+            workspace, knowledge_name, knowledge, source_paths, source_roots
+        )
+        errors.extend(knowledge_errors)
+        if materialized_knowledge is not None:
+            knowledge_content[knowledge_name] = materialized_knowledge
     selected_tools = {tool["metadata"]["name"] for tool in resolved["tools"]}
     skill_instructions: dict[str, dict[str, str]] = {}
     for skill in resolved["skills"]:
@@ -287,6 +330,8 @@ def resolve_agent(workspace, agent, resources, source_paths, source_roots, envir
     }
     if resolved["policies"]:
         compiled["policies"] = resolved["policies"]
+    if knowledge_content:
+        compiled["knowledgeContent"] = knowledge_content
     if capabilities is not None:
         compiled["capabilities"] = capabilities
     return compiled

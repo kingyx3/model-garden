@@ -137,6 +137,25 @@ Changing the Tool arguments or bounded governance context creates a different re
 
 This file-backed approval mechanism is intentionally an MVP operator surface. Do not build an approval portal or workflow engine until repeated client evidence justifies one.
 
+## Human hand-off (Tier 4)
+
+When an action cannot run here, the coworker prepares it for a named person instead of failing or pretending. Two triggers:
+
+- **Unbound or unavailable capability.** The platform Tool `handoff_request` takes the exact portable Tool name and arguments of a **write** Tool the Agent selected. It is accepted only when `platform_capabilities` shows that family as `unbound` or `unavailable` with fallback `human-handoff`; otherwise the call is refused ("call the Tool directly"). Reads cannot be handed off. A revoked or failed connection still denies direct Tool calls exactly as before; `handoff_request` is the explicit alternative.
+- **Policy `human-only`.** A matching `human-only` rule (which must name an `assignee`, optionally `deadlineHours`) forbids automation: the direct Tool call returns `handed-off` and nothing executes, and no approval can change that. Deny rules still win; public principals cannot reach a write Tool this way.
+
+The hand-off holds the same exact request material that approvals bind to (so it is as sensitive as a pending approval), is stored on the sidecar-only volume at `/opt/data/.modelgarden/handoffs`, and is created idempotently per exact request. The assignee is `MODEL_GARDEN_HANDOFF_ASSIGNEE` or the policy rule's `assignee`; with neither, the call fails closed.
+
+```bash
+python3 scripts/client-operator.py handoffs --project-name acme-prod
+python3 scripts/client-operator.py handoff-done <id> --project-name acme-prod --by jordan@client.example
+python3 scripts/client-operator.py handoff-decline <id> --project-name acme-prod --by jordan@client.example --note "not our policy"
+```
+
+Creating and closing a hand-off each write a chained `handoff` ledger event with `tier: 4` and `provider: human`; closing records the person's identity and `late` when the deadline passed. As with approvals, that identity is what the operator command asserts (`--by`); the platform does not verify that the person is the assignee or independently confirm that they performed the action. The coworker learns the outcome only through `handoff_status`, whose message says the action has **not** been done while pending, names the person who confirmed it when done (and that the coworker did not do it itself), and says it was **not** done when declined. The receptionist instructions and the `unavailable-action-handoff` eval require that wording.
+
+Delivery today is the built-in inbox (the operator command above). Delivery to Slack, Teams or email, reminders/escalation when a deadline passes, and a person's confirmation arriving through their own channel are not implemented; the operator records the outcome on the person's behalf.
+
 ## Enterprise audit contract
 
 Governed material actions emit versioned JSONL records with `schemaVersion: 3`. Depending on the stage, records capture:
@@ -178,6 +197,22 @@ Audit appends use an exclusive filesystem lock, flush plus `fsync`, a restrictiv
 This is **tamper-evidence, not immutable storage**. An administrator with host/storage authority could still replace or delete the complete local log and its head. Enterprise deployments that require independent non-repudiation or longer retention should continuously export governed-action records/head hashes to a separately administered immutable log/SIEM/object store according to the client retention policy.
 
 The bounded context intentionally rejects arbitrary fields so prompts, raw credentials and uncontrolled application payloads cannot be smuggled into the governance envelope.
+
+### Ledger export and verification
+
+`scripts/ledger-export.py` (library: `platform/core/ledger_export.py`) copies the chained records and head manifests to a sink that the runtime identity should not be able to rewrite:
+
+```bash
+python3 scripts/ledger-export.py export --ledger /opt/data/.modelgarden/audit.jsonl \
+  --state /var/lib/model-garden/export-state.json --sink-dir /mnt/ledger-sink
+python3 scripts/ledger-export.py export ... --webhook https://siem.example/ingest --token-env SIEM_TOKEN
+python3 scripts/ledger-export.py verify --ledger /opt/data/.modelgarden/audit.jsonl --sink-dir /mnt/ledger-sink
+```
+
+- **Delivery:** at-least-once. The record ID is the event's own chain hash, so a duplicate delivery is harmless and a different record under an existing ID is an error. The cursor only advances after the sink acknowledges a batch.
+- **Sinks:** an append-only directory layout (files created exclusively, never rewritten; mount it where a different identity controls writes) and a generic HTTPS collector with an `Idempotency-Key` per batch. The collector is write-only, so `verify` needs the directory sink. A retention-locked object-store sink is not implemented.
+- **Verification:** recomputes the chain from the exported records alone and reports gaps in the exported sequence, a local log that is shorter than the export (truncation) or that differs from it (replacement with another valid chain), tampered exported records and a head manifest that disagrees with its record. It prints `ALERT:` lines and exits 2; routing that to monitoring is deployment-specific.
+- **Not proven:** nothing is scheduled or deployed by default, and the separate export identity and retention lock (Terraform) are not provisioned. Until a client environment runs this against a separately administered target, the ledger remains tamper-evident, not independently immutable.
 
 ### Audit-to-cost correlation
 

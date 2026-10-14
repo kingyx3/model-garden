@@ -40,5 +40,5 @@ ops:
 	@echo 'python3 scripts/operations-readiness.py <client-operations.yaml>'
 
 validate: contracts tests terraform hermes
-	python3 -m py_compile scripts/deploy-reference-voice.py scripts/reference-proof.py scripts/operating-scorecard.py scripts/operations-readiness.py platform/channels/livekit_receptionist.py platform/channels/call_transcript.py platform/core/policy.py
+	python3 -m py_compile scripts/deploy-reference-voice.py scripts/reference-proof.py scripts/operating-scorecard.py scripts/operations-readiness.py platform/channels/livekit_receptionist.py platform/channels/call_transcript.py platform/core/policy.py platform/core/handoff.py platform/core/knowledge.py platform/core/ledger_export.py scripts/ledger-export.py scripts/runtime-handoff.py scripts/knowledge-check.py
 	bash -n scripts/*.sh

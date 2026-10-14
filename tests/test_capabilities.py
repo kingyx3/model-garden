@@ -393,7 +393,7 @@ class CapabilityManifestTests(unittest.TestCase):
             self.assertEqual(tools_env["MODEL_GARDEN_READ_AUDIT"], "sampled:10")
             self.assertNotIn("secret://", manifest_path.read_text())
             platform_copy = root / "bundle-b" / "model-garden-platform"
-            for relative in ("platform/core/capabilities.py", "platform/core/policy.py", "contracts/v1/capabilities.json", "platform/channels/text_channel.py", "VERSION"):
+            for relative in ("platform/core/capabilities.py", "platform/core/policy.py", "platform/core/handoff.py", "scripts/runtime-handoff.py", "contracts/v1/capabilities.json", "platform/channels/text_channel.py", "VERSION"):
                 self.assertTrue((platform_copy / relative).is_file(), relative)
 
     def test_invalid_read_audit_mode_is_rejected(self):

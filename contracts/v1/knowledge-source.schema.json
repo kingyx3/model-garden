@@ -9,6 +9,27 @@
     "apiVersion": {"const": "modelgarden.ai/v1"},
     "kind": {"const": "KnowledgeSource"},
     "metadata": {"type": "object", "additionalProperties": false, "required": ["name", "owner"], "properties": {"name": {"type": "string"}, "owner": {"type": "string"}, "description": {"type": "string"}}},
-    "spec": {"type": "object", "additionalProperties": false, "required": ["type", "classification"], "properties": {"type": {"enum": ["repository", "sharepoint", "drive", "database", "url", "vector-index"]}, "classification": {"enum": ["public", "internal", "confidential", "restricted"]}, "reference": {"type": "string"}}}
+    "spec": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "classification"],
+      "properties": {
+        "type": {"enum": ["repository", "sharepoint", "drive", "database", "url", "vector-index", "text-file"]},
+        "classification": {"enum": ["public", "internal", "confidential", "restricted"]},
+        "reference": {"type": "string"},
+        "file": {"type": "string", "minLength": 1, "description": "text-file only: path, relative to this resource, of the `.txt` or `.md` business-rules file."},
+        "status": {"enum": ["draft", "approved", "retired"], "description": "text-file only: only `approved` content can ground answers; absent means draft."},
+        "version": {"type": "string", "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$", "description": "text-file only: version of the rules, cited with answers."},
+        "effectiveDate": {"type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$", "description": "text-file only: the content is not used before this date."},
+        "audiences": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}, "uniqueItems": true, "description": "text-file only: Agents allowed to ground answers on this source; omitted means every Agent that selects it."}
+      },
+      "allOf": [
+        {
+          "if": {"properties": {"type": {"const": "text-file"}}, "required": ["type"]},
+          "then": {"required": ["file"]},
+          "else": {"not": {"anyOf": [{"required": ["file"]}, {"required": ["status"]}, {"required": ["version"]}, {"required": ["effectiveDate"]}, {"required": ["audiences"]}]}}
+        }
+      ]
+    }
   }
 }

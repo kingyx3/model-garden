@@ -405,6 +405,41 @@ def runtime_approval(
     return 0
 
 
+def runtime_handoff(
+    project_name: str,
+    command: str,
+    handoff_id: str | None = None,
+    by: str | None = None,
+    note: str | None = None,
+) -> int:
+    """List Tier 4 hand-offs or close one as done/declined by a named person."""
+    if command not in {"list", "done", "decline"}:
+        raise ValueError("runtime hand-off command must be list, done, or decline")
+    if command != "list":
+        # Validate before touching Docker so bad input never reaches the runtime.
+        if not isinstance(handoff_id, str) or not REQUEST_ID.fullmatch(handoff_id):
+            raise ValueError("hand-off id must be a 64-character lowercase SHA-256 hex value")
+        if not isinstance(by, str) or not by.strip():
+            raise ValueError("--by must name the person closing the hand-off")
+    container = _governed_tool_container(project_name)
+    inner = [
+        "python",
+        "/opt/model-garden-platform/scripts/runtime-handoff.py",
+        "/opt/data/.modelgarden/handoffs",
+        command,
+    ]
+    if command != "list":
+        inner.extend([handoff_id, "--by", by.strip()])
+        if note:
+            inner.extend(["--note", note])
+    result = _run(["docker", "exec", container, *inner])
+    if result.returncode != 0:
+        raise ValueError(result.stderr.strip() or result.stdout.strip() or "runtime hand-off command failed")
+    if result.stdout:
+        print(result.stdout.strip())
+    return 0
+
+
 def runtime_connection(
     project_name: str,
     command: str,
@@ -481,6 +516,16 @@ def main() -> int:
     reject.add_argument("--project-name", required=True)
     reject.add_argument("--approver", required=True)
 
+    handoffs = sub.add_parser("handoffs", help="list actions the coworker prepared for a named person (Tier 4 hand-offs)")
+    handoffs.add_argument("--project-name", required=True)
+
+    for outcome in ("handoff-done", "handoff-decline"):
+        closer = sub.add_parser(outcome, help=f"record that a named person {outcome.split('-')[1]} a hand-off")
+        closer.add_argument("handoff_id")
+        closer.add_argument("--project-name", required=True)
+        closer.add_argument("--by", required=True, help="the named person who did or declined it")
+        closer.add_argument("--note")
+
     skills = sub.add_parser("skills", help="show enabled, disabled and blocked Skills for a client environment")
     skills.add_argument("workspace", type=pathlib.Path, help="private client workspace")
     skills.add_argument("--environment", choices=("dev", "prod"), default="dev")
@@ -545,6 +590,16 @@ def main() -> int:
             return 0
         if args.command == "doctor":
             return doctor(args.workspace, args.environment, args.repo, check_host=args.host)
+        if args.command == "handoffs":
+            return runtime_handoff(args.project_name, "list")
+        if args.command in {"handoff-done", "handoff-decline"}:
+            return runtime_handoff(
+                args.project_name,
+                "done" if args.command == "handoff-done" else "decline",
+                handoff_id=args.handoff_id,
+                by=args.by,
+                note=args.note,
+            )
         if args.command == "approvals":
             return runtime_approval(args.project_name, "list")
         if args.command in {"approve", "reject"}:

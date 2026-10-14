@@ -1,0 +1,315 @@
+"""Tier 0 business-rules knowledge: parse a client's `.txt` or `.md` into citable sections and search it.
+
+A small business can satisfy `kb` with one uploaded file of rules of engagement (hours, services,
+prices it may quote, booking and escalation rules). This module is the credential-free core:
+
+- `parse_sections` splits the file into stable, citable sections (Markdown headings, or
+  recognisable plain-text headings, or paragraph chunks when there are none);
+- `check_source` is the upload parse/test, reporting sections, digest and warnings;
+- `search` ranks sections for a query and returns `{"documents": [...]}` in the `kb.search`
+  contract, every document carrying its section citation, source digest and version;
+- only content that the client owner has marked `approved`, that is effective today and that
+  names this Agent (when audiences are set) is searchable; anything else returns no documents and
+  a reason, so the caller clarifies or escalates instead of inventing a rule.
+
+Retrieved text is untrusted reference data: results are flagged `dataOnly` and never carry
+instructions. Each client/environment searches only the content compiled into its own desired
+state. This is the building block only: the `text-knowledge` provider stays `planned` in the
+integration registry until the runtime exposes it and live acceptance exists.
+"""
+from __future__ import annotations
+
+import datetime as dt
+import hashlib
+import math
+import pathlib
+import re
+from collections.abc import Mapping
+from typing import Any
+
+SUFFIXES = (".txt", ".md")
+STATUSES = ("draft", "approved", "retired")
+MAX_BYTES = 256 * 1024
+MAX_SECTIONS = 500
+MAX_RESULTS = 10
+CHUNK_CHARS = 800
+_STOPWORDS = frozenset(
+    "a an and are as at be by can do does for from has have how i in is it its me my of on or our so that the "
+    "their there they this to us was we what when where which who will with you your".split()
+)
+_WORD = re.compile(r"[a-z0-9][a-z0-9'\-]*")
+_MD_HEADING = re.compile(r"^(#{1,6})\s+(.+?)\s*#*\s*$")
+_NUMBERED = re.compile(r"^\d+[.)]\s+\S")
+_UNDERLINE = re.compile(r"^(=+|-+)\s*$")
+
+
+class KnowledgeError(ValueError):
+    """Raised when a knowledge file cannot be used safely."""
+
+
+def digest(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _slug(title: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-")[:40] or "section"
+
+
+def _stem(word: str) -> str:
+    """Fold simple plurals so 'smells' finds 'smell' and 'prices' finds 'price'."""
+    if len(word) > 4 and word.endswith("ies"):
+        return word[:-3] + "y"
+    if len(word) > 3 and word.endswith("s") and not word.endswith(("ss", "us", "is")):
+        return word[:-1]
+    return word
+
+
+def _tokens(text: str) -> list[str]:
+    return [_stem(word) for word in _WORD.findall(text.lower()) if word not in _STOPWORDS and len(word) > 1]
+
+
+def _is_plain_heading(lines: list[str], index: int) -> bool:
+    line = lines[index].strip()
+    if not line or len(line) > 80 or line[-1] in ".!?;,":
+        return False
+    previous_blank = index == 0 or not lines[index - 1].strip()
+    following = lines[index + 1].strip() if index + 1 < len(lines) else ""
+    if not previous_blank or not following:
+        return False
+    if _UNDERLINE.fullmatch(following) and len(following) >= 3:
+        return True
+    return bool(line.endswith(":") or (line.isupper() and any(c.isalpha() for c in line)) or _NUMBERED.match(line))
+
+
+def _chunks(text: str) -> list[tuple[str, str]]:
+    """Paragraph chunks (about 800 characters) for a file with no headings."""
+    paragraphs = [item.strip() for item in re.split(r"\n\s*\n", text) if item.strip()]
+    chunks: list[str] = []
+    for paragraph in paragraphs:
+        if chunks and len(chunks[-1]) + len(paragraph) < CHUNK_CHARS:
+            chunks[-1] += "\n\n" + paragraph
+        else:
+            chunks.append(paragraph)
+    return [(f"Part {number}", chunk) for number, chunk in enumerate(chunks, start=1)]
+
+
+def parse_sections(text: str, *, markdown: bool) -> list[dict[str, Any]]:
+    """Split into sections with stable IDs (`NNN-title-slug`), each with its own content digest."""
+    lines = text.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    raw: list[tuple[str, list[str]]] = []
+    current_title: str | None = None
+    current: list[str] = []
+    found_heading = False
+
+    def flush() -> None:
+        body = [line for line in current]
+        if any(line.strip() for line in body):
+            raw.append((current_title or "Overview", body))
+
+    index = 0
+    while index < len(lines):
+        line = lines[index]
+        heading: str | None = None
+        skip = 0
+        match = _MD_HEADING.match(line) if markdown else None
+        if match:
+            heading = match.group(2).strip()
+        elif not markdown and _is_plain_heading(lines, index):
+            heading = line.strip().rstrip(":").strip()
+            if index + 1 < len(lines) and _UNDERLINE.fullmatch(lines[index + 1].strip() or "x"):
+                skip = 1
+        if heading:
+            flush()
+            current_title, current = heading, []
+            found_heading = True
+            index += 1 + skip
+            continue
+        current.append(line)
+        index += 1
+    flush()
+    if not found_heading:
+        sections = _chunks("\n".join(lines))
+    else:
+        sections = [(title, "\n".join(body).strip()) for title, body in raw]
+    if len(sections) > MAX_SECTIONS:
+        raise KnowledgeError(f"knowledge file has more than {MAX_SECTIONS} sections; split it or shorten it")
+    return [
+        {"id": f"{number:03d}-{_slug(title)}", "title": title, "text": body, "digest": digest(body)}
+        for number, (title, body) in enumerate(sections, start=1)
+        if body.strip() or found_heading
+    ]
+
+
+def read_text_file(path: pathlib.Path, *, root: pathlib.Path | None = None) -> str:
+    """Read a bounded UTF-8 `.txt`/`.md` file, optionally confined to ``root``."""
+    path = pathlib.Path(path)
+    if path.suffix.lower() not in SUFFIXES:
+        raise KnowledgeError(f"knowledge file must be {' or '.join(SUFFIXES)}, not {path.suffix or 'extensionless'}")
+    resolved = path.resolve()
+    if root is not None:
+        try:
+            resolved.relative_to(pathlib.Path(root).resolve())
+        except ValueError as exc:
+            raise KnowledgeError(f"knowledge file escapes its allowed root: {path}") from exc
+    if not resolved.is_file():
+        raise KnowledgeError(f"knowledge file does not exist: {path}")
+    if resolved.stat().st_size > MAX_BYTES:
+        raise KnowledgeError(f"knowledge file is larger than {MAX_BYTES // 1024} KiB")
+    try:
+        return resolved.read_text(encoding="utf-8")
+    except UnicodeDecodeError as exc:
+        raise KnowledgeError("knowledge file must be UTF-8 text") from exc
+
+
+def check_source(text: str, *, filename: str) -> dict[str, Any]:
+    """The upload parse/test: what would be searchable, and anything the owner should fix."""
+    if not text.strip():
+        raise KnowledgeError("knowledge file is empty")
+    markdown = filename.lower().endswith(".md")
+    sections = parse_sections(text, markdown=markdown)
+    if not sections:
+        raise KnowledgeError("knowledge file has no usable text")
+    warnings: list[str] = []
+    if len(sections) == 1 and sections[0]["title"].startswith("Part"):
+        warnings.append("no headings found: answers can only cite generic parts; add headings per topic (hours, prices, escalation)")
+    if len({section["title"] for section in sections}) != len(sections):
+        warnings.append("some section titles repeat; citations use the numbered section ID")
+    lowered = text.lower()
+    for topic, hints in (("hours", ("hours", "open")), ("escalation", ("escalat", "hand off", "human")), ("prices", ("price", "fee", "cost", "$"))):
+        if not any(hint in lowered for hint in hints):
+            warnings.append(f"no mention of {topic}: the coworker will have to escalate those questions")
+    return {
+        "sections": [{"id": s["id"], "title": s["title"], "characters": len(s["text"])} for s in sections],
+        "sectionCount": len(sections),
+        "sha256": digest(text),
+        "warnings": warnings,
+    }
+
+
+def build_index(name: str, text: str, *, filename: str, spec: Mapping[str, Any] | None = None) -> dict[str, Any]:
+    spec = spec or {}
+    sections = parse_sections(text, markdown=filename.lower().endswith(".md"))
+    document_frequency: dict[str, int] = {}
+    for section in sections:
+        for token in set(_tokens(section["title"] + " " + section["text"])):
+            document_frequency[token] = document_frequency.get(token, 0) + 1
+    return {
+        "name": name,
+        "sha256": digest(text),
+        "version": spec.get("version"),
+        "status": spec.get("status", "draft"),
+        "effectiveDate": spec.get("effectiveDate"),
+        "audiences": list(spec.get("audiences", [])),
+        "sections": sections,
+        "df": document_frequency,
+    }
+
+
+def availability(index: Mapping[str, Any], *, agent: str | None = None, today: dt.date | None = None) -> str | None:
+    """None when the source may ground answers, else the reason it may not."""
+    if index["status"] != "approved":
+        return f"source-{index['status']}"
+    effective = index.get("effectiveDate")
+    if effective:
+        try:
+            starts = dt.date.fromisoformat(str(effective))
+        except ValueError:
+            return "source-effective-date-invalid"
+        if starts > (today or dt.date.today()):
+            return "source-not-yet-effective"
+    audiences = index.get("audiences") or []
+    if audiences and agent not in audiences:
+        return "source-not-for-this-agent"
+    return None
+
+
+def search(
+    index: Mapping[str, Any],
+    query: str,
+    *,
+    limit: int = 3,
+    agent: str | None = None,
+    today: dt.date | None = None,
+) -> dict[str, Any]:
+    """Rank sections for ``query``; returns the `kb.search` result shape plus availability facts."""
+    limit = max(1, min(int(limit), MAX_RESULTS))
+    reason = availability(index, agent=agent, today=today)
+    if reason is not None:
+        return {"documents": [], "reason": reason, "dataOnly": True}
+    terms = _tokens(query)
+    total = max(1, len(index["sections"]))
+    scored = []
+    for position, section in enumerate(index["sections"]):
+        body = _tokens(section["text"])
+        title = set(_tokens(section["title"]))
+        score = 0.0
+        for term in set(terms):
+            idf = math.log(1 + total / (1 + index["df"].get(term, 0)))
+            score += idf * (body.count(term) + (3 if term in title else 0))
+        if score > 0:
+            scored.append((-score, position, section))
+    scored.sort(key=lambda item: (item[0], item[1]))
+    documents = [
+        {
+            "id": section["id"],
+            "title": section["title"],
+            "content": section["text"],
+            "citation": f"knowledge:{index['name']}#{section['id']}",
+            "sourceSha256": index["sha256"],
+            "sourceVersion": index.get("version"),
+            "score": round(-negative, 4),
+        }
+        for negative, _, section in scored[:limit]
+    ]
+    result: dict[str, Any] = {"documents": documents, "dataOnly": True}
+    if not documents:
+        result["reason"] = "no-matching-section"
+    return result
+
+
+def search_selected(
+    desired_state: Mapping[str, Any],
+    query: str,
+    *,
+    source: str | None = None,
+    limit: int = 3,
+    today: dt.date | None = None,
+) -> dict[str, Any]:
+    """`kb.search` over the Tier 0 sources compiled into this client's own desired state."""
+    contents = desired_state.get("knowledgeContent", {})
+    agent = desired_state.get("source", {}).get("name")
+    selected = {
+        item.get("metadata", {}).get("name"): item
+        for item in desired_state.get("knowledge", [])
+        if isinstance(item, dict) and item.get("spec", {}).get("type") == "text-file"
+    }
+    names = [source] if source else sorted(selected)
+    if source and source not in selected:
+        return {"documents": [], "reason": "source-not-selected", "dataOnly": True}
+    documents: list[dict[str, Any]] = []
+    reasons: dict[str, str] = {}
+    for name in names:
+        record = contents.get(name)
+        if record is None:
+            reasons[name] = "source-content-missing"
+            continue
+        index = build_index(name, record["content"], filename=record["source"], spec=selected[name]["spec"])
+        outcome = search(index, query, limit=limit, agent=agent, today=today)
+        documents.extend(outcome["documents"])
+        if outcome.get("reason") and not outcome["documents"]:
+            reasons[name] = outcome["reason"]
+    documents.sort(key=lambda doc: -doc["score"])
+    result: dict[str, Any] = {"documents": documents[: max(1, min(int(limit), MAX_RESULTS))], "dataOnly": True}
+    if not result["documents"]:
+        result["reason"] = next(iter(reasons.values()), "no-matching-section")
+        result["sources"] = reasons
+    return result
+
+
+def read_receipt(result: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """Ledger sources for a search result: section IDs and content digests, never the text."""
+    by_source: dict[str, list[dict[str, Any]]] = {}
+    for document in result.get("documents", []):
+        source_name = document["citation"].split("#", 1)[0].removeprefix("knowledge:")
+        by_source.setdefault(source_name, []).append({"id": document["id"], "content": document["content"]})
+    return [{"sourceId": f"knowledge:{name}", "records": records} for name, records in sorted(by_source.items())]

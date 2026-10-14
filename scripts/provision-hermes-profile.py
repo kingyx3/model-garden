@@ -26,7 +26,7 @@ MCP_TOOL_NAMES = {
     "calendar.book": "calendar_book",
 }
 # Platform built-ins exposed whenever the governed Tool sidecar is present.
-PLATFORM_MCP_TOOLS = ("platform_capabilities",)
+PLATFORM_MCP_TOOLS = ("platform_capabilities", "handoff_request", "handoff_status")
 
 
 def _require_mapping(value: Any, label: str) -> dict[str, Any]:

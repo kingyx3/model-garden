@@ -18,7 +18,7 @@ Supported v1 business resources:
 - `Agent` and `Skill` resources may declare `requiredCapabilities` and `optionalCapabilities`, naming a family (`calendar`) or a portable Tool (`calendar.book`). A required declaration on any selected Skill makes the capability required for the Agent.
 - A `Tool` may opt in with `spec.capability: <family>`; its name must then be a portable Tool of that family and its risk must match the catalog. The reference `calendar.availability`, `calendar.book` and `crm.read` Tools do this with no behaviour change.
 - Only the EnvironmentBinding chooses a provider, as `connectors.<family>.provider` (the legacy `connectors.google_calendar` / `microsoft_calendar` shapes map to `calendar`). Optional non-secret `tier` (0–4, default 1), `scopes` and `owner` describe the connection.
-- `compile-workspace.py --environment-binding <file>` resolves declarations: a required capability with no provider fails closed with a message naming the Agent, capability and environment; an unbound optional one compiles and is reported under `capabilities.degraded` with its fallback tier (Tier 4, human hand-off, until built-in Tier 0 storage exists). Docker deployment re-runs the same check against the real binding.
+- `compile-workspace.py --environment-binding <file>` resolves declarations: a required capability with no provider fails closed with a message naming the Agent, capability and environment; an unbound optional one compiles and is reported under `capabilities.degraded` with its fallback tier (Tier 4, human hand-off, until built-in Tier 0 storage exists; the `handoff_request` platform Tool prepares a write action for a named person, see [Human hand-off](governed-tools.md#human-hand-off-tier-4)). Docker deployment re-runs the same check against the real binding.
 - The fail-closed message also names the Skill(s) that require each missing capability. With a binding, the compiled output carries `capabilities.skills`: one entry per selected Skill (plus the Agent when it declares capabilities itself) with `ready` and each dependency as `bound` (provider, tier), `missing` or `degraded` (fallback tier). It copies no token references, calendar IDs, scopes or owners.
 - `compile-workspace.py --environment-binding <file> --readiness` prints that per-Skill table instead of compiling and exits non-zero if any Skill is blocked.
 
@@ -26,13 +26,25 @@ The `crm` family also carries `crm.create` (risk `write`) and `crm.log-interacti
 
 All of this is additive to `modelgarden.ai/v1`: existing workspaces without declarations validate and compile unchanged.
 
+## Tier 0 business-rules knowledge (building block)
+
+A `KnowledgeSource` with `spec.type: text-file` points at one `.txt` or `.md` file of approved business rules (`spec.file`, relative to the resource, at most 256 KiB, UTF-8, confined to the workspace or library root) so a small client needs no knowledge system. Optional `status` (`draft` default, `approved`, `retired`), `version`, `effectiveDate` and `audiences` (Agents allowed to ground answers) travel with it; these fields are rejected on other source types.
+
+- Compiling an Agent that selects the source parses the file as an upload test and materializes it into desired state under `knowledgeContent` (content, SHA-256, section count). An empty, unreadable, oversized or escaping file fails compilation. `python3 scripts/knowledge-check.py rules.md [--query ...]` runs the same parse/test on an upload and shows what a search would cite.
+- `platform/core/knowledge.py` splits the file into stable numbered sections (Markdown headings, recognisable plain-text headings, or paragraph chunks) and searches them. `search_selected` returns the `kb.search` result shape: each document carries its section citation (`knowledge:<source>#<section-id>`), source SHA-256 and version, and the result is flagged `dataOnly` (retrieved text is reference data, never instructions). Only content that is `approved`, effective today and addressed to this Agent is returned; otherwise there are no documents and a reason (`source-draft`, `source-retired`, `source-not-yet-effective`, `source-not-for-this-agent`, `no-matching-section`) so the caller clarifies or escalates.
+- Each client/environment searches only the content compiled into its own desired state. `read_receipt` turns a result into section IDs and content digests for the existing governed read event (`record_knowledge_read` / `execute_action(read_receipt=...)`), so the ledger never holds the text.
+
+**Not yet delivered:** the runtime does not expose a `kb.search` Tool backed by this module, and the registry keeps `text-knowledge` as `planned`, so a Skill that requires `kb` is still not satisfied by it and the readiness gate still refuses a forged Tier 0 binding. Document-level permissions, external knowledge providers, freshness/refresh policy, conflict detection and the no-system FAQ eval (#116, #77) are also not done.
+
 ## Client approval policy
 
 `Agent.spec.policies` names `Policy` resources whose ordered rules the governed boundary enforces for that Agent. A rule has an `effect` (`allow`, `deny`, `require-approval`) and optionally `actions` (Tool names or globs such as `calendar.book`, `*.send`, `crm.*`), `dataClassifications`, `channels` and `principals` (`member`, `public`).
 
+A fourth effect, `human-only`, forbids automation: the action is prepared for the rule's required `assignee` (optional `deadlineHours`) as a Tier 4 hand-off instead of being executed (see [Human hand-off](governed-tools.md#human-hand-off-tier-4)). It is restrictive, so it covers every principal and an unknown channel or classification, and removing it counts as relaxing control in a policy diff.
+
 Precedence is fail-closed:
 
-1. a matching `deny` rule wins;
+1. a matching `deny` rule wins, then a matching `human-only` rule (nothing is executed, whatever else matches);
 2. the Agent's `approvals.externalActions: required` and any matching `require-approval` rule always win over an `allow` rule (the stricter source wins);
 3. `privileged` Tools are never auto-approved, and a public principal can never reach `privileged` or `external-communication` Tools;
 4. a Tool's own `approvalRequired` default is waived only by a matching `allow` rule that carries a valid client-owner sign-off.

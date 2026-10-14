@@ -1,0 +1,15 @@
+apiVersion: modelgarden.ai/v1
+kind: KnowledgeSource
+metadata:
+  name: rules-of-engagement
+  owner: business-owner
+  description: Tier 0 example - one plain-text file of approved business rules that satisfies a Skill needing knowledge with no client system connected.
+spec:
+  type: text-file
+  classification: internal
+  file: rules-of-engagement.md
+  status: approved
+  version: 1.0.0
+  effectiveDate: "2026-01-01"
+  audiences:
+    - receptionist
