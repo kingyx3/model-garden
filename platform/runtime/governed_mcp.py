@@ -43,6 +43,7 @@ GOVERN = _load_module("model_garden_govern_action", ROOT / "scripts" / "govern-a
 GOOGLE_CALENDAR = _load_module("model_garden_google_calendar", ROOT / "platform" / "connectors" / "google_calendar.py")
 MICROSOFT_CALENDAR = _load_module("model_garden_microsoft_calendar", ROOT / "platform" / "connectors" / "microsoft_calendar.py")
 CAPABILITIES = _load_module("model_garden_runtime_capabilities", ROOT / "platform" / "core" / "capabilities.py")
+OAUTH = _load_module("model_garden_oauth_refresh", ROOT / "platform" / "connectors" / "oauth_refresh.py")
 TEXT_CHANNEL = _load_module("model_garden_text_channel", ROOT / "platform" / "channels" / "text_channel.py")
 AUTH_FAILURE = re.compile(r"\((401|403)\)")
 
@@ -106,6 +107,7 @@ class GovernedToolRuntime:
         environ: Mapping[str, str] | None = None,
         calendar_transport=None,
         principal_resolver=None,
+        oauth_transport=None,
     ) -> None:
         self.desired_state = _load_json_object(desired_state_path, "compiled desired state")
         if self.desired_state.get("schemaVersion") != 1:
@@ -115,6 +117,8 @@ class GovernedToolRuntime:
         self.governance_root = audit_path.parent
         self.environ = dict(os.environ if environ is None else environ)
         self.calendar_transport = calendar_transport
+        self.oauth_transport = oauth_transport
+        self._credential_cache = {}
         # A channel gateway supplies the verified principal for the current request.
         # Without one, the static runtime workload identity is used, as before.
         self.principal_resolver = principal_resolver
@@ -169,6 +173,10 @@ class GovernedToolRuntime:
 
     def _record_health(self, family: str, health: str, reason: str | None = None) -> None:
         current = CAPABILITIES.read_connection_health(self.governance_root).get(family, {})
+        # An in-flight provider call may complete after the operator revokes access.
+        # Never let that completion clear revocation; only an explicit operator action may.
+        if current.get("health") == "revoked":
+            return
         if current.get("health") == health and current.get("reason") == reason:
             return
         CAPABILITIES.record_connection_health(self.governance_root, family, health, actor="runtime:governed-tools", reason=reason)
@@ -192,7 +200,7 @@ class GovernedToolRuntime:
             if not token:
                 raise RuntimeError("Google Calendar credential is not configured for the governed Tool service")
             return GOOGLE_CALENDAR.GoogleCalendarClient(
-                token,
+                self._access_token(provider, token),
                 calendar_id=self.environ.get("MODEL_GARDEN_GOOGLE_CALENDAR_ID", "primary"),
                 transport=self.calendar_transport,
             )
@@ -201,11 +209,18 @@ class GovernedToolRuntime:
             if not token:
                 raise RuntimeError("Microsoft Calendar credential is not configured for the governed Tool service")
             return MICROSOFT_CALENDAR.MicrosoftCalendarClient(
-                token,
+                self._access_token(provider, token),
                 mailbox=self.environ.get("MODEL_GARDEN_MICROSOFT_CALENDAR_MAILBOX", ""),
                 transport=self.calendar_transport,
             )
         raise ValueError("Unsupported Calendar provider; choose google or microsoft")
+
+    def _access_token(self, provider: str, raw_secret: str) -> str:
+        credential = self._credential_cache.get(provider)
+        if credential is None:
+            credential = OAUTH.CalendarCredential(raw_secret, provider, transport=self.oauth_transport)
+            self._credential_cache[provider] = credential
+        return credential.token()
 
     def _take_approval(self, request_id: str) -> tuple[dict[str, Any] | None, pathlib.Path | None]:
         """Atomically claim one decision without letting a crashed claim block fresh approval."""
@@ -267,6 +282,18 @@ class GovernedToolRuntime:
             initiating_user=identity,
             governance_context=governance_context,
         )
+        if family is not None:
+            state = CAPABILITIES.read_connection_health(self.governance_root).get(family, {}).get("health")
+            if state in CAPABILITIES.UNAVAILABLE_HEALTH:
+                # Unlike the capability manifest, this is an enforcement boundary.
+                # Audit the denial without leaking private arguments or credentials.
+                event = GOVERN.make_audit_event(
+                    "authorization", request, outcome="deny",
+                    details={"reason": f"connection-{state}"},
+                    ledger=self._ledger(provider=provider, justification=None),
+                )
+                GOVERN.append_audit_event(self.audit_path, event)
+                raise PermissionError(f"Tool {tool_name!r} unavailable: {family} connection {state}")
         approval, claim = self._take_approval(request["requestId"])
         if approval is not None:
             self._clear_pending(request["requestId"])
@@ -314,12 +341,11 @@ class GovernedToolRuntime:
         arguments: dict[str, Any] = {"start": start, "end": end}
         if timezone is not None:
             arguments["timezone"] = timezone
-        client = self._calendar()
         provider = self._calendar_provider()
         return self._execute(
             "calendar.availability",
             arguments,
-            lambda exact: client.check_availability(
+            lambda exact: self._calendar().check_availability(
                 start=exact["start"],
                 end=exact["end"],
                 timezone=exact.get("timezone"),
@@ -348,7 +374,6 @@ class GovernedToolRuntime:
             arguments["description"] = description
         if attendees is not None:
             arguments["attendees"] = attendees
-        client = self._calendar()
         provider = self._calendar_provider()
 
         def event_reference(result: Any) -> str | None:
@@ -358,7 +383,7 @@ class GovernedToolRuntime:
         return self._execute(
             "calendar.book",
             arguments,
-            client.booking_executor(),
+            lambda exact: self._calendar().book(exact),
             family="calendar",
             provider=provider,
             justification=justification,

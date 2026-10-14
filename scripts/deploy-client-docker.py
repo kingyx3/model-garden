@@ -42,6 +42,7 @@ RUNTIME_SOURCE_PATHS = (
     pathlib.Path("platform/runtime/governed_mcp.py"),
     pathlib.Path("platform/connectors/google_calendar.py"),
     pathlib.Path("platform/connectors/microsoft_calendar.py"),
+    pathlib.Path("platform/connectors/oauth_refresh.py"),
     pathlib.Path("platform/core/capabilities.py"),
     pathlib.Path("platform/channels/text_channel.py"),
     pathlib.Path("contracts/v1/capabilities.json"),
