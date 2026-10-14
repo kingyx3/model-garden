@@ -24,14 +24,16 @@ The sidecar is not a control plane and is not exposed on a host port. It is part
 
 Hermes only receives MCP Tool names corresponding to Tools explicitly selected by that Agent. Provisioning fails closed if a selected Tool has no implemented governed runtime binding.
 
-## Google Calendar MVP binding
+## Client-stack-neutral Calendar integration (Google Workspace / Microsoft 365)
 
-The reference Receptionist currently supports:
+The *Agent* always selects the same portable Tools:
 
-- `calendar.availability` — read-only free/busy lookup; no human approval required;
-- `calendar.book` — event creation; exact-action human approval required.
+- `calendar.availability`: read free/busy state.
+- `calendar.book`: create an event only after the configured exact-action approval.
 
-When either Calendar Tool is selected, add an environment-scoped connector binding:
+Only the **EnvironmentBinding** chooses the provider. Do not fork Agents or Skills by cloud/office suite. Each isolated client/environment can use Google or Microsoft independently while keeping the same audit and approval contract.
+
+Preferred Google Workspace binding:
 
 ```yaml
 environment: dev
@@ -39,21 +41,45 @@ runtime:
   profile: receptionist
   model_credential_ref: secret://model/dev
 connectors:
-  google_calendar:
+  calendar:
+    provider: google
     token_ref: secret://google/dev-calendar
     calendar_id: primary
 ```
 
-Then `MODEL_GARDEN_RUNTIME_SECRETS_JSON` in the protected GitHub Environment must contain exactly those references, for example:
+Preferred Microsoft 365 binding:
 
-```json
-{
-  "secret://google/dev-calendar": "<runtime Google Calendar token>",
-  "secret://model/dev": "<runtime model credential>"
-}
+```yaml
+environment: dev
+runtime:
+  profile: receptionist
+  model_credential_ref: secret://model/dev
+connectors:
+  calendar:
+    provider: microsoft
+    token_ref: secret://microsoft/dev-calendar
+    mailbox: receptionist@client.example
 ```
 
-The aggregate secret map exists only in the deployment process. Docker Compose injects the model credential only into Hermes and the Calendar credential only into the governed Tool sidecar.
+The older `connectors.google_calendar` shape remains accepted for existing clients. Do not define multiple calendar provider bindings: deployment rejects ambiguity or unknown providers. The `MODEL_GARDEN_RUNTIME_SECRETS_JSON` for the protected `dev`/`prod` GitHub Environment contains **exactly** the referenced logical keys and operator-supplied runtime tokens. Model credentials are injected into Hermes only; Google/Microsoft Calendar credentials go only to the private governed Tool sidecar. Neither API keys nor tokens belong in Agent, Skill or workspace YAML.
+
+### Authorization responsibility and current support
+
+| Concern | Google Workspace | Microsoft 365 |
+| --- | --- | --- |
+| Implemented API | Google Calendar freeBusy + event creation | Microsoft Graph v1.0 getSchedule + event creation |
+| Mailbox/calendar target | Configured calendar ID | Explicitly approved mailbox email |
+| Authority | Scoped Google OAuth access token | Scoped Entra/Graph OAuth access token |
+| Consent | Client owns account/consent; Model Garden handles setup | Client owns account/consent; Model Garden handles setup, Entra admin where needed |
+| Read permission | Google Calendar free/busy scope or approved equivalent | Graph `Calendars.ReadBasic` (when supported by selected flow) or approved equivalent |
+| Write permission | Calendar event-write permission | Graph `Calendars.ReadWrite` |
+| Connector boundary | Fixed Google API host | Fixed `graph.microsoft.com` Graph v1.0 host |
+
+**Operational limitation:** The shipped adapter consumes an authorized access token supplied at deployment. It does not perform OAuth user consent, token renewal, service-principal credential rotation, Entra app registration, or Google OAuth app creation. Normal production operation therefore requires a separately managed valid token lifecycle or a subsequent reviewed token-provider integration. Do **not** treat a manually supplied short-lived OAuth access token as an unattended, production-stable connection. Confirm real tenant authorization, refresh/revocation and live read/write actions before go-live.
+
+Microsoft Graph sends invitations when creating events with attendees; approval policy and client consent must cover that external side effect. The adapter normalizes timezone-aware RFC3339 arguments to UTC for Graph. Tentative, out-of-office and unknown schedule statuses block availability.
+
+Other Google/Microsoft capabilities described in Confluence (Gmail/Outlook, Drive/SharePoint, Teams, OneDrive) are **target architecture only**, not implemented governed connectors. New providers should be narrow, audited and tested instead of granting an Agent raw Graph/Google API authority.
 
 ## Exact-action approval
 

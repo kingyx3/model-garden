@@ -68,7 +68,7 @@ The actual manually maintained runtime values are stored in the protected GitHub
 |---|---|
 | `MODEL_GARDEN_RUNTIME_SECRETS_JSON` | JSON object whose keys exactly match the `secret://` references required by that environment. Missing or extra keys fail closed. |
 
-OAuth refresh tokens or other dynamic grants created by an end-user/provider authorization flow may be stored by the governed runtime/provider authorization store where appropriate; they are not business-authored workspace content.
+OAuth refresh tokens or other dynamic grants created by an end-user/provider authorization flow may be stored by an independently reviewed governed runtime/provider authorization store where appropriate; they are never business-authored workspace content. **The current Google and Microsoft Calendar adapters accept access tokens but do not implement consent or token renewal**. Before deploying unattended client integrations, establish a secure, revocable token refresh/rotation path; a one-off short-lived access token is not enough. See [`governed-tools.md`](governed-tools.md).
 
 The deployment process resolves the aggregate map, removes it before Docker execution and injects only the credentials required by the selected runtime processes/capabilities. Hermes/model execution must not receive unrelated Calendar, CRM or telephony credentials; governed Tool sidecars receive only their connector-specific credentials.
 

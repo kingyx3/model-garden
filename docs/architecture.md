@@ -37,7 +37,7 @@ Terraform -> isolated client Docker host
 | Validation/materialization | Versioned `modelgarden.ai/v1` contracts, deterministic workspace validation/compiler and Hermes profile materialization. |
 | Agent runtime | Hermes reference runtime; runtime implementation remains behind the Model Garden client contract. |
 | Business actions | Governed MCP Tool boundary with explicit Tool selection, scoped credentials, `allow | approval | deny`, exact-action approval and attributable audit. |
-| Business-system integration | Thin connectors for proven capabilities; Google Calendar is the reference connector. |
+| Business-system integration | Portable governed Calendar Tools with provider-specific Google Calendar or Microsoft Graph adapters; broader suites are not yet implemented. |
 | Channels | Replaceable channel adapters; LiveKit is the reference voice path. |
 | Usage/cost attribution | Canonical non-secret attribution events emitted to the external Lago metering/billing seam. |
 | Infrastructure | Terraform-managed keyless GCP bootstrap and isolated Compute Engine Docker host. |

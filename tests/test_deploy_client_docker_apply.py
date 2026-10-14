@@ -135,5 +135,46 @@ class DeployClientDockerApplyTests(unittest.TestCase):
         self.assertFalse(any("up" in command for command in commands))
 
 
+    def test_microsoft_credential_only_reaches_selected_sidecar_compose_variable(self):
+        binding = {
+            "apiVersion": "modelgarden.ai/v1",
+            "kind": "EnvironmentBinding",
+            "spec": {
+                "environment": "dev",
+                "runtime": {"profile": "receptionist", "model_credential_ref": "secret://model/dev"},
+                "connectors": {"calendar": {
+                    "provider": "microsoft",
+                    "token_ref": "secret://microsoft/dev-calendar",
+                    "mailbox": "staff@example.com",
+                }},
+            },
+        }
+        envs = []
+
+        def fake_run(command, *, env, check=True):
+            envs.append(env.copy())
+            class Result:
+                returncode = 1 if command[:3] == ["docker", "image", "inspect"] else 0
+                stdout = ""
+                stderr = "No such image" if returncode else ""
+            return Result()
+
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(deployer, "_run", side_effect=fake_run), mock.patch.object(deployer, "_wait_healthy", return_value=True):
+            with mock.patch.dict(os.environ, {
+                "MODEL_GARDEN_GOOGLE_CALENDAR_TOKEN": "stray-google-token",
+                "MODEL_GARDEN_RUNTIME_SECRETS_JSON": "never-forward",
+            }, clear=False):
+                deployer.apply_bundle(pathlib.Path(tmp), binding, "acme-dev", secrets_json=json.dumps({
+                    "secret://model/dev": "model-token",
+                    "secret://microsoft/dev-calendar": "microsoft-token",
+                }), timeout=1)
+        self.assertTrue(envs)
+        for env in envs:
+            self.assertNotIn("MODEL_GARDEN_GOOGLE_CALENDAR_TOKEN", env)
+            self.assertNotIn("MODEL_GARDEN_RUNTIME_SECRETS_JSON", env)
+            self.assertEqual(env["MODEL_GARDEN_MICROSOFT_CALENDAR_TOKEN"], "microsoft-token")
+            self.assertEqual(env["MODEL_GARDEN_MODEL_CREDENTIAL"], "model-token")
+
+
 if __name__ == "__main__":
     unittest.main()
