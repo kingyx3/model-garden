@@ -53,6 +53,27 @@ python3 scripts/compile-workspace.py examples/workspace --agent receptionist \
 
 The CLI does **not** obtain OAuth tokens, provision a tenant, save a secret, test a live provider or change an EnvironmentBinding. Planned providers fail the preview. An implemented provider returns `readyToConnect: false` with the remaining live consent/health gate, rather than implying connectivity. The normal private GitHub Environment secret map and reviewed PR → DEV → PROD workflow remain the actual deployment interface. The Skill readiness report links missing capability families back to the provider options; the coworker's `platform.capabilities` manifest also includes selected per-Skill readiness. Full guided provisioning and real OAuth lifecycle remain tracked under [#110](https://github.com/kingyx3/model-garden/issues/110) and [#86](https://github.com/kingyx3/model-garden/issues/86).
 
+## Shipped-provider activation gate
+
+An EnvironmentBinding naming a provider is not evidence that its connector exists. The
+compiler, `client-operator skills` readiness report, non-secret coworker
+`platform.capabilities` manifest and Docker deployment now consult
+`contracts/v1/integrations.json` to determine **implemented** support. Only
+`built-credential-free` or `live` providers with a matching family, correct tier
+and a real local adapter satisfy a dependency. Historical `google_calendar`,
+`microsoft_calendar`, `google` and `microsoft` aliases continue to work.
+
+A planned HubSpot/Jira/Zoho/SharePoint/Drive provider, an unregistered provider or
+a forged Tier 0 `built-in-crm`/`text-knowledge` binding **cannot activate a Skill**.
+Required capabilities remain blocked, optional ones degrade to the declared
+fallback, and production deployment repeats the check even when it receives a
+previously compiled desired-state document. A missing or invalid registry
+fails closed. This gate verifies shipped adapter presence, **not** client
+consent, a current access token, live provider health or completed acceptance
+proof. Real OAuth and live proof are still tracked by
+[#66](https://github.com/kingyx3/model-garden/issues/66) and
+[#86](https://github.com/kingyx3/model-garden/issues/86).
+
 ## Enable or disable individual Skills safely
 
 An Agent may list a Skill in `spec.skills` while keeping it off using `spec.disabledSkills`. Example:
