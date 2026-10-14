@@ -233,6 +233,7 @@ class DeployClientDockerTests(unittest.TestCase):
             self.assertNotIn("MODEL_GARDEN_MICROSOFT_CALENDAR_TOKEN", hermes)
             self.assertNotIn("OPENAI_API_KEY", sidecar)
             self.assertTrue((bundle / "model-garden-platform" / "platform" / "connectors" / "microsoft_calendar.py").is_file())
+            self.assertTrue((bundle / "model-garden-platform" / "platform" / "connectors" / "oauth_refresh.py").is_file())
             self.assertEqual(
                 deployer.resolve_secrets(json.loads(binding.read_text(encoding="utf-8")), json.dumps({
                     "secret://model/dev": "model", "secret://microsoft/dev-calendar": "graph"
