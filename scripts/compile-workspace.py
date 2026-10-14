@@ -183,11 +183,39 @@ def resolve_agent(workspace, agent, resources, source_paths, source_roots, envir
                 errors.append(f"Agent {name!r} references missing {kind} {ref!r}")
             else:
                 resolved[field].append(resource)
+    # Disabled Skills remain business-authored but are not executable or
+    # materialized into Hermes. Removing one from disabledSkills is an explicit
+    # activation that must pass the ordinary capability and Tool checks.
+    disabled = set(spec.get("disabledSkills", []))
+    unknown_disabled = sorted(disabled - set(spec.get("skills", [])))
+    if unknown_disabled:
+        errors.append(f"Agent {name!r} disables Skills it did not select: {', '.join(unknown_disabled)}")
+    listed_skills = resolved["skills"]
+    resolved["skills"] = [
+        skill for skill in listed_skills if skill["metadata"]["name"] not in disabled
+    ]
+    # Tools exclusively associated with a disabled Skill must not remain
+    # callable merely because the Agent's Tool list still names them.
+    disabled_tools = {
+        tool
+        for skill in listed_skills if skill["metadata"]["name"] in disabled
+        for tool in skill.get("spec", {}).get("allowedTools", [])
+    }
+    enabled_tools = {
+        tool for skill in resolved["skills"]
+        for tool in skill.get("spec", {}).get("allowedTools", [])
+    }
+    suppressed_tools = disabled_tools - enabled_tools
+    if suppressed_tools:
+        resolved["tools"] = [
+            tool for tool in resolved["tools"]
+            if tool["metadata"]["name"] not in suppressed_tools
+        ]
     agent_instructions, instruction_errors = materialize_instruction_file(
         workspace, "Agent", name, agent, source_paths, source_roots
     )
     errors.extend(instruction_errors)
-    selected_tools = set(spec.get("tools", []))
+    selected_tools = {tool["metadata"]["name"] for tool in resolved["tools"]}
     skill_instructions: dict[str, dict[str, str]] = {}
     for skill in resolved["skills"]:
         skill_name = skill["metadata"]["name"]
@@ -215,7 +243,9 @@ def resolve_agent(workspace, agent, resources, source_paths, source_roots, envir
                         required_by=CAPABILITIES.skills_requiring(resolved["skills"]),
                     )
                 )
-                capabilities["skills"] = CAPABILITIES.skill_readiness(agent, resolved["skills"], environment_binding)
+                capabilities["skills"] = CAPABILITIES.skill_readiness(
+                    agent, listed_skills, environment_binding, disabled_skills=disabled
+                )
             except ValueError as exc:
                 errors.append(str(exc))
     if errors:
@@ -286,11 +316,23 @@ def workspace_readiness(
     resources, _, _ = load_workspace(workspace, library_roots)
     report = []
     for agent in _selected_agents(resources, agent_name):
-        skills = [resources["Skill"][ref] for ref in agent["spec"].get("skills", []) if ref in resources["Skill"]]
+        configured = agent["spec"].get("skills", [])
+        disabled = set(agent["spec"].get("disabledSkills", []))
+        unknown_disabled = sorted(disabled - set(configured))
+        if unknown_disabled:
+            raise ValueError(
+                f"Agent {agent['metadata']['name']!r} disables Skills it did not select: {', '.join(unknown_disabled)}"
+            )
+        absent = [ref for ref in configured if ref not in resources["Skill"]]
+        if absent:
+            raise ValueError(f"Agent {agent['metadata']['name']!r} refers to missing Skills: {', '.join(absent)}")
+        skills = [resources["Skill"][ref] for ref in configured]
         report.append({
             "agent": agent["metadata"]["name"],
             "environment": CAPABILITIES.binding_environment(environment_binding),
-            "skills": CAPABILITIES.skill_readiness(agent, skills, environment_binding),
+            "skills": CAPABILITIES.skill_readiness(
+                agent, skills, environment_binding, disabled_skills=disabled
+            ),
         })
     return report
 
@@ -311,7 +353,7 @@ def format_readiness(report: list[dict[str, Any]]) -> str:
         lines.append(f"Agent {agent['agent']} in {where}")
         width = max([len(entry["name"]) for entry in agent["skills"]] + [5])
         for entry in agent["skills"]:
-            state = "ready" if entry["ready"] else "BLOCKED"
+            state = "DISABLED" if not entry.get("enabled", True) else ("ready" if entry["ready"] else "BLOCKED")
             needs = "; ".join(_dependency_text(item) for item in entry["dependencies"]) or "-"
             lines.append(f"  {entry['kind']:<5} {entry['name']:<{width}}  {state:<7}  {needs}")
             missing_families = sorted({item["family"] for item in entry["dependencies"] if item["status"] == "missing"})
@@ -362,7 +404,8 @@ def main() -> int:
             print(str(exc), file=sys.stderr)
             return 1
         sys.stdout.write(format_readiness(report))
-        return 0 if all(entry["ready"] for agent in report for entry in agent["skills"]) else 1
+        return 0 if all(entry["ready"] or not entry.get("enabled", True)
+                        for agent in report for entry in agent["skills"]) else 1
     try:
         binding = load_environment_binding(pathlib.Path(args.environment_binding)) if args.environment_binding else None
         compiled = compile_workspace(workspace, args.agent, libraries, binding)
