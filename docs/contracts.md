@@ -30,6 +30,29 @@ Stable operational contract:
 
 Business teams should depend on the business resource contracts rather than infrastructure details or physical model IDs. Runtime/commercial integrations should depend on the explicit operational contracts rather than inventing provider-specific attribution shapes. Breaking schema changes require a new API version, e.g. `modelgarden.ai/v2`.
 
+## Integration registry and readiness-to-connect boundary
+
+`contracts/v1/integrations.json` is the **single technical inventory** of providers by capability family, connection method/tier, maturity, portable Tools, tracking issue and (for implemented providers) adapter source. Its schema, Tool coverage, adapter existence and live-proof requirements are exercised in tests. **`built-credential-free` means an adapter and automated tests exist; it does not mean a real client tenant, refreshable authorization, or production acceptance has been proven.** No provider is currently marked `live`.
+
+Render the provider directory for review and Confluence sync without maintaining a second manually authored list:
+
+```bash
+python3 scripts/integration-directory.py --format markdown
+python3 scripts/integration-directory.py --family crm --format json
+```
+
+An operator can inspect a family, then request an **explicit, non-secret scope preview** before seeking the client owner's authorization:
+
+```bash
+python3 scripts/client-operator.py connect calendar
+python3 scripts/client-operator.py connect calendar --provider google-calendar \
+  --tools calendar.availability --owner client-owner@example.com --operator consultant@example.com
+python3 scripts/compile-workspace.py examples/workspace --agent receptionist \
+  --environment-binding environments/dev.yaml --readiness
+```
+
+The CLI does **not** obtain OAuth tokens, provision a tenant, save a secret, test a live provider or change an EnvironmentBinding. Planned providers fail the preview. An implemented provider returns `readyToConnect: false` with the remaining live consent/health gate, rather than implying connectivity. The normal private GitHub Environment secret map and reviewed PR → DEV → PROD workflow remain the actual deployment interface. The Skill readiness report links missing capability families back to the provider options; the coworker's `platform.capabilities` manifest also includes selected per-Skill readiness. Full guided provisioning and real OAuth lifecycle remain tracked under [#110](https://github.com/kingyx3/model-garden/issues/110) and [#86](https://github.com/kingyx3/model-garden/issues/86).
+
 ## Validate a workspace
 
 ```bash

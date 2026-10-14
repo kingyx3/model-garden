@@ -46,6 +46,20 @@ def _load_capabilities():
 CAPABILITIES = _load_capabilities()
 
 
+def _load_integrations():
+    module_spec = importlib.util.spec_from_file_location(
+        "model_garden_integrations", ROOT / "platform" / "core" / "integrations.py"
+    )
+    module = importlib.util.module_from_spec(module_spec)
+    assert module_spec.loader is not None
+    module_spec.loader.exec_module(module)
+    return module
+
+
+INTEGRATIONS = _load_integrations()
+
+
+
 def load_validators() -> dict[str, Draft202012Validator]:
     validators: dict[str, Draft202012Validator] = {}
     for kind, filename in SCHEMAS.items():
@@ -300,6 +314,12 @@ def format_readiness(report: list[dict[str, Any]]) -> str:
             state = "ready" if entry["ready"] else "BLOCKED"
             needs = "; ".join(_dependency_text(item) for item in entry["dependencies"]) or "-"
             lines.append(f"  {entry['kind']:<5} {entry['name']:<{width}}  {state:<7}  {needs}")
+            missing_families = sorted({item["family"] for item in entry["dependencies"] if item["status"] == "missing"})
+            for family in missing_families:
+                choices = INTEGRATIONS.options(family)
+                built = [choice["id"] for choice in choices if choice["status"] in INTEGRATIONS.BUILT]
+                hint = (", ".join(built) if built else "no usable connector shipped yet")
+                lines.append(f"    Next: python3 scripts/client-operator.py connect {family}  ({hint})")
     return "\n".join(lines) + "\n"
 
 
