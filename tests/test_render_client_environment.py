@@ -85,5 +85,21 @@ class RenderClientEnvironmentTests(unittest.TestCase):
                 renderer.render(path, "prod")
 
 
+    def test_provider_neutral_microsoft_binding_keeps_only_logical_references(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = self._write(pathlib.Path(tmp), {
+                "environment": "dev",
+                "runtime": {"profile": "receptionist", "model_credential_ref": "secret://model/dev"},
+                "connectors": {"calendar": {
+                    "provider": "microsoft", "mailbox": "helpdesk@example.com",
+                    "token_ref": "secret://microsoft/dev-calendar",
+                }},
+            })
+            rendered = renderer.render(path, "dev")
+            self.assertEqual(rendered["spec"]["connectors"]["calendar"]["provider"], "microsoft")
+            self.assertEqual(rendered["spec"]["connectors"]["calendar"]["token_ref"], "secret://microsoft/dev-calendar")
+            self.assertNotIn("access_token", json.dumps(rendered))
+
+
 if __name__ == "__main__":
     unittest.main()
