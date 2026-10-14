@@ -6,5 +6,6 @@ metadata:
   description: Read approved CRM account and opportunity data.
 spec:
   type: internal
+  capability: crm
   risk: read
   approvalRequired: false

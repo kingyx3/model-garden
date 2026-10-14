@@ -25,6 +25,8 @@ MCP_TOOL_NAMES = {
     "calendar.availability": "calendar_availability",
     "calendar.book": "calendar_book",
 }
+# Platform built-ins exposed whenever the governed Tool sidecar is present.
+PLATFORM_MCP_TOOLS = ("platform_capabilities",)
 
 
 def _require_mapping(value: Any, label: str) -> dict[str, Any]:
@@ -63,6 +65,8 @@ def _selected_mcp_tools(desired_state: dict[str, Any]) -> list[str]:
             "Hermes provisioning failed: no governed runtime implementation for selected Tool(s): "
             + ", ".join(sorted(unsupported))
         )
+    if selected:
+        selected.extend(PLATFORM_MCP_TOOLS)
     return sorted(selected)
 
 

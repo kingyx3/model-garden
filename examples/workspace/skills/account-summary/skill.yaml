@@ -10,6 +10,8 @@ spec:
     file: instructions.md
   allowedTools:
     - crm.read
+  requiredCapabilities:
+    - crm
   inputs:
     - account
   evaluationSuite: evals/

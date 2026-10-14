@@ -1,0 +1,50 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://modelgarden.ai/schemas/v1/capability-catalog.schema.json",
+  "title": "Model Garden Capability Catalog v1",
+  "description": "Platform-owned, provider-neutral Tool families. Agents and Skills declare these capabilities; only an EnvironmentBinding chooses the provider.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["apiVersion", "kind", "catalogVersion", "tiers", "families"],
+  "properties": {
+    "apiVersion": {"const": "modelgarden.ai/v1"},
+    "kind": {"const": "CapabilityCatalog"},
+    "catalogVersion": {"type": "string", "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$"},
+    "tiers": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["0", "1", "2", "3", "4"],
+      "patternProperties": {"^[0-4]$": {"type": "string", "minLength": 1}}
+    },
+    "families": {
+      "type": "object",
+      "minProperties": 1,
+      "propertyNames": {"pattern": "^[a-z]+$"},
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["description", "fallbackTier", "tools"],
+        "properties": {
+          "description": {"type": "string", "minLength": 1},
+          "fallbackTier": {"type": "integer", "minimum": 0, "maximum": 4},
+          "tools": {
+            "type": "object",
+            "minProperties": 1,
+            "propertyNames": {"pattern": "^[a-z]+\\.[a-z][a-z-]*$"},
+            "additionalProperties": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["risk", "ledgerFields", "arguments", "result"],
+              "properties": {
+                "risk": {"enum": ["read", "write", "privileged", "external-communication"]},
+                "ledgerFields": {"type": "array", "items": {"type": "string"}, "uniqueItems": true},
+                "arguments": {"type": "object"},
+                "result": {"type": "object"}
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

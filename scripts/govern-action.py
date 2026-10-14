@@ -6,6 +6,11 @@ MVP behavior is intentionally small and explicit:
 - selected Tools resolve to allow or require-approval from the stricter of Agent and Tool configuration;
 - approvals bind to an immutable requestId derived from agent + tool + exact arguments + initiating identity/context;
 - denied, pending, approved, failed, and executed material actions can be written as versioned JSONL audit events;
+- schema-v3 events store arguments redacted plus a digest, a bounded ledger block (delegation chain,
+  stated justification, policy rule, capability/provider/tier, external object reference), and
+  read events that record which sources and records were read as digests, never content;
+- a verified channel principal can flow in as the initiating identity; unmapped (public) principals
+  are limited to read-class Tools;
 - first-party governance context can correlate tenant, environment, conversation, runtime, model and commercial attribution;
 - execution is injected by the caller, so this module never owns provider credentials.
 
@@ -19,6 +24,7 @@ import argparse
 import datetime as dt
 import fcntl
 import hashlib
+import importlib.util
 import json
 import os
 import pathlib
@@ -26,7 +32,15 @@ import sys
 from collections.abc import Callable
 from typing import Any
 
-AUDIT_SCHEMA_VERSION = 2
+AUDIT_SCHEMA_VERSION = 3
+CHAINED_SCHEMA_VERSIONS = (2, 3)
+POLICY_VERSION = "model-garden-governance/1"
+REDACTED = "[redacted]"
+MAX_CONTEXT_VALUE = 256
+MAX_JUSTIFICATION = 500
+MAX_DELEGATION_DEPTH = 16
+READ_AUDIT_MODES = ("full", "aggregate", "sampled")
+DEFAULT_MAX_RECORD_IDS = 100
 GOVERNANCE_CONTEXT_KEYS = (
     "tenantId",
     "environment",
@@ -43,7 +57,41 @@ GOVERNANCE_CONTEXT_KEYS = (
     "costCenter",
     "billingSubscriptionId",
     "sharedPoolId",
+    "originatingPrincipal",
+    "channel",
+    "triggerRef",
+    "taskId",
+    "parentRequestId",
 )
+# Bounded authority fields (bind the requestId) that are not plain strings.
+GOVERNANCE_LIST_KEYS = ("delegationChain",)
+# Bounded descriptive fields recorded on ledger events but not bound into the requestId,
+# so a reworded justification or a new platform release cannot invalidate an approval.
+LEDGER_STRING_KEYS = (
+    "agentVersion",
+    "workspaceRevision",
+    "platformRelease",
+    "policyRuleId",
+    "policyVersion",
+    "justification",
+    "capability",
+    "provider",
+    "externalObjectRef",
+)
+LEDGER_INT_KEYS = ("tier",)
+_BOUNDED_KEYS = frozenset({"originatingPrincipal", "channel", "triggerRef", "taskId", "parentRequestId"})
+
+
+def _load_capabilities():
+    path = pathlib.Path(__file__).resolve().parents[1] / "platform" / "core" / "capabilities.py"
+    module_spec = importlib.util.spec_from_file_location("model_garden_capabilities_for_governance", path)
+    module = importlib.util.module_from_spec(module_spec)
+    assert module_spec.loader is not None
+    module_spec.loader.exec_module(module)
+    return module
+
+
+CAPABILITIES = _load_capabilities()
 
 
 def _canonical_json(value: Any) -> str:
@@ -74,7 +122,7 @@ def _governance_context(value: dict[str, Any] | None) -> dict[str, Any]:
         return {}
     if not isinstance(value, dict):
         raise ValueError("Governed action failed: governance_context must be a JSON object")
-    unknown = sorted(set(value) - set(GOVERNANCE_CONTEXT_KEYS))
+    unknown = sorted(set(value) - set(GOVERNANCE_CONTEXT_KEYS) - set(GOVERNANCE_LIST_KEYS))
     if unknown:
         raise ValueError("Governed action failed: unsupported governance context keys: " + ", ".join(unknown))
     context: dict[str, Any] = {}
@@ -83,8 +131,70 @@ def _governance_context(value: dict[str, Any] | None) -> dict[str, Any]:
         if item is not None:
             if not isinstance(item, str) or not item:
                 raise ValueError(f"Governed action failed: governance context {key} must be a non-empty string")
+            if key in _BOUNDED_KEYS and len(item) > MAX_CONTEXT_VALUE:
+                raise ValueError(f"Governed action failed: governance context {key} exceeds {MAX_CONTEXT_VALUE} characters")
             context[key] = item
+    chain = value.get("delegationChain")
+    if chain is not None:
+        if (
+            not isinstance(chain, list)
+            or not chain
+            or len(chain) > MAX_DELEGATION_DEPTH
+            or not all(isinstance(hop, str) and hop and len(hop) <= MAX_CONTEXT_VALUE for hop in chain)
+        ):
+            raise ValueError(
+                f"Governed action failed: governance context delegationChain must be 1-{MAX_DELEGATION_DEPTH} non-empty strings"
+            )
+        context["delegationChain"] = list(chain)
     return context
+
+
+def ledger_context(value: dict[str, Any] | None) -> dict[str, Any]:
+    """Validate the bounded, allow-listed ledger block; arbitrary fields are rejected."""
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise ValueError("Governed action failed: ledger context must be a JSON object")
+    unknown = sorted(set(value) - set(LEDGER_STRING_KEYS) - set(LEDGER_INT_KEYS))
+    if unknown:
+        raise ValueError("Governed action failed: unsupported ledger context keys: " + ", ".join(unknown))
+    context: dict[str, Any] = {}
+    for key in LEDGER_STRING_KEYS:
+        item = value.get(key)
+        if item is None:
+            continue
+        if not isinstance(item, str) or not item.strip():
+            raise ValueError(f"Governed action failed: ledger context {key} must be a non-empty string")
+        if key == "justification":
+            item = " ".join(item.split())[:MAX_JUSTIFICATION]
+        elif len(item) > MAX_CONTEXT_VALUE:
+            raise ValueError(f"Governed action failed: ledger context {key} exceeds {MAX_CONTEXT_VALUE} characters")
+        context[key] = item
+    tier = value.get("tier")
+    if tier is not None:
+        if not isinstance(tier, int) or isinstance(tier, bool) or tier not in CAPABILITIES.TIERS:
+            raise ValueError("Governed action failed: ledger context tier must be an integer 0-4")
+        context["tier"] = tier
+    return context
+
+
+def redact_arguments(tool_name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+    """Keep only catalog-approved scalar argument fields verbatim; redact everything else."""
+    keep = CAPABILITIES.ledger_fields(tool_name)
+    redacted: dict[str, Any] = {}
+    for key in sorted(arguments):
+        value = arguments[key]
+        safe_scalar = isinstance(value, (bool, int, float)) or (isinstance(value, str) and len(value) <= MAX_CONTEXT_VALUE)
+        redacted[key] = value if key in keep and safe_scalar else REDACTED
+    return redacted
+
+
+def _tool_risk(desired_state: dict[str, Any], tool_name: str) -> str | None:
+    tool = _selected_tool(desired_state, tool_name)
+    if tool is None:
+        return None
+    risk = tool.get("spec", {}).get("risk")
+    return risk if isinstance(risk, str) else None
 
 
 def build_action_request(
@@ -119,6 +229,7 @@ def authorize_action(
     *,
     initiating_user: str | None = None,
     governance_context: dict[str, Any] | None = None,
+    principal_access: str | None = None,
 ) -> dict[str, Any]:
     request = build_action_request(
         desired_state,
@@ -130,6 +241,10 @@ def authorize_action(
     tool = _selected_tool(desired_state, tool_name)
     if tool is None:
         return {"decision": "deny", "reason": "tool-not-selected", "request": request}
+    if principal_access not in (None, "member", "public"):
+        raise ValueError("Governed action failed: principal_access must be member or public")
+    if principal_access == "public" and tool.get("spec", {}).get("risk") != "read":
+        return {"decision": "deny", "reason": "principal-not-authorized", "request": request}
 
     agent_requires_approval = desired_state.get("agent", {}).get("spec", {}).get("approvals", {}).get("externalActions") == "required"
     tool_requires_approval = tool.get("spec", {}).get("approvalRequired", False)
@@ -143,7 +258,15 @@ def _utc_timestamp() -> str:
     return dt.datetime.now(dt.timezone.utc).isoformat().replace("+00:00", "Z")
 
 
-def make_audit_event(event_type: str, request: dict[str, Any], *, outcome: str, details: dict[str, Any] | None = None) -> dict[str, Any]:
+def make_audit_event(
+    event_type: str,
+    request: dict[str, Any],
+    *,
+    outcome: str,
+    details: dict[str, Any] | None = None,
+    ledger: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Build one schema-v3 ledger event: redacted arguments plus digest, never raw payloads."""
     event = {
         "schemaVersion": AUDIT_SCHEMA_VERSION,
         "timestamp": _utc_timestamp(),
@@ -152,14 +275,124 @@ def make_audit_event(event_type: str, request: dict[str, Any], *, outcome: str, 
         "requestId": request["requestId"],
         "agent": request["agent"],
         "tool": request["tool"],
-        "arguments": request["arguments"],
+        "arguments": redact_arguments(request["tool"], request["arguments"]),
+        "argumentsDigest": _sha256_json(request["arguments"]),
     }
     if "initiatingUser" in request:
         event["initiatingUser"] = request["initiatingUser"]
     if "governance" in request:
         event["governance"] = request["governance"]
+    bounded = ledger_context(ledger)
+    if bounded:
+        event["ledger"] = bounded
     if details:
         event["details"] = details
+    return event
+
+
+def parse_read_policy(value: str | dict[str, Any] | None) -> dict[str, Any]:
+    """Parse ``full`` (default), ``aggregate`` or ``sampled:<N>`` into a read-audit policy."""
+    if value is None or value == "":
+        return {"mode": "full", "maxRecordIds": DEFAULT_MAX_RECORD_IDS}
+    if isinstance(value, dict):
+        mode = value.get("mode", "full")
+        rate = value.get("sampleRate")
+        max_ids = value.get("maxRecordIds", DEFAULT_MAX_RECORD_IDS)
+    else:
+        mode, _, rate_text = value.strip().partition(":")
+        rate = int(rate_text) if rate_text.isdigit() else None
+        max_ids = DEFAULT_MAX_RECORD_IDS
+    if mode not in READ_AUDIT_MODES:
+        raise ValueError(f"read audit mode must be one of {', '.join(READ_AUDIT_MODES)}")
+    if not isinstance(max_ids, int) or isinstance(max_ids, bool) or max_ids < 1:
+        raise ValueError("read audit maxRecordIds must be a positive integer")
+    policy: dict[str, Any] = {"mode": mode, "maxRecordIds": max_ids}
+    if mode == "sampled":
+        if not isinstance(rate, int) or isinstance(rate, bool) or rate < 1:
+            raise ValueError("sampled read audit needs a positive sample rate, e.g. sampled:10")
+        policy["sampleRate"] = rate
+    return policy
+
+
+def _read_entries(sources: list[dict[str, Any]], policy: dict[str, Any]) -> tuple[list[dict[str, Any]], bool]:
+    """Digest read sources; returns (entries, restricted). Content never leaves this function."""
+    entries: list[dict[str, Any]] = []
+    restricted = False
+    for source in sources:
+        source_id = source.get("sourceId")
+        if not isinstance(source_id, str) or not source_id or len(source_id) > MAX_CONTEXT_VALUE:
+            raise ValueError("Governed action failed: read source needs a bounded sourceId")
+        classification = source.get("classification")
+        records = source.get("records", [])
+        if not isinstance(records, list):
+            raise ValueError("Governed action failed: read source records must be a list")
+        digested = []
+        for record in records:
+            record_id = record.get("id") if isinstance(record, dict) else None
+            if not isinstance(record_id, str) or not record_id or len(record_id) > MAX_CONTEXT_VALUE:
+                raise ValueError("Governed action failed: read record needs a bounded id")
+            digested.append({"id": record_id, "contentDigest": _sha256_json(record.get("content"))})
+        entry: dict[str, Any] = {"sourceId": source_id, "recordCount": len(digested), "recordsDigest": _sha256_json(digested)}
+        if classification is not None:
+            entry["classification"] = classification
+        if "content" in source:
+            entry["contentDigest"] = _sha256_json(source["content"])
+        is_restricted = classification == "restricted"
+        restricted = restricted or is_restricted
+        if policy["mode"] != "aggregate" or is_restricted:
+            limit = len(digested) if is_restricted else policy["maxRecordIds"]
+            entry["records"] = digested[:limit]
+            if len(digested) > limit:
+                entry["recordsTruncated"] = True
+        entries.append(entry)
+    return entries, restricted
+
+
+def make_read_event(
+    request: dict[str, Any],
+    sources: list[dict[str, Any]],
+    *,
+    policy: dict[str, Any] | None = None,
+    ledger: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    """Build a read event recording what was read (IDs and digests), or None when sampled out.
+
+    Restricted-classification sources are always recorded, with every record ID, whatever
+    the sampling or aggregation policy says.
+    """
+    policy = policy or parse_read_policy(None)
+    entries, restricted = _read_entries(sources, policy)
+    if policy["mode"] == "sampled" and not restricted:
+        if int(request["requestId"][:8], 16) % policy["sampleRate"] != 0:
+            return None
+    details = {"reads": entries, "readPolicy": policy["mode"]}
+    return make_audit_event("read", request, outcome="recorded", details=details, ledger=ledger)
+
+
+def record_knowledge_read(
+    desired_state: dict[str, Any],
+    request: dict[str, Any],
+    source_name: str,
+    documents: list[dict[str, Any]],
+    *,
+    audit_path: pathlib.Path | None,
+    policy: dict[str, Any] | None = None,
+    ledger: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    """Ledger a ``kb.search`` style read of one selected KnowledgeSource by document digest."""
+    selected = {
+        item.get("metadata", {}).get("name"): item
+        for item in desired_state.get("knowledge", [])
+        if isinstance(item, dict)
+    }
+    knowledge = selected.get(source_name)
+    if knowledge is None:
+        raise PermissionError(f"KnowledgeSource {source_name!r} is not selected by Agent {request['agent']!r}")
+    classification = knowledge.get("spec", {}).get("classification")
+    source = {"sourceId": f"knowledge:{source_name}", "classification": classification, "records": documents}
+    event = make_read_event(request, [source], policy=policy, ledger=ledger)
+    if event is not None:
+        append_audit_event(audit_path, event)
     return event
 
 
@@ -217,16 +450,18 @@ def append_audit_event(path: pathlib.Path | None, event: dict[str, Any]) -> None
 
 
 def verify_audit_chain(path: pathlib.Path) -> dict[str, Any]:
-    """Verify ordering and SHA-256 chaining for schema-v2 audit events.
+    """Verify ordering and SHA-256 chaining for chained (schema-v2 and v3) audit events.
 
-    Legacy schema-v1 records may precede v2 records. Their canonical digest becomes the
-    anchor for the first v2 record, so migration is detectable without rewriting history.
+    Legacy schema-v1 records may precede chained records. Their canonical digest becomes
+    the anchor for the first chained record, so migration is detectable without rewriting
+    history. Schema versions may only move forward along the chain.
     """
     if not path.exists():
         return {"valid": True, "events": 0, "headHash": None}
     previous_hash: str | None = None
     expected_sequence = 1
     events = 0
+    last_version = 1
     with path.open("r", encoding="utf-8") as handle:
         fcntl.flock(handle.fileno(), fcntl.LOCK_SH)
         try:
@@ -245,8 +480,11 @@ def verify_audit_chain(path: pathlib.Path) -> dict[str, Any]:
                     previous_hash = _sha256_json(event)
                     expected_sequence = events + 1
                     continue
-                if schema_version != AUDIT_SCHEMA_VERSION:
+                if schema_version not in CHAINED_SCHEMA_VERSIONS:
                     raise ValueError(f"Audit chain invalid at line {line_number}: unsupported schemaVersion {schema_version!r}")
+                if schema_version < last_version:
+                    raise ValueError(f"Audit chain invalid at line {line_number}: schemaVersion moved backwards")
+                last_version = schema_version
                 if event.get("sequence") != expected_sequence:
                     raise ValueError(f"Audit chain invalid at line {line_number}: sequence mismatch")
                 if event.get("previousEventHash") != previous_hash:
@@ -279,35 +517,70 @@ def execute_action(
     initiating_user: str | None = None,
     governance_context: dict[str, Any] | None = None,
     audit_path: pathlib.Path | None = None,
+    ledger: dict[str, Any] | None = None,
+    principal_access: str | None = None,
+    read_receipt: Callable[[Any], list[dict[str, Any]]] | None = None,
+    read_policy: dict[str, Any] | None = None,
+    external_object_ref: Callable[[Any], str | None] | None = None,
 ) -> dict[str, Any]:
-    authorization = authorize_action(desired_state, tool_name, arguments, initiating_user=initiating_user, governance_context=governance_context)
+    authorization = authorize_action(
+        desired_state,
+        tool_name,
+        arguments,
+        initiating_user=initiating_user,
+        governance_context=governance_context,
+        principal_access=principal_access,
+    )
     request = authorization["request"]
-    append_audit_event(audit_path, make_audit_event("authorization", request, outcome=authorization["decision"], details={"reason": authorization["reason"]}))
+    base_ledger: dict[str, Any] = {"policyRuleId": authorization["reason"], "policyVersion": POLICY_VERSION}
+    family = CAPABILITIES.family_of(tool_name)
+    if family is not None:
+        base_ledger["capability"] = family
+    base_ledger.update(ledger or {})
+    base_ledger = ledger_context(base_ledger)
+
+    def audit(event_type: str, outcome: str, details: dict[str, Any] | None = None, extra: dict[str, Any] | None = None) -> None:
+        event_ledger = {**base_ledger, **(extra or {})}
+        append_audit_event(audit_path, make_audit_event(event_type, request, outcome=outcome, details=details, ledger=event_ledger))
+
+    audit("authorization", authorization["decision"], {"reason": authorization["reason"]})
 
     if authorization["decision"] == "deny":
+        if authorization["reason"] == "principal-not-authorized":
+            raise PermissionError(f"Tool {tool_name!r} requires a mapped, verified principal")
         raise PermissionError(f"Tool {tool_name!r} is not selected by Agent {request['agent']!r}")
 
     if authorization["decision"] == "require-approval":
         if approval is None:
-            append_audit_event(audit_path, make_audit_event("approval", request, outcome="pending"))
+            audit("approval", "pending")
             return {"status": "pending-approval", "request": request}
         if approval.get("requestId") != request["requestId"]:
-            append_audit_event(audit_path, make_audit_event("approval", request, outcome="rejected", details={"reason": "request-id-mismatch"}))
+            audit("approval", "rejected", {"reason": "request-id-mismatch"})
             raise PermissionError("Approval does not match the exact material action request")
         if approval.get("approved") is not True:
-            append_audit_event(audit_path, make_audit_event("approval", request, outcome="rejected", details={"reason": "not-approved"}))
+            audit("approval", "rejected", {"reason": "not-approved"})
             raise PermissionError("Action approval was not granted")
         approver = approval.get("approver")
         if not isinstance(approver, str) or not approver:
             raise ValueError("Approved action must record a non-empty approver")
-        append_audit_event(audit_path, make_audit_event("approval", request, outcome="approved", details={"approver": approver}))
+        audit("approval", "approved", {"approver": approver})
 
     try:
         result = executor(arguments)
     except Exception as exc:
-        append_audit_event(audit_path, make_audit_event("execution", request, outcome="failed", details={"errorType": type(exc).__name__}))
+        audit("execution", "failed", {"errorType": type(exc).__name__})
         raise
-    append_audit_event(audit_path, make_audit_event("execution", request, outcome="succeeded", details=_result_receipt(result)))
+    extra: dict[str, Any] = {}
+    if external_object_ref is not None:
+        reference = external_object_ref(result)
+        if reference:
+            extra["externalObjectRef"] = reference
+    audit("execution", "succeeded", _result_receipt(result), extra)
+    if _tool_risk(desired_state, tool_name) == "read":
+        sources = read_receipt(result) if read_receipt is not None else [{"sourceId": f"tool:{tool_name}", "content": result}]
+        event = make_read_event(request, sources, policy=read_policy, ledger=base_ledger)
+        if event is not None:
+            append_audit_event(audit_path, event)
     return {"status": "executed", "request": request, "result": result}
 
 

@@ -9,6 +9,6 @@
     "apiVersion": {"const": "modelgarden.ai/v1"},
     "kind": {"const": "Tool"},
     "metadata": {"type": "object", "additionalProperties": false, "required": ["name", "owner"], "properties": {"name": {"type": "string"}, "owner": {"type": "string"}, "description": {"type": "string"}}},
-    "spec": {"type": "object", "additionalProperties": false, "required": ["type", "risk"], "properties": {"type": {"enum": ["http", "mcp", "internal"]}, "risk": {"enum": ["read", "write", "privileged"]}, "endpoint": {"type": "string"}, "approvalRequired": {"type": "boolean"}}}
+    "spec": {"type": "object", "additionalProperties": false, "required": ["type", "risk"], "properties": {"type": {"enum": ["http", "mcp", "internal"]}, "risk": {"enum": ["read", "write", "privileged", "external-communication"]}, "capability": {"type": "string", "pattern": "^[a-z]+$"}, "endpoint": {"type": "string"}, "approvalRequired": {"type": "boolean"}}}
   }
 }

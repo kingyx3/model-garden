@@ -8,6 +8,8 @@ metadata:
 spec:
   instructions:
     file: instructions.md
+  optionalCapabilities:
+    - tickets
   inputs:
     - caller-request
   evaluationSuite: evals/

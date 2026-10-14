@@ -405,6 +405,42 @@ def runtime_approval(
     return 0
 
 
+def runtime_connection(
+    project_name: str,
+    command: str,
+    family: str | None = None,
+    health: str | None = None,
+    actor: str | None = None,
+    reason: str | None = None,
+) -> int:
+    """Show or set live connection health; the capability manifest reflects it immediately."""
+    if command not in {"list", "set"}:
+        raise ValueError("runtime connection command must be list or set")
+    container = _governed_tool_container(project_name)
+    inner = [
+        "python",
+        "/opt/model-garden-platform/scripts/runtime-connection.py",
+        "/opt/data/.modelgarden",
+        command,
+    ]
+    if command == "set":
+        if not isinstance(family, str) or not re.fullmatch(r"[a-z]+", family):
+            raise ValueError("connection family must be a lowercase capability family, e.g. calendar")
+        if health not in {"healthy", "degraded", "failed", "revoked"}:
+            raise ValueError("connection health must be healthy, degraded, failed or revoked")
+        if not isinstance(actor, str) or not actor.strip():
+            raise ValueError("actor must be non-empty")
+        inner.extend([family, health, "--actor", actor.strip()])
+        if reason:
+            inner.extend(["--reason", reason])
+    result = _run(["docker", "exec", container, *inner])
+    if result.returncode != 0:
+        raise ValueError(result.stderr.strip() or result.stdout.strip() or "runtime connection command failed")
+    if result.stdout:
+        print(result.stdout.strip())
+    return 0
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
@@ -445,8 +481,24 @@ def main() -> int:
     reject.add_argument("--project-name", required=True)
     reject.add_argument("--approver", required=True)
 
+    connections = sub.add_parser("connections", help="show live connector health on a client runtime")
+    connections.add_argument("--project-name", required=True)
+
+    connection = sub.add_parser("connection", help="mark one connector healthy, degraded, failed or revoked")
+    connection.add_argument("family", help="capability family, e.g. calendar")
+    connection.add_argument("health", choices=("healthy", "degraded", "failed", "revoked"))
+    connection.add_argument("--project-name", required=True)
+    connection.add_argument("--actor", required=True)
+    connection.add_argument("--reason")
+
     args = parser.parse_args()
     try:
+        if args.command == "connections":
+            return runtime_connection(args.project_name, "list")
+        if args.command == "connection":
+            return runtime_connection(
+                args.project_name, "set", family=args.family, health=args.health, actor=args.actor, reason=args.reason
+            )
         if args.command == "init":
             output = args.output or pathlib.Path(f"{args.client_slug}-ai-workspace")
             initialize(output, args.client_slug, args.agent, args.role_title, args.github_repo)

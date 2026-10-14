@@ -8,10 +8,13 @@ service, never into the Hermes/model process.
 MVP supported Tools:
 - calendar.availability: provider-neutral Google/Microsoft free/busy read
 - calendar.book: provider-neutral event creation, with exact-action approval when required
+- platform.capabilities: read-only, non-secret manifest of what this environment can and
+  cannot do, with live connection health; it is a platform built-in, not a business Tool
 """
 from __future__ import annotations
 
 import argparse
+import hashlib
 import importlib.metadata
 import importlib.util
 import json
@@ -39,6 +42,9 @@ def _load_module(name: str, path: pathlib.Path):
 GOVERN = _load_module("model_garden_govern_action", ROOT / "scripts" / "govern-action.py")
 GOOGLE_CALENDAR = _load_module("model_garden_google_calendar", ROOT / "platform" / "connectors" / "google_calendar.py")
 MICROSOFT_CALENDAR = _load_module("model_garden_microsoft_calendar", ROOT / "platform" / "connectors" / "microsoft_calendar.py")
+CAPABILITIES = _load_module("model_garden_runtime_capabilities", ROOT / "platform" / "core" / "capabilities.py")
+TEXT_CHANNEL = _load_module("model_garden_text_channel", ROOT / "platform" / "channels" / "text_channel.py")
+AUTH_FAILURE = re.compile(r"\((401|403)\)")
 
 
 def _load_json_object(path: pathlib.Path, label: str) -> dict[str, Any]:
@@ -67,6 +73,14 @@ def _hermes_version() -> str | None:
     return None
 
 
+def _platform_release() -> str | None:
+    try:
+        value = (ROOT / "VERSION").read_text(encoding="utf-8").strip()
+    except OSError:
+        return None
+    return value or None
+
+
 def _atomic_json(path: pathlib.Path, payload: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_suffix(path.suffix + ".tmp")
@@ -91,14 +105,22 @@ class GovernedToolRuntime:
         *,
         environ: Mapping[str, str] | None = None,
         calendar_transport=None,
+        principal_resolver=None,
     ) -> None:
         self.desired_state = _load_json_object(desired_state_path, "compiled desired state")
         if self.desired_state.get("schemaVersion") != 1:
             raise ValueError("compiled desired state schemaVersion must be 1")
         self.audit_path = audit_path
         self.approval_root = approval_root
+        self.governance_root = audit_path.parent
         self.environ = dict(os.environ if environ is None else environ)
         self.calendar_transport = calendar_transport
+        # A channel gateway supplies the verified principal for the current request.
+        # Without one, the static runtime workload identity is used, as before.
+        self.principal_resolver = principal_resolver
+        self.read_policy = GOVERN.parse_read_policy(self.environ.get("MODEL_GARDEN_READ_AUDIT"))
+        digest = hashlib.sha256(GOVERN._canonical_json(self.desired_state).encode("utf-8")).hexdigest()
+        self.agent_version = f"sha256:{digest[:16]}"
 
     def _identity(self) -> str:
         identity = self.environ.get("MODEL_GARDEN_INITIATING_IDENTITY", "runtime:hermes").strip()
@@ -127,8 +149,44 @@ class GovernedToolRuntime:
                     context["model"] = model
         return context
 
+    def _calendar_provider(self) -> str:
+        return self.environ.get("MODEL_GARDEN_CALENDAR_PROVIDER", "google")
+
+    def _ledger(self, *, provider: str | None, justification: str | None) -> dict[str, Any]:
+        ledger: dict[str, Any] = {"agentVersion": self.agent_version}
+        release = _platform_release()
+        if release:
+            ledger["platformRelease"] = release
+        revision = self.environ.get("MODEL_GARDEN_WORKSPACE_REVISION", "").strip()
+        if revision:
+            ledger["workspaceRevision"] = revision
+        if provider:
+            ledger["provider"] = provider
+            ledger["tier"] = 1
+        if justification and justification.strip():
+            ledger["justification"] = justification
+        return ledger
+
+    def _record_health(self, family: str, health: str, reason: str | None = None) -> None:
+        current = CAPABILITIES.read_connection_health(self.governance_root).get(family, {})
+        if current.get("health") == health and current.get("reason") == reason:
+            return
+        CAPABILITIES.record_connection_health(self.governance_root, family, health, actor="runtime:governed-tools", reason=reason)
+
+    def capabilities(self) -> dict[str, Any]:
+        """Return the non-secret capability manifest with live connection health applied."""
+        path_text = self.environ.get("MODEL_GARDEN_CAPABILITY_MANIFEST", "").strip()
+        path = pathlib.Path(path_text) if path_text else None
+        if path is not None and path.is_file():
+            manifest = _load_json_object(path, "capability manifest")
+        else:
+            selected = {tool.get("metadata", {}).get("name") for tool in self.desired_state.get("tools", [])}
+            connectors = {"calendar": {"provider": self._calendar_provider()}} if selected & {"calendar.availability", "calendar.book"} else {}
+            manifest = CAPABILITIES.build_manifest(self.desired_state, {"connectors": connectors})
+        return CAPABILITIES.apply_connection_health(manifest, CAPABILITIES.read_connection_health(self.governance_root))
+
     def _calendar(self):
-        provider = self.environ.get("MODEL_GARDEN_CALENDAR_PROVIDER", "google")
+        provider = self._calendar_provider()
         if provider == "google":
             token = self.environ.get("MODEL_GARDEN_GOOGLE_CALENDAR_TOKEN")
             if not token:
@@ -183,13 +241,30 @@ class GovernedToolRuntime:
         if path.exists():
             path.unlink()
 
-    def _execute(self, tool_name: str, arguments: dict[str, Any], executor) -> dict[str, Any]:
+    def _execute(
+        self,
+        tool_name: str,
+        arguments: dict[str, Any],
+        executor,
+        *,
+        family: str | None = None,
+        provider: str | None = None,
+        justification: str | None = None,
+        read_receipt=None,
+        external_object_ref=None,
+    ) -> dict[str, Any]:
         governance_context = self._governance_context()
+        identity = self._identity()
+        principal_access = None
+        principal = self.principal_resolver() if self.principal_resolver is not None else None
+        if principal is not None:
+            identity, principal_context, principal_access = TEXT_CHANNEL.governance_for_principal(principal)
+            governance_context.update(principal_context)
         request = GOVERN.build_action_request(
             self.desired_state,
             tool_name,
             arguments,
-            initiating_user=self._identity(),
+            initiating_user=identity,
             governance_context=governance_context,
         )
         approval, claim = self._take_approval(request["requestId"])
@@ -202,23 +277,45 @@ class GovernedToolRuntime:
                 arguments,
                 executor,
                 approval=approval,
-                initiating_user=self._identity(),
+                initiating_user=identity,
                 governance_context=governance_context,
                 audit_path=self.audit_path,
+                ledger=self._ledger(provider=provider, justification=justification),
+                principal_access=principal_access,
+                read_receipt=read_receipt,
+                read_policy=self.read_policy,
+                external_object_ref=external_object_ref,
             )
+        except RuntimeError as exc:
+            if family is not None:
+                if AUTH_FAILURE.search(str(exc)):
+                    self._record_health(family, "failed", "provider-authorization")
+                else:
+                    self._record_health(family, "degraded", "provider-error")
+            raise
         finally:
             self._discard_claim(claim)
         if result.get("status") == "pending-approval":
             self._pending(result["request"])
         else:
             self._clear_pending(request["requestId"])
+            if family is not None:
+                self._record_health(family, "healthy")
         return result
 
-    def calendar_availability(self, *, start: str, end: str, timezone: str | None = None) -> dict[str, Any]:
+    def calendar_availability(
+        self,
+        *,
+        start: str,
+        end: str,
+        timezone: str | None = None,
+        justification: str | None = None,
+    ) -> dict[str, Any]:
         arguments: dict[str, Any] = {"start": start, "end": end}
         if timezone is not None:
             arguments["timezone"] = timezone
         client = self._calendar()
+        provider = self._calendar_provider()
         return self._execute(
             "calendar.availability",
             arguments,
@@ -227,6 +324,10 @@ class GovernedToolRuntime:
                 end=exact["end"],
                 timezone=exact.get("timezone"),
             ),
+            family="calendar",
+            provider=provider,
+            justification=justification,
+            read_receipt=lambda result: [{"sourceId": f"calendar:{provider}", "content": result}],
         )
 
     def calendar_book(
@@ -238,6 +339,7 @@ class GovernedToolRuntime:
         timezone: str | None = None,
         description: str | None = None,
         attendees: list[str] | None = None,
+        justification: str | None = None,
     ) -> dict[str, Any]:
         arguments: dict[str, Any] = {"start": start, "end": end, "summary": summary}
         if timezone is not None:
@@ -247,17 +349,44 @@ class GovernedToolRuntime:
         if attendees is not None:
             arguments["attendees"] = attendees
         client = self._calendar()
-        return self._execute("calendar.book", arguments, client.booking_executor())
+        provider = self._calendar_provider()
+
+        def event_reference(result: Any) -> str | None:
+            event_id = result.get("eventId") if isinstance(result, dict) else None
+            return f"{provider}-calendar:event/{event_id}" if isinstance(event_id, str) and event_id else None
+
+        return self._execute(
+            "calendar.book",
+            arguments,
+            client.booking_executor(),
+            family="calendar",
+            provider=provider,
+            justification=justification,
+            external_object_ref=event_reference,
+        )
 
 
 def build_server(runtime: GovernedToolRuntime) -> MCPServer:
     """Build the MCP 2 server; transport settings are supplied only when it is run."""
     mcp = MCPServer("Model Garden Governed Tools")
 
+    @mcp.tool(name="platform_capabilities")
+    def platform_capabilities() -> dict[str, Any]:
+        """List what this coworker can and cannot do here: capability, provider, tier, health and fallback."""
+        return runtime.capabilities()
+
     @mcp.tool(name="calendar_availability")
-    def calendar_availability(start: str, end: str, timezone: str | None = None) -> dict[str, Any]:
-        """Check an approved calendar for free/busy state in an exact RFC3339 interval."""
-        return runtime.calendar_availability(start=start, end=end, timezone=timezone)
+    def calendar_availability(
+        start: str,
+        end: str,
+        timezone: str | None = None,
+        justification: str | None = None,
+    ) -> dict[str, Any]:
+        """Check an approved calendar for free/busy state in an exact RFC3339 interval.
+
+        justification: one short sentence on why this read is needed (recorded in the audit ledger).
+        """
+        return runtime.calendar_availability(start=start, end=end, timezone=timezone, justification=justification)
 
     @mcp.tool(name="calendar_book")
     def calendar_book(
@@ -267,8 +396,12 @@ def build_server(runtime: GovernedToolRuntime) -> MCPServer:
         timezone: str | None = None,
         description: str | None = None,
         attendees: list[str] | None = None,
+        justification: str | None = None,
     ) -> dict[str, Any]:
-        """Request one governed calendar booking; approval-required actions return pending first."""
+        """Request one governed calendar booking; approval-required actions return pending first.
+
+        justification: one short sentence on why this booking is being made (recorded in the audit ledger).
+        """
         return runtime.calendar_book(
             start=start,
             end=end,
@@ -276,6 +409,7 @@ def build_server(runtime: GovernedToolRuntime) -> MCPServer:
             timezone=timezone,
             description=description,
             attendees=attendees,
+            justification=justification,
         )
 
     return mcp

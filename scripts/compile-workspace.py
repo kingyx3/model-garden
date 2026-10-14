@@ -12,6 +12,7 @@ provisioning remains the responsibility of an adapter (Hermes is the reference r
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import json
 import pathlib
 import sys
@@ -31,6 +32,18 @@ SCHEMAS = {
     "Policy": "policy.schema.json",
 }
 REFERENCE_FIELDS = {"skills": "Skill", "tools": "Tool", "knowledge": "KnowledgeSource"}
+
+
+def _load_capabilities():
+    path = ROOT / "platform" / "core" / "capabilities.py"
+    module_spec = importlib.util.spec_from_file_location("model_garden_capabilities", path)
+    module = importlib.util.module_from_spec(module_spec)
+    assert module_spec.loader is not None
+    module_spec.loader.exec_module(module)
+    return module
+
+
+CAPABILITIES = _load_capabilities()
 
 
 def load_validators() -> dict[str, Draft202012Validator]:
@@ -87,6 +100,11 @@ def load_workspace(workspace: pathlib.Path, library_roots: tuple[pathlib.Path, .
                 errors.append(f"{path}:{location}: {error.message}")
             if schema_errors:
                 continue
+            if kind == "Tool":
+                contract_errors = CAPABILITIES.tool_contract_errors(document)
+                errors.extend(f"{path}: {error}" for error in contract_errors)
+                if contract_errors:
+                    continue
             name = document["metadata"]["name"]
             key = (kind, name)
             if key in seen_in_root:
@@ -134,7 +152,7 @@ def materialize_instruction_file(workspace, resource_kind, resource_name, resour
     return {"source": source, "content": instruction_path.read_text()}, errors
 
 
-def resolve_agent(workspace, agent, resources, source_paths, source_roots):
+def resolve_agent(workspace, agent, resources, source_paths, source_roots, environment_binding=None):
     name = agent["metadata"]["name"]
     spec = agent["spec"]
     errors: list[str] = []
@@ -168,6 +186,16 @@ def resolve_agent(workspace, agent, resources, source_paths, source_roots):
         for tool_name in skill.get("spec", {}).get("allowedTools", []):
             if tool_name not in selected_tools:
                 errors.append(f"Skill {skill_name!r} requires Tool {tool_name!r}, but Agent {name!r} did not select it")
+    declarations = CAPABILITIES.collect_declarations(agent, resolved["skills"])
+    errors.extend(CAPABILITIES.declaration_errors(declarations, f"Agent {name!r} or one of its Skills"))
+    capabilities: dict[str, Any] | None = None
+    if not errors and (declarations["required"] or declarations["optional"] or environment_binding is not None):
+        capabilities = dict(declarations)
+        if environment_binding is not None:
+            try:
+                capabilities.update(CAPABILITIES.resolve(declarations, environment_binding, agent_name=name))
+            except ValueError as exc:
+                errors.append(str(exc))
     if errors:
         raise ValueError("Workspace compilation failed:\n - " + "\n - ".join(errors))
     agent_path = source_paths[("Agent", name)]
@@ -181,7 +209,7 @@ def resolve_agent(workspace, agent, resources, source_paths, source_roots):
     client = _workspace_client(workspace)
     if client is not None:
         source["client"] = client
-    return {
+    compiled = {
         "schemaVersion": 1,
         "source": source,
         "agent": agent,
@@ -192,9 +220,23 @@ def resolve_agent(workspace, agent, resources, source_paths, source_roots):
         "tools": resolved["tools"],
         "knowledge": resolved["knowledge"],
     }
+    if capabilities is not None:
+        compiled["capabilities"] = capabilities
+    return compiled
 
 
-def compile_workspace(workspace: pathlib.Path, agent_name: str | None = None, library_roots: tuple[pathlib.Path, ...] = ()) -> list[dict[str, Any]]:
+def compile_workspace(
+    workspace: pathlib.Path,
+    agent_name: str | None = None,
+    library_roots: tuple[pathlib.Path, ...] = (),
+    environment_binding: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
+    """Compile Agents; with an EnvironmentBinding, also resolve declared capabilities.
+
+    A required capability with no provider in that environment fails closed. An
+    unbound optional capability compiles and is reported as degraded with its
+    fallback tier.
+    """
     resources, source_paths, source_roots = load_workspace(workspace, library_roots)
     agents = resources["Agent"]
     if agent_name is not None:
@@ -204,7 +246,21 @@ def compile_workspace(workspace: pathlib.Path, agent_name: str | None = None, li
         selected = [agent]
     else:
         selected = [agents[name] for name in sorted(agents)]
-    return [resolve_agent(workspace, agent, resources, source_paths, source_roots) for agent in selected]
+    return [
+        resolve_agent(workspace, agent, resources, source_paths, source_roots, environment_binding)
+        for agent in selected
+    ]
+
+
+def load_environment_binding(path: pathlib.Path) -> dict[str, Any]:
+    """Load a rendered EnvironmentBinding JSON or a client environments/<env>.yaml file."""
+    try:
+        document = yaml.safe_load(path.read_text(encoding="utf-8"))
+    except yaml.YAMLError as exc:
+        raise ValueError(f"Workspace compilation failed: cannot parse environment binding {path}") from exc
+    if not isinstance(document, dict):
+        raise ValueError(f"Workspace compilation failed: environment binding {path} must be a mapping")
+    return document
 
 
 def main() -> int:
@@ -213,12 +269,17 @@ def main() -> int:
     parser.add_argument("--agent", help="Compile only the named Agent")
     parser.add_argument("--library", action="append", default=[], help="curated resource root; may be repeated and is overridden by client-local resources")
     parser.add_argument("--output", help="Write JSON to this path instead of stdout")
+    parser.add_argument(
+        "--environment-binding",
+        help="EnvironmentBinding JSON or environment YAML; resolves declared capabilities and fails closed on unbound required ones",
+    )
     args = parser.parse_args()
     workspace = pathlib.Path(args.workspace)
     libraries = tuple(pathlib.Path(path) for path in args.library)
     try:
-        compiled = compile_workspace(workspace, args.agent, libraries)
-    except ValueError as exc:
+        binding = load_environment_binding(pathlib.Path(args.environment_binding)) if args.environment_binding else None
+        compiled = compile_workspace(workspace, args.agent, libraries, binding)
+    except (OSError, ValueError) as exc:
         print(str(exc), file=sys.stderr)
         return 1
     payload: Any = compiled[0] if args.agent else {"schemaVersion": 1, "agents": compiled}

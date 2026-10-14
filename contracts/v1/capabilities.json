@@ -1,0 +1,233 @@
+{
+  "apiVersion": "modelgarden.ai/v1",
+  "kind": "CapabilityCatalog",
+  "catalogVersion": "1.0.0",
+  "tiers": {
+    "0": "built-in",
+    "1": "native-connector",
+    "2": "governed-mcp",
+    "3": "long-tail-integration",
+    "4": "human-handoff"
+  },
+  "families": {
+    "calendar": {
+      "description": "Free/busy reads and event creation on an approved calendar.",
+      "fallbackTier": 4,
+      "tools": {
+        "calendar.availability": {
+          "risk": "read",
+          "ledgerFields": ["start", "end", "timezone"],
+          "arguments": {
+            "type": "object",
+            "required": ["start", "end"],
+            "properties": {
+              "start": {"type": "string", "description": "RFC3339 interval start with offset"},
+              "end": {"type": "string", "description": "RFC3339 interval end with offset"},
+              "timezone": {"type": "string"}
+            }
+          },
+          "result": {
+            "type": "object",
+            "required": ["available"],
+            "properties": {"available": {"type": "boolean"}, "busy": {"type": "array"}}
+          }
+        },
+        "calendar.book": {
+          "risk": "write",
+          "ledgerFields": ["start", "end", "timezone"],
+          "arguments": {
+            "type": "object",
+            "required": ["start", "end"],
+            "properties": {
+              "start": {"type": "string"},
+              "end": {"type": "string"},
+              "summary": {"type": "string"},
+              "timezone": {"type": "string"},
+              "description": {"type": "string"},
+              "attendees": {"type": "array", "items": {"type": "string"}}
+            }
+          },
+          "result": {
+            "type": "object",
+            "required": ["eventId"],
+            "properties": {"eventId": {"type": "string"}, "status": {"type": "string"}}
+          }
+        }
+      }
+    },
+    "chat": {
+      "description": "Read and post messages in approved team chat conversations.",
+      "fallbackTier": 4,
+      "tools": {
+        "chat.read": {
+          "risk": "read",
+          "ledgerFields": ["conversationId"],
+          "arguments": {"type": "object", "required": ["conversationId"], "properties": {"conversationId": {"type": "string"}, "limit": {"type": "integer"}}},
+          "result": {"type": "object", "properties": {"messages": {"type": "array"}}}
+        },
+        "chat.post": {
+          "risk": "external-communication",
+          "ledgerFields": ["conversationId"],
+          "arguments": {"type": "object", "required": ["conversationId", "text"], "properties": {"conversationId": {"type": "string"}, "text": {"type": "string"}}},
+          "result": {"type": "object", "required": ["messageId"], "properties": {"messageId": {"type": "string"}}}
+        }
+      }
+    },
+    "mail": {
+      "description": "Search, read, draft and send email from an approved mailbox.",
+      "fallbackTier": 4,
+      "tools": {
+        "mail.search": {
+          "risk": "read",
+          "ledgerFields": [],
+          "arguments": {"type": "object", "required": ["query"], "properties": {"query": {"type": "string"}, "limit": {"type": "integer"}}},
+          "result": {"type": "object", "properties": {"messages": {"type": "array"}}}
+        },
+        "mail.read": {
+          "risk": "read",
+          "ledgerFields": ["messageId"],
+          "arguments": {"type": "object", "required": ["messageId"], "properties": {"messageId": {"type": "string"}}},
+          "result": {"type": "object", "properties": {"message": {"type": "object"}}}
+        },
+        "mail.draft": {
+          "risk": "write",
+          "ledgerFields": [],
+          "arguments": {"type": "object", "required": ["to", "subject", "body"], "properties": {"to": {"type": "array", "items": {"type": "string"}}, "subject": {"type": "string"}, "body": {"type": "string"}}},
+          "result": {"type": "object", "required": ["draftId"], "properties": {"draftId": {"type": "string"}}}
+        },
+        "mail.send": {
+          "risk": "external-communication",
+          "ledgerFields": ["draftId"],
+          "arguments": {"type": "object", "required": ["draftId"], "properties": {"draftId": {"type": "string"}}},
+          "result": {"type": "object", "required": ["messageId"], "properties": {"messageId": {"type": "string"}}}
+        }
+      }
+    },
+    "files": {
+      "description": "Find, read, write and share files in approved storage.",
+      "fallbackTier": 4,
+      "tools": {
+        "files.search": {
+          "risk": "read",
+          "ledgerFields": [],
+          "arguments": {"type": "object", "required": ["query"], "properties": {"query": {"type": "string"}}},
+          "result": {"type": "object", "properties": {"files": {"type": "array"}}}
+        },
+        "files.read": {
+          "risk": "read",
+          "ledgerFields": ["fileId"],
+          "arguments": {"type": "object", "required": ["fileId"], "properties": {"fileId": {"type": "string"}}},
+          "result": {"type": "object", "properties": {"file": {"type": "object"}}}
+        },
+        "files.write": {
+          "risk": "write",
+          "ledgerFields": ["folderId", "name"],
+          "arguments": {"type": "object", "required": ["name", "content"], "properties": {"folderId": {"type": "string"}, "name": {"type": "string"}, "content": {"type": "string"}}},
+          "result": {"type": "object", "required": ["fileId"], "properties": {"fileId": {"type": "string"}}}
+        },
+        "files.share": {
+          "risk": "privileged",
+          "ledgerFields": ["fileId", "role"],
+          "arguments": {"type": "object", "required": ["fileId", "principal", "role"], "properties": {"fileId": {"type": "string"}, "principal": {"type": "string"}, "role": {"enum": ["reader", "commenter", "writer"]}}},
+          "result": {"type": "object", "properties": {"permissionId": {"type": "string"}}}
+        }
+      }
+    },
+    "docs": {
+      "description": "Read, create and update documents.",
+      "fallbackTier": 4,
+      "tools": {
+        "docs.read": {
+          "risk": "read",
+          "ledgerFields": ["documentId"],
+          "arguments": {"type": "object", "required": ["documentId"], "properties": {"documentId": {"type": "string"}}},
+          "result": {"type": "object", "properties": {"document": {"type": "object"}}}
+        },
+        "docs.create": {
+          "risk": "write",
+          "ledgerFields": ["title"],
+          "arguments": {"type": "object", "required": ["title", "content"], "properties": {"title": {"type": "string"}, "content": {"type": "string"}}},
+          "result": {"type": "object", "required": ["documentId"], "properties": {"documentId": {"type": "string"}}}
+        },
+        "docs.update": {
+          "risk": "write",
+          "ledgerFields": ["documentId"],
+          "arguments": {"type": "object", "required": ["documentId", "content"], "properties": {"documentId": {"type": "string"}, "content": {"type": "string"}}},
+          "result": {"type": "object", "properties": {"revisionId": {"type": "string"}}}
+        }
+      }
+    },
+    "tickets": {
+      "description": "Search, create and update work items.",
+      "fallbackTier": 4,
+      "tools": {
+        "tickets.search": {
+          "risk": "read",
+          "ledgerFields": [],
+          "arguments": {"type": "object", "required": ["query"], "properties": {"query": {"type": "string"}}},
+          "result": {"type": "object", "properties": {"tickets": {"type": "array"}}}
+        },
+        "tickets.create": {
+          "risk": "write",
+          "ledgerFields": ["project"],
+          "arguments": {"type": "object", "required": ["project", "title"], "properties": {"project": {"type": "string"}, "title": {"type": "string"}, "description": {"type": "string"}}},
+          "result": {"type": "object", "required": ["ticketId"], "properties": {"ticketId": {"type": "string"}}}
+        },
+        "tickets.update": {
+          "risk": "write",
+          "ledgerFields": ["ticketId", "status"],
+          "arguments": {"type": "object", "required": ["ticketId"], "properties": {"ticketId": {"type": "string"}, "status": {"type": "string"}, "comment": {"type": "string"}}},
+          "result": {"type": "object", "properties": {"ticketId": {"type": "string"}}}
+        }
+      }
+    },
+    "crm": {
+      "description": "Read and update approved CRM accounts, contacts and opportunities.",
+      "fallbackTier": 4,
+      "tools": {
+        "crm.read": {
+          "risk": "read",
+          "ledgerFields": ["objectType", "objectId"],
+          "arguments": {"type": "object", "properties": {"objectType": {"type": "string"}, "objectId": {"type": "string"}, "query": {"type": "string"}}},
+          "result": {"type": "object", "properties": {"records": {"type": "array"}}}
+        },
+        "crm.update": {
+          "risk": "write",
+          "ledgerFields": ["objectType", "objectId"],
+          "arguments": {"type": "object", "required": ["objectType", "objectId", "fields"], "properties": {"objectType": {"type": "string"}, "objectId": {"type": "string"}, "fields": {"type": "object"}}},
+          "result": {"type": "object", "properties": {"objectId": {"type": "string"}}}
+        }
+      }
+    },
+    "code": {
+      "description": "Read repositories and propose reviewed changes.",
+      "fallbackTier": 4,
+      "tools": {
+        "code.read": {
+          "risk": "read",
+          "ledgerFields": ["repository", "path", "ref"],
+          "arguments": {"type": "object", "required": ["repository", "path"], "properties": {"repository": {"type": "string"}, "path": {"type": "string"}, "ref": {"type": "string"}}},
+          "result": {"type": "object", "properties": {"content": {"type": "string"}}}
+        },
+        "code.propose-change": {
+          "risk": "write",
+          "ledgerFields": ["repository", "baseRef"],
+          "arguments": {"type": "object", "required": ["repository", "baseRef", "title", "changes"], "properties": {"repository": {"type": "string"}, "baseRef": {"type": "string"}, "title": {"type": "string"}, "changes": {"type": "array"}}},
+          "result": {"type": "object", "required": ["changeId"], "properties": {"changeId": {"type": "string"}}}
+        }
+      }
+    },
+    "kb": {
+      "description": "Search approved knowledge sources.",
+      "fallbackTier": 4,
+      "tools": {
+        "kb.search": {
+          "risk": "read",
+          "ledgerFields": ["source"],
+          "arguments": {"type": "object", "required": ["query"], "properties": {"query": {"type": "string"}, "source": {"type": "string"}, "limit": {"type": "integer"}}},
+          "result": {"type": "object", "properties": {"documents": {"type": "array"}}}
+        }
+      }
+    }
+  }
+}

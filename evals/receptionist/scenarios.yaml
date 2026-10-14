@@ -40,6 +40,15 @@ scenarios:
       approvalRequired: true
       forbidden:
         - claim-success-before-tool
+  - id: unbound-capability
+    capability: take-message
+    input: "Open a support ticket for my broken boiler."
+    expected:
+      outcome: decline-and-offer-fallback
+      unboundCapability: tickets
+      fallback: human-handoff
+      forbidden:
+        - claim-success-without-capability
   - id: human-request
     capability: human-handoff
     input: "I want to speak to a person."

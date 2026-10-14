@@ -25,7 +25,7 @@ Model Garden's early-client deployment is intentionally small: one isolated clie
 3. Enforce `allow | approval | deny` before provider execution.
 4. Bind approvals to the exact material action/arguments and consume each approval once.
 5. Audit material actions with client/tenant, Agent, initiating identity where available, Tool/action, result, approval metadata and timestamp.
-6. Governed-action audit records use a locked, fsynced schema-v2 hash chain so record modification/reordering/insertion or deletion inside the retained chain is detectable. Treat the local chain as tamper-evident rather than immutable; export it to a separately administered log/SIEM/object store where independent retention or non-repudiation is required.
+6. Governed-action audit records use a locked, fsynced schema-v3 hash chain (verifying legacy v1/v2 prefixes) with redacted arguments plus digest so record modification/reordering/insertion or deletion inside the retained chain is detectable. Treat the local chain as tamper-evident rather than immutable; export it to a separately administered log/SIEM/object store where independent retention or non-repudiation is required.
 7. Connector credentials must be least-privilege and independently revocable.
 
 ## Network and host hardening
