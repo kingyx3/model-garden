@@ -248,6 +248,8 @@ def skill_readiness(
     skills: list[dict[str, Any]],
     binding: Mapping[str, Any],
     catalog: dict[str, Any] | None = None,
+    *,
+    disabled_skills: set[str] | None = None,
 ) -> list[dict[str, Any]]:
     """Report, per selected Skill, whether its capability dependencies are met here.
 
@@ -258,6 +260,7 @@ def skill_readiness(
     never token references, calendar IDs, scopes or owners.
     """
     providers = bound_providers(binding, catalog)
+    disabled_skills = disabled_skills or set()
     owners: list[tuple[str, dict[str, Any]]] = []
     agent_spec = agent.get("spec", {})
     if agent_spec.get("requiredCapabilities") or agent_spec.get("optionalCapabilities"):
@@ -284,10 +287,13 @@ def skill_readiness(
                 else:
                     dependency.update(status="degraded", fallbackTier=families(catalog)[family]["fallbackTier"])
                 dependencies.append(dependency)
+        ready = all(item["status"] != "missing" for item in dependencies)
         report.append({
             "name": name,
             "kind": kind,
-            "ready": all(item["status"] != "missing" for item in dependencies),
+            "enabled": kind != "Skill" or name not in disabled_skills,
+            "ready": ready,
+            "canEnable": ready,
             "dependencies": dependencies,
         })
     return report
@@ -408,6 +414,7 @@ def read_connection_health(root: pathlib.Path) -> dict[str, dict[str, Any]]:
 def apply_connection_health(manifest: dict[str, Any], health: Mapping[str, Mapping[str, Any]]) -> dict[str, Any]:
     """Overlay live health; failed or revoked connections become unavailable with a fallback."""
     updated = json.loads(json.dumps(manifest))
+    unavailable = set()
     for entry in updated.get("capabilities", []):
         record = health.get(entry.get("family"))
         if record is None or "provider" not in entry:
@@ -417,4 +424,24 @@ def apply_connection_health(manifest: dict[str, Any], health: Mapping[str, Mappi
         if record["health"] in UNAVAILABLE_HEALTH:
             entry["status"] = "unavailable"
             entry["fallback"] = _fallback(families()[entry["family"]]["fallbackTier"])
+            unavailable.add(entry["family"])
+
+    # A static deploy-time readiness result must not remain "ready" when
+    # authorization fails or a client owner revokes the connection. Never
+    # copy runtime health records, identities or reasons into the Skill view.
+    for skill in updated.get("skills", []):
+        for dependency in skill.get("dependencies", []):
+            family = dependency.get("family")
+            if family not in unavailable or dependency.get("status") != "bound":
+                continue
+            if dependency.get("required"):
+                dependency["status"] = "unavailable"
+            else:
+                dependency["status"] = "degraded"
+                dependency["fallbackTier"] = families()[family]["fallbackTier"]
+        skill["ready"] = all(
+            dep.get("status") not in {"missing", "unavailable"}
+            for dep in skill.get("dependencies", [])
+        )
+        skill["canEnable"] = skill["ready"]
     return updated

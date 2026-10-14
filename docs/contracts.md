@@ -53,6 +53,26 @@ python3 scripts/compile-workspace.py examples/workspace --agent receptionist \
 
 The CLI does **not** obtain OAuth tokens, provision a tenant, save a secret, test a live provider or change an EnvironmentBinding. Planned providers fail the preview. An implemented provider returns `readyToConnect: false` with the remaining live consent/health gate, rather than implying connectivity. The normal private GitHub Environment secret map and reviewed PR → DEV → PROD workflow remain the actual deployment interface. The Skill readiness report links missing capability families back to the provider options; the coworker's `platform.capabilities` manifest also includes selected per-Skill readiness. Full guided provisioning and real OAuth lifecycle remain tracked under [#110](https://github.com/kingyx3/model-garden/issues/110) and [#86](https://github.com/kingyx3/model-garden/issues/86).
 
+## Enable or disable individual Skills safely
+
+An Agent may list a Skill in `spec.skills` while keeping it off using `spec.disabledSkills`. Example:
+
+```yaml
+spec:
+  skills: [answer-faq, take-message, book-appointment]
+  disabledSkills: [book-appointment]
+```
+
+Disabled Skills remain in the non-secret readiness report but are **not** materialized into the Hermes runtime, do not contribute required capabilities, and suppress Tools used exclusively by disabled Skills. Tools shared with enabled Skills remain selected. Removing a Skill from `disabledSkills` is an activation: the ordinary required-capability validation then **fails closed** if its provider is missing. Keep direct Agent instructions aligned with what is enabled; disabling a Skill is not a grant/revocation of an underlying client provider credential.
+
+```bash
+python3 scripts/client-operator.py skills <private-client-workspace> --environment dev --agent receptionist
+```
+
+This prints `ready`, `DISABLED` and `BLOCKED`, dependencies, and registry-backed `connect <family>` guidance without exposing tokens. An intentionally disabled Skill does not block the current deployment; enabling it without its required capability does. The `platform.capabilities` coworker response includes the same per-Skill `enabled`, `ready`, `canEnable` and dependency facts. When a connector is failed or revoked, live runtime health overlays mark dependent required Skills unavailable until a named operator reauthorizes the connection.
+
+The receptionist's complete Tier 0 `kb` / `crm` support and interaction logging remain **unimplemented** (#77, #108), as does full consent/provisioning (#110). Do not represent these capability checks as real external provider proof.
+
 ## Validate a workspace
 
 ```bash

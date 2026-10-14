@@ -78,6 +78,10 @@ python3 scripts/launch.py acme \
 
 Change Model Garden core only when a reusable Skill, connector, governance capability or runtime seam is genuinely missing.
 
+## Business-owner Skill selection and activation gate
+
+Before activating or modifying a Skill, run `python3 scripts/client-operator.py skills <private-client-workspace> --environment dev --agent <name>`. Show the owner the dependency state and next `connect <family>` step. Keep a Skill listed in the Agent's `spec.skills` but inactive with `spec.disabledSkills: [skill-name]` while its permission or data dependency is missing. Re-enable only after connection and explicit DEV validation; it cannot compile with an unbound required capability. The coworker's capability manifest reflects this state, including a runtime failure/revocation of a previously working connection. No nontechnical Agent Studio is shipped.
+
 ## Client integration discovery and permission preflight
 
 Use the canonical [integration registry and guide](contracts.md#integration-registry-and-readiness-to-connect-boundary) to show a client which CRM, mailbox, calendar and knowledge providers are implemented versus planned. `python3 scripts/client-operator.py connect <family>` lists provider choices by tier and maturity. Add `--provider`, `--tools`, `--owner` and `--operator` for a non-secret permission preview; it does not grant access or change credentials. For incomplete connectors and expired authorization, fail closed and keep live client provisioning manual until the corresponding implementation and real-provider proof gates are met.
