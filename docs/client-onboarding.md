@@ -84,10 +84,13 @@ Before activating or modifying a Skill, run `python3 scripts/client-operator.py 
 
 Before enabling a Skill that requires a provider, verify the integration's status
 in the canonical registry. Merely listing `connectors.crm.provider: hubspot`
-or `connectors.crm.provider: built-in-crm` is not sufficient until the adapter
+or `connectors.kb.provider: confluence-knowledge` is not sufficient until the adapter
 is implemented; the readiness and deployment gates reject such claims. The Tier 0
-`connectors.kb: {provider: text-knowledge, tier: 0}` binding is shipped and needs no
-credentials, only an approved business-rules file (below).
+`connectors.kb: {provider: text-knowledge, tier: 0}` and
+`connectors.crm: {provider: built-in-crm, tier: 0}` bindings are shipped and need no
+credentials: an approved business-rules file (below) and a person who reviews the
+contact log (`client-operator.py contacts review`; it prints personal data, so run it on
+the client host and agree who may).
 Clients can continue to list those Skills under `disabledSkills` until their
 dependencies are implemented and authorized. A shipped Calendar adapter still
 needs actual account consent, working token rotation and live acceptance.

@@ -782,6 +782,33 @@ def record_policy_change(
     return event
 
 
+def record_operator_action(
+    path: pathlib.Path | None,
+    action: str,
+    performed_by: str,
+    details: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Ledger an action a person performed on the runtime (for example erasing a contact).
+
+    ``details`` should hold identifiers and counts only; never personal data or record contents.
+    """
+    if not isinstance(performed_by, str) or not performed_by.strip():
+        raise ValueError("Governed action failed: an operator action must record who performed it")
+    if not isinstance(action, str) or not action.strip() or len(action) > MAX_CONTEXT_VALUE:
+        raise ValueError("Governed action failed: an operator action needs a short action name")
+    event = {
+        "schemaVersion": AUDIT_SCHEMA_VERSION,
+        "timestamp": _utc_timestamp(),
+        "event": "operator-action",
+        "outcome": "recorded",
+        "action": action.strip(),
+        "performedBy": performed_by.strip()[:MAX_CONTEXT_VALUE],
+        "details": details or {},
+    }
+    append_audit_event(path, event)
+    return event
+
+
 def _load_json(path: pathlib.Path) -> dict[str, Any]:
     value = json.loads(path.read_text())
     if not isinstance(value, dict):

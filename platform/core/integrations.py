@@ -66,9 +66,14 @@ def plan(family: str, provider_id: str, selected_tools: list[str]):
     result["scopes"] = sorted({scope for tool in selected_tools for scope in scope_map[tool]})
     if provider["tier"] == 0:
         # Built-in/file providers hold no third-party credentials: nothing to consent to or rotate.
-        result["blocker"] = ("No credentials are needed. The client owner must supply the business "
-                             "content (for a text file: parse-test it with scripts/knowledge-check.py "
-                             "and mark the KnowledgeSource approved) before it can ground answers")
+        if provider["method"] == "file":
+            result["blocker"] = ("No credentials are needed. The client owner must supply the business "
+                                 "content (for a text file: parse-test it with scripts/knowledge-check.py "
+                                 "and mark the KnowledgeSource approved) before it can ground answers")
+        else:
+            result["blocker"] = ("No credentials are needed. Name the person who reviews the built-in "
+                                 "records (client-operator.py contacts review) and agree who may see them, "
+                                 "since they hold customer personal data on the client host")
         return result
     result["blocker"] = ("Client-owner consent, secure credential lifecycle and live read-only "
                          "test are required before changing the binding")

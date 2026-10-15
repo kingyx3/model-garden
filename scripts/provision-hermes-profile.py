@@ -25,6 +25,9 @@ MCP_TOOL_NAMES = {
     "calendar.availability": "calendar_availability",
     "calendar.book": "calendar_book",
     "kb.search": "kb_search",
+    "crm.read": "crm_read",
+    "crm.create": "crm_create",
+    "crm.log-interaction": "crm_log_interaction",
 }
 # Platform built-ins exposed whenever the governed Tool sidecar is present.
 PLATFORM_MCP_TOOLS = ("platform_capabilities", "handoff_request", "handoff_status")

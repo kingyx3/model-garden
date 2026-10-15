@@ -63,20 +63,28 @@ class ConnectorActivationGateTests(unittest.TestCase):
                 capabilities.resolve({"required": ["calendar"], "optional": []}, binding,
                                      agent_name="frontdesk")
 
-    def test_tier_zero_future_crm_is_not_mistaken_for_an_implemented_baseline(self):
-        binding = {"environment": "dev", "connectors": {
-            "crm": {"provider": "built-in-crm", "tier": 0},
-        }}
-        self.assertEqual(capabilities.bound_providers(binding), {})
+    def test_tier_zero_crm_satisfies_crm_only_as_the_built_in_provider_at_tier_zero(self):
+        shipped = {"environment": "dev", "connectors": {"crm": {"provider": "built-in-crm", "tier": 0}}}
+        self.assertEqual(capabilities.bound_providers(shipped)["crm"]["provider"], "built-in-crm")
         skill = {"metadata": {"name": "log-call"}, "spec": {"requiredCapabilities": ["crm"]}}
-        readiness = capabilities.skill_readiness({"metadata": {"name": "desk"}, "spec": {}},
-                                                 [skill], binding)
-        self.assertFalse(readiness[0]["ready"])
-        self.assertEqual([x["status"] for x in readiness[0]["dependencies"]], ["missing"])
-        with self.assertRaisesRegex(ValueError, "log-call"):
-            capabilities.resolve({"required": ["crm"], "optional": []},
-                                 binding, agent_name="desk",
-                                 required_by=capabilities.skills_requiring([skill]))
+        readiness = capabilities.skill_readiness({"metadata": {"name": "desk"}, "spec": {}}, [skill], shipped)
+        self.assertTrue(readiness[0]["ready"])
+        self.assertEqual(readiness[0]["dependencies"][0]["tier"], 0)
+        # Forged or unshipped shapes are still refused and the Skill stays blocked, naming it.
+        for connectors in (
+            {"crm": {"provider": "built-in-crm", "tier": 1}},
+            {"kb": {"provider": "built-in-crm", "tier": 0}},
+            {"crm": {"provider": "hubspot", "tier": 1}},
+            {"crm": {"provider": "salesforce", "tier": 1}},
+            {"crm": {"provider": "zoho-crm", "tier": 2}},
+        ):
+            forged = {"environment": "dev", "connectors": connectors}
+            self.assertNotIn("crm", capabilities.bound_providers(forged), connectors)
+            blocked = capabilities.skill_readiness({"metadata": {"name": "desk"}, "spec": {}}, [skill], forged)
+            self.assertFalse(blocked[0]["ready"], connectors)
+            with self.assertRaisesRegex(ValueError, "log-call"):
+                capabilities.resolve({"required": ["crm"], "optional": []}, forged, agent_name="desk",
+                                     required_by=capabilities.skills_requiring([skill]))
 
     def test_tier_zero_text_knowledge_satisfies_kb_only_as_a_kb_provider_at_tier_zero(self):
         shipped = {"environment": "dev", "connectors": {"kb": {"provider": "text-knowledge", "tier": 0}}}
