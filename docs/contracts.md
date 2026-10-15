@@ -141,6 +141,28 @@ Open: delivery to the person's own channel and acknowledgement from it, a runtim
 
 Open: cross-channel conversation timelines, verified identity linkage, wiring into the voice and email filing paths and connectors, safe provider swap with a re-link plan, retention/erasure across providers and live evidence (#115, #108).
 
+## Deliverables and the Tier 0 artifact store
+
+`platform/core/deliverables.py` builds real DOCX and XLSX files (and CSV) from structured Agent output with the standard library only, and `platform/core/artifacts.py` is the Tier 0 store they land in when the client has no file system bound. Both are credential-free modules with tests; they are **not yet behind** `docs.create`/`files.*` on the governed sidecar, not driven by a Skill, and they post no link into a channel (#101, #77).
+
+- **Builders.** A report is a title plus sections of headings and paragraphs; a workbook is sheets of rows. Output is deterministic (same input, same bytes and digest). Spreadsheet strings are written as literal inline strings and CSV cells that start with `= + - @` are quoted, so text from an email cannot run as a formula; XML is escaped and control characters removed; sizes are bounded. PPTX, PDF and native Google/Microsoft formats are not generated.
+- **Store.** One directory per tenant (0700, files 0600, an index for another tenant is refused). Files are named by artifact id, never by the display name. Only office, PDF, CSV, Markdown and text types, at most 10 MB and 2,000 artifacts; `restricted` data is refused unless the deployment's policy allows it. A read recomputes the SHA-256 and refuses a file that changed on disk.
+- **Accountable.** Each artifact records who asked, which Agent produced it, a bounded list of source identifiers (for example `kb:rules-of-engagement#hours`) and its `tier0:<tenant>/<id>` location. `artifact.create`, `artifact.read`, `artifact.delete` and `artifact.expire` are ledgered with identifiers, size, digest and sources, never content or names.
+- **People and retention.** The requester or an administrator reads or deletes; artifacts expire after the client's retention period (default 365 days) and `purge_expired` removes the files. `client-operator.py artifacts list|delete|purge-expired --project-name <env>` is the operator view (client data: run it on the client host; the actor is as asserted on the command line, like approvals).
+
+Open: PPTX/PDF and native formats, `docs.create`/`files.*` backing on the sidecar, links in the requesting channel, Skill-driven generation, evals through the runtime and live evidence (#101, #77).
+
+## Skillsets
+
+`platform/core/skillsets.py` is the credential-free first contract for reusable Skill bundles. A Skillset is a versioned list of Skill **references**, not a security principal, an Agent, an all-or-nothing unit or a place for credentials. It is **not yet read by `compile-workspace.py` or a registry**; it produces the `skills` and `disabledSkills` values the compiler already understands (#128).
+
+- **Validation** is strict: unknown keys are refused, and so is any key that looks like a secret (token, password, API key, credential).
+- **Expansion is deterministic and fails closed.** Direct Skills, selected Skillsets and `includes` expand to one sorted, deduplicated list with the sources that brought each Skill. A missing Skillset or Skill, a pin that differs from the available version, conflicting pins, a cycle or nesting deeper than 4, and an include with several versions each raise an error and expand nothing.
+- **Selection is not activation.** `activation` gives every selected Skill a coworker-specific state, all off unless named; `exposed_tools` returns Tools only through enabled Skills, so enabling one member never adds another member's Tools. The compiler's own readiness still blocks an enabled Skill whose dependency is missing.
+- **Independent per coworker.** The same bundle resolves against each coworker's own available Skills and enabled set; the bundle holds no coworker state.
+
+Open: reading Skillsets in the compiler or a registry, knowledge-aware prerequisites, per-coworker identities and grants (#129, #95), runtime re-evaluation at invocation, the reviewed PR → DEV/evals → business approval → PROD change flow with rollback, and live evidence (#128).
+
 Stable operational contract:
 
 - `usage-attribution.schema.json` — canonical non-secret client/Agent/environment/provider and optional cost/trace/subscription/shared-pool dimensions used to correlate runtime consumption with showback and billing. This is platform-generated operational metadata, not client-authored Agent/Skill desired state.

@@ -191,7 +191,10 @@ class InteractionTests(StoreCase):
         stored = self.raw()["interactions"][result["interactionId"]]["summary"]
         self.assertNotIn("4111", stored)
         self.assertIn(C.REDACTED_CARD, stored)
-        self.assertNotIn("4111", self.store.path.read_text(encoding="utf-8"))
+        # The whole file, checked for the full number (a 4-digit fragment can occur inside a hash-derived id).
+        text = self.store.path.read_text(encoding="utf-8")
+        self.assertNotIn(VISA, text)
+        self.assertNotIn("".join(ch for ch in VISA if ch.isdigit()), text)
 
     def test_capacity_is_bounded(self):
         original = C.MAX_INTERACTIONS

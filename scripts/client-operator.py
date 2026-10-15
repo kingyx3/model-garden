@@ -487,6 +487,43 @@ def runtime_memory(
     return 0
 
 
+ARTIFACT_COMMANDS = {"list", "delete", "purge-expired"}
+ARTIFACT_ID = re.compile(r"^a-[0-9a-f]{12}$")
+ARTIFACT_PERSON = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:@/+-]{0,127}$")
+
+
+def runtime_artifacts(
+    project_name: str,
+    command: str,
+    *,
+    artifact_id: str | None = None,
+    by: str | None = None,
+    requested_by: str | None = None,
+) -> int:
+    """List, delete or expire the coworker's stored deliverables; deletes and expiries are ledgered."""
+    if command not in ARTIFACT_COMMANDS:
+        raise ValueError("artifacts command must be list, delete or purge-expired")
+    if command == "delete":
+        if not (isinstance(artifact_id, str) and ARTIFACT_ID.fullmatch(artifact_id)):
+            raise ValueError("artifact id must look like a-0123456789ab")
+        if not isinstance(by, str) or not ARTIFACT_PERSON.fullmatch(by.strip()):
+            raise ValueError("--by must name the administrator")
+    if requested_by is not None and not ARTIFACT_PERSON.fullmatch(requested_by):
+        raise ValueError("--requested-by must be a short identity")
+    container = _governed_tool_container(project_name)
+    inner = ["python", "/opt/model-garden-platform/scripts/runtime-artifacts.py", "/opt/data/.modelgarden/artifacts", command]
+    if command == "list" and requested_by:
+        inner.extend(["--requested-by", requested_by])
+    if command == "delete":
+        inner.extend([artifact_id, "--by", by.strip()])
+    result = _run(["docker", "exec", container, *inner])
+    if result.returncode != 0:
+        raise ValueError(result.stderr.strip() or result.stdout.strip() or "runtime artifacts command failed")
+    if result.stdout:
+        print(result.stdout.strip())
+    return 0
+
+
 NOTICE_KINDS = ("assigned", "reminder", "escalation")
 CHANNEL_NAME = re.compile(r"^[a-z][a-z0-9-]{0,31}$")
 
@@ -698,6 +735,12 @@ def main() -> int:
     memory.add_argument("--project-name", required=True)
     memory.add_argument("--scope", action="append", default=[], help="client, agent:<name> or conversation:<id>")
     memory.add_argument("--by", help="the named administrator for export, delete and purge")
+    artifacts = sub.add_parser("artifacts", help="list, delete or expire the coworker's stored deliverables (client data; run on the client host)")
+    artifacts.add_argument("action", choices=sorted(ARTIFACT_COMMANDS))
+    artifacts.add_argument("artifact_id", nargs="?", help="deliverable to delete (a-...)")
+    artifacts.add_argument("--project-name", required=True)
+    artifacts.add_argument("--by", help="the named administrator for delete")
+    artifacts.add_argument("--requested-by", help="list only what this person asked for")
     inbox = sub.add_parser("inbox", help="show everything waiting for a person: approvals, hand-offs, records to review")
     inbox.add_argument("--project-name", required=True)
     inbox.add_argument("--json", action="store_true")
@@ -791,6 +834,8 @@ def main() -> int:
             )
         if args.command == "memory":
             return runtime_memory(args.project_name, args.action, scopes=tuple(args.scope), memory_id=args.memory_id, by=args.by)
+        if args.command == "artifacts":
+            return runtime_artifacts(args.project_name, args.action, artifact_id=args.artifact_id, by=args.by, requested_by=args.requested_by)
         if args.command == "inbox":
             return runtime_inbox(args.project_name, as_json=args.json)
         if args.command == "file-calls":
