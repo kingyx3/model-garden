@@ -53,12 +53,35 @@
       "family": "crm",
       "method": "native",
       "tier": 1,
-      "status": "planned",
+      "status": "in-development",
       "tools": [
         "crm.read",
-        "crm.update"
+        "crm.update",
+        "crm.create",
+        "crm.log-interaction"
       ],
-      "issue": 93
+      "issue": 93,
+      "adapter": "platform/connectors/hubspot.py",
+      "scopeByTool": {
+        "crm.read": [
+          "crm.objects.contacts.read",
+          "crm.objects.companies.read",
+          "crm.objects.deals.read"
+        ],
+        "crm.update": [
+          "crm.objects.contacts.write",
+          "crm.objects.companies.write",
+          "crm.objects.deals.write"
+        ],
+        "crm.create": [
+          "crm.objects.contacts.write",
+          "crm.objects.companies.write",
+          "crm.objects.deals.write"
+        ],
+        "crm.log-interaction": [
+          "crm.objects.contacts.write"
+        ]
+      }
     },
     {
       "id": "salesforce",
@@ -112,14 +135,29 @@
       "family": "mail",
       "method": "native",
       "tier": 1,
-      "status": "planned",
+      "status": "in-development",
       "tools": [
         "mail.search",
         "mail.read",
         "mail.draft",
         "mail.send"
       ],
-      "issue": 90
+      "issue": 90,
+      "adapter": "platform/connectors/gmail.py",
+      "scopeByTool": {
+        "mail.search": [
+          "https://www.googleapis.com/auth/gmail.readonly"
+        ],
+        "mail.read": [
+          "https://www.googleapis.com/auth/gmail.readonly"
+        ],
+        "mail.draft": [
+          "https://www.googleapis.com/auth/gmail.compose"
+        ],
+        "mail.send": [
+          "https://www.googleapis.com/auth/gmail.send"
+        ]
+      }
     },
     {
       "id": "outlook",
@@ -127,14 +165,29 @@
       "family": "mail",
       "method": "native",
       "tier": 1,
-      "status": "planned",
+      "status": "in-development",
       "tools": [
         "mail.search",
         "mail.read",
         "mail.draft",
         "mail.send"
       ],
-      "issue": 90
+      "issue": 90,
+      "adapter": "platform/connectors/microsoft_mail.py",
+      "scopeByTool": {
+        "mail.search": [
+          "Mail.Read"
+        ],
+        "mail.read": [
+          "Mail.Read"
+        ],
+        "mail.draft": [
+          "Mail.ReadWrite"
+        ],
+        "mail.send": [
+          "Mail.Send"
+        ]
+      }
     },
     {
       "id": "text-knowledge",
@@ -286,6 +339,44 @@
         "code.propose-change"
       ],
       "issue": 94
+    },
+    {
+      "id": "built-in-files",
+      "name": "Built-in artifact store (files)",
+      "family": "files",
+      "method": "built-in",
+      "tier": 0,
+      "status": "in-development",
+      "tools": [
+        "files.search",
+        "files.read",
+        "files.write"
+      ],
+      "issue": 77,
+      "adapter": "platform/core/builtin_files.py",
+      "scopeByTool": {
+        "files.search": [],
+        "files.read": [],
+        "files.write": []
+      }
+    },
+    {
+      "id": "built-in-docs",
+      "name": "Built-in artifact store (documents)",
+      "family": "docs",
+      "method": "built-in",
+      "tier": 0,
+      "status": "in-development",
+      "tools": [
+        "docs.read",
+        "docs.create"
+      ],
+      "issue": 77,
+      "adapter": "platform/core/builtin_files.py",
+      "scopeByTool": {
+        "docs.read": [],
+        "docs.create": []
+      }
     }
   ]
 }

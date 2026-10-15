@@ -110,6 +110,9 @@ def check(root: pathlib.Path = ROOT) -> list[str]:
 
 
 def _lists_other_unbuilt(text: str, provider: dict[str, Any], providers: dict[str, Any]) -> bool:
-    """True when the "not built" wording is about a different (planned) provider named on the same line."""
-    others = [p for p in providers.values() if p["id"] != provider["id"] and p["status"] == "planned" and _mentions(text, p)]
+    """True when the "not built" wording is about a different (planned or in-development) provider named on the same line."""
+    others = [
+        p for p in providers.values()
+        if p["id"] != provider["id"] and p["status"] in ("planned", "in-development") and _mentions(text, p)
+    ]
     return bool(others)

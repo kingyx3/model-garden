@@ -66,10 +66,15 @@ class IntegrationRegistryTests(unittest.TestCase):
         self.assertEqual(both["scopes"], ["Calendars.Read", "Calendars.ReadWrite"])
         with self.assertRaisesRegex(ValueError, "only the portable Tools"):
             registry.plan("calendar", "google-calendar", ["mail.send"])
-        planned = registry.plan("crm", "hubspot", ["crm.read"])
+        planned = registry.plan("crm", "salesforce", ["crm.read"])
         self.assertEqual(planned["status"], "planned")
         self.assertIn("not implemented", planned["blocker"])
         self.assertNotIn("scopes", planned)
+        in_development = registry.plan("crm", "hubspot", ["crm.read"])
+        self.assertEqual(in_development["status"], "in-development")
+        self.assertIn("not implemented for the governed runtime", in_development["blocker"])
+        self.assertIn("do not request credentials", in_development["blocker"])
+        self.assertNotIn("scopes", in_development)  # no consent or scopes are offered for an unserved connector
 
     def test_tier_zero_text_provider_needs_no_credentials_and_says_what_the_owner_must_do(self):
         plan = registry.plan("kb", "text-knowledge", ["kb.search"])
@@ -92,8 +97,9 @@ class IntegrationRegistryTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "only the portable Tools"):
             registry.plan("crm", "built-in-crm", ["crm.update"])
         hubspot = registry.plan("crm", "hubspot", ["crm.read"])
-        self.assertEqual(hubspot["status"], "planned")
+        self.assertEqual(hubspot["status"], "in-development")
         self.assertIn("not implemented", hubspot["blocker"])
+        self.assertEqual(registry.plan("crm", "salesforce", ["crm.read"])["status"], "planned")
 
     def test_directory_renderer_uses_registry_and_does_not_claim_live(self):
         result = subprocess.run(
