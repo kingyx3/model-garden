@@ -216,6 +216,27 @@ Open: serving any of these from the sidecar, OAuth consent and token lifecycle (
 
 Open: delivering notices through Slack, Teams, email or the inbox, escalation after a notice goes unacknowledged, OAuth consent, token refresh and provider-side revocation (#86, #110).
 
+## Filing interactions through the sync ledger
+
+`platform/core/crm_filing.py` runs the filing that `crm_sync.py` tracks: it takes the portable `crm.log-interaction` arguments and an executor (the Tier 0 contact log or the HubSpot adapter, which share an `arguments -> result` shape) and records every attempt in the provider-neutral sync ledger. It contains no provider code, is credential-free, and is **not yet wired** to the voice or mail paths (#108, #115).
+
+- **One entry per call or message.** The ledger key comes from the channel, the call or message id and the interaction type, so redelivery, a retry and a restart reach the same entry and nothing is filed twice. Tests replay the same interaction through the built-in log and the HubSpot adapter and get the same states.
+- **Success only on the provider's word.** A result without an `externalObjectRef` is a rejection. A result flagged `duplicate` means the record was already there (for example the first attempt landed and its answer was lost), so the entry is *reconciled* to the existing reference rather than written again.
+- **Failures are sorted.** An error carrying a sync `code` keeps it; a `PermissionError` is `unauthorized`; a `ValueError` (bad arguments, an unknown contact) is `rejected` and waits for a person; anything else is a transient `outage` that backs off and, after the ceiling, blocks.
+- **No content in the ledger.** `retry_due` takes a `payloads` callable for the interaction to retry (a deployment reads it from its transcript or message store); an entry whose payload is unavailable is skipped and counted, never invented.
+
+Open: wiring this to the voice transcript and support-mailbox paths, a payload store, real CRMs, cross-channel timelines and identity linkage, and live proof (#108, #115).
+
+## Guided connect step
+
+`platform/core/connect.py` is the credential-free core of connecting a CRM, mailbox or calendar for one named coworker (#110). The operator provisions the provider-side identity and secret elsewhere and passes only the `secret://` reference; this module runs no owner OAuth consent, stores no secret, makes no provider call itself (the read-only test is injected) and is not wired to the interactive CLI.
+
+- **Plan.** For a named Agent, client owner and operator, the plan takes its scopes from the registry's reviewed mapping for the selected portable Tools and refuses a request for more. It carries a digest of everything the owner consents to; `apply` needs that digest back, so consent to one plan cannot be reused for another. Providers that are not shipped, and Tier 0 providers (which need no credentials), are not connectable and the plan says why. A mailbox is `shared` or `delegated`; a `personal` one needs an explicit recorded owner exception.
+- **Apply.** The read-only connection test runs first. If it fails nothing is recorded and the failure is ledgered; on success the coworker's own grant is recorded (`provider_grants.py`, so a second coworker never inherits the first one's credential) and the binding fragment (provider, tier, scopes, owner, never a secret) is returned for `merge_binding`, which leaves the input untouched, keeps a live `token_ref` for the same provider and makes replacing a provider explicit.
+- **Ledger.** `connection.connect`, `connection.connect-failed` and `connection.disconnect` name the operator and the client owner with identifiers, never a credential, reference or account. `disconnect` revokes one coworker's grant and affects no other.
+
+Open: owner OAuth consent and token acquisition, credential storage, a live test, re-scoping, re-running Skill readiness after a change, and the interactive CLI (#110, #86, #129).
+
 Stable operational contract:
 
 - `usage-attribution.schema.json` — canonical non-secret client/Agent/environment/provider and optional cost/trace/subscription/shared-pool dimensions used to correlate runtime consumption with showback and billing. This is platform-generated operational metadata, not client-authored Agent/Skill desired state.

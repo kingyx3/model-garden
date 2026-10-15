@@ -1,0 +1,212 @@
+"""The guided connect step: one named coworker, exact scopes, a read-only test, then a grant of its own.
+
+Connecting a CRM, mailbox or calendar must give the coworker least-privilege access without hand-edited bindings or credentials
+in chat (#110). ``client-operator.py connect`` already lists providers and previews scopes; this module is the credential-free
+core of the step that follows. It handles **no credentials**: the operator provisions the provider-side identity and secret
+elsewhere and passes only the ``secret://`` *reference*. It does not run owner OAuth consent, store a secret, call a provider
+itself (the read-only test is injected) or edit a file; it is not wired to the interactive CLI.
+
+- **One coworker, named first.** A plan is for a specific Agent, a named client owner and a named operator, so a second coworker
+  connecting the same system gets a grant of its own (``provider_grants.py``, #129) and never inherits the first one's.
+- **Exact scopes.** The scopes come from the registry's reviewed mapping for the selected portable Tools. A request for more is
+  refused. The plan has a digest of everything the owner is asked to consent to; ``apply`` needs that digest back, so consent
+  to one plan cannot be reused for another.
+- **Only shipped connectors.** A provider that is not ``built-credential-free`` or ``live`` (anything planned or in development)
+  and a Tier 0 provider (which needs no credentials) are not connectable; the plan says why instead of asking for credentials.
+- **Shared or delegated mailboxes.** A mailbox is connected as ``shared`` or ``delegated``; a ``personal`` mailbox needs an explicit
+  owner exception, which is recorded.
+- **The test comes first and failure changes nothing.** ``apply`` runs the injected read-only connection test before touching
+  anything. If it fails, no grant is recorded, the binding is unchanged and the failure is ledgered; on success the grant is
+  recorded and the binding fragment (provider, tier, scopes, owner, never a secret) is returned for the caller to merge.
+- **Ledgered with both people.** Connect, failed connect and disconnect each call the audit hook naming the operator and the
+  client owner, with identifiers, never a credential, reference or account.
+
+Not done here: owner OAuth consent and token acquisition, storing the credential, a live test, re-scoping, and re-running Skill
+readiness after a change (the caller does that against the new binding).
+"""
+from __future__ import annotations
+
+import copy
+import hashlib
+import importlib.util
+import json
+import pathlib
+import re
+import sys
+from collections.abc import Callable, Iterable, Mapping
+from typing import Any
+
+MAILBOX_KINDS = ("shared", "delegated", "personal")
+BINDING_KEYS = ("provider", "tier", "scopes", "owner")
+_PERSON = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:@/+-]{0,127}$")
+_AGENT = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+_DIGEST = re.compile(r"^[0-9a-f]{64}$")
+Audit = Callable[[str, str, dict[str, Any]], Any]
+
+
+class ConnectError(ValueError):
+    """Raised for an invalid plan or a connection that must not proceed; nothing is changed when it is raised."""
+
+
+def _module(name: str, filename: str):
+    if name not in sys.modules:
+        spec = importlib.util.spec_from_file_location(name, pathlib.Path(__file__).with_name(filename))
+        module = importlib.util.module_from_spec(spec)
+        assert spec.loader is not None
+        sys.modules[name] = module
+        spec.loader.exec_module(module)
+    return sys.modules[name]
+
+
+def _integrations():
+    return _module("model_garden_connect_integrations", "integrations.py")
+
+
+def _person(value: Any, label: str) -> str:
+    if not isinstance(value, str) or not _PERSON.match(value):
+        raise ConnectError(f"{label} must be a named person's identity, never a password or token")
+    return value
+
+
+def digest_of(plan: Mapping[str, Any]) -> str:
+    material = {key: plan[key] for key in ("family", "provider", "tier", "agent", "owner", "operator", "tools", "scopes", "mailbox", "ownerException") if key in plan}
+    return hashlib.sha256(json.dumps(material, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
+
+
+def plan(
+    *,
+    family: str,
+    provider: str,
+    tools: Iterable[str],
+    agent: str,
+    owner: str,
+    operator: str,
+    requested_scopes: Iterable[str] | None = None,
+    mailbox: Mapping[str, Any] | None = None,
+    owner_exception: str | None = None,
+) -> dict[str, Any]:
+    """The non-mutating plan the client owner is asked to consent to, with a digest of exactly what it covers."""
+    if not isinstance(agent, str) or not _AGENT.match(agent):
+        raise ConnectError("choose the specific coworker (Agent name) before connecting anything")
+    owner, operator = _person(owner, "owner"), _person(operator, "operator")
+    if family == "mail":
+        kind = (mailbox or {}).get("kind")
+        address = (mailbox or {}).get("address")
+        if kind not in MAILBOX_KINDS or not isinstance(address, str) or "@" not in address:
+            raise ConnectError("name the mailbox (address and kind: shared, delegated or personal)")
+        if kind == "personal" and not (isinstance(owner_exception, str) and owner_exception.strip() and len(owner_exception) <= 200):
+            raise ConnectError("a personal mailbox is refused unless the owner records an explicit exception")
+    elif mailbox is not None:
+        raise ConnectError("a mailbox only applies to the mail family")
+    chosen = sorted(set(tools))
+    try:
+        base = _integrations().plan(family, provider, chosen)
+    except ValueError as exc:
+        raise ConnectError(str(exc)) from exc
+    result: dict[str, Any] = {
+        "family": family, "provider": provider, "tier": base["tier"], "status": base["status"], "agent": agent, "owner": owner,
+        "operator": operator, "tools": chosen, "scopes": [],
+    }
+    if mailbox is not None:
+        result["mailbox"] = {"address": mailbox["address"], "kind": mailbox["kind"]}
+        if owner_exception:
+            result["ownerException"] = owner_exception.strip()
+    if base["tier"] == 0:
+        result.update(connectable=False, reason="a built-in Tier 0 provider needs no credentials or grant; bind it directly")
+    elif base["status"] not in _integrations().BUILT:
+        result.update(connectable=False, reason=base["blocker"])
+    else:
+        needed = base["scopes"]
+        if requested_scopes is not None:
+            extra = sorted(set(requested_scopes) - set(needed))
+            if extra:
+                raise ConnectError("scopes beyond what the selected Tools need are refused: " + ", ".join(extra))
+        result.update(connectable=True, scopes=needed, reason=None)
+    result["digest"] = digest_of(result)
+    return result
+
+
+def _record(audit: Audit | None, action: str, by: str, details: dict[str, Any]) -> None:
+    if audit is not None:
+        audit(action, by, details)
+
+
+def apply(
+    proposal: Mapping[str, Any],
+    registry: Any,
+    *,
+    owner_consent: str,
+    connection_test: Callable[[], Mapping[str, Any]],
+    connection_id: str,
+    isolation: str,
+    acting_identity: str,
+    secret_ref: str,
+    now: int,
+    audit: Audit | None = None,
+) -> dict[str, Any]:
+    """Run the read-only test and, only if it passes, record the coworker's own grant and return the binding fragment."""
+    if not proposal.get("connectable"):
+        raise ConnectError(str(proposal.get("reason") or "this plan is not connectable"))
+    if not isinstance(owner_consent, str) or not _DIGEST.match(owner_consent) or owner_consent != proposal.get("digest") or digest_of(proposal) != proposal["digest"]:
+        raise ConnectError("the owner's consent does not match this plan; show the owner the exact scopes and ask again")
+    base = {"agent": proposal["agent"], "family": proposal["family"], "provider": proposal["provider"], "owner": proposal["owner"],
+            "operator": proposal["operator"], "tools": list(proposal["tools"]), "consentDigest": proposal["digest"]}
+
+    def failed(reason: str) -> ConnectError:
+        _record(audit, "connection.connect-failed", proposal["operator"], {**base, "reason": reason})
+        return ConnectError(f"connection not made ({reason}); nothing was changed")
+
+    try:
+        outcome = connection_test()
+    except Exception as exc:  # noqa: BLE001 - any failure of the test is a failed connection
+        raise failed(f"test-error:{type(exc).__name__}") from exc
+    if not isinstance(outcome, Mapping) or outcome.get("ok") is not True:
+        raise failed("test-failed")
+    try:
+        grant = registry.create(
+            agent=proposal["agent"], family=proposal["family"], provider=proposal["provider"], connection_id=connection_id,
+            isolation=isolation, acting_identity=acting_identity, secret_ref=secret_ref, scopes=proposal["tools"],
+            owner=proposal["owner"], by=proposal["operator"], now=now,
+        )
+    except PermissionError as exc:  # the registry refused to share a credential or identity
+        raise failed("grant-refused") from exc
+    _record(audit, "connection.connect", proposal["operator"], {**base, "grantId": grant["id"], "tier": proposal["tier"], "connectionTest": "passed"})
+    fragment = {"provider": proposal["provider"], "tier": proposal["tier"], "scopes": list(proposal["scopes"]), "owner": proposal["owner"]}
+    return {"grant": grant, "binding": fragment}
+
+
+def disconnect(
+    registry: Any, grant_id: str, *, operator: str, owner: str, now: int, audit: Audit | None = None
+) -> dict[str, Any]:
+    """Revoke one coworker's grant (no other coworker is affected) and ledger who did it and for which owner."""
+    operator, owner = _person(operator, "operator"), _person(owner, "owner")
+    try:
+        grant = registry.revoke(grant_id, by=operator, now=now)
+    except PermissionError as exc:
+        raise ConnectError(str(exc)) from exc
+    _record(audit, "connection.disconnect", operator, {
+        "agent": grant["agent"], "family": grant["family"], "provider": grant["provider"], "owner": owner, "operator": operator,
+        "grantId": grant["id"],
+    })
+    return grant
+
+
+def merge_binding(binding: Mapping[str, Any], family: str, fragment: Mapping[str, Any], *, replace: bool = False) -> dict[str, Any]:
+    """A copy of the EnvironmentBinding with ``connectors.<family>`` set from a connect fragment; the input is never changed."""
+    if set(fragment) - set(BINDING_KEYS):
+        raise ConnectError("a binding fragment holds only provider, tier, scopes and owner; never a secret")
+    if not isinstance(family, str) or not re.fullmatch(r"[a-z]+", family):
+        raise ConnectError("family must be a lowercase capability family")
+    merged = copy.deepcopy(dict(binding))
+    connectors = merged.setdefault("connectors", {})
+    existing = connectors.get(family)
+    if isinstance(existing, Mapping) and existing.get("provider") not in (None, fragment.get("provider")) and not replace:
+        raise ConnectError(f"{family} is already bound to {existing.get('provider')}; replacing a provider must be explicit")
+    kept: dict[str, Any] = {}
+    if isinstance(existing, Mapping):
+        same_provider = existing.get("provider") in (None, fragment.get("provider"))
+        # An environment-level token_ref still serves the running sidecar until per-coworker resolution exists (#129), so it
+        # stays for the same provider; it belonged to the old provider if the provider changes, so it goes then.
+        kept = {key: value for key, value in existing.items() if key not in BINDING_KEYS and (same_provider or key != "token_ref")}
+    connectors[family] = {**kept, **{key: fragment[key] for key in BINDING_KEYS if key in fragment}}
+    return merged
