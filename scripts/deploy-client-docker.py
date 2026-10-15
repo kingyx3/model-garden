@@ -50,6 +50,7 @@ RUNTIME_SOURCE_PATHS = (
     pathlib.Path("platform/core/handoff.py"),
     pathlib.Path("platform/core/knowledge.py"),
     pathlib.Path("platform/core/contacts.py"),
+    pathlib.Path("platform/core/inbox.py"),
     pathlib.Path("platform/channels/text_channel.py"),
     pathlib.Path("platform/channels/email_channel.py"),
     pathlib.Path("platform/channels/conversation_filing.py"),
@@ -60,6 +61,7 @@ RUNTIME_SOURCE_PATHS = (
     pathlib.Path("scripts/runtime-handoff.py"),
     pathlib.Path("scripts/runtime-contacts.py"),
     pathlib.Path("scripts/runtime-file-calls.py"),
+    pathlib.Path("scripts/runtime-inbox.py"),
     pathlib.Path("scripts/runtime-connection.py"),
     pathlib.Path("VERSION"),
 )

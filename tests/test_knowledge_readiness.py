@@ -173,5 +173,50 @@ class ReadinessContentTests(unittest.TestCase):
         self.assertNotIn("content", report[0]["dependencies"][0])
 
 
+class RemediationTests(unittest.TestCase):
+    """Every blocked Skill names the one non-secret action that unblocks it."""
+
+    workspace = ReadinessContentTests.workspace
+
+    def test_each_kind_of_block_gets_its_own_single_action(self):
+        skill = {"metadata": {"name": "answer-faq"}, "spec": {"requiredCapabilities": ["kb", "calendar"]}}
+        agent = {"metadata": {"name": "desk"}, "spec": {}}
+        unbound = capabilities.skill_readiness(agent, [skill], {"environment": "dev", "connectors": {}}, knowledge=[])
+        self.assertIn("connect calendar", unbound[0]["remediation"])  # sorted by capability: calendar before kb
+        kb_only = {"metadata": {"name": "answer-faq"}, "spec": {"requiredCapabilities": ["kb"]}}
+        drafted = capabilities.skill_readiness(agent, [kb_only], BINDING, knowledge=[{"name": "rules", "state": "draft"}])
+        self.assertIn("Approve business knowledge", drafted[0]["remediation"])
+        ready = capabilities.skill_readiness(agent, [kb_only], BINDING, knowledge=[{"name": "rules", "state": "usable"}])
+        self.assertNotIn("remediation", ready[0])
+
+    def test_remediation_reaches_the_report_the_compiled_output_and_the_coworkers_manifest(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = self.workspace(pathlib.Path(tmp), status="draft")
+            report = compiler.workspace_readiness(workspace, "receptionist", (), BINDING)
+            text = compiler.format_readiness(report)
+            desired = compiler.compile_workspace(workspace, "receptionist", environment_binding=BINDING)[0]
+            manifest = capabilities.build_manifest(desired, BINDING)
+        faq = next(s for s in report[0]["skills"] if s["name"] == "answer-faq")
+        self.assertIn("Approve business knowledge", faq["remediation"])
+        self.assertIn("Next: Approve business knowledge", text)
+        self.assertIn("Approve business knowledge", next(s for s in desired["capabilities"]["skills"] if s["name"] == "answer-faq")["remediation"])
+        self.assertIn("Approve business knowledge", next(s for s in manifest["skills"] if s["name"] == "answer-faq")["remediation"])
+        self.assertNotIn("secret://", json.dumps(manifest))
+        ready = next(s for s in report[0]["skills"] if s["name"] == "take-message")
+        self.assertNotIn("remediation", ready)
+
+    def test_a_revoked_connection_changes_the_action_and_a_recovery_removes_it(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = self.workspace(pathlib.Path(tmp))
+            desired = compiler.compile_workspace(workspace, "receptionist", environment_binding=BINDING)[0]
+            manifest = capabilities.build_manifest(desired, BINDING)
+            revoked = capabilities.apply_connection_health(manifest, {"calendar": {"health": "revoked", "updatedAt": "2026-06-01T00:00:00Z"}})
+            booking = next(s for s in revoked["skills"] if s["name"] == "book-appointment")
+            self.assertFalse(booking["ready"])
+            self.assertIn("reauthorize the calendar connection", booking["remediation"])
+            healed = capabilities.apply_connection_health(manifest, {"calendar": {"health": "healthy", "updatedAt": "2026-06-01T00:00:00Z"}})
+            self.assertNotIn("remediation", next(s for s in healed["skills"] if s["name"] == "book-appointment"))
+
+
 if __name__ == "__main__":
     unittest.main()

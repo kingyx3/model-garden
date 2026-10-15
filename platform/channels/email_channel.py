@@ -13,6 +13,9 @@ writing* and *whether an approval is genuine*, so every provider adapter shares 
   entry, so it is public and read-only like any unmapped channel user. The receiving MTA must remove
   inbound headers that already carry its own ``authserv-id`` (RFC 8601 section 5).
 - **Threading.** Replies keep ``In-Reply-To`` and ``References`` so they land in the same thread.
+- **Loop protection.** ``loop_risk`` names why a message must never get an automatic reply (an
+  auto-reply, bulk or list mail, a bounce, a no-reply sender, or our own address or marker), outgoing
+  replies are marked ``Auto-Submitted: auto-replied``, and ``ReplyLimiter`` caps replies per thread.
 - **Approval links.** A signed, expiring link is bound to one ``requestId``, one decision and one
   approver address, and a request/approver pair can be consumed once: using either the approve or the
   reject link spends both. The link only proves control of the approver's mailbox; the approver must
@@ -30,6 +33,7 @@ import binascii
 import email
 import email.policy
 import email.utils
+import fcntl
 import hashlib
 import hmac
 import json
@@ -75,6 +79,14 @@ MAX_REFERENCES = 20
 MIN_SECRET_BYTES = 32
 DEFAULT_LINK_TTL_SECONDS = 24 * 60 * 60
 MAX_LINK_TTL_SECONDS = 7 * 24 * 60 * 60
+_NO_REPLY_LOCAL = re.compile(
+    r"^(no[-_.]?reply|do[-_.]?not[-_.]?reply|mailer-daemon|postmaster|bounces?|bounce[-_+].*|no[-_.]?reply[-_+].*)$",
+    re.IGNORECASE,
+)
+_BULK_PRECEDENCE = frozenset({"bulk", "junk", "list", "auto_reply"})
+OWN_MESSAGE_HEADER = "X-Model-Garden-Reply"
+DEFAULT_THREAD_REPLY_LIMIT = 3
+MAX_THREAD_REPLY_LIMIT = 20
 _COMMENT = re.compile(r"\((?:[^()\\]|\\.)*\)")
 _MESSAGE_ID = re.compile(r"<[^<>\s]{1,240}>")
 _DOMAIN = re.compile(r"^[a-z0-9]([a-z0-9.-]{0,251}[a-z0-9])?$")
@@ -145,6 +157,68 @@ def verified_sender(message: email.message.EmailMessage, trusted_authserv_id: st
     if dmarc.get("header.from") != address.rpartition("@")[2]:
         return None
     return address
+
+
+def loop_risk(message: email.message.EmailMessage, own_addresses: frozenset[str] = frozenset()) -> str | None:
+    """Why this message must not receive an automatic reply, or ``None`` when a reply is allowed.
+
+    Covers RFC 3834 auto-replies, bulk/list mail, delivery reports and null return paths, no-reply
+    and mailer senders, our own addresses and our own reply marker. Checked in that order, so the
+    reason names the strongest signal.
+    """
+    auto = str(message.get("Auto-Submitted") or "").strip().lower()
+    if auto and auto.split(";")[0].strip() != "no":
+        return "auto-submitted"
+    if str(message.get("Precedence") or "").strip().lower() in _BULK_PRECEDENCE:
+        return "bulk-precedence"
+    if message.get("X-Auto-Response-Suppress") is not None:
+        return "auto-response-suppressed"
+    if any(message.get(name) is not None for name in ("List-Id", "List-Unsubscribe", "List-Post")):
+        return "mailing-list"
+    content_type = message.get_content_type()
+    if content_type == "multipart/report" or str(message.get_param("report-type") or "").lower() == "delivery-status":
+        return "bounce"
+    if str(message.get("Return-Path") or "").strip() == "<>":
+        return "bounce"
+    if message.get(OWN_MESSAGE_HEADER) is not None:
+        return "own-message"
+    address = _from_address(message)
+    if address is None:
+        return "no-usable-sender"
+    if address in own_addresses:
+        return "own-address"
+    if _NO_REPLY_LOCAL.match(address.rpartition("@")[0]):
+        return "no-reply-sender"
+    return None
+
+
+class ReplyLimiter:
+    """At most ``limit`` automatic replies per thread, counted under a file lock so restarts keep the count."""
+
+    def __init__(self, root: pathlib.Path, limit: int = DEFAULT_THREAD_REPLY_LIMIT) -> None:
+        if not isinstance(limit, int) or isinstance(limit, bool) or not 1 <= limit <= MAX_THREAD_REPLY_LIMIT:
+            raise ValueError(f"thread reply limit must be an integer from 1 to {MAX_THREAD_REPLY_LIMIT}")
+        self._root = pathlib.Path(root)
+        self._limit = limit
+
+    def consume(self, thread_id: str) -> bool:
+        """Count one reply to ``thread_id``; ``False`` (and nothing counted) once the limit is reached."""
+        self._root.mkdir(parents=True, exist_ok=True, mode=0o700)
+        path = self._root / hashlib.sha256(thread_id.encode("utf-8")).hexdigest()[:32]
+        descriptor = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX)
+            raw = os.read(descriptor, 16).decode("ascii", "ignore").strip()
+            used = int(raw) if raw.isdigit() else 0
+            if used >= self._limit:
+                return False
+            os.lseek(descriptor, 0, os.SEEK_SET)
+            os.ftruncate(descriptor, 0)
+            os.write(descriptor, str(used + 1).encode("ascii"))
+            os.fsync(descriptor)
+            return True
+        finally:
+            os.close(descriptor)
 
 
 def _digest(text: str) -> str:
@@ -273,10 +347,14 @@ class EmailChannelAdapter:
         *,
         approval_links: ApprovalLinks | None = None,
         transport: Callable[[dict[str, Any]], str] | None = None,
+        own_addresses: tuple[str, ...] = (),
+        reply_limiter: ReplyLimiter | None = None,
     ) -> None:
         if not (trusted_authserv_id or "").strip():
             raise ValueError("a trusted authserv-id is required to verify email senders")
         self._authserv_id = trusted_authserv_id.strip().lower()
+        self._own = frozenset(item.strip().lower() for item in own_addresses if item.strip())
+        self._limiter = reply_limiter
         self._links = approval_links
         self._transport = transport
 
@@ -318,6 +396,22 @@ class EmailChannelAdapter:
         token = bytes(body).decode("ascii", "ignore").strip() if body else ""
         return self._links.consume(token) if token else None
 
+    def should_reply(self, body: bytes) -> tuple[bool, str | None]:
+        """Whether the coworker may reply automatically, and the reason when not.
+
+        Loop signals are checked first and never consume the per-thread allowance; only a reply that
+        is allowed is counted against the thread's limit.
+        """
+        message = self._parse(body)
+        reason = loop_risk(message, self._own)
+        if reason is not None:
+            return False, reason
+        if self._limiter is not None:
+            inbound = self.parse_inbound(body)
+            if not self._limiter.consume(inbound.thread_id or inbound.conversation_id):
+                return False, "thread-reply-limit"
+        return True, None
+
     # -- outbound: composed here, sent by the injected transport ---------------------------
 
     @staticmethod
@@ -329,7 +423,11 @@ class EmailChannelAdapter:
         if message_id:
             chain = [*chain, message_id][-MAX_REFERENCES:]
         original = _header_safe(subject if subject is not None else str(message.get("Subject") or ""))
-        headers = {"Subject": original if re.match(r"(?i)^re:", original) else f"Re: {original}".strip()}
+        headers = {
+            "Subject": original if re.match(r"(?i)^re:", original) else f"Re: {original}".strip(),
+            "Auto-Submitted": "auto-replied",
+            OWN_MESSAGE_HEADER: "1",
+        }
         if message_id:
             headers["In-Reply-To"] = message_id
         if chain:
