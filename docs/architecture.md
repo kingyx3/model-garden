@@ -36,12 +36,13 @@ Terraform -> isolated client Docker host
 | Client desired state | One separate private workspace repository per client, pinned to a published Model Garden release. |
 | Validation/materialization | Versioned `modelgarden.ai/v1` contracts, deterministic workspace validation/compiler and Hermes profile materialization. |
 | Agent runtime | Hermes reference runtime; runtime implementation remains behind the Model Garden client contract. |
-| Business actions | Governed MCP Tool boundary with explicit Tool selection, scoped credentials, `allow | approval | deny`, exact-action approval and a tamper-evident schema-v3 action ledger with read events. |
-| Business-system integration | Provider-neutral capability catalog (`contracts/v1/capabilities.json`) with required/optional declarations and a per-environment capability manifest; Calendar has implemented Google Calendar and Microsoft Graph adapters; neither is proven production-live until the [#66](https://github.com/kingyx3/model-garden/issues/66) OAuth and tenant acceptance gates pass. |
-| Channels | One text channel adapter contract with verified principal mapping (no text adapters shipped yet); LiveKit is the reference voice path. |
+| Business actions | Governed MCP Tool boundary with explicit Tool selection, environment-scoped connector credentials, `allow | approval | deny`, exact-action approval and a tamper-evident schema-v3 action ledger with read events. Per-coworker provider authentication is not shipped (see #129). |
+| Business-system integration | Provider-neutral capability catalog (`contracts/v1/capabilities.json`) with required/optional declarations and a per-environment capability manifest. Calendar has credential-free tested Google and Microsoft adapters; Tier 0 CRM and text-file knowledge are also credential-free tested. No external provider is production-live until its tenant acceptance gate passes. |
+| Channels | One text channel adapter contract with verified principal mapping (no text adapters shipped yet); LiveKit is the reference voice path with two-way transcript storage tested, but live-call, generated summary and CRM filing are unfinished (#107/#108). |
 | Usage/cost attribution | Canonical non-secret attribution events emitted to the external Lago metering/billing seam. |
 | Infrastructure | Terraform-managed keyless GCP bootstrap and isolated Compute Engine Docker host. |
 | Delivery control | GitHub PR validation plus generated keyless environment deployment workflow. |
+| Skills and coworker identities | Individual Skill selection, disablement and dependency readiness are built; first-class reusable Skillsets (#128), multi-Agent deployment (#95) and separately authenticated downstream identities for each coworker (#129) are not yet built. |
 
 ## Deployment contract
 
