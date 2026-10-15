@@ -378,7 +378,10 @@ def build_manifest(desired_state: dict[str, Any], binding: Mapping[str, Any], ca
         "agent": source.get("name"),
         "environment": binding_environment(binding),
         "capabilities": entries,
-        "skills": declared.get("skills", []),
+        "skills": skill_readiness(
+            desired_state["agent"], desired_state.get("skills", []), binding,
+            disabled_skills=set(desired_state.get("agent", {}).get("spec", {}).get("disabledSkills", [])),
+        ) if isinstance(desired_state.get("agent"), dict) else declared.get("skills", []),
     }
     if isinstance(source.get("client"), str):
         manifest["client"] = source["client"]
