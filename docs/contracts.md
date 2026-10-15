@@ -110,6 +110,37 @@ Open: the runtime-native handoff or A2A decision, a multi-Agent runtime that cal
 - **Writes** redact card numbers, refuse `restricted` classification unless the deployment's policy allows it, are bounded (500 characters, 2,000 entries) and are idempotent per scope. Each write, delete, export and purge calls the audit hook with identifiers and a digest of the text, never the text.
 - **People and administrators.** A person may list and delete entries they own; an administrator may export and purge per scope or for the whole client: `client-operator.py memory list|export|delete|purge --project-name <env>` (client data, so run it on the client host; the actor is as asserted on the command line, like approvals).
 
+## Scheduled coworker tasks
+
+`platform/core/schedules.py` is the contract for recurring work with a named owner ("send me a pipeline summary every Monday"). It is a credential-free store and cron arithmetic with tests, **not a scheduler**: nothing wakes a coworker, and event triggers (new email, ticket, chat message) and chat commands are not part of it (#99).
+
+- **Named owner and budget.** Every schedule belongs to one principal and must carry a per-run budget (`tokens`, `costCents` and/or `steps`, each at least 1). A run's task envelope comes from `delegation.root_envelope` with the owner as the originating principal, so its authority is the Agent's grants narrowed to the owner's permissions *at run time*; when the owner loses a permission the next run is refused (`ScheduleError`) instead of widened.
+- **Cron-like, UTC.** Five fields with `*`, lists, ranges and `/step`; when both day fields are restricted either may match, as in standard cron. Fires closer than 15 minutes apart are refused. After downtime a schedule fires once for the slots it missed, and resuming after a pause never replays old slots.
+- **Owner-only control.** Only the owner or an administrator pauses, resumes or deletes a schedule; at most 20 schedules per owner and 500 per tenant. One private file per tenant (another tenant's file is refused). Every change calls the audit hook with identifiers, the budget and a digest of the goal, never the goal.
+
+Open: a scheduler that fires runs as tasks with their own ledger timeline, owner notification on failure, event triggers, chat create/list/pause/delete and live evidence (#99, #73).
+
+## Human step in a task
+
+`platform/core/human_step.py` lets a task step target a named person using the Tier 4 hand-off store, with no storage of its own: the pending hand-off is the durable pause, so a restart loses nothing, and the inbox, notices and `runtime-handoff.py complete` are how the person is told and answers. It is **not wired into a runtime** (no multi-Agent task runner yet, #95) (#97).
+
+- **The step carries the exact ask** and a short context; notices carry only the Tool name and a reference, never the ask.
+- **`resolution`** reports `waiting`, `resumed` (done, with the person's note and identity), `declined`, `timed-out` or `unknown`. A decline or timeout never resumes: it returns the configured fallback (`fail`, `skip` or `escalate` to a named person). Reopening the same step returns the same hand-off and does not reset its clock.
+- **No widening.** The answer is data for the task; it never changes the envelope's authority.
+- **Ledger.** `task.human-step.opened` (under the Agent), `task.human-step.resolved` (under the person) and `task.human-step.timed-out` (under the task) hold identifiers, the outcome, lateness and digests of the ask and note.
+
+Open: delivery to the person's own channel and acknowledgement from it, a runtime that pauses and resumes a task on this, and live evidence (#97, #88).
+
+## CRM sync states
+
+`platform/core/crm_sync.py` is a provider-neutral delivery ledger for filing interactions to a CRM; it contains no provider code and does not call one (#115).
+
+- **Key.** A stable idempotency key from tenant, channel, external call or message id and interaction type, so a redelivered webhook, a retry and a restarted worker reach the same entry and never create a second record; a provider that supports idempotent writes is given the same key.
+- **States.** `pending`, `synced`, `failed`, `blocked`, `reconciled`. `synced` and `reconciled` need the provider's reference, so nothing claims a filing the provider did not acknowledge. Transient errors (`rate-limited`, `outage`) retry after 30 s, doubling to 1 h; `rejected`, `unauthorized` or eight attempts block until a named person retries. `reconcile` links a record found at the provider without writing it again.
+- **Readable.** `describe` returns the state, the provider reference when there is one, and a plain repair action; transitions are ledgered with the key, state, attempt count and error code, never interaction content.
+
+Open: cross-channel conversation timelines, verified identity linkage, wiring into the voice and email filing paths and connectors, safe provider swap with a re-link plan, retention/erasure across providers and live evidence (#115, #108).
+
 Stable operational contract:
 
 - `usage-attribution.schema.json` — canonical non-secret client/Agent/environment/provider and optional cost/trace/subscription/shared-pool dimensions used to correlate runtime consumption with showback and billing. This is platform-generated operational metadata, not client-authored Agent/Skill desired state.
