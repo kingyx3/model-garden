@@ -26,7 +26,7 @@ channels:
     slack:
       T01ABC/U02DEF: {identity: alice@client.example, roles: [approver]}
     teams:
-      29:1a2b3c: {identity: bob@client.example}
+      0f1e2d3c-.../4b5a6978-...: {identity: bob@client.example}   # <tenant id>/<Entra object id>, lowercase
 ```
 
 - Keys are scoped by the channel workspace/tenant when the provider has one, so a user ID from another workspace never matches.
@@ -77,7 +77,18 @@ The same module can file an email once an adapter exists: a sender verified by t
 - **What is answered.** Direct messages and `@mentions` only. Mentions are answered only in the channels listed in the deployment's `allowed_channels`; the bot's own and other bots' messages, edits and deletions, reactions and ordinary channel chatter raise `SlackIgnored` with a named reason. The sender is the reported Slack user and workspace, mapped through `channels.directory.slack` (`T01/U02`); message text never changes it.
 - **Threads.** The conversation is the channel and thread (`thread_ts`, else the message `ts`); every outgoing message is posted into that thread. Files arrive as references (ID, name, type, size), never URLs or content. Slack redelivers events it thinks failed, so consumers should de-duplicate on `(conversation_id, message_id)`.
 - **Approvals.** `send_approval_prompt` builds Approve/Reject buttons whose value is the exact `requestId`; `parse_approval_response` accepts only a verified `block_actions` payload with one of those two action IDs, returns the clicking user as the responder, and `decide_from_channel` still requires them to be a mapped approver. Receipts carry the ledger reference.
-- **Scopes (least privilege) for the app the client admin installs:** `app_mentions:read`, `im:history`, `chat:write`, and `files:read`/`files:write` only once file deliverables are enabled. The bot token is held by the deployment's transport, never by this module. Token lifecycle (#68), file deliverables with ledger references and live proof are not done.
+- **Scopes (least privilege) for the app the client admin installs:** `app_mentions:read`, `im:history`, `chat:write`, and `files:read`/`files:write` only once file deliverables are enabled. The bot token is held by the deployment's transport, never by this module. A reply that carries a deliverable posts a reference line (name, type, size, the artifact's `tier0:<tenant>/<id>` location and the start of its SHA-256) from `text_channel.attachment_from_artifact` and `describe_attachments`; the file itself is not uploaded, so the upload call, token lifecycle (#68) and live proof are not done.
+
+## Microsoft Teams
+
+`platform/channels/teams_channel.py` implements the contract for Teams without an Entra app registration, bot credential or network connection (#83 remains open; there is no live-tenant proof).
+
+- **Verification fails closed.** Every activity needs a Bot Framework bearer token. Checking its signature needs Microsoft's published keys, so that step is an injected `verify_token` callable that returns the claims; there is no default and an adapter cannot be built without one. The adapter then checks the issuer, the audience (our bot's application id), expiry and not-before (five minutes' leeway), that the token's `serviceurl` claim equals the activity's `serviceUrl`, which must be https on an allow-listed host (`smba.trafficmanager.net` by default), and that the activity comes from an allow-listed Entra tenant. A verifier error is a refusal, never a pass.
+- **What is answered.** One-to-one chats, and `@mentions` of the bot in the conversations listed in `allowed_conversations` (channels and group chats). Bots, the coworker's own messages, edits, reactions, typing, membership changes and ordinary channel chatter raise `TeamsIgnored` with a named reason. File attachments arrive as references (name and unique id), never URLs or content; the HTML copy and cards Teams adds are skipped.
+- **Identity.** The sender is the Entra object id Teams reports, scoped to the tenant (`channels.directory.teams` key `<tenant id>/<object id>`, lowercase); message text never changes it.
+- **Replies go only where we were spoken to.** The service URL for a conversation comes from a verified inbound activity and is remembered (in memory, bounded); a reply to a conversation never seen that way is refused, so nothing can make the coworker post to an arbitrary URL. Replies carry `replyToId`. After a restart the URLs are forgotten until the next verified activity, and proactive messaging is not supported.
+- **Approvals.** `send_approval_prompt` builds an Adaptive Card with Approve and Reject `Action.Submit` buttons carrying the exact `requestId`; `parse_approval_response` accepts only a verified activity with that payload from a person, and `decide_from_channel` still requires the responder to be a mapped approver. Receipts carry the ledger reference, and deliverables are posted as reference lines as on Slack.
+- **Least-privilege settings for the bot the client admin registers:** a single-tenant bot (Entra application in the client's tenant) with the Teams channel enabled and scopes limited to personal and team chats it is installed in; no Graph application permissions are needed for this adapter. Bot registration and credential lifecycle (#68), real token validation, file upload and live proof are not done.
 
 ## Built-in web chat
 
@@ -89,8 +100,8 @@ The same module can file an email once an adapter exists: a sender verified by t
 
 ## One contract, every surface
 
-`tests/test_channel_contract.py` runs one compiled receptionist behind the email, Slack and web chat adapters and checks the same outcomes on each: the same mapped person gets the same identity and approval rights, a stranger is public and read-only whatever their text claims, a mapped member's write needs approval and names them and the surface, and only a mapped approver's structured click decides. The Agent definition is not modified by the surface. Microsoft Teams (#83) has no adapter yet, so its parity criteria remain open.
+`tests/test_channel_contract.py` runs one compiled receptionist behind the email, Slack, Teams and web chat adapters and checks the same outcomes on each: the same mapped person gets the same identity and approval rights, a stranger is public and read-only whatever their text claims, a mapped member's write needs approval and names them and the surface, and only a mapped approver's structured click decides. The Agent definition is not modified by the surface. The Teams adapter passes the same suite, which is the "same Agent on Slack and Teams without changes" evidence; Teams file upload, bot registration and live-tenant proof remain open (#83).
 
 ## Status
 
-The contract, directory and governance wiring are implemented and tested credential-free. The Slack, email and web chat adapters above implement the verification and identity rules credential-free and have no live proof; a Teams adapter, an email provider adapter and a hosted web chat page are separate stories and must implement this contract rather than bypass it.
+The contract, directory and governance wiring are implemented and tested credential-free. The Slack, Teams, email and web chat adapters above implement the verification and identity rules credential-free and have no live proof; an email provider adapter and a hosted web chat page are separate stories and must implement this contract rather than bypass it.

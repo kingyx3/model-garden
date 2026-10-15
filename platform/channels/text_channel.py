@@ -62,12 +62,18 @@ class ChannelIdentity:
 
 @dataclass(frozen=True)
 class Attachment:
-    """A reference to an inbound file; adapters fetch content only through governed Tools."""
+    """A reference to a file; adapters fetch or send content only through governed Tools.
+
+    On an outbound reply it is a *deliverable reference*: ``attachment_id`` is the artifact's location (for example
+    ``tier0:acme-prod/a-0123456789ab``) and ``digest`` its SHA-256, so the thread shows what was produced and the ledger
+    can be matched to it. No file bytes travel through this contract.
+    """
 
     attachment_id: str
     name: str
     media_type: str
     size_bytes: int
+    digest: str | None = None
 
 
 @dataclass(frozen=True)
@@ -136,6 +142,23 @@ class Principal:
         return self.mapped and self.access == MEMBER and APPROVER_ROLE in self.roles
 
 
+def attachment_from_artifact(entry: Mapping[str, Any]) -> Attachment:
+    """A deliverable reference from an artifact-store record (``artifacts.ArtifactStore.put``); never the file content."""
+    return Attachment(
+        attachment_id=str(entry["location"]), name=str(entry["name"]), media_type=str(entry["mediaType"]),
+        size_bytes=int(entry["bytes"]), digest=str(entry["sha256"]),
+    )
+
+
+def describe_attachments(attachments: tuple[Attachment, ...]) -> list[str]:
+    """One plain line per deliverable, so every surface says the same thing about a file."""
+    lines = []
+    for item in attachments[:10]:
+        short = f", sha256 {item.digest[:12]}" if item.digest else ""
+        lines.append(f"File ready: {item.name} ({item.media_type}, {item.size_bytes} bytes{short}), reference {item.attachment_id}")
+    return lines
+
+
 class TextChannelAdapter(Protocol):
     """Implemented once per surface; every method is transport-only."""
 
@@ -162,7 +185,7 @@ class PrincipalDirectory:
         slack:
           T01/U123: {identity: alice@client.example, roles: [approver]}
         teams:
-          29:abc: {identity: bob@client.example}
+          <tenant id>/<Entra object id>: {identity: bob@client.example}
     """
 
     def __init__(self, mapping: Mapping[str, Mapping[str, Mapping[str, Any]]] | None = None) -> None:

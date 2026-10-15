@@ -205,6 +205,17 @@ These adapters implement portable Tools behind an injected transport with creden
 
 Open: serving any of these from the sidecar, OAuth consent and token lifecycle (#86, #110), per-coworker identities (#129), Drive and SharePoint/OneDrive connectors (#91), Salesforce and Zoho (#93), automatic filing from calls and mail (#108, #109), and live proof on each provider.
 
+## Owner notices for connections and provider grants
+
+`platform/core/connection_notices.py` works out who should be told when a connection or a per-coworker provider grant needs a person (#86). It sends nothing: a deployment delivers each notice through a channel or the inbox and then records it, as with hand-off notices. It is credential-free, not wired into the sidecar or a channel, and no owner delivery exists yet.
+
+- **Conditions.** A capability connection that is `degraded`, `failed` or `revoked`, and a grant (#129) that is revoked, failed, degraded, expired or expiring within a warning window (default 7 days).
+- **Who.** The connection's named `owner` from the EnvironmentBinding, or the grant's owner; with none, the escalation contact; with neither, the notice is still returned with `to: null` and `unowned: true`, so it cannot be silently dropped.
+- **Once per state, at least once.** A notice has a stable key (connection or grant, condition, when the state began), is offered until delivery is recorded, and is not repeated for an unchanged state. A cleared condition is forgotten so a recurrence is told again. Only a notice the store offered can be marked delivered; `connection.notice-delivered` is ledgered with the key, kind and channel.
+- **Non-secret.** Notices name the family or the grant's connection, the condition and a recovery step, never a reason string, scope, account, secret reference or the provider-side identity.
+
+Open: delivering notices through Slack, Teams, email or the inbox, escalation after a notice goes unacknowledged, OAuth consent, token refresh and provider-side revocation (#86, #110).
+
 Stable operational contract:
 
 - `usage-attribution.schema.json` — canonical non-secret client/Agent/environment/provider and optional cost/trace/subscription/shared-pool dimensions used to correlate runtime consumption with showback and billing. This is platform-generated operational metadata, not client-authored Agent/Skill desired state.
