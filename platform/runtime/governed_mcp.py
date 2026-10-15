@@ -456,6 +456,10 @@ class GovernedToolRuntime:
             raise PermissionError("Customer record keeping is not connected here; say so and offer a message or a human hand-off")
         return CONTACTS.ContactStore(self.governance_root / "contacts")
 
+    def crm_store(self) -> "CONTACTS.ContactStore":
+        """The Tier 0 contact store for the platform's own filing step; refuses unless `crm` is bound to it."""
+        return self._require_crm()
+
     def crm_create(
         self,
         *,

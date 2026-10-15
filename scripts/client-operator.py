@@ -350,7 +350,7 @@ def doctor(
     return 1 if failed else 0
 
 
-def _governed_tool_container(project_name: str) -> str:
+def _service_container(project_name: str, service: str, label: str) -> str:
     if not PROJECT_NAME.fullmatch(project_name):
         raise ValueError("project name must use lowercase letters, numbers, and internal hyphens")
     _require_command("docker")
@@ -361,19 +361,23 @@ def _governed_tool_container(project_name: str) -> str:
             "--filter",
             f"label=com.docker.compose.project={project_name}",
             "--filter",
-            "label=com.docker.compose.service=governed-tools",
+            f"label=com.docker.compose.service={service}",
             "--format",
             "{{.ID}}",
         ]
     )
     if result.returncode != 0:
-        raise ValueError(f"cannot inspect governed Tool runtime: {result.stderr.strip()}")
+        raise ValueError(f"cannot inspect {label}: {result.stderr.strip()}")
     containers = [line.strip() for line in result.stdout.splitlines() if line.strip()]
     if len(containers) != 1:
         raise ValueError(
-            f"expected exactly one running governed-tools container for {project_name}; found {len(containers)}"
+            f"expected exactly one running {service} container for {project_name}; found {len(containers)}"
         )
     return containers[0]
+
+
+def _governed_tool_container(project_name: str) -> str:
+    return _service_container(project_name, "governed-tools", "governed Tool runtime")
 
 
 def runtime_approval(
@@ -472,6 +476,27 @@ def runtime_contacts(
     return 0
 
 
+VOICE_TRANSCRIPTS = "/opt/data/transcripts.jsonl"
+
+
+def runtime_file_calls(project_name: str) -> int:
+    """File the voice worker's stored call transcripts into the bound CRM (ledgered, idempotent)."""
+    voice = _service_container(project_name, "voice", "voice worker")
+    container = _governed_tool_container(project_name)
+    stored = _run(["docker", "exec", voice, "sh", "-c", f"cat {VOICE_TRANSCRIPTS} 2>/dev/null || true"])
+    if stored.returncode != 0:
+        raise ValueError(stored.stderr.strip() or "cannot read the voice worker's transcripts")
+    result = _run(
+        ["docker", "exec", "-i", container, "python", "/opt/model-garden-platform/scripts/runtime-file-calls.py", "--transcripts", "-"],
+        input_text=stored.stdout,
+    )
+    if result.stdout:
+        print(result.stdout.strip())
+    if result.returncode != 0:
+        raise ValueError(result.stderr.strip() or "runtime file-calls command failed")
+    return 0
+
+
 def runtime_connection(
     project_name: str,
     command: str,
@@ -558,6 +583,10 @@ def main() -> int:
         closer.add_argument("--by", required=True, help="the named person who did or declined it")
         closer.add_argument("--note")
 
+    file_calls = sub.add_parser(
+        "file-calls", help="file the voice worker's stored call transcripts into the bound CRM (unmatched queue; run on the client host)"
+    )
+    file_calls.add_argument("--project-name", required=True)
     contacts = sub.add_parser("contacts", help="review or erase the Tier 0 contact log (personal data; run on the client host)")
     contacts.add_argument("action", choices=sorted(CONTACT_COMMANDS))
     contacts.add_argument("ids", nargs="*", help="record IDs the action applies to")
@@ -628,6 +657,8 @@ def main() -> int:
             return 0
         if args.command == "doctor":
             return doctor(args.workspace, args.environment, args.repo, check_host=args.host)
+        if args.command == "file-calls":
+            return runtime_file_calls(args.project_name)
         if args.command == "contacts":
             return runtime_contacts(args.project_name, args.action, tuple(args.ids), by=args.by)
         if args.command == "handoffs":
