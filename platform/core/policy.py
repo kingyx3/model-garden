@@ -204,13 +204,39 @@ def evaluate(
     return {"decision": "allow", "reason": "selected-tool", "ruleId": None}
 
 
-def relaxation_errors(policies: Iterable[Mapping[str, Any]] | None, tools: Iterable[Mapping[str, Any]]) -> list[str]:
+def owners_from_binding(binding: Mapping[str, Any] | None) -> list[str] | None:
+    """The environment's named owners (``governance.owners``), or ``None`` when it names none.
+
+    An empty list is meaningful: it names nobody, so every relaxing rule is refused.
+    """
+    if not isinstance(binding, Mapping):
+        return None
+    spec = binding.get("spec", binding) if binding.get("kind") == "EnvironmentBinding" else binding
+    governance = spec.get("governance") if isinstance(spec, Mapping) else None
+    owners = governance.get("owners") if isinstance(governance, Mapping) else None
+    if owners is None:
+        return None
+    if not isinstance(owners, list) or not all(isinstance(item, str) and item.strip() for item in owners):
+        raise ValueError("EnvironmentBinding governance.owners must be a list of non-empty identities")
+    return sorted({item.strip().lower() for item in owners})
+
+
+def relaxation_errors(
+    policies: Iterable[Mapping[str, Any]] | None,
+    tools: Iterable[Mapping[str, Any]],
+    trusted_owners: Iterable[str] | None = None,
+) -> list[str]:
     """Deploy-time checks: rule ids are unique, and every approval-relaxing rule is signed.
 
     An `allow` rule relaxes approval when it matches a selected Tool that is not read-class.
     Its sign-off must name the client owner and carry the digest of the rule's exact content,
     so editing a rule after it was approved blocks compilation until the owner re-signs.
+
+    When ``trusted_owners`` is given (the environment's ``governance.owners``), the sign-off must also
+    name one of them. The digest proves the rule was not edited after signing, and this list narrows who
+    may claim to be the owner; neither authenticates the signer's identity.
     """
+    trusted = None if trusted_owners is None else {item.strip().lower() for item in trusted_owners}
     errors: list[str] = []
     seen: set[str] = set()
     selected = [
@@ -250,6 +276,11 @@ def relaxation_errors(policies: Iterable[Mapping[str, Any]] | None, tools: Itera
             errors.append(
                 f"Policy rule {rule_id!r} relaxes an approval requirement and needs the client owner's "
                 f"sign-off: signoff.owner plus signoff.ruleDigest {rule_digest(rule)}"
+            )
+        elif relaxes and trusted is not None and rule["signoff"]["owner"].strip().lower() not in trusted:
+            errors.append(
+                f"Policy rule {rule_id!r} is signed by {rule['signoff']['owner'].strip()!r}, who is not a named "
+                "owner of this environment (governance.owners in the EnvironmentBinding)"
             )
     return errors
 

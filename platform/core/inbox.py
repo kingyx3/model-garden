@@ -7,7 +7,9 @@ copying their contents:
 - pending approvals (an exact material action waiting for a mapped approver),
 - open Tier 4 hand-offs (an action the coworker prepared for a named person, with its deadline),
 - records that need a person's review in the Tier 0 contact log (unmatched interactions and possible
-  duplicates), as counts only.
+  duplicates), as counts only,
+- connections that are failed, revoked or degraded (a token that expired or was withdrawn is the commonest
+  reason a coworker silently stops being able to do something), by capability family and recorded reason.
 
 The summary is deliberately non-sensitive: it names the Tool, the reason, the assignee, the deadline
 and the record ID, plus the command that shows the exact content. It never includes action arguments,
@@ -102,28 +104,66 @@ def _review(root: pathlib.Path | None) -> list[dict[str, Any]]:
     return items
 
 
+def _connections(root: pathlib.Path | None) -> list[dict[str, Any]]:
+    if root is None:
+        return []
+    capabilities = _sibling("model_garden_inbox_capabilities", "capabilities.py")
+    items = []
+    try:
+        records = capabilities.read_connection_health(pathlib.Path(root))
+    except (OSError, ValueError):
+        return items
+    for family, record in sorted(records.items()):
+        health = record.get("health")
+        if health not in ("failed", "revoked", "degraded"):
+            continue
+        item: dict[str, Any] = {
+            "kind": "connection", "family": family, "health": health,
+            "since": record.get("updatedAt"), "recordedBy": record.get("updatedBy"),
+            "next": (
+                f"ask the connection's owner to reauthorize {family}, then run python3 scripts/client-operator.py "
+                f"connection {family} healthy --project-name <env> --actor <you>"
+                if health in ("failed", "revoked")
+                else f"watch {family}: it is degraded; python3 scripts/client-operator.py connections --project-name <env> shows the detail"
+            ),
+        }
+        if isinstance(record.get("reason"), str):
+            item["reason"] = record["reason"]
+        items.append(item)
+    return items
+
+
 def collect(
     *,
     approvals: pathlib.Path,
     handoffs: pathlib.Path,
     contacts: pathlib.Path | None = None,
+    governance: pathlib.Path | None = None,
     now: int | None = None,
 ) -> dict[str, Any]:
-    """Everything waiting for a person, most urgent first: overdue hand-offs, approvals, other hand-offs, reviews."""
+    """Everything waiting for a person, most urgent first.
+
+    Order: failed or revoked connections, overdue hand-offs, approvals, other hand-offs, degraded
+    connections, then records to review.
+    """
     current = int(time.time()) if now is None else now
     open_handoffs = sorted(_handoffs(handoffs, current), key=lambda item: (not item["overdue"], item.get("deadline") or 0, item["id"]))
     waiting = sorted(_approvals(approvals, current), key=lambda item: (-item["waitingSeconds"], item["id"]))
     overdue = [item for item in open_handoffs if item["overdue"]]
     due = [item for item in open_handoffs if not item["overdue"]]
     reviews = _review(contacts)
+    connections = _connections(governance)
+    down = [item for item in connections if item["health"] in ("failed", "revoked")]
+    degraded = [item for item in connections if item["health"] == "degraded"]
     return {
         "generatedAt": current,
-        "items": [*overdue, *waiting, *due, *reviews],
+        "items": [*down, *overdue, *waiting, *due, *degraded, *reviews],
         "counts": {
             "approvals": len(waiting),
             "handoffs": len(open_handoffs),
             "overdueHandoffs": len(overdue),
             "reviews": sum(item["count"] for item in reviews),
+            "connections": len(connections),
         },
     }
 
@@ -142,11 +182,15 @@ def format_text(inbox: dict[str, Any]) -> str:
         return "Nothing is waiting for a person.\n"
     lines = [
         f"Waiting for a person: {counts['approvals']} approval(s), {counts['handoffs']} hand-off(s)"
-        f" ({counts['overdueHandoffs']} overdue), {counts['reviews']} record(s) to review",
+        f" ({counts['overdueHandoffs']} overdue), {counts['reviews']} record(s) to review,"
+        f" {counts['connections']} connection(s) not healthy",
     ]
     for item in inbox["items"]:
         if item["kind"] == "approval":
             lines.append(f"  APPROVAL  {item['tool'] or 'unknown tool'}  waiting {_age(item['waitingSeconds'])}  id {item['id']}")
+        elif item["kind"] == "connection":
+            why = f" ({item['reason']})" if item.get("reason") else ""
+            lines.append(f"  CONNECTION  {item['family']} is {item['health'].upper()}{why}")
         elif item["kind"] == "handoff":
             due = "OVERDUE" if item["overdue"] else "open"
             lines.append(f"  HAND-OFF  {item['tool']}  for {item['assignee']}  {due} ({item['reason']})  id {item['id']}")
