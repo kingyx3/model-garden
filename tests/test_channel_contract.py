@@ -1,4 +1,4 @@
-"""One Agent, every surface: the shared channel contract gives identical governed outcomes on email, Slack and web chat.
+"""One Agent, every surface: the shared channel contract gives identical governed outcomes on email, Slack, Teams and web chat.
 
 The same compiled receptionist is run behind each adapter. Whoever writes, on whichever surface, authority
 comes from the verified transport identity mapped through the same ``PrincipalDirectory``; message text
@@ -26,6 +26,7 @@ def load(name: str, relative: str):
 
 email = load("email_for_contract", "platform/channels/email_channel.py")
 slack = load("slack_for_contract", "platform/channels/slack_channel.py")
+teams = load("teams_for_contract", "platform/channels/teams_channel.py")
 webchat = load("webchat_for_contract", "platform/channels/web_chat.py")
 compiler = load("compiler_for_contract", "scripts/compile-workspace.py")
 runtime_module = load("runtime_for_contract", "platform/runtime/governed_mcp.py")
@@ -34,16 +35,20 @@ text = email.TEXT
 
 NOW = 1_790_000_000
 WINDOW = {"start": "2026-09-16T10:00:00+08:00", "end": "2026-09-16T10:30:00+08:00"}
-PEOPLE = {  # who is who, per surface: address (email, web chat) or Slack user id
-    "alice": {"email": "alice@acme.example", "slack": "U0ALICE01", "webchat": "alice@acme.example"},
-    "bob": {"email": "bob@acme.example", "slack": "U0BOB0001", "webchat": "bob@acme.example"},
-    "stranger": {"email": "eve@elsewhere.example", "slack": "U0EVE0001", "webchat": None},
+TEAMS_TENANT = "22222222-2222-4222-8222-222222222222"
+TEAMS_BOT_APP = "11111111-1111-4111-8111-111111111111"
+PEOPLE = {  # who is who, per surface: address (email, web chat), Slack user id or Entra object id (Teams)
+    "alice": {"email": "alice@acme.example", "slack": "U0ALICE01", "teams": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", "webchat": "alice@acme.example"},
+    "bob": {"email": "bob@acme.example", "slack": "U0BOB0001", "teams": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", "webchat": "bob@acme.example"},
+    "stranger": {"email": "eve@elsewhere.example", "slack": "U0EVE0001", "teams": "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee", "webchat": None},
 }
 DIRECTORY = text.PrincipalDirectory({
     "email": {"alice@acme.example": {"identity": "alice@acme.example", "roles": ["approver"]},
               "bob@acme.example": {"identity": "bob@acme.example"}},
     "slack": {"T01/U0ALICE01": {"identity": "alice@acme.example", "roles": ["approver"]},
               "T01/U0BOB0001": {"identity": "bob@acme.example"}},
+    "teams": {f"{TEAMS_TENANT}/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa": {"identity": "alice@acme.example", "roles": ["approver"]},
+              f"{TEAMS_TENANT}/bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb": {"identity": "bob@acme.example"}},
     "webchat": {"alice@acme.example": {"identity": "alice@acme.example", "roles": ["approver"]},
                 "bob@acme.example": {"identity": "bob@acme.example"}},
 })
@@ -130,6 +135,34 @@ class SlackSurface(Surface):
         return self._adapter.parse_approval_response(body, self._signed(body))
 
 
+class TeamsSurface(Surface):
+    name = "teams"
+    SERVICE = "https://smba.trafficmanager.net/apac/"
+
+    def __init__(self, root):
+        super().__init__(root)
+        claims = {"iss": "https://api.botframework.com", "aud": TEAMS_BOT_APP, "exp": NOW + 3000, "serviceurl": self.SERVICE}
+        self._adapter = teams.TeamsChannelAdapter(
+            bot_app_id=TEAMS_BOT_APP, allowed_tenants=(TEAMS_TENANT,), verify_token=lambda token: claims, clock=lambda: NOW)
+
+    def adapter(self):
+        return self._adapter
+
+    def _activity(self, who, **extra):
+        return json.dumps({
+            "type": "message", "id": "1790000000001", "serviceUrl": self.SERVICE, "channelData": {"tenant": {"id": TEAMS_TENANT}},
+            "from": {"id": "29:opaque", "aadObjectId": PEOPLE[who]["teams"]}, "recipient": {"id": f"28:{TEAMS_BOT_APP}"},
+            "conversation": {"id": "a:1dm", "conversationType": "personal", "tenantId": TEAMS_TENANT}, **extra,
+        }).encode()
+
+    def message(self, who, words="Please book the 10:00 slot"):
+        return self._adapter.parse_inbound(self._activity(who, text=words), {"Authorization": "Bearer a.b.c"})
+
+    def click(self, who, request_id, decision="approve"):
+        body = self._activity(who, text="", value={"mgAction": decision, "requestId": request_id})
+        return self._adapter.parse_approval_response(body, {"Authorization": "Bearer a.b.c"})
+
+
 class WebChatSurface(Surface):
     name = "webchat"
 
@@ -158,7 +191,7 @@ class WebChatSurface(Surface):
         return self._adapter.parse_approval_response(body, self._headers(who))
 
 
-SURFACES = (EmailSurface, SlackSurface, WebChatSurface)
+SURFACES = (EmailSurface, SlackSurface, TeamsSurface, WebChatSurface)
 
 
 class ContractCase(unittest.TestCase):

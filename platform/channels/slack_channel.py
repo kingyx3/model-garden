@@ -252,7 +252,9 @@ class SlackChannelAdapter:
         return self._transport(message)
 
     def send_reply(self, reply: OutboundReply) -> str:
-        return self._post(reply.conversation_id, reply.thread_id, reply.text[:MAX_TEXT_CHARS])
+        """Post the reply in its thread; a deliverable is posted as a reference line (location, digest), not uploaded."""
+        text = "\n".join([reply.text[:MAX_TEXT_CHARS], *TEXT.describe_attachments(reply.attachments)])
+        return self._post(reply.conversation_id, reply.thread_id, text[:MAX_TEXT_CHARS])
 
     def send_receipt(self, receipt: ActionReceipt) -> str:
         return self._post(
