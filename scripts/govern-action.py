@@ -249,6 +249,38 @@ def build_action_request(
     return {**material, "requestId": request_id}
 
 
+def count_executions_today(audit_path: pathlib.Path | None, tool_name: str, *, now: dt.datetime | None = None) -> int | None:
+    """Successful executions of a Tool so far today (UTC) in the local ledger.
+
+    ``None`` means the count is unavailable (no ledger, or it cannot be read), which a
+    usage-limited allow rule treats as "limit not proven" and therefore does not apply.
+    """
+    if audit_path is None:
+        return None
+    today = (now or dt.datetime.now(dt.timezone.utc)).strftime("%Y-%m-%d")
+    if not audit_path.exists():
+        return 0
+    count = 0
+    try:
+        with audit_path.open("r", encoding="utf-8") as handle:
+            for raw in handle:
+                try:
+                    event = json.loads(raw)
+                except json.JSONDecodeError:
+                    return None
+                if (
+                    isinstance(event, dict)
+                    and event.get("event") == "execution"
+                    and event.get("outcome") == "succeeded"
+                    and event.get("tool") == tool_name
+                    and str(event.get("timestamp", "")).startswith(today)
+                ):
+                    count += 1
+    except OSError:
+        return None
+    return count
+
+
 def authorize_action(
     desired_state: dict[str, Any],
     tool_name: str,
@@ -257,6 +289,7 @@ def authorize_action(
     initiating_user: str | None = None,
     governance_context: dict[str, Any] | None = None,
     principal_access: str | None = None,
+    audit_path: pathlib.Path | None = None,
 ) -> dict[str, Any]:
     request = build_action_request(
         desired_state,
@@ -272,8 +305,14 @@ def authorize_action(
         raise ValueError("Governed action failed: principal_access must be member or public")
 
     agent_spec = desired_state.get("agent", {}).get("spec", {})
+    limited = any(
+        isinstance(rule.get("conditions"), dict) and "maxPerDay" in rule["conditions"]
+        for rule in POLICY.rules_of(desired_state.get("policies"))
+    )
     outcome = POLICY.evaluate(
         desired_state.get("policies"),
+        arguments=arguments,
+        usage_today=count_executions_today(audit_path, tool_name) if limited else None,
         tool_name=tool_name,
         risk=tool.get("spec", {}).get("risk"),
         classification=agent_spec.get("security", {}).get("dataClassification"),
@@ -605,6 +644,7 @@ def create_handoff(
     authorization = authorize_action(
         desired_state, tool_name, arguments,
         initiating_user=initiating_user, governance_context=governance_context, principal_access=principal_access,
+        audit_path=audit_path,
     )
     request = authorization["request"]
     base_ledger: dict[str, Any] = {
@@ -686,6 +726,7 @@ def execute_action(
         initiating_user=initiating_user,
         governance_context=governance_context,
         principal_access=principal_access,
+        audit_path=audit_path,
     )
     request = authorization["request"]
     base_ledger: dict[str, Any] = {

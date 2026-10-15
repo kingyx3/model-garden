@@ -37,7 +37,7 @@ A `KnowledgeSource` with `spec.type: text-file` points at one `.txt` or `.md` fi
 
 **Runtime and activation.** The governed sidecar exposes `kb_search` (the `kb.search` Tool) over this module. It runs only when the Agent selected the `kb.search` Tool (see `examples/workspace/tools/kb-search.yaml`) **and** the capability manifest shows `kb` bound to `text-knowledge` at Tier 0; otherwise it refuses with "not connected here". Each search is a governed read: the ledger records provider `text-knowledge`, `tier: 0` and the section IDs and content digests, never the text. A client binds it with `connectors.kb: {provider: text-knowledge, tier: 0}` in the EnvironmentBinding; the registry lists it as `built-credential-free` (adapter `platform/core/knowledge.py`), so a Skill requiring `kb` is ready and the readiness report shows `kb: text-knowledge tier 0`. A deployment that selects `kb.search` gets the governed sidecar even with no calendar bound, and that sidecar holds no provider credential. This is credential-free build evidence only: no live deployment has exercised it.
 
-**Not yet delivered:** the reference receptionist does not yet declare `kb` and `crm` as required capabilities, so its evals do not exercise these paths. Document-level permissions, external knowledge providers, freshness/refresh policy, conflict detection and the no-system FAQ eval (#116, #77) are also not done.
+**Not yet delivered:** document-level permissions, external knowledge providers, freshness/refresh policy and conflict detection (#116, #77). The reference receptionist declares `kb` and `crm` and its evals exercise both Tier 0 paths (see [Reference receptionist on a zero-stack client](#reference-receptionist-on-a-zero-stack-client)).
 
 ## Tier 0 contact and interaction log
 
@@ -73,7 +73,21 @@ With no policy, Agent and Tool settings behave exactly as before (plus the `priv
 
 **Preview.** `python3 scripts/compile-workspace.py <workspace> --approvals` prints, per Skill, which Tool actions run automatically, need approval or are denied for members and for public callers.
 
-Not yet supported: bounded conditions (for example "FAQ category only", "max N per day"), which need per-call classification and counters; and consultant/owner role separation beyond the sign-off above.
+**Bounded conditions.** An `allow` rule may carry `conditions` that can only *narrow* it (`conditions` on any other effect is a compile error):
+
+```yaml
+- id: faq-replies
+  effect: allow
+  actions: [mail.send]
+  conditions:
+    arguments: {category: [faq]}   # every named Tool argument must be present and equal to a listed value
+    maxPerDay: 20                  # applies only while fewer than 20 successful executions of the matched Tool are in today's (UTC) local ledger
+  signoff: {owner: owner@client.example, ruleDigest: <sha256>}
+```
+
+When a condition is unmet, or cannot be checked (a missing or non-scalar argument, no readable ledger), the rule does not apply and the stricter default stands, so a limited rule reached its limit shows `policy-limit-reached` with the rule ID in the ledger and the call needs approval. Values are compared by type (`1` does not match `true`). The conditions are part of the rule content, so editing them invalidates the owner's sign-off until it is re-signed. `--approvals` shows such a Tool as `conditional`. Counts come from the sidecar's local chained ledger; they are not a distributed rate limiter (concurrent calls can overshoot by the number in flight) and a client who deletes the ledger resets them, so use `deny`/`human-only` for hard limits.
+
+Not yet supported: classification of free-text content (for example deciding that a message *is* an FAQ), per-principal counters, verifying that the named owner really signed (a sign-off proves content integrity, not identity), and consultant/owner role separation beyond the sign-off above.
 
 Stable operational contract:
 
@@ -142,6 +156,14 @@ spec:
 
 Disabled Skills remain in the non-secret readiness report but are **not** materialized into the Hermes runtime, do not contribute required capabilities, and suppress Tools used exclusively by disabled Skills. Tools shared with enabled Skills remain selected. Removing a Skill from `disabledSkills` is an activation: the ordinary required-capability validation then **fails closed** if its provider is missing. Keep direct Agent instructions aligned with what is enabled; disabling a Skill is not a grant/revocation of an underlying client provider credential.
 
+### Knowledge content readiness
+
+A Skill that requires `kb` is ready only when the provider is bound **and** the Agent selects at least one usable KnowledgeSource: `status: approved`, an `effectiveDate` that has arrived, and an `audiences` list (if any) that names the Agent. Otherwise the readiness report, `client-operator.py skills`, the compiled `capabilities.skills` and the coworker's `platform.capabilities` show the dependency as `no-content` with each source's state (`draft`, `retired`, `not-yet-effective`, `effective-date-invalid`, `not-for-this-agent`, `not-indexed`) and the Skill is not ready (`canEnable: false`, `skills` exits non-zero). Compilation still succeeds so a draft can be authored and reviewed, and an *optional* `kb` dependency reports the states without blocking. States are non-secret names only; source text never appears. This checks declarations, not document-level permissions or freshness (#116).
+
+### Status consistency
+
+The integration registry and versioned tests are the authority for implementation status. `python3 scripts/check-status-consistency.py` (run by CI and `make contracts`) fails when a doc calls a built provider planned or unimplemented, calls an unproven provider live, denies capabilities the reference receptionist does declare, or when the Tier 0 providers stop being `built-credential-free` at tier 0 with no live proof. It does not validate Confluence pages, which still have to be updated from `python3 scripts/integration-directory.py` by hand.
+
 ### Reference receptionist on a zero-stack client
 
 The shipped receptionist declares `kb.search`, `crm.create` and `crm.log-interaction` (Tier 0, no third-party account) next to the calendar Tools. A client with no calendar sets `disabledSkills: [book-appointment]` and binds only `connectors.kb` (`text-knowledge`, tier 0) and `connectors.crm` (`built-in-crm`, tier 0); the calendar Tools are then suppressed and the bundle renders with no calendar provider. A client that later adds a calendar removes the Skill from `disabledSkills` and adds `connectors.calendar` (`google` or `microsoft`, tier 1); the Agent and the other Skills are unchanged. Unshipped providers (for example `hubspot`), forged tiers, or a failed connection keep the dependent Skill blocked. `tests/test_reference_compatibility.py` pins both scenarios, and `python3 scripts/eval-receptionist.py` also checks that each scenario's question retrieves the expected approved-knowledge section. The Tier 0 kb/crm path still has no live deployment evidence.
@@ -152,7 +174,7 @@ python3 scripts/client-operator.py skills <private-client-workspace> --environme
 
 This prints `ready`, `DISABLED` and `BLOCKED`, dependencies, and registry-backed `connect <family>` guidance without exposing tokens. An intentionally disabled Skill does not block the current deployment; enabling it without its required capability does. The `platform.capabilities` coworker response includes the same per-Skill `enabled`, `ready`, `canEnable` and dependency facts. When a connector is failed or revoked, live runtime health overlays mark dependent required Skills unavailable until a named operator reauthorizes the connection.
 
-Tier 0 `kb` (a business-rules text file) and Tier 0 `crm` (the contact and interaction log) are implemented credential-free; full consent/provisioning (#110) and third-party CRM providers (#93) remain **unimplemented**, and the reference receptionist does not yet declare `kb` or `crm` as dependencies. Do not represent these capability checks as real external provider proof.
+Tier 0 `kb` (a business-rules text file) and Tier 0 `crm` (the contact and interaction log) are implemented credential-free; full consent/provisioning (#110) and third-party CRM providers (#93) remain **unimplemented**. The reference receptionist declares both as dependencies and its Skills are ready on the Tier 0 bindings. Do not represent these capability checks as real external provider proof.
 
 ## Validate a workspace
 

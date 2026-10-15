@@ -583,6 +583,7 @@ class GovernedToolRuntime:
         decision = GOVERN.authorize_action(
             self.desired_state, tool, arguments,
             initiating_user=identity, governance_context=governance_context, principal_access=principal_access,
+            audit_path=self.audit_path,
         )
         family = CAPABILITIES.family_of(tool)
         entry = next((item for item in self.capabilities().get("capabilities", []) if item.get("family") == family), None)
