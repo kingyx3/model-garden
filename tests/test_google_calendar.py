@@ -5,6 +5,9 @@ import json
 import pathlib
 import tempfile
 import unittest
+import urllib.error
+import urllib.request
+from unittest import mock
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 CONNECTOR_PATH = ROOT / "platform" / "connectors" / "google_calendar.py"
@@ -46,6 +49,30 @@ def desired_state():
 
 
 class GoogleCalendarTests(unittest.TestCase):
+    def test_transport_rejects_redirect_before_replaying_bearer_token(self):
+        request_url = "https://www.googleapis.com/calendar/v3/freeBusy"
+        redirect = urllib.error.HTTPError(
+            request_url, 302, "Found", {"Location": "https://attacker.example/steal"}, None
+        )
+        with mock.patch.object(calendar.urllib.request, "build_opener", wraps=urllib.request.build_opener) as build:
+            with mock.patch.object(calendar.urllib.request, "urlopen", side_effect=AssertionError("global opener used")):
+                with mock.patch.object(urllib.request.OpenerDirector, "open", side_effect=redirect):
+                    # Directly exercise the installed redirect handler: it must never return a follow-up request.
+                    handler = calendar._NoRedirect()
+                    request = urllib.request.Request(request_url, headers={"Authorization": "Bearer secret"})
+                    with self.assertRaisesRegex(ValueError, "redirect refused"):
+                        handler.redirect_request(request, None, 302, "Found", redirect.headers, redirect.headers["Location"])
+                with mock.patch.object(urllib.request.OpenerDirector, "open", side_effect=redirect):
+                    status, _ = calendar._urllib_transport("POST", request_url, {"Authorization": "Bearer secret"}, {})
+                    self.assertEqual(status, 302)
+            self.assertTrue(build.called)
+
+    def test_transport_rejects_nondefault_port_before_network(self):
+        with mock.patch.object(calendar.urllib.request, "build_opener") as build:
+            with self.assertRaisesRegex(ValueError, "fixed HTTPS Google API host"):
+                calendar._urllib_transport("GET", "https://www.googleapis.com:444/calendar/v3", {"Authorization": "Bearer secret"}, None)
+            build.assert_not_called()
+
     def test_availability_uses_google_freebusy_api_without_leaking_token(self):
         transport = FakeTransport([
             (200, {"calendars": {"primary": {"busy": []}}}),
