@@ -57,6 +57,7 @@ RUNTIME_SOURCE_PATHS = (
     pathlib.Path("platform/core/human_step.py"),
     pathlib.Path("platform/core/crm_sync.py"),
     pathlib.Path("platform/core/artifacts.py"),
+    pathlib.Path("platform/core/builtin_files.py"),
     pathlib.Path("platform/core/deliverables.py"),
     pathlib.Path("platform/core/skillsets.py"),
     pathlib.Path("platform/core/provider_grants.py"),

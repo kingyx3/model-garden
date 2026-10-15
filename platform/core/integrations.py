@@ -58,7 +58,9 @@ def plan(family: str, provider_id: str, selected_tools: list[str]):
               "tools": sorted(set(selected_tools)), "readyToConnect": False,
               "issue": provider["issue"]}
     if provider["status"] not in BUILT:
-        result["blocker"] = "Connector not implemented; do not request credentials"
+        result["blocker"] = ("Connector not implemented for the governed runtime (adapter in development); do not request credentials"
+                             if provider["status"] == "in-development"
+                             else "Connector not implemented; do not request credentials")
         return result
     scope_map = provider.get("scopeByTool", {})
     if any(t not in scope_map for t in selected_tools):
