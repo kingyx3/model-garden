@@ -27,6 +27,18 @@ compiler = load("compiler_skill_activation", "scripts/compile-workspace.py")
 capabilities = load("capabilities_skill_activation", "platform/core/capabilities.py")
 provisioner = load("hermes_skill_activation", "scripts/provision-hermes-profile.py")
 
+# The receptionist's knowledge and contact-log dependencies are satisfied at Tier 0 with no
+# third-party account; a client with no calendar simply keeps booking disabled.
+TIER_ZERO = {
+    "kb": {"provider": "text-knowledge", "tier": 0},
+    "crm": {"provider": "built-in-crm", "tier": 0},
+}
+ZERO_STACK = {"environment": "dev", "connectors": dict(TIER_ZERO)}
+WITH_CALENDAR = {
+    "environment": "dev",
+    "connectors": {**TIER_ZERO, "calendar": {"provider": "google", "token_ref": "secret://google/dev"}},
+}
+
 
 class SkillActivationTests(unittest.TestCase):
     def workspace(self, root: pathlib.Path) -> pathlib.Path:
@@ -34,7 +46,8 @@ class SkillActivationTests(unittest.TestCase):
         shutil.copytree(ROOT / "examples/workspace", workspace)
         (workspace / "environments").mkdir()
         (workspace / "environments/dev.yaml").write_text(
-            "environment: dev\nruntime:\n  profile: receptionist\n  model_credential_ref: secret://model/dev\n",
+            "environment: dev\nruntime:\n  profile: receptionist\n  model_credential_ref: secret://model/dev\n"
+            "connectors:\n  kb:\n    provider: text-knowledge\n    tier: 0\n  crm:\n    provider: built-in-crm\n    tier: 0\n",
             encoding="utf-8",
         )
         return workspace
@@ -52,12 +65,14 @@ class SkillActivationTests(unittest.TestCase):
             workspace = self.workspace(pathlib.Path(tmp))
             self.edit_agent(workspace, disabled=["book-appointment"])
             desired = compiler.compile_workspace(
-                workspace, "receptionist", environment_binding={"environment": "dev"}
+                workspace, "receptionist", environment_binding=ZERO_STACK
             )[0]
             names = {x["metadata"]["name"] for x in desired["skills"]}
             self.assertNotIn("book-appointment", names)
+            # Only the calendar Tools exclusive to the disabled Skill are suppressed.
             self.assertEqual(
-                [x["metadata"]["name"] for x in desired["tools"]], []
+                [x["metadata"]["name"] for x in desired["tools"]],
+                ["kb.search", "crm.create", "crm.log-interaction"],
             )
             self.assertNotIn("book-appointment", desired["skillInstructions"])
             self.assertEqual(
@@ -110,12 +125,7 @@ class SkillActivationTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "book-appointment"):
                 compiler.compile_workspace(workspace, "receptionist",
                                            environment_binding={"environment": "dev"})
-            ready = compiler.compile_workspace(
-                workspace, "receptionist",
-                environment_binding={"environment": "dev", "connectors": {
-                    "calendar": {"provider": "google", "token_ref": "secret://google/dev"}
-                }},
-            )[0]
+            ready = compiler.compile_workspace(workspace, "receptionist", environment_binding=WITH_CALENDAR)[0]
             self.assertIn("book-appointment", [s["metadata"]["name"] for s in ready["skills"]])
             self.assertIn("calendar.book", [t["metadata"]["name"] for t in ready["tools"]])
 
@@ -137,22 +147,18 @@ class SkillActivationTests(unittest.TestCase):
             skill["spec"]["allowedTools"] = ["calendar.availability"]
             path.write_text(yaml.safe_dump(skill, sort_keys=False))
             desired = compiler.compile_workspace(
-                workspace, "receptionist", environment_binding={"environment": "dev"}
+                workspace, "receptionist", environment_binding=ZERO_STACK
             )[0]
-            self.assertEqual([t["metadata"]["name"] for t in desired["tools"]], ["calendar.availability"])
+            self.assertEqual(
+                [t["metadata"]["name"] for t in desired["tools"]],
+                ["calendar.availability", "kb.search", "crm.create", "crm.log-interaction"],
+            )
 
     def test_runtime_revocation_recomputes_required_skill_readiness(self):
         compiled = compiler.compile_workspace(
-            ROOT / "examples/workspace", "receptionist",
-            environment_binding={"environment": "dev", "connectors": {
-                "calendar": {"provider": "google", "token_ref": "secret://google/dev"}
-            }},
+            ROOT / "examples/workspace", "receptionist", environment_binding=WITH_CALENDAR
         )[0]
-        manifest = capabilities.build_manifest(compiled, {
-            "environment": "dev", "connectors": {
-                "calendar": {"provider": "google", "token_ref": "secret://google/dev"}
-            },
-        })
+        manifest = capabilities.build_manifest(compiled, WITH_CALENDAR)
         before = next(x for x in manifest["skills"] if x["name"] == "book-appointment")
         self.assertTrue(before["ready"])
         assert manifest["capabilities"]

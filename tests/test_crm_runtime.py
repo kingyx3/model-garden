@@ -50,11 +50,10 @@ LOG_ARGS = {
 def workspace(tmp: str) -> pathlib.Path:
     target = pathlib.Path(tmp) / "workspace"
     shutil.copytree(ROOT / "examples" / "workspace", target)
+    # The example receptionist already selects the log-conversation Skill and the create and
+    # log-interaction Tools; a read Tool is added for the staff-lookup tests.
     agent = target / "agents" / "front-office" / "receptionist" / "agent.yaml"
-    text = agent.read_text()
-    text = text.replace("    - book-appointment\n", "    - book-appointment\n    - log-conversation\n", 1)
-    text = text.replace("    - calendar.book\n", "    - calendar.book\n    - crm.read\n    - crm.create\n    - crm.log-interaction\n", 1)
-    agent.write_text(text)
+    agent.write_text(agent.read_text().replace("    - crm.create\n", "    - crm.read\n    - crm.create\n", 1))
     return target
 
 
@@ -286,7 +285,9 @@ class ProvisionDeployAndReadinessTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             ws = workspace(tmp)
             calendar = {"provider": "google", "tier": 1, "token_ref": "secret://calendar/dev"}
-            ready = {"environment": "dev", "connectors": {"calendar": calendar, **CRM_BINDING["connectors"]}}
+            ready = {"environment": "dev", "connectors": {
+                "calendar": calendar, "kb": {"provider": "text-knowledge", "tier": 0}, **CRM_BINDING["connectors"],
+            }}
             report = compiler.workspace_readiness(ws, "receptionist", (), ready)
             skill = next(item for item in report[0]["skills"] if item["name"] == "log-conversation")
             self.assertTrue(skill["ready"])

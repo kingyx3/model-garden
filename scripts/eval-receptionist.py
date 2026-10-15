@@ -8,6 +8,7 @@ quality remains a separate credential-backed acceptance gate.
 from __future__ import annotations
 
 import argparse
+import datetime
 import importlib.util
 import pathlib
 import sys
@@ -15,8 +16,19 @@ import sys
 import yaml
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
-# The eval environment binds only the calendar, so every other declared capability is unbound.
-EVAL_BINDING = {"environment": "eval", "connectors": {"calendar": {"provider": "google"}}}
+# The eval environment binds the calendar and the credential-free Tier 0 knowledge and contact
+# log, so every other declared capability (tickets) is unbound and must degrade to a hand-off.
+EVAL_BINDING = {
+    "environment": "eval",
+    "connectors": {
+        "calendar": {"provider": "google"},
+        "kb": {"provider": "text-knowledge", "tier": 0},
+        "crm": {"provider": "built-in-crm", "tier": 0},
+    },
+}
+# Business-rules content is only searchable once effective; evaluate as of a fixed date.
+EVAL_DATE = datetime.date(2026, 6, 1)
+RETRIEVAL_TOP = 3
 
 
 def _load_module(name: str, path: pathlib.Path):
@@ -81,19 +93,71 @@ def evaluate(workspace: pathlib.Path, suite_path: pathlib.Path) -> list[str]:
         if phrase not in instructions:
             failures.append(message)
 
-    manifest = None
+    state: dict[str, object] = {}
+
+    def compiled():
+        """Compile once against the evaluation binding; a failure is reported, never raised."""
+        if "error" in state:
+            return None
+        if "desired" not in state:
+            compiler = _load_module("eval_compile_workspace", ROOT / "scripts" / "compile-workspace.py")
+            try:
+                desired = compiler.compile_workspace(workspace, "receptionist", environment_binding=EVAL_BINDING)[0]
+            except ValueError as exc:
+                state["error"] = str(exc)
+                failures.append(f"Receptionist does not compile against the evaluation binding: {exc}")
+                return None
+            state.update(
+                compiler=compiler,
+                desired=desired,
+                manifest=compiler.CAPABILITIES.build_manifest(desired, EVAL_BINDING),
+            )
+        return state
+
     for scenario in suite.get("scenarios", []):
         capability = scenario["capability"]
         if capability not in selected_skills:
             failures.append(f"{scenario['id']}: missing selected Skill {capability!r}")
             continue
         expected = scenario.get("expected", {})
+        bound = expected.get("boundCapability")
+        if bound:
+            context = compiled()
+            entry = None
+            if context is not None:
+                entry = next((item for item in context["manifest"]["capabilities"] if item["family"] == bound["family"]), None)
+            if context is not None and (
+                entry is None
+                or entry.get("status") != "available"
+                or entry.get("provider") != bound["provider"]
+                or entry.get("tier") != bound["tier"]
+            ):
+                failures.append(
+                    f"{scenario['id']}: capability {bound['family']!r} must be available from {bound['provider']!r} "
+                    f"at tier {bound['tier']} in the evaluation binding"
+                )
+        retrieval = expected.get("retrieval")
+        if retrieval:
+            context = compiled()
+            if context is not None:
+                found = context["compiler"].KNOWLEDGE.search_selected(
+                    context["desired"], scenario["input"], today=EVAL_DATE
+                )
+                cited = [document["citation"] for document in found["documents"][:RETRIEVAL_TOP]]
+                if "citation" in retrieval and retrieval["citation"] not in cited:
+                    failures.append(
+                        f"{scenario['id']}: expected a search for {scenario['input']!r} to cite "
+                        f"{retrieval['citation']!r} in its top {RETRIEVAL_TOP}, got {cited}"
+                    )
+                if "documents" in retrieval and len(found["documents"]) != retrieval["documents"]:
+                    failures.append(
+                        f"{scenario['id']}: expected {retrieval['documents']} section(s) for {scenario['input']!r}, "
+                        f"got {len(found['documents'])}; an unknown question must fall back to a person"
+                    )
         unbound = expected.get("unboundCapability")
         if unbound:
-            if manifest is None:
-                compiler = _load_module("eval_compile_workspace", ROOT / "scripts" / "compile-workspace.py")
-                desired = compiler.compile_workspace(workspace, "receptionist", environment_binding=EVAL_BINDING)[0]
-                manifest = compiler.CAPABILITIES.build_manifest(desired, EVAL_BINDING)
+            context = compiled()
+            manifest = context["manifest"] if context is not None else {"capabilities": []}
             entry = next((item for item in manifest["capabilities"] if item["family"] == unbound), None)
             if entry is None or not (entry["required"] or entry["optional"]):
                 failures.append(f"{scenario['id']}: Receptionist does not declare capability {unbound!r}")

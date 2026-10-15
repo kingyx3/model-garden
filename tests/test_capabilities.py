@@ -35,9 +35,14 @@ GOOGLE_BINDING = {
             "calendar_id": "frontdesk@acme-tenant.example",
             "scopes": ["https://www.googleapis.com/auth/calendar.events"],
             "owner": "office-manager@acme.example",
-        }
+        },
+        # The reference binding also satisfies the receptionist's knowledge and contact-log
+        # dependencies at Tier 0, with no third-party account.
+        "kb": {"provider": "text-knowledge", "tier": 0},
+        "crm": {"provider": "built-in-crm", "tier": 0},
     },
 }
+TIER_ZERO_CONNECTORS = {key: GOOGLE_BINDING["connectors"][key] for key in ("kb", "crm")}
 
 
 class FakeCalendarTransport:
@@ -104,7 +109,7 @@ class CapabilityResolutionTests(unittest.TestCase):
 
     def test_workspace_without_binding_compiles_with_declarations_only(self):
         compiled = compiler.compile_workspace(ROOT / "examples" / "workspace", "receptionist")[0]
-        self.assertEqual(compiled["capabilities"], {"optional": ["tickets"], "required": ["calendar"]})
+        self.assertEqual(compiled["capabilities"], {"optional": ["tickets"], "required": ["calendar", "crm", "kb"]})
 
     def test_required_capability_bound_and_optional_reported_degraded(self):
         compiled = compiler.compile_workspace(
@@ -115,21 +120,28 @@ class CapabilityResolutionTests(unittest.TestCase):
             resolution,
             [
                 {"capability": "calendar", "family": "calendar", "required": True, "status": "bound", "provider": "google", "tier": 1},
+                {"capability": "crm", "family": "crm", "required": True, "status": "bound", "provider": "built-in-crm", "tier": 0},
+                {"capability": "kb", "family": "kb", "required": True, "status": "bound", "provider": "text-knowledge", "tier": 0},
                 {"capability": "tickets", "family": "tickets", "required": False, "status": "degraded", "fallbackTier": 4},
             ],
         )
         self.assertEqual(compiled["capabilities"]["degraded"], ["tickets"])
 
     def test_required_capability_without_binding_fails_closed_with_clear_message(self):
-        with self.assertRaisesRegex(ValueError, r"requires capability 'calendar' \(needed by Skill 'book-appointment'\) but environment 'dev' binds no provider"):
+        with self.assertRaisesRegex(
+            ValueError,
+            r"requires capability 'calendar' \(needed by Skill 'book-appointment'\), "
+            r"'crm' \(needed by Skill 'log-conversation'\), 'kb' \(needed by Skill 'answer-faq'\) "
+            r"but environment 'dev' binds no provider",
+        ):
             compiler.compile_workspace(
                 ROOT / "examples" / "workspace", "receptionist", environment_binding={"environment": "dev"}
             )
 
     def test_legacy_and_microsoft_calendar_bindings_resolve_identically(self):
         for connectors, provider in (
-            ({"google_calendar": {"token_ref": "secret://g", "calendar_id": "primary"}}, "google"),
-            ({"calendar": {"provider": "microsoft", "token_ref": "secret://m", "mailbox": "r@client.example"}}, "microsoft"),
+            ({"google_calendar": {"token_ref": "secret://g", "calendar_id": "primary"}, **TIER_ZERO_CONNECTORS}, "google"),
+            ({"calendar": {"provider": "microsoft", "token_ref": "secret://m", "mailbox": "r@client.example"}, **TIER_ZERO_CONNECTORS}, "microsoft"),
         ):
             compiled = compiler.compile_workspace(
                 ROOT / "examples" / "workspace",
@@ -201,7 +213,7 @@ class SkillReadinessTests(unittest.TestCase):
     def test_readiness_per_skill_with_google_calendar(self):
         agent, skills = self._receptionist()
         report = {entry["name"]: entry for entry in capabilities.skill_readiness(agent, skills, GOOGLE_BINDING)}
-        self.assertEqual(sorted(report), ["answer-faq", "book-appointment", "human-handoff", "take-message"])
+        self.assertEqual(sorted(report), ["answer-faq", "book-appointment", "human-handoff", "log-conversation", "take-message"])
         self.assertTrue(all(entry["kind"] == "Skill" and entry["ready"] for entry in report.values()))
         self.assertEqual(
             report["book-appointment"]["dependencies"],
@@ -211,7 +223,15 @@ class SkillReadinessTests(unittest.TestCase):
             report["take-message"]["dependencies"],
             [{"capability": "tickets", "family": "tickets", "required": False, "status": "degraded", "fallbackTier": 4}],
         )
-        self.assertEqual(report["answer-faq"]["dependencies"], [])
+        self.assertEqual(
+            report["answer-faq"]["dependencies"],
+            [{"capability": "kb", "family": "kb", "required": True, "status": "bound", "provider": "text-knowledge", "tier": 0}],
+        )
+        self.assertEqual(
+            report["log-conversation"]["dependencies"],
+            [{"capability": "crm", "family": "crm", "required": True, "status": "bound", "provider": "built-in-crm", "tier": 0}],
+        )
+        self.assertEqual(report["human-handoff"]["dependencies"], [])
         rendered = json.dumps(report)
         for forbidden in ("token_ref", "secret://", "calendar_id", "frontdesk@acme-tenant.example", "scopes", "owner"):
             self.assertNotIn(forbidden, rendered)
@@ -221,7 +241,7 @@ class SkillReadinessTests(unittest.TestCase):
             ROOT / "examples" / "workspace", "receptionist", environment_binding=GOOGLE_BINDING
         )[0]
         names = [entry["name"] for entry in compiled["capabilities"]["skills"]]
-        self.assertEqual(names, ["answer-faq", "take-message", "human-handoff", "book-appointment"])
+        self.assertEqual(names, ["answer-faq", "take-message", "human-handoff", "book-appointment", "log-conversation"])
         self.assertNotIn("calendar_id", json.dumps(compiled["capabilities"]))
 
     def test_agent_declarations_get_their_own_entry(self):
@@ -233,7 +253,7 @@ class SkillReadinessTests(unittest.TestCase):
     def test_missing_required_capability_blocks_skill_and_error_names_it(self):
         agent = {"metadata": {"name": "receptionist"}, "spec": {}}
         skills = [
-            {"metadata": {"name": "log-call"}, "spec": {"requiredCapabilities": ["crm"]}},
+            {"metadata": {"name": "log-call"}, "spec": {"requiredCapabilities": ["mail"]}},
             {"metadata": {"name": "answer-faq"}, "spec": {}},
         ]
         report = {entry["name"]: entry for entry in capabilities.skill_readiness(agent, skills, GOOGLE_BINDING)}
@@ -242,7 +262,7 @@ class SkillReadinessTests(unittest.TestCase):
         self.assertTrue(report["answer-faq"]["ready"])
         with self.assertRaisesRegex(
             ValueError,
-            r"Agent 'receptionist' requires capability 'crm' \(needed by Skill 'log-call'\) but environment 'dev' binds no provider",
+            r"Agent 'receptionist' requires capability 'mail' \(needed by Skill 'log-call'\) but environment 'dev' binds no provider",
         ):
             capabilities.resolve(
                 capabilities.collect_declarations(agent, skills),

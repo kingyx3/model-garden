@@ -91,6 +91,9 @@ is implemented; the readiness and deployment gates reject such claims. The Tier 
 credentials: an approved business-rules file (below) and a person who reviews the
 contact log (`client-operator.py contacts review`; it prints personal data, so run it on
 the client host and agree who may).
+The reference receptionist now depends on these two Tier 0 bindings; a client with no
+calendar keeps `book-appointment` under `disabledSkills` and needs nothing else (see
+[contracts](contracts.md#reference-receptionist-on-a-zero-stack-client)).
 Clients can continue to list those Skills under `disabledSkills` until their
 dependencies are implemented and authorized. A shipped Calendar adapter still
 needs actual account consent, working token rotation and live acceptance.

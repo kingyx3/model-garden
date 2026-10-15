@@ -30,6 +30,7 @@ provisioner = _load("provision_hermes_for_kb", "scripts/provision-hermes-profile
 KB_BINDING = {"environment": "dev", "connectors": {"kb": {"provider": "text-knowledge", "tier": 0, "owner": "owner@client.example"}}}
 FULL_BINDING = {"environment": "dev", "connectors": {
     **KB_BINDING["connectors"],
+    "crm": {"provider": "built-in-crm", "tier": 0},
     "calendar": {"provider": "google", "tier": 1, "token_ref": "secret://calendar/dev"},
 }}
 
@@ -41,12 +42,7 @@ def workspace(tmp: str, **source_spec) -> pathlib.Path:
     document = yaml.safe_load(source.read_text())
     document["spec"].update(source_spec)
     source.write_text(yaml.safe_dump(document))
-    agent = target / "agents" / "front-office" / "receptionist" / "agent.yaml"
-    text = agent.read_text()
-    text = text.replace("    - business-information\n", "    - business-information\n    - rules-of-engagement\n")
-    text = text.replace("    - calendar.book\n", "    - calendar.book\n    - kb.search\n")
-    agent.write_text(text)
-    return target
+    return target  # the example receptionist already selects the source and the kb.search Tool
 
 
 class RuntimeKbSearchTests(unittest.TestCase):
@@ -170,7 +166,10 @@ class ProvisionAndDeployTests(unittest.TestCase):
             files = provisioner.build_profile_files(desired)
             config = yaml.safe_load(files[pathlib.Path("config.yaml")])
             include = config["mcp_servers"]["model_garden"]["tools"]["include"]
-            self.assertEqual(include, ["calendar_availability", "calendar_book", "handoff_request", "handoff_status", "kb_search", "platform_capabilities"])
+            self.assertEqual(include, [
+                "calendar_availability", "calendar_book", "crm_create", "crm_log_interaction",
+                "handoff_request", "handoff_status", "kb_search", "platform_capabilities",
+            ])
             state = json.loads(files[pathlib.Path(".modelgarden") / "desired-state.json"])
             self.assertEqual(state["knowledgeContent"]["rules-of-engagement"]["sectionCount"], 6)
 

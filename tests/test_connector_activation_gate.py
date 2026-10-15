@@ -27,7 +27,9 @@ class ConnectorActivationGateTests(unittest.TestCase):
     def test_real_adapters_are_usable_but_unproven_without_live_credentials(self):
         for provider in ("google", "microsoft"):
             binding = {"environment": "dev", "connectors": {
-                "calendar": {"provider": provider, "tier": 1, "token_ref": "secret://calendar/dev"}
+                "calendar": {"provider": provider, "tier": 1, "token_ref": "secret://calendar/dev"},
+                "kb": {"provider": "text-knowledge", "tier": 0},
+                "crm": {"provider": "built-in-crm", "tier": 0},
             }}
             self.assertEqual(capabilities.bound_providers(binding)["calendar"]["provider"], provider)
             compiled = compiler.compile_workspace(ROOT / "examples/workspace", "receptionist",

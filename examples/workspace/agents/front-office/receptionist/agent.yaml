@@ -15,11 +15,16 @@ spec:
     - take-message
     - human-handoff
     - book-appointment
+    - log-conversation
   tools:
     - calendar.availability
     - calendar.book
+    - kb.search
+    - crm.create
+    - crm.log-interaction
   knowledge:
     - business-information
+    - rules-of-engagement
   policies:
     - default-agent-policy
   security:

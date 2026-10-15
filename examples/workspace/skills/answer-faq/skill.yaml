@@ -3,11 +3,15 @@ kind: Skill
 metadata:
   name: answer-faq
   owner: front-office
-  version: 1.0.0
-  description: Answer common customer questions from approved business knowledge.
+  version: 1.1.0
+  description: Answer common customer questions from approved business knowledge and cite where the answer came from.
 spec:
   instructions:
     file: instructions.md
+  allowedTools:
+    - kb.search
+  requiredCapabilities:
+    - kb
   inputs:
     - customer-question
   evaluationSuite: evals/
