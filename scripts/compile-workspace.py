@@ -283,7 +283,15 @@ def resolve_agent(workspace, agent, resources, source_paths, source_roots, envir
         for tool_name in skill.get("spec", {}).get("allowedTools", []):
             if tool_name not in selected_tools:
                 errors.append(f"Skill {skill_name!r} requires Tool {tool_name!r}, but Agent {name!r} did not select it")
-    errors.extend(f"Agent {name!r}: {error}" for error in POLICY.relaxation_errors(resolved["policies"], resolved["tools"]))
+    try:
+        trusted_owners = POLICY.owners_from_binding(environment_binding)
+    except ValueError as exc:
+        errors.append(str(exc))
+        trusted_owners = None
+    errors.extend(
+        f"Agent {name!r}: {error}"
+        for error in POLICY.relaxation_errors(resolved["policies"], resolved["tools"], trusted_owners)
+    )
     declarations = CAPABILITIES.collect_declarations(agent, resolved["skills"])
     errors.extend(CAPABILITIES.declaration_errors(declarations, f"Agent {name!r} or one of its Skills"))
     capabilities: dict[str, Any] | None = None

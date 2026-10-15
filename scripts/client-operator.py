@@ -557,8 +557,10 @@ def runtime_connection(
     reason: str | None = None,
 ) -> int:
     """Show or set live connection health; the capability manifest reflects it immediately."""
-    if command not in {"list", "set"}:
-        raise ValueError("runtime connection command must be list or set")
+    if command not in {"list", "set", "offboard"}:
+        raise ValueError("runtime connection command must be list, set or offboard")
+    if command == "offboard" and (not isinstance(actor, str) or not actor.strip()):
+        raise ValueError("--actor must name the person offboarding the environment")
     container = _governed_tool_container(project_name)
     inner = [
         "python",
@@ -574,6 +576,10 @@ def runtime_connection(
         if not isinstance(actor, str) or not actor.strip():
             raise ValueError("actor must be non-empty")
         inner.extend([family, health, "--actor", actor.strip()])
+        if reason:
+            inner.extend(["--reason", reason])
+    if command == "offboard":
+        inner.extend(["--actor", actor.strip()])
         if reason:
             inner.extend(["--reason", reason])
     result = _run(["docker", "exec", container, *inner])
@@ -670,6 +676,12 @@ def main() -> int:
     connections = sub.add_parser("connections", help="show live connector health on a client runtime")
     connections.add_argument("--project-name", required=True)
 
+    offboard = sub.add_parser(
+        "offboard", help="revoke every bound external connection and print the manual provider, secret and data steps"
+    )
+    offboard.add_argument("--project-name", required=True)
+    offboard.add_argument("--actor", required=True, help="the named person offboarding this environment")
+    offboard.add_argument("--reason")
     connection = sub.add_parser("connection", help="mark one connector healthy, degraded, failed or revoked")
     connection.add_argument("family", help="capability family, e.g. calendar")
     connection.add_argument("health", choices=("healthy", "degraded", "failed", "revoked"))
@@ -706,6 +718,8 @@ def main() -> int:
             return 0 if plan["status"] in registry.BUILT else 1
         if args.command == "connections":
             return runtime_connection(args.project_name, "list")
+        if args.command == "offboard":
+            return runtime_connection(args.project_name, "offboard", actor=args.actor, reason=args.reason)
         if args.command == "connection":
             return runtime_connection(
                 args.project_name, "set", family=args.family, health=args.health, actor=args.actor, reason=args.reason

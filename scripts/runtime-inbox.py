@@ -34,6 +34,7 @@ def main(argv: list[str] | None = None) -> int:
         spec.loader.exec_module(module)
         inbox = module.collect(
             approvals=args.data_root / "approvals", handoffs=args.data_root / "handoffs", contacts=args.data_root / "contacts",
+            governance=args.data_root,
         )
     except (OSError, ValueError, json.JSONDecodeError) as exc:
         print(f"Runtime inbox failed: {exc}", file=sys.stderr)

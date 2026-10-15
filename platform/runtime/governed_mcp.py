@@ -193,6 +193,11 @@ class GovernedToolRuntime:
         if current.get("health") == health and current.get("reason") == reason:
             return
         CAPABILITIES.record_connection_health(self.governance_root, family, health, actor="runtime:governed-tools", reason=reason)
+        details: dict[str, Any] = {"family": family, "health": health}
+        if reason:
+            details["reason"] = reason
+        # A connection coming up, degrading or failing is evidence an auditor needs, named to the runtime itself.
+        GOVERN.record_operator_action(self.audit_path, "connection.health", "runtime:governed-tools", details)
 
     def capabilities(self) -> dict[str, Any]:
         """Return the non-secret capability manifest with live connection health applied."""
