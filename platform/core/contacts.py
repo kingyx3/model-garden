@@ -324,6 +324,28 @@ class ContactStore:
             "interactions": self._interactions(state, contact["id"]),
         }
 
+    # -- matching for the platform's own filing step (never reachable from the model) -----
+
+    def find_by_email(self, address: str) -> list[str]:
+        """IDs of contacts holding exactly this address. For filing a *verified* sender's conversation only.
+
+        This is internal to the filing step: it is not a Tool, nothing it returns is shown to a caller or
+        sender, and a caller-supplied address must never reach it (use the unmatched queue instead).
+        """
+        needle = normalize_email(address) if isinstance(address, str) else None
+        if needle is None:
+            return []
+        with self._locked() as state:
+            return sorted(
+                contact_id for contact_id, contact in state["contacts"].items()
+                if contact.get("keys", {}).get("email") == needle
+            )
+
+    def has_reference(self, reference: str) -> bool:
+        """Whether an interaction with this transcript/message reference is already filed anywhere."""
+        with self._locked() as state:
+            return any(item.get("transcriptRef") == reference for item in state["interactions"].values())
+
     # -- human review and erasure (operator surface; never reachable from the model) -------
 
     def review_queue(self) -> dict[str, Any]:

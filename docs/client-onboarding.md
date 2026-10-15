@@ -90,7 +90,9 @@ is implemented; the readiness and deployment gates reject such claims. The Tier 
 `connectors.crm: {provider: built-in-crm, tier: 0}` bindings are shipped and need no
 credentials: an approved business-rules file (below) and a person who reviews the
 contact log (`client-operator.py contacts review`; it prints personal data, so run it on
-the client host and agree who may).
+the client host and agree who may). Voice calls reach that log when someone runs
+`client-operator.py file-calls --project-name <env>` (see [channels](channels.md#filing-finished-conversations));
+it is not automatic yet.
 The reference receptionist now depends on these two Tier 0 bindings; a client with no
 calendar keeps `book-appointment` under `disabledSkills` and needs nothing else (see
 [contracts](contracts.md#reference-receptionist-on-a-zero-stack-client)).
