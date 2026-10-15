@@ -163,6 +163,38 @@ Open: PPTX/PDF and native formats, `docs.create`/`files.*` backing on the sideca
 
 Open: reading Skillsets in the compiler or a registry, knowledge-aware prerequisites, per-coworker identities and grants (#129, #95), runtime re-evaluation at invocation, the reviewed PR → DEV/evals → business approval → PROD change flow with rollback, and live evidence (#128).
 
+## Per-coworker provider grants
+
+`platform/core/provider_grants.py` is the credential-free contract for giving each AI coworker its own authorization to a connected system (#129). It holds **references**, never secrets, and is **not wired into the governed sidecar**: today the sidecar still resolves provider access from the environment-level binding, so no deployment has independently authenticated coworkers.
+
+- **One grant per coworker and connection:** immutable tenant (client and environment), Agent, family, provider and connection id, the provider-side acting identity or isolated delegated grant, a `secret://` reference, granted Tools, an owner, health, optional expiry and a revocation state. Operators see the reference only as a digest.
+- **No shared credentials.** A secret reference or acting identity held by another coworker is refused, as is a `shared-login` grant next to a second coworker on the same family (a shared login is allowed for a lone coworker but reported `multiCoworkerSupported: false`).
+- **Attested caller only.** `resolve` takes the runtime-attested Agent name and no argument through which a model, coordinator or delegate could name another coworker or hand over a token. Rights are the originating principal's permissions ∩ the coworker's granted scopes ∩ the Tools enabled for it; revoked, expired or failed grants refuse instead of falling back.
+- **Independent lifecycle and secure upgrade.** Revoking, rotating or degrading one grant never changes another. `upgrade_from_environment` proposes a grant from an environment binding only for a workspace with exactly one Agent and refuses several, so an old shared token is never silently reused. `receipt_fields` gives the attribution a call must carry (Agent, initiating principal, grant, connection, provider-side identity, scopes, request id).
+
+Open: provisioning real per-coworker identities or grants, sidecar resolution from attested caller context, provider-side audit verification, real tenant proof per authentication mode (#129, #110, #86, #95).
+
+## Team of Agents
+
+`platform/core/team.py` checks the compiled desired states of several Agents (the compiler already emits them when no `--agent` is given) before a runtime may advertise more than one coworker. It changes nothing and is not wired into a runtime; the governed sidecar still serves one Agent per environment (#95).
+
+- **Tool isolation.** `authorize_call` allows a call only if the Tool is one of the *calling* Agent's own compiled Tools, using the attested Agent name; another Agent's Tool is refused. The action request identity already includes the Agent, so one Agent's approval cannot be replayed by another.
+- **Own provider access.** With several Agents, each Agent whose Tools belong to an external (tier 1+) family needs a usable grant of its own covering them (`plan` reports `blocked` with a plain reason); Tier 0 families need none; an unbound family blocks. Duplicate Agent names are refused.
+- **Single-Agent workspaces are unchanged:** one Agent and no registry is `ready` through the environment binding.
+
+Open: a multi-Agent sidecar and deployment, per-Agent usage attribution and ledger separation at runtime, and cross-Agent token isolation proof against a real provider (#95, #129).
+
+## Governed MCP passthrough
+
+`platform/core/mcp_passthrough.py` defines what the governed sidecar may expose from a vendor or client MCP server. It contains **no MCP client** and is not wired into the sidecar; Hermes would still see only the sidecar's own Tools (#87).
+
+- **Declaration.** Name, https URL (no credentials, query or fragment), `secret://` credential reference and an explicit allow-list; every allowed tool has an explicit risk class (`read`, `write`, `privileged`, `external-communication`) and may map to a portable capability Tool (for example `crm.read`). There is no allow-all; unclassified entries are refused.
+- **Exposure.** Unlisted upstream tools are never exposed (they are only counted); a listed tool the server no longer offers is reported missing. Exposed tools become `modelgarden.ai/v1` Tool resources of type `mcp`, with `approvalRequired: true` for anything but `read` (a signed client policy can relax it, as for native Tools).
+- **Schema pinning.** An operator approves a tool by fingerprint over its name, description and input schema. A changed definition (including a rewritten description) hides the tool and `call_gate` fails closed until it is approved again; approvals are ledgered as fingerprints, never schemas.
+- **Ledger.** `ledger_fields` supplies `tier: 2`, `provider: mcp:<server>`, the server and upstream tool name, never arguments or results.
+
+Open: an MCP client in the sidecar with the credential stored there, binding declarations in the EnvironmentBinding and compiler, approval workflow commands, and live evidence with a real upstream server (#87, #89).
+
 Stable operational contract:
 
 - `usage-attribution.schema.json` — canonical non-secret client/Agent/environment/provider and optional cost/trace/subscription/shared-pool dimensions used to correlate runtime consumption with showback and billing. This is platform-generated operational metadata, not client-authored Agent/Skill desired state.
