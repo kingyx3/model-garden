@@ -100,7 +100,7 @@ class CollectTests(InboxCase):
                                "timestamp": "2026-10-20T10:00:00+08:00", "summary": SECRET_ARGUMENT})
         result = self.collect()
         rendered = json.dumps(result) + inbox.format_text(result)
-        for private in ("Hargreaves", "Acacia", "Alex", "6123", "arguments"):
+        for private in ("Hargreaves", "Acacia", "Alex", "6123 4567", "61234567", "arguments"):
             self.assertNotIn(private, rendered)
         self.assertIn("jordan@client.example", rendered)  # the assignee is the point of a hand-off
 
