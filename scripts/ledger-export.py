@@ -4,9 +4,13 @@
   ledger-export.py export --ledger audit.jsonl --state export-state.json --sink-dir /mnt/ledger-sink
   ledger-export.py export --ledger audit.jsonl --state export-state.json --webhook https://siem.example/ingest --token-env SIEM_TOKEN
   ledger-export.py verify --ledger audit.jsonl --sink-dir /mnt/ledger-sink
+  ledger-export.py verify ... --max-lag-events 100 --max-head-age-seconds 3600
 
 `verify` exits non-zero and prints ``ALERT:`` lines for gaps in the exported sequence, a local
 log that is shorter than or differs from the export, or a head manifest that does not match.
+With ``--max-lag-events`` / ``--max-head-age-seconds`` it also alerts when the exporter has stalled:
+the local ledger is too far ahead of the export, or events are waiting and the newest head
+manifest is older than the limit. An idle, fully exported ledger never trips either.
 Run `export` on a schedule under an identity that is separate from the runtime and deployment
 identities; wiring the non-zero exit into monitoring is deployment-specific. A webhook sink is
 write-only, so `verify` needs a readable directory sink.
@@ -59,6 +63,8 @@ def main(argv: list[str] | None = None) -> int:
     verify = sub.add_parser("verify", help="compare a directory sink with the local ledger")
     verify.add_argument("--ledger", type=pathlib.Path, required=True)
     verify.add_argument("--sink-dir", required=True)
+    verify.add_argument("--max-lag-events", type=int, help="alert when the local ledger is more than this many events ahead of the export")
+    verify.add_argument("--max-head-age-seconds", type=int, help="alert when events are waiting and the newest head manifest is older than this")
     args = parser.parse_args(argv)
 
     try:
@@ -66,14 +72,17 @@ def main(argv: list[str] | None = None) -> int:
             summary = EXPORT.export_ledger(args.ledger, build_sink(args), args.state, batch_size=args.batch_size)
             print(json.dumps(summary, sort_keys=True))
             return 0
-        report = EXPORT.verify_export(args.ledger, EXPORT.DirectorySink(pathlib.Path(args.sink_dir)))
+        report = EXPORT.verify_export(
+            args.ledger, EXPORT.DirectorySink(pathlib.Path(args.sink_dir)),
+            max_lag_events=args.max_lag_events, max_head_age_seconds=args.max_head_age_seconds,
+        )
     except EXPORT.LedgerTruncated as exc:
         print(f"ALERT: {exc}", file=sys.stderr)
         return 2
     except (EXPORT.LedgerExportError, OSError, ValueError) as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 1
-    print(json.dumps({key: report[key] for key in ("ok", "localChainedEvents", "exportedRecords", "exportedHeadSequence")}, sort_keys=True))
+    print(json.dumps({key: report[key] for key in ("ok", "localChainedEvents", "exportedRecords", "exportedHeadSequence", "lagEvents", "headAgeSeconds")}, sort_keys=True))
     for problem in report["problems"]:
         print(f"ALERT: {problem}", file=sys.stderr)
     return 0 if report["ok"] else 2

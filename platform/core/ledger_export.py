@@ -279,13 +279,29 @@ def _exported_chain_problems(records: list[dict[str, Any]], first: int) -> tuple
     return problems, gaps
 
 
-def verify_export(ledger_path: pathlib.Path, sink: DirectorySink) -> dict[str, Any]:
+def verify_export(
+    ledger_path: pathlib.Path,
+    sink: DirectorySink,
+    *,
+    max_lag_events: int | None = None,
+    max_head_age_seconds: int | None = None,
+    now: int | None = None,
+) -> dict[str, Any]:
     """Compare a readable sink with the local ledger.
 
     ``ok`` is true only when the exported chain is intact and contiguous, matches the local
     chain over their common range, the local log is not shorter than the exported head, and
     the newest head manifest agrees with the exported record at its sequence.
+
+    Two optional delivery alarms catch an exporter that has quietly stopped: ``max_lag_events``
+    flags a local ledger that is more than that many events ahead of the export, and
+    ``max_head_age_seconds`` flags a newest head manifest older than that while the ledger holds
+    events the export does not. Both are off unless set, and neither fires when the export is
+    simply current, so an idle runtime does not alarm.
     """
+    for label, value in (("max_lag_events", max_lag_events), ("max_head_age_seconds", max_head_age_seconds)):
+        if value is not None and (not isinstance(value, int) or isinstance(value, bool) or value < 0):
+            raise ValueError(f"{label} must be a non-negative integer")
     problems: list[str] = []
     try:
         local = read_chained_events(ledger_path)
@@ -313,6 +329,7 @@ def verify_export(ledger_path: pathlib.Path, sink: DirectorySink) -> dict[str, A
     if diverged_at is not None:
         problems.append(f"local ledger differs from the export at sequence {diverged_at}")
     heads = sink.heads()
+    newest: dict[str, Any] | None = None
     if heads:
         newest = max(heads, key=lambda head: (head.get("sequence", 0), head.get("exportedAt", 0)))
         record = by_sequence.get(newest.get("sequence"))
@@ -320,6 +337,20 @@ def verify_export(ledger_path: pathlib.Path, sink: DirectorySink) -> dict[str, A
             problems.append(f"head manifest at sequence {newest.get('sequence')} does not match the exported record")
     elif exported:
         problems.append("no head manifest has been exported")
+    lag = max(0, local_head - exported_head) if not truncated else 0
+    if max_lag_events is not None and lag > max_lag_events:
+        problems.append(f"export lag: the local ledger is {lag} event(s) ahead of the export (limit {max_lag_events})")
+    head_age: int | None = None
+    if newest is not None and isinstance(newest.get("exportedAt"), int):
+        head_age = max(0, (int(time.time()) if now is None else now) - newest["exportedAt"])
+    if max_head_age_seconds is not None and lag > 0:
+        if head_age is None:
+            problems.append("export stale: events are waiting and no head manifest has ever been exported")
+        elif head_age > max_head_age_seconds:
+            problems.append(
+                f"export stale: events are waiting and the newest head manifest is {head_age} seconds old "
+                f"(limit {max_head_age_seconds})"
+            )
     return {
         "ok": not problems,
         "localChainedEvents": len(local),
@@ -327,6 +358,8 @@ def verify_export(ledger_path: pathlib.Path, sink: DirectorySink) -> dict[str, A
         "exportedHeadSequence": exported_head,
         "gaps": gaps,
         "truncated": truncated,
+        "lagEvents": lag,
+        "headAgeSeconds": head_age,
         "problems": problems,
     }
 

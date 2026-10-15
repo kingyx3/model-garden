@@ -16,6 +16,7 @@ belong to the channel adapters and are not implemented here.
 """
 from __future__ import annotations
 
+import datetime as dt
 import json
 import os
 import pathlib
@@ -174,6 +175,84 @@ def complete(
     closed_path = pathlib.Path(root) / "closed" / f"{handoff_id}-{completed}.json"
     _write(closed_path, document)
     pending_path.unlink()
+    return document
+
+
+NOTICE_KINDS = ("assigned", "reminder", "escalation")
+MIN_REMINDER_LEAD_SECONDS = 30 * 60
+MAX_REMINDER_LEAD_SECONDS = 2 * 60 * 60
+
+
+def _utc(seconds: int) -> str:
+    return dt.datetime.fromtimestamp(seconds, dt.timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+
+
+def due_notices(
+    root: pathlib.Path, *, now: int | None = None, escalate_to: str | None = None
+) -> list[dict[str, Any]]:
+    """Notices that should reach a person now, one per hand-off and kind, until recorded as sent.
+
+    - ``assigned``: the named person has not yet been told it exists;
+    - ``reminder``: shortly before the deadline (a quarter of the window, between 30 minutes and
+      2 hours), while it is still open;
+    - ``escalation``: once the deadline has passed, to ``escalate_to`` when given, else to the assignee
+      again. A hand-off is never silently dropped.
+
+    A notice names the Tool, the deadline and the reference, never the action's arguments, so it is safe
+    for any channel; the person opens the exact content through the operator command. Nothing is sent
+    here: the caller delivers each notice through a channel and then calls :func:`mark_notified`, so a
+    failed delivery is offered again (at-least-once).
+    """
+    current = int(time.time()) if now is None else now
+    escalation_target = _name(escalate_to, "escalation contact") if escalate_to else None
+    notices: list[dict[str, Any]] = []
+    for document in pending(root):
+        sent = document.get("notices") if isinstance(document.get("notices"), dict) else {}
+        deadline, created = int(document["deadline"]), int(document.get("createdAt", current))
+        overdue = current > deadline
+        lead = min(MAX_REMINDER_LEAD_SECONDS, max(MIN_REMINDER_LEAD_SECONDS, (deadline - created) // 4))
+        wanted: list[tuple[str, str]] = []
+        if "assigned" not in sent:
+            wanted.append(("assigned", document["assignee"]))
+        if "reminder" not in sent and not overdue and current >= deadline - lead:
+            wanted.append(("reminder", document["assignee"]))
+        if "escalation" not in sent and overdue:
+            wanted.append(("escalation", escalation_target or document["assignee"]))
+        for kind, recipient in wanted:
+            tool, reference = document["tool"], document["id"][:12]
+            if kind == "assigned":
+                text = (f"{tool} is waiting for you: the coworker prepared it but cannot perform it. "
+                        f"Please do it by {_utc(deadline)} and mark it done or declined. Reference {reference}.")
+            elif kind == "reminder":
+                text = f"Reminder: {tool} is still waiting for you and is due by {_utc(deadline)}. Reference {reference}."
+            else:
+                text = (f"OVERDUE: {tool} was due by {_utc(deadline)} and has not been done or declined "
+                        f"(assigned to {document['assignee']}). Reference {reference}.")
+            notices.append({
+                "handoffId": document["id"], "kind": kind, "to": recipient, "tool": tool,
+                "deadline": deadline, "overdue": overdue, "text": text,
+            })
+    return notices
+
+
+def mark_notified(
+    root: pathlib.Path, handoff_id: str, kind: str, *, via: str, now: int | None = None
+) -> dict[str, Any]:
+    """Record that a notice was delivered (and through which channel); a repeat is a no-op."""
+    if kind not in NOTICE_KINDS:
+        raise HandoffError(f"notice kind must be one of {', '.join(NOTICE_KINDS)}")
+    handoff_id = _check_id(handoff_id)
+    channel = _name(via, "delivery channel")
+    path = pathlib.Path(root) / "pending" / f"{handoff_id}.json"
+    if not path.is_file():
+        raise HandoffError(f"no pending hand-off exists for {handoff_id}")
+    document = _read(path)
+    notices = document.get("notices") if isinstance(document.get("notices"), dict) else {}
+    if kind in notices:
+        return document
+    notices[kind] = {"at": int(time.time()) if now is None else now, "via": channel}
+    document["notices"] = notices
+    _write(path, document)
     return document
 
 
