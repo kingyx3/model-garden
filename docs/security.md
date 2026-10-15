@@ -26,7 +26,7 @@ Model Garden's early-client deployment is intentionally small: one isolated clie
 4. Bind approvals to the exact material action/arguments and consume each approval once.
 5. Audit material actions with client/tenant, Agent, initiating identity where available, Tool/action, result, approval metadata and timestamp.
 6. Governed-action audit records use a locked, fsynced schema-v3 hash chain (verifying legacy v1/v2 prefixes) with redacted arguments plus digest so record modification/reordering/insertion or deletion inside the retained chain is detectable. Treat the local chain as tamper-evident rather than immutable; export it to a separately administered log/SIEM/object store where independent retention or non-repudiation is required.
-7. Connector credentials must be least-privilege and independently revocable.
+7. Connector credentials must be least-privilege and independently revocable. **Per-coworker credentials are a required target control, not yet a shipped guarantee:** the current environment-level binding can carry one downstream token for a client/environment. Do not reuse that token for two autonomous coworkers or claim native provider-side Agent attribution; block unsupported multi-coworker setups until each caller is runtime-attested and has its own isolated, revocable source-system authorization ([#129](https://github.com/kingyx3/model-garden/issues/129), [#95](https://github.com/kingyx3/model-garden/issues/95)). A shared Skill or connector is never an access grant.
 
 ## Network and host hardening
 
