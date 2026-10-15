@@ -12,6 +12,9 @@ MVP supported Tools:
   cannot do, with live connection health; it is a platform built-in, not a business Tool
 - kb.search: Tier 0 search of the client's own approved business-rules text (no provider
   credential); a governed read whose ledger event holds section IDs and digests only
+- crm.read / crm.create / crm.log-interaction: Tier 0 built-in contact and interaction log
+  (no CRM connected): no merge on an asserted identity, idempotent filing, records returned
+  only to verified staff principals; ledgered at tier 0 without personal data
 - handoff_request / handoff_status: Tier 4 human hand-off for actions whose capability is
   unbound or unavailable (or policy marks human-only); platform built-ins, nothing is executed
 """
@@ -51,6 +54,7 @@ OAUTH = _load_module("model_garden_oauth_refresh", ROOT / "platform" / "connecto
 TEXT_CHANNEL = _load_module("model_garden_text_channel", ROOT / "platform" / "channels" / "text_channel.py")
 HANDOFF = _load_module("model_garden_runtime_handoff", ROOT / "platform" / "core" / "handoff.py")
 KNOWLEDGE = _load_module("model_garden_runtime_knowledge", ROOT / "platform" / "core" / "knowledge.py")
+CONTACTS = _load_module("model_garden_runtime_contacts", ROOT / "platform" / "core" / "contacts.py")
 AUTH_FAILURE = re.compile(r"\((401|403)\)")
 
 
@@ -445,6 +449,112 @@ class GovernedToolRuntime:
             read_receipt=KNOWLEDGE.read_receipt,
         )
 
+    def _require_crm(self) -> "CONTACTS.ContactStore":
+        """The Tier 0 log, only when the manifest binds `crm` to the built-in provider."""
+        entry = next((item for item in self.capabilities().get("capabilities", []) if item.get("family") == "crm"), None)
+        if entry is None or entry.get("status") != "available" or entry.get("provider") != CONTACTS.PROVIDER_ID:
+            raise PermissionError("Customer record keeping is not connected here; say so and offer a message or a human hand-off")
+        return CONTACTS.ContactStore(self.governance_root / "contacts")
+
+    def crm_create(
+        self,
+        *,
+        fields: dict[str, Any],
+        object_type: str = "contact",
+        justification: str | None = None,
+    ) -> dict[str, Any]:
+        """Create a new customer record from asserted details; never merges with an existing one."""
+        if object_type != "contact":
+            raise ValueError("the built-in log supports objectType 'contact' only")
+        store = self._require_crm()
+        return self._execute(
+            "crm.create",
+            {"objectType": object_type, "fields": fields},
+            lambda exact: store.create_contact(exact["fields"]),
+            provider=CONTACTS.PROVIDER_ID,
+            tier=0,
+            justification=justification,
+            external_object_ref=lambda result: result.get("externalObjectRef") if isinstance(result, dict) else None,
+        )
+
+    def crm_log_interaction(
+        self,
+        *,
+        object_id: str,
+        interaction_type: str,
+        channel: str,
+        direction: str,
+        timestamp: str,
+        summary: str,
+        outcome: str | None = None,
+        transcript_ref: str | None = None,
+        object_type: str = "contact",
+        justification: str | None = None,
+    ) -> dict[str, Any]:
+        """File one call, email or chat against a contact (or the unmatched queue); retries are harmless."""
+        if object_type != "contact":
+            raise ValueError("the built-in log supports objectType 'contact' only")
+        store = self._require_crm()
+        arguments: dict[str, Any] = {
+            "objectType": object_type, "objectId": object_id, "interactionType": interaction_type,
+            "channel": channel, "direction": direction, "timestamp": timestamp, "summary": summary,
+        }
+        if outcome is not None:
+            arguments["outcome"] = outcome
+        if transcript_ref is not None:
+            arguments["transcriptRef"] = transcript_ref
+        return self._execute(
+            "crm.log-interaction",
+            arguments,
+            lambda exact: store.log_interaction(exact),
+            provider=CONTACTS.PROVIDER_ID,
+            tier=0,
+            justification=justification,
+            external_object_ref=lambda result: result.get("externalObjectRef") if isinstance(result, dict) else None,
+        )
+
+    def crm_read(
+        self,
+        *,
+        query: str | None = None,
+        object_id: str | None = None,
+        limit: int = 5,
+        object_type: str = "contact",
+        justification: str | None = None,
+    ) -> dict[str, Any]:
+        """Look up customer records for verified staff only; a caller or sender never gets records back."""
+        if object_type != "contact":
+            raise ValueError("the built-in log supports objectType 'contact' only")
+        if not isinstance(limit, int) or isinstance(limit, bool) or not 1 <= limit <= CONTACTS.MAX_READ:
+            raise ValueError(f"limit must be an integer from 1 to {CONTACTS.MAX_READ}")
+        store = self._require_crm()
+        _, _, principal_access = self._caller()
+        arguments: dict[str, Any] = {"objectType": object_type}
+        if object_id is not None:
+            arguments["objectId"] = object_id
+        if query is not None:
+            arguments["query"] = query
+
+        def receipt(result: Any) -> list[dict[str, Any]]:
+            records = result.get("records", []) if isinstance(result, dict) else []
+            return [{
+                "sourceId": f"crm:{CONTACTS.PROVIDER_ID}",
+                "classification": "confidential",
+                "records": [{"id": record["objectId"], "content": record} for record in records],
+            }]
+
+        return self._execute(
+            "crm.read",
+            arguments,
+            lambda exact: store.read(
+                object_id=exact.get("objectId"), query=exact.get("query"), principal_access=principal_access, limit=limit
+            ),
+            provider=CONTACTS.PROVIDER_ID,
+            tier=0,
+            justification=justification,
+            read_receipt=receipt,
+        )
+
     def request_handoff(
         self,
         *,
@@ -561,6 +671,60 @@ def build_server(runtime: GovernedToolRuntime) -> MCPServer:
         justification: one short sentence on why this lookup is needed (recorded in the audit ledger).
         """
         return runtime.kb_search(query=query, source=source, limit=limit, justification=justification)
+
+    @mcp.tool(name="crm_create")
+    def crm_create(fields: dict[str, Any], justification: str | None = None) -> dict[str, Any]:
+        """Create a new customer record from details the caller or sender gave you.
+
+        fields may hold name, phone, email and notes only. What a caller says about who they are is an
+        assertion, not verified identity: this always creates a new record and never reveals or
+        merges an existing one. Keep notes short and never record payment card or health details.
+
+        justification: one short sentence on why a record is needed (recorded in the audit ledger).
+        """
+        return runtime.crm_create(fields=fields, justification=justification)
+
+    @mcp.tool(name="crm_log_interaction")
+    def crm_log_interaction(
+        object_id: str,
+        interaction_type: str,
+        channel: str,
+        direction: str,
+        timestamp: str,
+        summary: str,
+        outcome: str | None = None,
+        transcript_ref: str | None = None,
+        justification: str | None = None,
+    ) -> dict[str, Any]:
+        """File one finished call, email or chat against a customer record.
+
+        object_id is a record you created or were given; use "unmatched" when you cannot tell whose it
+        is, and a person will assign it. interaction_type is call, email or chat; direction is inbound
+        or outbound; timestamp is RFC3339 with an offset. summary is a short factual summary (no card
+        or health details). transcript_ref is a reference to a stored transcript or message, never its
+        text. Filing the same interaction twice is harmless: you get the same id back.
+
+        justification: one short sentence on why this is being filed (recorded in the audit ledger).
+        """
+        return runtime.crm_log_interaction(
+            object_id=object_id, interaction_type=interaction_type, channel=channel, direction=direction,
+            timestamp=timestamp, summary=summary, outcome=outcome, transcript_ref=transcript_ref,
+            justification=justification,
+        )
+
+    @mcp.tool(name="crm_read")
+    def crm_read(
+        query: str | None = None, object_id: str | None = None, limit: int = 5, justification: str | None = None
+    ) -> dict[str, Any]:
+        """Look up customer records for a verified staff member.
+
+        Returns records only when the request comes from a verified staff principal. A phone caller or
+        an email sender never gets records back, even if they say they are the customer: when
+        `reason` says so, do not read anything out and offer a message or a human hand-off instead.
+
+        justification: one short sentence on why this lookup is needed (recorded in the audit ledger).
+        """
+        return runtime.crm_read(query=query, object_id=object_id, limit=limit, justification=justification)
 
     @mcp.tool(name="handoff_request")
     def handoff_request(tool: str, arguments: dict[str, Any], justification: str | None = None) -> dict[str, Any]:

@@ -22,7 +22,7 @@ Supported v1 business resources:
 - The fail-closed message also names the Skill(s) that require each missing capability. With a binding, the compiled output carries `capabilities.skills`: one entry per selected Skill (plus the Agent when it declares capabilities itself) with `ready` and each dependency as `bound` (provider, tier), `missing` or `degraded` (fallback tier). It copies no token references, calendar IDs, scopes or owners.
 - `compile-workspace.py --environment-binding <file> --readiness` prints that per-Skill table instead of compiling and exits non-zero if any Skill is blocked.
 
-The `crm` family also carries `crm.create` (risk `write`) and `crm.log-interaction` (risk `write`: channel, direction, timestamp, summary, outcome and a transcript or message *reference*). Their ledger fields are object type/ID and interaction type only, never summary or transcript text. This is the portable contract only: **no provider implements these Tools yet** (HubSpot/Salesforce/Zoho #93, the Tier 0 built-in log #77) and the integration registry does not claim them. Making the internal-record `crm.log-interaction` automatic while `crm.create`/`crm.update` stay approval-gated is a client decision: leave `crm.log-interaction` without `approvalRequired` on its Tool, or add a signed `allow` rule (below).
+The `crm` family also carries `crm.create` (risk `write`) and `crm.log-interaction` (risk `write`: channel, direction, timestamp, summary, outcome and a transcript or message *reference*). Their ledger fields are object type/ID and interaction type only, never summary or transcript text. Only the Tier 0 built-in log (below) implements these Tools; HubSpot/Salesforce/Zoho (#93) do not yet and the integration registry does not list them against those providers. Making the internal-record `crm.log-interaction` automatic while `crm.create`/`crm.update` stay approval-gated is a client decision: leave `crm.log-interaction` without `approvalRequired` on its Tool, or add a signed `allow` rule (below).
 
 All of this is additive to `modelgarden.ai/v1`: existing workspaces without declarations validate and compile unchanged.
 
@@ -36,7 +36,20 @@ A `KnowledgeSource` with `spec.type: text-file` points at one `.txt` or `.md` fi
 
 **Runtime and activation.** The governed sidecar exposes `kb_search` (the `kb.search` Tool) over this module. It runs only when the Agent selected the `kb.search` Tool (see `examples/workspace/tools/kb-search.yaml`) **and** the capability manifest shows `kb` bound to `text-knowledge` at Tier 0; otherwise it refuses with "not connected here". Each search is a governed read: the ledger records provider `text-knowledge`, `tier: 0` and the section IDs and content digests, never the text. A client binds it with `connectors.kb: {provider: text-knowledge, tier: 0}` in the EnvironmentBinding; the registry lists it as `built-credential-free` (adapter `platform/core/knowledge.py`), so a Skill requiring `kb` is ready and the readiness report shows `kb: text-knowledge tier 0`. A deployment that selects `kb.search` gets the governed sidecar even with no calendar bound, and that sidecar holds no provider credential. This is credential-free build evidence only: no live deployment has exercised it.
 
-**Not yet delivered:** the reference receptionist does not declare `kb` as a required capability (that needs the Tier 0 `crm` too, #108), so its evals do not exercise this path. Document-level permissions, external knowledge providers, freshness/refresh policy, conflict detection and the no-system FAQ eval (#116, #77) are also not done.
+**Not yet delivered:** the reference receptionist does not yet declare `kb` and `crm` as required capabilities, so its evals do not exercise these paths. Document-level permissions, external knowledge providers, freshness/refresh policy, conflict detection and the no-system FAQ eval (#116, #77) are also not done.
+
+## Tier 0 contact and interaction log
+
+With `connectors.crm: {provider: built-in-crm, tier: 0}` bound, the governed sidecar serves `crm.create`, `crm.log-interaction` and `crm.read` from a private per-client store (`platform/core/contacts.py`, on the sidecar-only volume at `/opt/data/.modelgarden/contacts`). Nothing is refused less strictly than a connector would be: each tool runs only when the manifest shows `crm` bound to `built-in-crm` at tier 0, is ledgered at `tier: 0` with an external object reference such as `built-in-crm:interaction/i-...`, and never writes names, numbers or summaries to the ledger (arguments are redacted, results are digests, reads record section-style record IDs and content digests).
+
+- **No merging on an assertion.** `crm.create` always makes a new record whose identity evidence is `asserted`. A colliding phone or email adds the pair to a human review queue; the response never says so, so a caller cannot learn that a number belongs to a customer.
+- **No guessing a contact.** `crm.log-interaction` files against a record ID the coworker holds, or `unmatched` for a person to assign; an unknown ID is an error. Interaction IDs are derived from their content (contact, type, channel, direction, timestamp, and the transcript reference or summary digest), so a retry, redelivered event or restarted worker returns the same ID with `duplicate: true` and writes nothing.
+- **No read-back to unverified principals.** `crm.read` returns records only when the governed boundary reports a verified `member` principal. A phone caller (the voice channel still uses the static runtime identity), an unmapped sender or any other principal gets `requires-verified-staff-principal` and no data.
+- **Bounded and private.** At most 5,000 contacts and 20,000 interactions, bounded field lengths, payment card numbers redacted from notes and summaries, files mode 0600 in a 0700 directory. Records are plaintext at rest on the sidecar volume, like the ledger and approval store; encryption at rest and retention schedules are deployment concerns.
+- **Policy.** The example `crm.create` Tool is approval-required (and the default policy's `*.create` rule agrees) and the example `crm.log-interaction` Tool is not, matching "an internal record". Public principals can do neither (the platform floor).
+- **People review and erase.** `python3 scripts/client-operator.py contacts review|assign|dismiss|erase-contact|erase-interaction --project-name <env> [ids] --by <person>` runs `scripts/runtime-contacts.py` on the sidecar. `review` prints personal data for a person to act on. Every change writes a chained `operator-action` event naming the person and the IDs, never the record contents; the identity is as asserted on the command line.
+
+`crm.update` and object types other than `contact` are not implemented at Tier 0; selecting `crm.update` fails closed at provisioning. The `examples/workspace` `log-conversation` Skill describes the intended behaviour (file after each call or email, `unmatched` when unsure, never read back, short factual summaries); no example Agent selects it yet. **Not delivered:** wiring the voice transcript or support mailbox into filing (#107, #109), cross-channel timelines and CRM-outage reconciliation (#115), third-party CRMs (#93), retention schedules, and any live proof.
 
 ## Client approval policy
 
@@ -101,11 +114,12 @@ and a real local adapter satisfy a dependency. Historical `google_calendar`,
 `microsoft_calendar`, `google` and `microsoft` aliases continue to work.
 
 A planned HubSpot/Jira/Zoho/SharePoint/Drive provider, an unregistered provider,
-a forged Tier 0 `built-in-crm` binding, or `text-knowledge` bound at the wrong tier or
-under the wrong family **cannot activate a Skill**. The Tier 0 `text-knowledge` provider
-(`connectors.kb: {provider: text-knowledge, tier: 0}`) is shipped credential-free and does
-satisfy `kb`; it holds no client credential, so it still needs an approved knowledge file
-and has no live proof.
+or a Tier 0 provider bound at the wrong tier or under the wrong family (for example
+`built-in-crm` at tier 1 or under `kb`) **cannot activate a Skill**. The Tier 0
+`text-knowledge` (`connectors.kb: {provider: text-knowledge, tier: 0}`) and `built-in-crm`
+(`connectors.crm: {provider: built-in-crm, tier: 0}`) providers are shipped credential-free
+and do satisfy `kb` and `crm`; they hold no client credential, so they still need approved
+content (an approved knowledge file; a person to review the contact log) and have no live proof.
 Required capabilities remain blocked, optional ones degrade to the declared
 fallback, and production deployment repeats the check even when it receives a
 previously compiled desired-state document. A missing or invalid registry
@@ -133,7 +147,7 @@ python3 scripts/client-operator.py skills <private-client-workspace> --environme
 
 This prints `ready`, `DISABLED` and `BLOCKED`, dependencies, and registry-backed `connect <family>` guidance without exposing tokens. An intentionally disabled Skill does not block the current deployment; enabling it without its required capability does. The `platform.capabilities` coworker response includes the same per-Skill `enabled`, `ready`, `canEnable` and dependency facts. When a connector is failed or revoked, live runtime health overlays mark dependent required Skills unavailable until a named operator reauthorizes the connection.
 
-Tier 0 `kb` (a business-rules text file) is implemented credential-free; Tier 0 `crm`, interaction logging (#77, #108) and full consent/provisioning (#110) remain **unimplemented**, and the reference receptionist does not yet declare `kb` as a dependency. Do not represent these capability checks as real external provider proof.
+Tier 0 `kb` (a business-rules text file) and Tier 0 `crm` (the contact and interaction log) are implemented credential-free; full consent/provisioning (#110) and third-party CRM providers (#93) remain **unimplemented**, and the reference receptionist does not yet declare `kb` or `crm` as dependencies. Do not represent these capability checks as real external provider proof.
 
 ## Validate a workspace
 

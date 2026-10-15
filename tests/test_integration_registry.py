@@ -22,7 +22,7 @@ class IntegrationRegistryTests(unittest.TestCase):
         providers = registry.load_registry()["providers"]
         self.assertGreaterEqual(len(providers), 18)
         self.assertEqual({p["id"] for p in providers if p["status"] == "built-credential-free"},
-                         {"google-calendar", "microsoft-calendar", "text-knowledge"})
+                         {"google-calendar", "microsoft-calendar", "text-knowledge", "built-in-crm"})
         self.assertFalse(any(p["status"] == "live" for p in providers))
         self.assertEqual({p["family"] for p in providers},
                          {"calendar", "crm", "mail", "kb", "docs", "files", "tickets", "chat", "code"})
@@ -83,10 +83,17 @@ class IntegrationRegistryTests(unittest.TestCase):
         self.assertEqual(entry["adapter"], "platform/core/knowledge.py")
         self.assertNotIn("proof", entry)
         self.assertNotEqual(entry["status"], "live")
-        # The other Tier 0 baseline provider is still only planned and cannot be connected.
-        crm = registry.plan("crm", "built-in-crm", ["crm.read"])
-        self.assertEqual(crm["status"], "planned")
-        self.assertIn("not implemented", crm["blocker"])
+        # The Tier 0 contact log is also credential-free; the third-party CRMs are still only planned.
+        crm = registry.plan("crm", "built-in-crm", ["crm.read", "crm.create", "crm.log-interaction"])
+        self.assertEqual((crm["status"], crm["tier"], crm["scopes"]), ("built-credential-free", 0, []))
+        self.assertIn("No credentials are needed", crm["blocker"])
+        self.assertIn("contacts review", crm["blocker"])
+        self.assertNotIn("text file", crm["blocker"])
+        with self.assertRaisesRegex(ValueError, "only the portable Tools"):
+            registry.plan("crm", "built-in-crm", ["crm.update"])
+        hubspot = registry.plan("crm", "hubspot", ["crm.read"])
+        self.assertEqual(hubspot["status"], "planned")
+        self.assertIn("not implemented", hubspot["blocker"])
 
     def test_directory_renderer_uses_registry_and_does_not_claim_live(self):
         result = subprocess.run(

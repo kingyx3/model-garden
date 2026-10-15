@@ -1,0 +1,11 @@
+apiVersion: modelgarden.ai/v1
+kind: Tool
+metadata:
+  name: crm.create
+  owner: ai-platform
+  description: Create a new customer record from details a caller or sender asserted. Never merges with an existing record.
+spec:
+  type: internal
+  capability: crm
+  risk: write
+  approvalRequired: true

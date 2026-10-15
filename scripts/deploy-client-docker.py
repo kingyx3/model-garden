@@ -38,7 +38,7 @@ PROVIDER_ENV = {
 }
 CALENDAR_TOOLS = {"calendar.availability", "calendar.book"}
 # Tier 0 tools served by the sidecar from compiled desired state; they need no provider credential.
-BUILT_IN_TOOLS = {"kb.search"}
+BUILT_IN_TOOLS = {"kb.search", "crm.read", "crm.create", "crm.log-interaction"}
 RUNTIME_SOURCE_PATHS = (
     pathlib.Path("requirements-runtime.txt"),
     pathlib.Path("platform/runtime/governed_mcp.py"),
@@ -49,12 +49,14 @@ RUNTIME_SOURCE_PATHS = (
     pathlib.Path("platform/core/policy.py"),
     pathlib.Path("platform/core/handoff.py"),
     pathlib.Path("platform/core/knowledge.py"),
+    pathlib.Path("platform/core/contacts.py"),
     pathlib.Path("platform/channels/text_channel.py"),
     pathlib.Path("contracts/v1/capabilities.json"),
     pathlib.Path("contracts/v1/integrations.json"),
     pathlib.Path("scripts/govern-action.py"),
     pathlib.Path("scripts/runtime-approval.py"),
     pathlib.Path("scripts/runtime-handoff.py"),
+    pathlib.Path("scripts/runtime-contacts.py"),
     pathlib.Path("scripts/runtime-connection.py"),
     pathlib.Path("VERSION"),
 )

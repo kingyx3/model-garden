@@ -92,12 +92,19 @@
       "family": "crm",
       "method": "built-in",
       "tier": 0,
-      "status": "planned",
+      "status": "built-credential-free",
       "tools": [
         "crm.read",
-        "crm.update"
+        "crm.create",
+        "crm.log-interaction"
       ],
-      "issue": 77
+      "issue": 77,
+      "adapter": "platform/core/contacts.py",
+      "scopeByTool": {
+        "crm.read": [],
+        "crm.create": [],
+        "crm.log-interaction": []
+      }
     },
     {
       "id": "gmail",

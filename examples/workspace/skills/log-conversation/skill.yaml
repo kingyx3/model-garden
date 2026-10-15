@@ -1,0 +1,18 @@
+apiVersion: modelgarden.ai/v1
+kind: Skill
+metadata:
+  name: log-conversation
+  owner: front-office
+  version: 1.0.0
+  description: After each call or customer email, file a short factual record against the right customer record, or the unmatched queue when unsure.
+spec:
+  instructions:
+    file: instructions.md
+  allowedTools:
+    - crm.create
+    - crm.log-interaction
+  requiredCapabilities:
+    - crm
+  inputs:
+    - finished-conversation
+  evaluationSuite: evals/

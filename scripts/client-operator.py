@@ -440,6 +440,38 @@ def runtime_handoff(
     return 0
 
 
+CONTACT_COMMANDS = {"review", "assign", "dismiss", "erase-contact", "erase-interaction"}
+CONTACT_ID = re.compile(r"^(?:c|i|r)-[0-9a-f]{12,24}$")
+
+
+def runtime_contacts(
+    project_name: str,
+    command: str,
+    ids: tuple[str, ...] = (),
+    by: str | None = None,
+) -> int:
+    """Review or erase records in the Tier 0 contact log; every change is ledgered with who did it."""
+    if command not in CONTACT_COMMANDS:
+        raise ValueError("contacts command must be review, assign, dismiss, erase-contact or erase-interaction")
+    expected = {"review": 0, "assign": 2, "dismiss": 1, "erase-contact": 1, "erase-interaction": 1}[command]
+    if len(ids) != expected:
+        raise ValueError(f"contacts {command} needs {expected} identifier(s)")
+    if any(not CONTACT_ID.fullmatch(item) and item != "unmatched" for item in ids):
+        raise ValueError("identifiers must be record IDs such as c-..., i-... or r-...")
+    if command != "review" and (not isinstance(by, str) or not by.strip()):
+        raise ValueError("--by must name the person performing the action")
+    container = _governed_tool_container(project_name)
+    inner = ["python", "/opt/model-garden-platform/scripts/runtime-contacts.py", "/opt/data/.modelgarden/contacts", command, *ids]
+    if command != "review":
+        inner.extend(["--by", by.strip()])
+    result = _run(["docker", "exec", container, *inner])
+    if result.returncode != 0:
+        raise ValueError(result.stderr.strip() or result.stdout.strip() or "runtime contacts command failed")
+    if result.stdout:
+        print(result.stdout.strip())
+    return 0
+
+
 def runtime_connection(
     project_name: str,
     command: str,
@@ -526,6 +558,12 @@ def main() -> int:
         closer.add_argument("--by", required=True, help="the named person who did or declined it")
         closer.add_argument("--note")
 
+    contacts = sub.add_parser("contacts", help="review or erase the Tier 0 contact log (personal data; run on the client host)")
+    contacts.add_argument("action", choices=sorted(CONTACT_COMMANDS))
+    contacts.add_argument("ids", nargs="*", help="record IDs the action applies to")
+    contacts.add_argument("--project-name", required=True)
+    contacts.add_argument("--by", help="the named person performing a change")
+
     skills = sub.add_parser("skills", help="show enabled, disabled and blocked Skills for a client environment")
     skills.add_argument("workspace", type=pathlib.Path, help="private client workspace")
     skills.add_argument("--environment", choices=("dev", "prod"), default="dev")
@@ -590,6 +628,8 @@ def main() -> int:
             return 0
         if args.command == "doctor":
             return doctor(args.workspace, args.environment, args.repo, check_host=args.host)
+        if args.command == "contacts":
+            return runtime_contacts(args.project_name, args.action, tuple(args.ids), by=args.by)
         if args.command == "handoffs":
             return runtime_handoff(args.project_name, "list")
         if args.command in {"handoff-done", "handoff-decline"}:

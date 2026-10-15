@@ -1,0 +1,11 @@
+apiVersion: modelgarden.ai/v1
+kind: Tool
+metadata:
+  name: crm.log-interaction
+  owner: ai-platform
+  description: File a finished call, email or chat against a customer record or the unmatched queue. An internal record, so it does not wait for approval; retries return the same interaction ID.
+spec:
+  type: internal
+  capability: crm
+  risk: write
+  approvalRequired: false

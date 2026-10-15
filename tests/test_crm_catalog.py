@@ -56,15 +56,21 @@ class CrmCatalogTests(unittest.TestCase):
         for key in ("summary", "transcriptRef", "channel", "timestamp"):
             self.assertEqual(redacted[key], govern.REDACTED, key)
 
-    def test_catalog_does_not_claim_any_provider_implements_the_new_tools(self):
+    def test_only_the_shipped_built_in_provider_claims_the_new_tools(self):
         registry = json.loads((ROOT / "contracts" / "v1" / "integrations.json").read_text())
         claimed = {
-            tool
+            provider["id"]
             for provider in registry["providers"]
             for tool in provider["tools"]
             if tool in ("crm.create", "crm.log-interaction")
         }
-        self.assertEqual(claimed, set(), "no provider may list the new CRM Tools before its adapter and proof exist (#93, #77)")
+        # HubSpot, Salesforce and Zoho (#93) must not list them before their adapters and proof exist.
+        self.assertEqual(claimed, {"built-in-crm"})
+        built_in = next(provider for provider in registry["providers"] if provider["id"] == "built-in-crm")
+        self.assertEqual(built_in["status"], "built-credential-free")
+        self.assertEqual(built_in["adapter"], "platform/core/contacts.py")
+        self.assertNotIn("crm.update", built_in["tools"])  # not implemented at Tier 0
+        self.assertNotIn("proof", built_in)
 
 
 if __name__ == "__main__":
