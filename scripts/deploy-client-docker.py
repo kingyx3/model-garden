@@ -56,6 +56,9 @@ RUNTIME_SOURCE_PATHS = (
     pathlib.Path("platform/core/schedules.py"),
     pathlib.Path("platform/core/human_step.py"),
     pathlib.Path("platform/core/crm_sync.py"),
+    pathlib.Path("platform/core/artifacts.py"),
+    pathlib.Path("platform/core/deliverables.py"),
+    pathlib.Path("platform/core/skillsets.py"),
     pathlib.Path("platform/channels/text_channel.py"),
     pathlib.Path("platform/channels/email_channel.py"),
     pathlib.Path("platform/channels/slack_channel.py"),
@@ -70,6 +73,7 @@ RUNTIME_SOURCE_PATHS = (
     pathlib.Path("scripts/runtime-file-calls.py"),
     pathlib.Path("scripts/runtime-inbox.py"),
     pathlib.Path("scripts/runtime-memory.py"),
+    pathlib.Path("scripts/runtime-artifacts.py"),
     pathlib.Path("scripts/runtime-connection.py"),
     pathlib.Path("VERSION"),
 )
