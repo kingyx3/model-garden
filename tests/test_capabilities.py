@@ -288,6 +288,18 @@ class CapabilityManifestTests(unittest.TestCase):
         for forbidden in ("secret://", "token", "frontdesk@acme-tenant.example", "calendar_id"):
             self.assertNotIn(forbidden, rendered)
 
+    def test_runtime_manifest_skill_readiness_tracks_binding(self):
+        desired = self._desired()
+        blocked = capabilities.build_manifest(desired, {"environment": "dev"})
+        skill = next(s for s in blocked["skills"] if s["name"] == "book-appointment")
+        self.assertFalse(skill["ready"])
+        self.assertEqual(skill["dependencies"][0]["status"], "missing")
+        ready = capabilities.build_manifest(desired, GOOGLE_BINDING)
+        skill = next(s for s in ready["skills"] if s["name"] == "book-appointment")
+        self.assertTrue(skill["ready"])
+        self.assertEqual(skill["dependencies"][0]["provider"], "google")
+        self.assertNotIn("secret://", json.dumps(ready["skills"]))
+
     def test_revoked_connection_becomes_unavailable_with_fallback(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = pathlib.Path(tmp)
