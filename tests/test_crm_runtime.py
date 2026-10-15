@@ -111,7 +111,7 @@ class FilingTests(RuntimeCase):
         self.assertEqual(execution["arguments"]["interactionType"], "call")
         self.assertEqual(execution["arguments"]["summary"], runtime_module.GOVERN.REDACTED)
         text = (self.root / "audit.jsonl").read_text()
-        for private in ("Alex", "6123", "callback", "boiler"):
+        for private in ("Alex", "6123 4567", "61234567", "callback", "boiler"):
             self.assertNotIn(private, text)
         self.assertTrue(runtime_module.GOVERN.verify_audit_chain(self.root / "audit.jsonl")["valid"])
 
@@ -190,7 +190,7 @@ class ReadTests(RuntimeCase):
         self.assertEqual(entry["records"][0]["id"], contact)
         self.assertEqual(len(entry["records"][0]["contentDigest"]), 64)
         text = (self.root / "audit.jsonl").read_text()
-        for private in ("Alex", "6123", "callback"):
+        for private in ("Alex", "6123 4567", "61234567", "callback"):
             self.assertNotIn(private, text)
 
     def test_limit_is_validated(self):

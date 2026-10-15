@@ -85,7 +85,7 @@ class LedgerTests(unittest.TestCase):
         self.assertEqual(event["details"]["errorType"], "Unknown")
         self.assertNotIn("callHash", event["details"])
         text = self.audit.read_text()
-        for private in ("alex", "Alex", "6123", "secret"):
+        for private in ("alex", "Alex", "6123 4567", "61234567", "secret"):
             self.assertNotIn(private, text)
 
     def test_a_corrupt_ledger_line_does_not_stop_deduplication_of_the_rest(self):

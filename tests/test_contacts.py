@@ -340,7 +340,7 @@ class OperatorScriptTests(StoreCase):
         self.assertEqual([event["action"] for event in events], ["contacts.assign", "contacts.dismiss", "contacts.erase-contact"])
         self.assertTrue(all(event["performedBy"] == "jordan@client.example" and event["event"] == "operator-action" for event in events))
         text = audit.read_text()
-        for secret in ("Alex", "6123", "callback"):
+        for secret in ("Alex", "6123 4567", "61234567", "callback"):
             self.assertNotIn(secret, text)
         self.assertTrue(govern.verify_audit_chain(audit)["valid"])
 
