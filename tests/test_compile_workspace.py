@@ -48,12 +48,12 @@ class CompileWorkspaceTests(unittest.TestCase):
     def test_receptionist_materializes_skill_instructions(self) -> None:
         workspace = ROOT / "examples" / "workspace"
         compiled = compiler.compile_workspace(workspace, "receptionist")[0]
-        self.assertEqual(sorted(compiled["skillInstructions"]), ["answer-faq", "book-appointment", "human-handoff", "take-message"])
+        self.assertEqual(sorted(compiled["skillInstructions"]), ["answer-faq", "book-appointment", "human-handoff", "log-conversation", "take-message"])
         self.assertIn("Do not invent availability", compiled["skillInstructions"]["book-appointment"]["content"])
         self.assertTrue(compiled["skillInstructions"]["book-appointment"]["source"].endswith("instructions.md"))
         self.assertEqual(
             [tool["metadata"]["name"] for tool in compiled["tools"]],
-            ["calendar.availability", "calendar.book"],
+            ["calendar.availability", "calendar.book", "kb.search", "crm.create", "crm.log-interaction"],
         )
 
     def test_missing_reference_fails_closed(self) -> None:
@@ -111,7 +111,7 @@ class CompileWorkspaceTests(unittest.TestCase):
             self.assertEqual(compiled["skillInstructions"]["book-appointment"]["source"], "library:skills/book-appointment/instructions.md")
             self.assertEqual(
                 [tool["metadata"]["name"] for tool in compiled["tools"]],
-                ["calendar.availability", "calendar.book"],
+                ["calendar.availability", "calendar.book", "kb.search", "crm.create", "crm.log-interaction"],
             )
 
     def test_client_local_resource_overrides_library_resource(self) -> None:

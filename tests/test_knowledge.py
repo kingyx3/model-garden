@@ -211,9 +211,7 @@ def workspace_with_source(tmp: str, **spec_overrides) -> pathlib.Path:
     document = yaml.safe_load(source.read_text())
     document["spec"].update(spec_overrides)
     source.write_text(yaml.safe_dump(document))
-    agent = target / "agents" / "front-office" / "receptionist" / "agent.yaml"
-    agent.write_text(agent.read_text().replace("    - business-information\n", "    - business-information\n    - rules-of-engagement\n"))
-    return target
+    return target  # the example receptionist already selects the rules-of-engagement source
 
 
 class CompileTests(unittest.TestCase):

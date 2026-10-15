@@ -142,6 +142,10 @@ spec:
 
 Disabled Skills remain in the non-secret readiness report but are **not** materialized into the Hermes runtime, do not contribute required capabilities, and suppress Tools used exclusively by disabled Skills. Tools shared with enabled Skills remain selected. Removing a Skill from `disabledSkills` is an activation: the ordinary required-capability validation then **fails closed** if its provider is missing. Keep direct Agent instructions aligned with what is enabled; disabling a Skill is not a grant/revocation of an underlying client provider credential.
 
+### Reference receptionist on a zero-stack client
+
+The shipped receptionist declares `kb.search`, `crm.create` and `crm.log-interaction` (Tier 0, no third-party account) next to the calendar Tools. A client with no calendar sets `disabledSkills: [book-appointment]` and binds only `connectors.kb` (`text-knowledge`, tier 0) and `connectors.crm` (`built-in-crm`, tier 0); the calendar Tools are then suppressed and the bundle renders with no calendar provider. A client that later adds a calendar removes the Skill from `disabledSkills` and adds `connectors.calendar` (`google` or `microsoft`, tier 1); the Agent and the other Skills are unchanged. Unshipped providers (for example `hubspot`), forged tiers, or a failed connection keep the dependent Skill blocked. `tests/test_reference_compatibility.py` pins both scenarios, and `python3 scripts/eval-receptionist.py` also checks that each scenario's question retrieves the expected approved-knowledge section. The Tier 0 kb/crm path still has no live deployment evidence.
+
 ```bash
 python3 scripts/client-operator.py skills <private-client-workspace> --environment dev --agent receptionist
 ```
