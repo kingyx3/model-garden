@@ -257,9 +257,9 @@ class HubSpotClient:
             raise ValueError("transcriptRef must be a reference to the stored transcript, never its text")
         cleaned = self._redact(summary.strip())
         material = json.dumps([object_type, object_id, timestamp, channel, direction, kind, cleaned], separators=(",", ":"))
-        token = "mgkey" + hashlib.sha256(material.encode("utf-8")).hexdigest()[:32]
+        marker = "mgkey" + hashlib.sha256(material.encode("utf-8")).hexdigest()[:32]
         existing = self._request("POST", "/crm/v3/objects/notes/search", {
-            "filterGroups": [{"filters": [{"propertyName": "hs_note_body", "operator": "CONTAINS_TOKEN", "value": token}]}],
+            "filterGroups": [{"filters": [{"propertyName": "hs_note_body", "operator": "CONTAINS_TOKEN", "value": marker}]}],
             "limit": 1, "properties": ["hs_timestamp"],
         })
         found = (existing.get("results") or [])
@@ -271,7 +271,7 @@ class HubSpotClient:
             lines.append(f"Outcome: {outcome}")
         if reference:
             lines.append(f"Transcript reference: {reference}")
-        lines.append(f"Model Garden marker: {token}")
+        lines.append(f"Model Garden marker: {marker}")
         created = self._request("POST", "/crm/v3/objects/notes", {
             "properties": {"hs_timestamp": timestamp, "hs_note_body": "\n".join(lines)},
             "associations": [{"to": {"id": object_id}, "types": [
