@@ -300,7 +300,8 @@ def resolve_agent(workspace, agent, resources, source_paths, source_roots, envir
                     )
                 )
                 capabilities["skills"] = CAPABILITIES.skill_readiness(
-                    agent, listed_skills, environment_binding, disabled_skills=disabled
+                    agent, listed_skills, environment_binding, disabled_skills=disabled,
+                    knowledge=CAPABILITIES.knowledge_states(resolved["knowledge"], agent=name),
                 )
             except ValueError as exc:
                 errors.append(str(exc))
@@ -404,7 +405,12 @@ def workspace_readiness(
             "agent": agent["metadata"]["name"],
             "environment": CAPABILITIES.binding_environment(environment_binding),
             "skills": CAPABILITIES.skill_readiness(
-                agent, skills, environment_binding, disabled_skills=disabled
+                agent, skills, environment_binding, disabled_skills=disabled,
+                knowledge=CAPABILITIES.knowledge_states(
+                    [resources["KnowledgeSource"][ref] for ref in agent["spec"].get("knowledge", [])
+                     if ref in resources["KnowledgeSource"]],
+                    agent=agent["metadata"]["name"],
+                ),
             ),
         })
     return report
@@ -479,6 +485,8 @@ def format_approvals(report: list[dict[str, Any]]) -> str:
                     f"    {action['tool']:<{width}}  {action['risk']:<22}"
                     f" members: {action['member']:<9} public callers: {action['public']}"
                 )
+        if any(action[who] == "conditional" for entry in agent["skills"] for action in entry["actions"] for who in ("member", "public")):
+            lines.append("  conditional = automatic only for calls inside the signed rule's argument and daily-limit conditions; any other call needs approval.")
         lines.append("  Approvals are given by a mapped approver from the client principal directory; public callers never approve.")
     return "\n".join(lines) + "\n"
 
@@ -489,6 +497,9 @@ def _dependency_text(dependency: dict[str, Any]) -> str:
         return f"{label}: {dependency['provider']} tier {dependency['tier']}"
     if dependency["status"] == "missing":
         return f"{label}: MISSING"
+    if dependency["status"] == "no-content":
+        states = ", ".join(f"{item['name']} {item['state']}" for item in dependency["content"]["sources"]) or "no source selected"
+        return f"{label}: {dependency['provider']} tier {dependency['tier']} but NO APPROVED CONTENT ({states})"
     return f"{label}: degraded -> fallback tier {dependency['fallbackTier']}"
 
 

@@ -13,7 +13,11 @@ deliberately small and fail-closed:
   carries a valid client-owner sign-off bound to the rule's exact content;
 - an `allow` rule applies to member principals unless it names ``public`` explicitly, and a
   public principal can reach at most one signed, named ``write`` Tool;
-- ``privileged`` Tools are never auto-approved and never reachable by a public principal.
+- ``privileged`` Tools are never auto-approved and never reachable by a public principal;
+- an `allow` rule may carry bounded ``conditions`` (an argument allow-list and a per-day usage
+  limit). Conditions only narrow a loosening rule: when one is unmet, or cannot be checked,
+  the rule simply does not apply and the stricter default stands. They are part of the rule's
+  content, so the owner's sign-off digest binds them too.
 
 With no Policy the result is exactly the previous Agent/Tool behaviour, plus the privileged
 floor. This module owns no I/O and no credentials.
@@ -69,6 +73,36 @@ def signoff_valid(rule: Mapping[str, Any]) -> bool:
     )
 
 
+def _scalar(value: Any) -> bool:
+    return isinstance(value, (str, int, float, bool))
+
+
+def conditions_status(
+    rule: Mapping[str, Any],
+    arguments: Mapping[str, Any] | None,
+    usage_today: int | None,
+) -> str | None:
+    """None when a rule's bounded conditions hold, else why the rule does not apply.
+
+    Fails closed: an argument the call did not supply, a non-scalar value, or a usage count the
+    caller could not provide all make the condition unmet.
+    """
+    conditions = rule.get("conditions")
+    if not isinstance(conditions, Mapping):
+        return None
+    allowed = conditions.get("arguments")
+    if isinstance(allowed, Mapping):
+        supplied = arguments if isinstance(arguments, Mapping) else {}
+        for name, values in allowed.items():
+            value = supplied.get(name)
+            if not _scalar(value) or not any(type(value) is type(item) and value == item for item in values):
+                return "argument-condition"
+    limit = conditions.get("maxPerDay")
+    if limit is not None and (usage_today is None or usage_today >= limit):
+        return "usage-limit"
+    return None
+
+
 def _action_matches(rule: Mapping[str, Any], tool_name: str) -> bool:
     patterns = rule.get("actions") or []
     return any(fnmatch.fnmatchcase(tool_name, pattern) for pattern in patterns)
@@ -109,14 +143,27 @@ def evaluate(
     principal: str | None = None,
     agent_requires_approval: bool = False,
     tool_requires_approval: bool = False,
+    arguments: Mapping[str, Any] | None = None,
+    usage_today: int | None = None,
 ) -> dict[str, Any]:
-    """Return ``{"decision", "reason", "ruleId"}`` for one already-selected Tool call."""
+    """Return ``{"decision", "reason", "ruleId"}`` for one already-selected Tool call.
+
+    ``arguments`` and ``usage_today`` (successful executions of this Tool so far today, UTC) feed
+    the bounded conditions of `allow` rules; omit them and conditional rules do not apply.
+    """
     who = principal or MEMBER
-    matched = [
-        rule
-        for rule in rules_of(policies)
-        if _matches(rule, tool_name=tool_name, classification=classification, channel=channel, principal=who)
-    ]
+    matched = []
+    limited: dict[str, Any] | None = None  # first allow rule set aside only because its daily limit is used up
+    for rule in rules_of(policies):
+        if not _matches(rule, tool_name=tool_name, classification=classification, channel=channel, principal=who):
+            continue
+        if rule["effect"] == "allow":
+            unmet = conditions_status(rule, arguments, usage_today)
+            if unmet is not None:
+                if unmet == "usage-limit" and usage_today is not None and limited is None:
+                    limited = rule
+                continue
+        matched.append(rule)
     denied = next((rule for rule in matched if rule["effect"] == "deny"), None)
     if denied is not None:
         return {"decision": "deny", "reason": "policy-deny", "ruleId": denied["id"]}
@@ -147,6 +194,8 @@ def evaluate(
     if risk == "privileged":
         return {"decision": "require-approval", "reason": "privileged-requires-approval", "ruleId": None}
     if tool_requires_approval and waiver is None:
+        if limited is not None:
+            return {"decision": "require-approval", "reason": "policy-limit-reached", "ruleId": limited["id"]}
         return {"decision": "require-approval", "reason": "tool-requires-approval", "ruleId": None}
     if waiver is not None:
         return {"decision": "allow", "reason": "policy-allow", "ruleId": waiver["id"]}
@@ -176,6 +225,11 @@ def relaxation_errors(policies: Iterable[Mapping[str, Any]] | None, tools: Itera
         if rule["effect"] == "human-only" and not (isinstance(rule.get("assignee"), str) and rule["assignee"].strip()):
             errors.append(f"Policy human-only rule {rule_id!r} must name the person (assignee) who performs the action")
         if rule["effect"] != "allow":
+            if rule.get("conditions") is not None:
+                errors.append(
+                    f"Policy rule {rule_id!r} has conditions but is not an allow rule; "
+                    "conditions may only narrow a loosening rule"
+                )
             continue
         if not rule.get("actions"):
             errors.append(f"Policy allow rule {rule_id!r} must list the actions it allows")
@@ -250,4 +304,11 @@ def preview(
         outcome[who] = {
             "allow": "automatic", "require-approval": "approval", "deny": "denied", "hand-off": "human",
         }[result["decision"]]
+        if outcome[who] == "approval" and any(
+            rule.get("effect") == "allow" and rule.get("conditions") and _action_matches(rule, tool_name)
+            and (who in (rule.get("principals") or [MEMBER]))
+            for rule in rules_of(policies)
+        ):
+            # Some calls (matching arguments, inside the daily limit) run automatically; others still need approval.
+            outcome[who] = "conditional"
     return outcome

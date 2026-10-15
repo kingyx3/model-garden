@@ -223,6 +223,23 @@ def availability(index: Mapping[str, Any], *, agent: str | None = None, today: d
     return None
 
 
+def source_state(spec: Mapping[str, Any], *, agent: str | None = None, today: dt.date | None = None) -> str:
+    """Whether one KnowledgeSource declaration may ground answers for an Agent, without reading its file.
+
+    ``usable`` or the reason it is not: ``draft``, ``retired``, ``not-yet-effective``,
+    ``effective-date-invalid``, ``not-for-this-agent`` or ``not-indexed`` (a source type that has
+    no governed, retrievable content here).
+    """
+    if spec.get("type") != "text-file":
+        return "not-indexed"
+    reason = availability(
+        {"status": spec.get("status", "draft"), "effectiveDate": spec.get("effectiveDate"),
+         "audiences": spec.get("audiences", [])},
+        agent=agent, today=today,
+    )
+    return "usable" if reason is None else reason.removeprefix("source-")
+
+
 def search(
     index: Mapping[str, Any],
     query: str,

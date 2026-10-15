@@ -14,10 +14,12 @@ chooses a provider. This module owns three small, deterministic jobs:
 from __future__ import annotations
 
 import datetime as dt
+import importlib.util
 import json
 import os
 import pathlib
 import re
+import sys
 from typing import Any, Mapping
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
@@ -29,6 +31,7 @@ TIERS = (0, 1, 2, 3, 4)
 HUMAN_HANDOFF_TIER = 4
 CONNECTION_HEALTH = ("healthy", "degraded", "failed", "revoked")
 UNAVAILABLE_HEALTH = {"failed", "revoked"}
+BLOCKING = {"missing", "no-content", "unavailable"}
 LEGACY_CONNECTOR_KEYS = {"google_calendar": ("calendar", "google"), "microsoft_calendar": ("calendar", "microsoft")}
 SAFE_SCOPE = re.compile(r"^[A-Za-z0-9._:/+-]{1,200}$")
 SAFE_NAME = re.compile(r"^[a-z]+$")
@@ -272,6 +275,25 @@ def skills_requiring(skills: list[dict[str, Any]]) -> dict[str, list[str]]:
     return {name: sorted(names) for name, names in sorted(owners.items())}
 
 
+def knowledge_states(
+    sources: list[Mapping[str, Any]], *, agent: str | None, today: dt.date | None = None
+) -> list[dict[str, str]]:
+    """Non-secret ``[{name, state}]`` for the KnowledgeSources an Agent selects (see knowledge.source_state)."""
+    module_name = "model_garden_capabilities_knowledge"
+    module = sys.modules.get(module_name)
+    if module is None:
+        spec = importlib.util.spec_from_file_location(module_name, pathlib.Path(__file__).with_name("knowledge.py"))
+        module = importlib.util.module_from_spec(spec)
+        assert spec.loader is not None
+        sys.modules[module_name] = module
+        spec.loader.exec_module(module)
+    return [
+        {"name": source.get("metadata", {}).get("name"),
+         "state": module.source_state(source.get("spec", {}), agent=agent, today=today)}
+        for source in sources if isinstance(source, Mapping)
+    ]
+
+
 def skill_readiness(
     agent: dict[str, Any],
     skills: list[dict[str, Any]],
@@ -279,6 +301,7 @@ def skill_readiness(
     catalog: dict[str, Any] | None = None,
     *,
     disabled_skills: set[str] | None = None,
+    knowledge: list[dict[str, str]] | None = None,
 ) -> list[dict[str, Any]]:
     """Report, per selected Skill, whether its capability dependencies are met here.
 
@@ -287,6 +310,12 @@ def skill_readiness(
     unbound: the entry is not ready) or ``degraded`` (optional and unbound, with its
     fallback tier). Only provider, tier and fallback tier are copied from the binding:
     never token references, calendar IDs, scopes or owners.
+
+    When ``knowledge`` (see :func:`knowledge_states`) is given, a bound ``kb`` dependency also
+    reports the state of the business content behind the provider: a *required* one with no
+    usable (approved, effective, audience-matching) source is ``no-content``, which blocks the
+    Skill exactly like a missing provider would, because a coworker with a knowledge store but
+    nothing approved to say cannot answer from it.
     """
     providers = bound_providers(binding, catalog)
     disabled_skills = disabled_skills or set()
@@ -311,12 +340,17 @@ def skill_readiness(
                 facts = providers.get(family)
                 if facts is not None:
                     dependency.update(status="bound", provider=facts["provider"], tier=facts["tier"])
+                    if knowledge is not None and family == "kb":
+                        usable = sum(1 for item in knowledge if item["state"] == "usable")
+                        dependency["content"] = {"usable": usable, "sources": [dict(item) for item in knowledge]}
+                        if is_required and usable == 0:
+                            dependency["status"] = "no-content"
                 elif is_required:
                     dependency["status"] = "missing"
                 else:
                     dependency.update(status="degraded", fallbackTier=families(catalog)[family]["fallbackTier"])
                 dependencies.append(dependency)
-        ready = all(item["status"] != "missing" for item in dependencies)
+        ready = all(item["status"] not in BLOCKING for item in dependencies)
         report.append({
             "name": name,
             "kind": kind,
@@ -409,9 +443,14 @@ def build_manifest(desired_state: dict[str, Any], binding: Mapping[str, Any], ca
                 },
             })
             known.add(old["name"])
+        selected_knowledge = desired_state.get("knowledge")
         skill_status = skill_readiness(
             agent, [*executable_skills, *disabled_declarations], binding, catalog,
             disabled_skills=disabled,
+            knowledge=(
+                knowledge_states(selected_knowledge, agent=source.get("name"))
+                if isinstance(selected_knowledge, list) else None
+            ),
         )
         # Very old profiles with no declaration details must not imply that a
         # disabled Skill can safely be switched on without recompilation.
@@ -523,7 +562,7 @@ def apply_connection_health(manifest: dict[str, Any], health: Mapping[str, Mappi
                 dependency["status"] = "degraded"
                 dependency["fallbackTier"] = families()[family]["fallbackTier"]
         skill["ready"] = all(
-            dep.get("status") not in {"missing", "unavailable"}
+            dep.get("status") not in BLOCKING
             for dep in skill.get("dependencies", [])
         )
         # Unknown legacy disabled-Skill declarations cannot be activated until
