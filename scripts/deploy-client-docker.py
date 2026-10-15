@@ -53,6 +53,8 @@ RUNTIME_SOURCE_PATHS = (
     pathlib.Path("platform/core/inbox.py"),
     pathlib.Path("platform/channels/text_channel.py"),
     pathlib.Path("platform/channels/email_channel.py"),
+    pathlib.Path("platform/channels/slack_channel.py"),
+    pathlib.Path("platform/channels/web_chat.py"),
     pathlib.Path("platform/channels/conversation_filing.py"),
     pathlib.Path("contracts/v1/capabilities.json"),
     pathlib.Path("contracts/v1/integrations.json"),
