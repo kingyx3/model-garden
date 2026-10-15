@@ -402,15 +402,23 @@ class EmailChannelAdapter:
         Loop signals are checked first and never consume the per-thread allowance; only a reply that
         is allowed is counted against the thread's limit.
         """
-        message = self._parse(body)
-        reason = loop_risk(message, self._own)
+        reason = self.loop_reason(body)
         if reason is not None:
             return False, reason
-        if self._limiter is not None:
-            inbound = self.parse_inbound(body)
-            if not self._limiter.consume(inbound.thread_id or inbound.conversation_id):
-                return False, "thread-reply-limit"
+        if not self.consume_reply(body):
+            return False, "thread-reply-limit"
         return True, None
+
+    def loop_reason(self, body: bytes) -> str | None:
+        """Why this message must not get an automatic reply, without counting anything against the thread."""
+        return loop_risk(self._parse(body), self._own)
+
+    def consume_reply(self, body: bytes) -> bool:
+        """Count one automatic reply against the message's thread; ``False`` once its limit is reached."""
+        if self._limiter is None:
+            return True
+        inbound = self.parse_inbound(body)
+        return self._limiter.consume(inbound.thread_id or inbound.conversation_id)
 
     # -- outbound: composed here, sent by the injected transport ---------------------------
 
