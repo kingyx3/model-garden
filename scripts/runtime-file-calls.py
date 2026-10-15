@@ -9,6 +9,9 @@ verified identity), referenced by `transcript:<callHash>`, with the outcome and 
 model summary when the record has one, never the transcript text. Every filing is ledgered under the
 identity `runtime:conversation-filing`. Re-running is safe: a reference already filed anywhere is skipped.
 A person then assigns unmatched records with `client-operator.py contacts review|assign`.
+
+The same input may also hold the worker's lifecycle events: each `TranscriptWriteFailed` (a call whose transcript
+could not be stored) is ledgered once as `transcript.write-failed` with the error type and time only.
 """
 from __future__ import annotations
 
@@ -56,16 +59,19 @@ def main(argv: list[str] | None = None) -> int:
                 handle.write(sys.stdin.read())
                 handle.flush()
                 records = filing.read_call_transcripts(pathlib.Path(handle.name))
+                write_failures = filing.read_transcript_failures(pathlib.Path(handle.name))
         else:
             records = filing.read_call_transcripts(pathlib.Path(args.transcripts))
+            write_failures = filing.read_transcript_failures(pathlib.Path(args.transcripts))
         failures: list[str] = []
         totals = filing.file_call_transcripts(runtime, store, records, log=failures.append)
+        ledgered = filing.ledger_transcript_failures(runtime_module.GOVERN, args.audit_path, write_failures)
     except (OSError, ValueError, PermissionError, json.JSONDecodeError) as exc:
         print(f"Runtime file-calls failed: {exc}", file=sys.stderr)
         return 1
     for failure in failures:
         print(f"failed to file {failure}", file=sys.stderr)
-    print(json.dumps({"records": len(records), **totals}, sort_keys=True))
+    print(json.dumps({"records": len(records), **totals, "writeFailures": ledgered}, sort_keys=True))
     return 1 if totals["failed"] else 0
 
 

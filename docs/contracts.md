@@ -91,6 +91,25 @@ When a condition is unmet, or cannot be checked (a missing or non-scalar argumen
 
 Not yet supported: classification of free-text content (for example deciding that a message *is* an FAQ), per-principal counters, verifying that the named owner really signed (a sign-off proves content integrity, not identity), and consultant/owner role separation beyond the sign-off above.
 
+## Delegation between Agents (task envelopes)
+
+`platform/core/delegation.py` holds the rules for a coordinator Agent handing work to a specialist without creating a way to do more than a person could have asked for. It is a pure module with tests, **not wired into a runtime**: the governed sidecar still serves one Agent per environment (#95), so nothing here yet decides a live call.
+
+- **Envelope.** goal, constraints, deadline, budget (`tokens`, `costCents`, `steps`), the Tools the task may use, the originating principal, the parent task and the chain of Agents so far. The root envelope's authority is the requesting person's permissions narrowed to what the first Agent holds; a child cannot change the originating principal.
+- **Attenuation.** A delegate's effective authority is its own grants ∩ the delegator's authority for this task ∩ the originating principal's permissions, re-checked on every hop. A delegate asked to use a Tool outside that set is refused rather than silently narrowed, and authority never grows along a chain.
+- **Bounds.** Depth (default 3), fan-out (default 5) and loops (an Agent already in the chain) are refused; a child's budget and deadline can only be tighter than what the parent has left, and a parent whose budget is exhausted cannot delegate (a task with an exhausted bound must halt and its owner be told, which nothing sends yet).
+- **Governance and ledger.** `governance_context` yields the `originatingPrincipal`, `taskId` and `delegationChain` fields the governed boundary already binds into every `requestId`; `permits` is the check a runtime must make before policy evaluation; `record_hop` ledgers each hop as a `delegation.hop` event holding identifiers, counts and a digest of the goal, never the goal.
+
+Open: the runtime-native handoff or A2A decision, a multi-Agent runtime that calls these rules, owner notification on budget exhaustion and live evidence (#96, #95, #71).
+
+## Coworker memory
+
+`platform/core/memory.py` is the Model Garden contract for what a coworker remembers, a credential-free store with its own tests; it is **not connected** to Hermes's memory or to chat commands, and whether a runtime's native memory sits behind it is undecided (#100).
+
+- **Scopes:** `client`, `agent:<name>` and `conversation:<id>`. A reader names the scopes it may see; anything else is invisible, so one conversation's memory never reaches another. A store belongs to one tenant, in its own file, and refuses another tenant's file.
+- **Writes** redact card numbers, refuse `restricted` classification unless the deployment's policy allows it, are bounded (500 characters, 2,000 entries) and are idempotent per scope. Each write, delete, export and purge calls the audit hook with identifiers and a digest of the text, never the text.
+- **People and administrators.** A person may list and delete entries they own; an administrator may export and purge per scope or for the whole client: `client-operator.py memory list|export|delete|purge --project-name <env>` (client data, so run it on the client host; the actor is as asserted on the command line, like approvals).
+
 Stable operational contract:
 
 - `usage-attribution.schema.json` — canonical non-secret client/Agent/environment/provider and optional cost/trace/subscription/shared-pool dimensions used to correlate runtime consumption with showback and billing. This is platform-generated operational metadata, not client-authored Agent/Skill desired state.

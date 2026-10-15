@@ -26,6 +26,7 @@ import datetime as dt
 import hashlib
 import json
 import pathlib
+import re
 from collections.abc import Callable, Iterable, Mapping
 from typing import Any
 
@@ -134,6 +135,78 @@ def read_call_transcripts(path: pathlib.Path) -> list[dict[str, Any]]:
             if len(records) >= MAX_RECORDS:
                 break
     return sorted(records, key=lambda item: (item.get("timestamp", 0), item.get("callHash", "")))
+
+
+_ERROR_TYPE = re.compile(r"^[A-Za-z][A-Za-z0-9_]{0,63}$")
+FAILURE_ACTION = "transcript.write-failed"
+
+
+def read_transcript_failures(path: pathlib.Path) -> list[dict[str, Any]]:
+    """The voice worker's ``TranscriptWriteFailed`` lifecycle events (error type and time only), oldest first."""
+    if not path.is_file():
+        return []
+    failures: list[dict[str, Any]] = []
+    with path.open("r", encoding="utf-8") as handle:
+        for raw in handle:
+            try:
+                value = json.loads(raw)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(value, dict) and value.get("type") == "TranscriptWriteFailed" and isinstance(value.get("timestamp"), int):
+                failures.append(value)
+            if len(failures) >= MAX_RECORDS:
+                break
+    return sorted(failures, key=lambda item: (item["timestamp"], str(item.get("roomHash", ""))))
+
+
+def _failure_fingerprint(failure: Mapping[str, Any]) -> str:
+    material = f"{failure['timestamp']}\0{failure.get('roomHash', '')}\0{failure.get('errorType', '')}"
+    return hashlib.sha256(material.encode("utf-8")).hexdigest()[:24]
+
+
+def _known_fingerprints(audit_path: pathlib.Path | None) -> set[str]:
+    known: set[str] = set()
+    if audit_path is None or not audit_path.is_file():
+        return known
+    with audit_path.open("r", encoding="utf-8") as handle:
+        for raw in handle:
+            try:
+                event = json.loads(raw)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(event, dict) and event.get("action") == FAILURE_ACTION:
+                fingerprint = (event.get("details") or {}).get("fingerprint")
+                if isinstance(fingerprint, str):
+                    known.add(fingerprint)
+    return known
+
+
+def ledger_transcript_failures(
+    govern: Any, audit_path: pathlib.Path | None, failures: Iterable[Mapping[str, Any]], *, performed_by: str = "runtime:conversation-filing"
+) -> dict[str, int]:
+    """Ledger each transcript write failure once (error type and time only; no transcript text exists to leak).
+
+    A failure the ledger already holds, recognised by a fingerprint of its time, call hash and error type, is not
+    recorded again, so the step can run repeatedly over the same worker log.
+    """
+    known = _known_fingerprints(audit_path)
+    totals = {"ledgered": 0, "known": 0}
+    for failure in failures:
+        fingerprint = _failure_fingerprint(failure)
+        if fingerprint in known:
+            totals["known"] += 1
+            continue
+        error_type = failure.get("errorType")
+        details: dict[str, Any] = {
+            "fingerprint": fingerprint, "at": failure["timestamp"],
+            "errorType": error_type if isinstance(error_type, str) and _ERROR_TYPE.match(error_type) else "Unknown",
+        }
+        if isinstance(failure.get("roomHash"), str) and re.fullmatch(r"[0-9a-f]{64}", failure["roomHash"]):
+            details["callHash"] = failure["roomHash"]
+        govern.record_operator_action(audit_path, FAILURE_ACTION, performed_by, details)
+        known.add(fingerprint)
+        totals["ledgered"] += 1
+    return totals
 
 
 def file_call_transcripts(

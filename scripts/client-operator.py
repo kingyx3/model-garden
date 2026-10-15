@@ -444,6 +444,49 @@ def runtime_handoff(
     return 0
 
 
+MEMORY_COMMANDS = {"list", "export", "delete", "purge"}
+MEMORY_ID = re.compile(r"^m-[0-9a-f]{12}$")
+MEMORY_SCOPE = re.compile(r"^(client|agent:[A-Za-z0-9][A-Za-z0-9._-]{0,63}|conversation:[A-Za-z0-9][A-Za-z0-9._:-]{0,127})$")
+
+
+def runtime_memory(
+    project_name: str,
+    command: str,
+    *,
+    scopes: tuple[str, ...] = (),
+    memory_id: str | None = None,
+    by: str | None = None,
+) -> int:
+    """List, export, delete or purge what the coworker remembers; every change is ledgered with who did it."""
+    if command not in MEMORY_COMMANDS:
+        raise ValueError("memory command must be list, export, delete or purge")
+    if any(not MEMORY_SCOPE.fullmatch(item) for item in scopes):
+        raise ValueError("scope must be client, agent:<name> or conversation:<id>")
+    if command == "list" and not scopes:
+        raise ValueError("memory list needs at least one --scope")
+    if command == "delete" and not (isinstance(memory_id, str) and MEMORY_ID.fullmatch(memory_id)):
+        raise ValueError("memory id must look like m-0123456789ab")
+    if command != "list" and (not isinstance(by, str) or not by.strip()):
+        raise ValueError("--by must name the administrator")
+    container = _governed_tool_container(project_name)
+    inner = ["python", "/opt/model-garden-platform/scripts/runtime-memory.py", "/opt/data/.modelgarden/memory", command]
+    if command == "list":
+        for item in scopes:
+            inner.extend(["--scope", item])
+    else:
+        if command == "delete":
+            inner.append(memory_id)
+        inner.extend(["--by", by.strip()])
+        if command == "purge" and scopes:
+            inner.extend(["--scope", scopes[0]])
+    result = _run(["docker", "exec", container, *inner])
+    if result.returncode != 0:
+        raise ValueError(result.stderr.strip() or result.stdout.strip() or "runtime memory command failed")
+    if result.stdout:
+        print(result.stdout.strip())
+    return 0
+
+
 NOTICE_KINDS = ("assigned", "reminder", "escalation")
 CHANNEL_NAME = re.compile(r"^[a-z][a-z0-9-]{0,31}$")
 
@@ -514,13 +557,14 @@ def runtime_contacts(
 
 
 VOICE_TRANSCRIPTS = "/opt/data/transcripts.jsonl"
+VOICE_MESSAGES = "/opt/data/messages.jsonl"  # lifecycle events, including TranscriptWriteFailed
 
 
 def runtime_file_calls(project_name: str) -> int:
     """File the voice worker's stored call transcripts into the bound CRM (ledgered, idempotent)."""
     voice = _service_container(project_name, "voice", "voice worker")
     container = _governed_tool_container(project_name)
-    stored = _run(["docker", "exec", voice, "sh", "-c", f"cat {VOICE_TRANSCRIPTS} 2>/dev/null || true"])
+    stored = _run(["docker", "exec", voice, "sh", "-c", f"cat {VOICE_TRANSCRIPTS} {VOICE_MESSAGES} 2>/dev/null || true"])
     if stored.returncode != 0:
         raise ValueError(stored.stderr.strip() or "cannot read the voice worker's transcripts")
     result = _run(
@@ -648,6 +692,12 @@ def main() -> int:
     notified.add_argument("kind", choices=NOTICE_KINDS)
     notified.add_argument("--project-name", required=True)
     notified.add_argument("--via", required=True)
+    memory = sub.add_parser("memory", help="inspect, export, delete or purge what the coworker remembers (client data; run on the client host)")
+    memory.add_argument("action", choices=sorted(MEMORY_COMMANDS))
+    memory.add_argument("memory_id", nargs="?", help="entry to delete (m-...)")
+    memory.add_argument("--project-name", required=True)
+    memory.add_argument("--scope", action="append", default=[], help="client, agent:<name> or conversation:<id>")
+    memory.add_argument("--by", help="the named administrator for export, delete and purge")
     inbox = sub.add_parser("inbox", help="show everything waiting for a person: approvals, hand-offs, records to review")
     inbox.add_argument("--project-name", required=True)
     inbox.add_argument("--json", action="store_true")
@@ -739,6 +789,8 @@ def main() -> int:
             return runtime_handoff_notices(
                 args.project_name, "notified", handoff_id=args.handoff_id, kind=args.kind, via=args.via
             )
+        if args.command == "memory":
+            return runtime_memory(args.project_name, args.action, scopes=tuple(args.scope), memory_id=args.memory_id, by=args.by)
         if args.command == "inbox":
             return runtime_inbox(args.project_name, as_json=args.json)
         if args.command == "file-calls":
