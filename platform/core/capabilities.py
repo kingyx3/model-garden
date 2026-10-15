@@ -371,6 +371,60 @@ def build_manifest(desired_state: dict[str, Any], binding: Mapping[str, Any], ca
             if not tools:
                 entry["fallback"] = _fallback(contract["fallbackTier"])
         entries.append(entry)
+    # Runtime binding is the authority for readiness. Compilation may have been
+    # performed without one, or with a different development environment.
+    agent = desired_state.get("agent")
+    if isinstance(agent, dict):
+        disabled = set(agent.get("spec", {}).get("disabledSkills", []))
+        executable_skills = [
+            skill for skill in desired_state.get("skills", []) if isinstance(skill, dict)
+        ]
+        # Disabled Skills are intentionally absent from executable skills and
+        # Hermes instructions. Keep only their non-executable declarations
+        # available for an accurate client-facing readiness explanation.
+        disabled_declarations = [
+            skill for skill in desired_state.get("disabledSkillDeclarations", [])
+            if isinstance(skill, dict) and skill.get("metadata", {}).get("name") in disabled
+        ]
+        known = {skill.get("metadata", {}).get("name") for skill in [*executable_skills, *disabled_declarations]}
+        # Legacy compiled profiles may have the old status snapshot but not the
+        # declaration subset. Recover its dependency names and re-evaluate them
+        # against today's binding, never trusting its original ready verdict.
+        for old in declared.get("skills", []):
+            if (not isinstance(old, dict) or old.get("kind") != "Skill"
+                    or old.get("name") not in disabled or old["name"] in known):
+                continue
+            dependencies = old.get("dependencies", [])
+            disabled_declarations.append({
+                "metadata": {"name": old["name"]},
+                "spec": {
+                    "requiredCapabilities": [
+                        dep["capability"] for dep in dependencies
+                        if isinstance(dep, dict) and dep.get("required") and isinstance(dep.get("capability"), str)
+                    ],
+                    "optionalCapabilities": [
+                        dep["capability"] for dep in dependencies
+                        if isinstance(dep, dict) and not dep.get("required") and isinstance(dep.get("capability"), str)
+                    ],
+                },
+            })
+            known.add(old["name"])
+        skill_status = skill_readiness(
+            agent, [*executable_skills, *disabled_declarations], binding, catalog,
+            disabled_skills=disabled,
+        )
+        # Very old profiles with no declaration details must not imply that a
+        # disabled Skill can safely be switched on without recompilation.
+        unknown = disabled - known
+        for name in sorted(unknown):
+            skill_status.append({
+                "name": name, "kind": "Skill", "enabled": False, "ready": False,
+                "canEnable": False, "dependencies": [],
+                "reason": "Recompile the workspace to check this disabled Skill's dependencies",
+            })
+    else:
+        skill_status = declared.get("skills", [])
+
     manifest: dict[str, Any] = {
         "schemaVersion": MANIFEST_SCHEMA_VERSION,
         "kind": "CapabilityManifest",
@@ -378,7 +432,7 @@ def build_manifest(desired_state: dict[str, Any], binding: Mapping[str, Any], ca
         "agent": source.get("name"),
         "environment": binding_environment(binding),
         "capabilities": entries,
-        "skills": declared.get("skills", []),
+        "skills": skill_status,
     }
     if isinstance(source.get("client"), str):
         manifest["client"] = source["client"]
@@ -472,5 +526,11 @@ def apply_connection_health(manifest: dict[str, Any], health: Mapping[str, Mappi
             dep.get("status") not in {"missing", "unavailable"}
             for dep in skill.get("dependencies", [])
         )
-        skill["canEnable"] = skill["ready"]
+        # Unknown legacy disabled-Skill declarations cannot be activated until
+        # a new compilation restores their requirements.
+        if skill.get("reason"):
+            skill["ready"] = False
+            skill["canEnable"] = False
+        else:
+            skill["canEnable"] = skill["ready"]
     return updated

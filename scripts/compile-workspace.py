@@ -334,6 +334,19 @@ def resolve_agent(workspace, agent, resources, source_paths, source_roots, envir
         compiled["knowledgeContent"] = knowledge_content
     if capabilities is not None:
         compiled["capabilities"] = capabilities
+    if disabled:
+        # Preserve only capability declarations for disabled Skills. Their
+        # instructions and Tools are never exported as executable resources.
+        compiled["disabledSkillDeclarations"] = [
+            {
+                "metadata": {"name": skill["metadata"]["name"]},
+                "spec": {
+                    "requiredCapabilities": list(skill.get("spec", {}).get("requiredCapabilities", [])),
+                    "optionalCapabilities": list(skill.get("spec", {}).get("optionalCapabilities", [])),
+                },
+            }
+            for skill in listed_skills if skill["metadata"]["name"] in disabled
+        ]
     return compiled
 
 

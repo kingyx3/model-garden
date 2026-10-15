@@ -288,6 +288,35 @@ class CapabilityManifestTests(unittest.TestCase):
         for forbidden in ("secret://", "token", "frontdesk@acme-tenant.example", "calendar_id"):
             self.assertNotIn(forbidden, rendered)
 
+    def test_runtime_manifest_recomputes_skill_readiness_from_target_environment(self):
+        desired = self._desired()
+        # Desired state compiled without a binding has no deploy-time snapshot.
+        self.assertNotIn("skills", desired["capabilities"])
+        blocked = capabilities.build_manifest(desired, {"environment": "dev"})
+        blocked_booking = next(s for s in blocked["skills"] if s["name"] == "book-appointment")
+        self.assertFalse(blocked_booking["ready"])
+        self.assertEqual(blocked_booking["dependencies"][0]["status"], "missing")
+        available = capabilities.build_manifest(desired, GOOGLE_BINDING)
+        booking = next(s for s in available["skills"] if s["name"] == "book-appointment")
+        self.assertTrue(booking["ready"])
+        self.assertEqual(booking["dependencies"][0]["provider"], "google")
+        self.assertNotIn("secret://", json.dumps(available))
+
+    def test_old_profile_missing_disabled_declarations_fails_closed(self):
+        desired = self._desired()
+        desired["agent"]["spec"]["disabledSkills"] = ["book-appointment"]
+        desired["skills"] = [
+            skill for skill in desired["skills"] if skill["metadata"]["name"] != "book-appointment"
+        ]
+        manifest = capabilities.build_manifest(desired, {"environment": "dev"})
+        booking = next(s for s in manifest["skills"] if s["name"] == "book-appointment")
+        self.assertFalse(booking["enabled"])
+        self.assertFalse(booking["ready"])
+        self.assertFalse(booking["canEnable"])
+        degraded = capabilities.apply_connection_health(manifest, {})
+        booking_after = next(s for s in degraded["skills"] if s["name"] == "book-appointment")
+        self.assertFalse(booking_after["canEnable"])
+
     def test_revoked_connection_becomes_unavailable_with_fallback(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = pathlib.Path(tmp)

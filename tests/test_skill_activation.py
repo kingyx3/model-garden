@@ -60,6 +60,13 @@ class SkillActivationTests(unittest.TestCase):
                 [x["metadata"]["name"] for x in desired["tools"]], []
             )
             self.assertNotIn("book-appointment", desired["skillInstructions"])
+            self.assertEqual(
+                desired["disabledSkillDeclarations"][0]["spec"]["requiredCapabilities"], ["calendar"]
+            )
+            self.assertEqual(
+                set(desired["disabledSkillDeclarations"][0]),
+                {"metadata", "spec"},
+            )
             by_name = {x["name"]: x for x in desired["capabilities"]["skills"]}
             self.assertFalse(by_name["book-appointment"]["enabled"])
             self.assertFalse(by_name["book-appointment"]["ready"])
@@ -71,6 +78,23 @@ class SkillActivationTests(unittest.TestCase):
             files = provisioner.build_profile_files(desired)
             self.assertFalse(any("book-appointment" in p.as_posix() for p in files))
             self.assertNotIn("secret://", json.dumps(manifest))
+
+    def test_disabled_skill_is_explained_even_when_compiled_without_binding(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = self.workspace(pathlib.Path(tmp))
+            self.edit_agent(workspace, disabled=["book-appointment"])
+            desired = compiler.compile_workspace(workspace, "receptionist")[0]
+            self.assertNotIn("book-appointment", [
+                skill["metadata"]["name"] for skill in desired["skills"]
+            ])
+            manifest = capabilities.build_manifest(desired, {"environment": "dev"})
+            booking = next(s for s in manifest["skills"] if s["name"] == "book-appointment")
+            self.assertFalse(booking["enabled"])
+            self.assertFalse(booking["canEnable"])
+            self.assertEqual(booking["dependencies"][0]["status"], "missing")
+            self.assertNotIn("calendar.book", [
+                tool for entry in manifest["capabilities"] for tool in entry["tools"]
+            ])
 
     def test_enabling_blocked_skill_fails_closed_then_succeeds_with_calendar(self):
         with tempfile.TemporaryDirectory() as tmp:
