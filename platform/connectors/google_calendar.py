@@ -41,6 +41,11 @@ def _validated_window(start: str, end: str) -> tuple[dt.datetime, dt.datetime]:
     return start_dt, end_dt
 
 
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        raise ValueError("Google Calendar redirect refused")
+
+
 def _urllib_transport(
     method: str,
     url: str,
@@ -48,13 +53,14 @@ def _urllib_transport(
     payload: dict[str, Any] | None,
 ) -> tuple[int, dict[str, Any]]:
     parsed = urllib.parse.urlparse(url)
-    if parsed.scheme != "https" or parsed.hostname != "www.googleapis.com":
+    if parsed.scheme != "https" or parsed.hostname != "www.googleapis.com" or parsed.port is not None:
         raise ValueError("Google Calendar transport only permits the fixed HTTPS Google API host")
     data = None if payload is None else json.dumps(payload).encode("utf-8")
     request = urllib.request.Request(url, data=data, headers=headers, method=method)
+    opener = urllib.request.build_opener(_NoRedirect())
     try:
-        # nosec B310 -- scheme and hostname are explicitly constrained immediately above.
-        with urllib.request.urlopen(request, timeout=15) as response:
+        # nosec B310 -- scheme/host are constrained and redirects are denied.
+        with opener.open(request, timeout=15) as response:
             raw = response.read().decode("utf-8")
             return response.status, json.loads(raw) if raw else {}
     except urllib.error.HTTPError as exc:
