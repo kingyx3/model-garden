@@ -294,6 +294,29 @@ def knowledge_states(
     ]
 
 
+def remediation_for(dependencies: list[Mapping[str, Any]]) -> str | None:
+    """The one non-secret action that unblocks a Skill, or ``None`` when nothing blocks it.
+
+    Names the first blocking dependency (by capability name) and never includes a secret, scope,
+    account or source content: only the family, the command or the kind of approval needed.
+    """
+    for dependency in sorted(
+        (item for item in dependencies if item.get("status") in BLOCKING),
+        key=lambda item: (str(item.get("capability")), str(item.get("status"))),
+    ):
+        family, status = dependency.get("family"), dependency.get("status")
+        if status == "missing":
+            return f"Connect {family}: run `python3 scripts/client-operator.py connect {family}` to see the options"
+        if status == "no-content":
+            return (
+                "Approve business knowledge for this coworker: a source with status approved, a current "
+                "effective date and this coworker as audience, then recompile"
+            )
+        if status == "unavailable":
+            return f"Ask the operator to reauthorize the {family} connection, then record it as healthy"
+    return None
+
+
 def skill_readiness(
     agent: dict[str, Any],
     skills: list[dict[str, Any]],
@@ -351,14 +374,17 @@ def skill_readiness(
                     dependency.update(status="degraded", fallbackTier=families(catalog)[family]["fallbackTier"])
                 dependencies.append(dependency)
         ready = all(item["status"] not in BLOCKING for item in dependencies)
-        report.append({
+        entry: dict[str, Any] = {
             "name": name,
             "kind": kind,
             "enabled": kind != "Skill" or name not in disabled_skills,
             "ready": ready,
             "canEnable": ready,
             "dependencies": dependencies,
-        })
+        }
+        if not ready:
+            entry["remediation"] = remediation_for(dependencies)
+        report.append(entry)
     return report
 
 
@@ -572,4 +598,9 @@ def apply_connection_health(manifest: dict[str, Any], health: Mapping[str, Mappi
             skill["canEnable"] = False
         else:
             skill["canEnable"] = skill["ready"]
+            fix = None if skill["ready"] else remediation_for(skill.get("dependencies", []))
+            if fix:
+                skill["remediation"] = fix
+            else:
+                skill.pop("remediation", None)
     return updated

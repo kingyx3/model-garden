@@ -519,6 +519,8 @@ def format_readiness(report: list[dict[str, Any]]) -> str:
                 built = [choice["id"] for choice in choices if choice["status"] in INTEGRATIONS.BUILT]
                 hint = (", ".join(built) if built else "no usable connector shipped yet")
                 lines.append(f"    Next: python3 scripts/client-operator.py connect {family}  ({hint})")
+            if not missing_families and entry.get("remediation"):
+                lines.append(f"    Next: {entry['remediation']}")
     return "\n".join(lines) + "\n"
 
 

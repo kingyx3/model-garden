@@ -239,6 +239,78 @@ class ApprovalLinkTests(unittest.TestCase):
         self.assertIsNone(adapter.parse_approval_response(b""))
 
 
+class LoopProtectionTests(unittest.TestCase):
+    adapter = mail.EmailChannelAdapter(MX, own_addresses=("Support@Acme.example",))
+
+    def reason(self, body: bytes):
+        return self.adapter.should_reply(body)
+
+    def test_an_ordinary_customer_mail_may_be_answered(self):
+        self.assertEqual(self.reason(raw()), (True, None))
+
+    def test_automatic_senders_and_bulk_traffic_never_get_a_reply(self):
+        cases = {
+            "auto-submitted": raw(extra="Auto-Submitted: auto-replied\r\n"),
+            "auto-submitted ": raw(extra="Auto-Submitted: auto-generated; type=vacation\r\n"),
+            "bulk-precedence": raw(extra="Precedence: bulk\r\n"),
+            "auto-response-suppressed": raw(extra="X-Auto-Response-Suppress: All\r\n"),
+            "mailing-list": raw(extra="List-Id: <news.client.example>\r\n"),
+            "bounce": raw(extra="Return-Path: <>\r\n"),
+            "own-message": raw(extra=f"{mail.OWN_MESSAGE_HEADER}: 1\r\n"),
+            "own-address": raw(sender="Support@acme.example", auth=""),
+            "no-reply-sender": raw(sender="noreply@client.example"),
+            "no-usable-sender": raw(sender="not an address"),
+        }
+        for expected, body in cases.items():
+            allowed, reason = self.reason(body)
+            self.assertFalse(allowed, expected)
+            self.assertEqual(reason, expected.strip(), expected)
+
+    def test_auto_submitted_no_is_a_person_and_other_no_reply_spellings_are_caught(self):
+        self.assertEqual(self.reason(raw(extra="Auto-Submitted: no\r\n")), (True, None))
+        for sender in ("do-not-reply@x.example", "Do_Not_Reply@x.example", "MAILER-DAEMON@x.example",
+                       "postmaster@x.example", "bounce+abc@x.example", "no.reply@x.example"):
+            self.assertEqual(self.reason(raw(sender=sender, auth=""))[1], "no-reply-sender", sender)
+        self.assertEqual(self.reason(raw(sender="replyer@x.example", auth=""))[0], True)
+
+    def test_delivery_reports_are_bounces(self):
+        body = raw().replace(b"text/plain; charset=utf-8", b"multipart/report; report-type=delivery-status; boundary=B")
+        self.assertEqual(self.reason(body), (False, "bounce"))
+
+    def test_our_own_outgoing_replies_carry_the_markers_that_stop_a_loop(self):
+        headers = mail.EmailChannelAdapter.reply_headers(raw())
+        self.assertEqual(headers["Auto-Submitted"], "auto-replied")
+        marker = "".join(f"{name}: {value}\r\n" for name, value in headers.items() if name in ("Auto-Submitted", mail.OWN_MESSAGE_HEADER))
+        self.assertFalse(self.reason(raw(extra=marker))[0])
+
+    def test_a_thread_gets_at_most_the_configured_number_of_replies_and_blocked_mail_is_not_counted(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            adapter = mail.EmailChannelAdapter(MX, reply_limiter=mail.ReplyLimiter(pathlib.Path(tmp) / "limits", limit=2))
+            thread = raw(message_id="<t2@client.example>", extra="References: <t1@client.example>\r\n")
+            self.assertEqual(adapter.should_reply(raw(message_id="<t1@client.example>")), (True, None))
+            self.assertEqual(adapter.should_reply(thread), (True, None))
+            self.assertEqual(adapter.should_reply(thread), (False, "thread-reply-limit"))
+            # Auto-replies in the same thread are refused for their own reason and never touch the count.
+            self.assertEqual(adapter.should_reply(raw(extra="References: <t1@client.example>\r\nAuto-Submitted: auto-replied\r\n"))[1], "auto-submitted")
+            # Another thread has its own allowance, and the count survives a new limiter (a restart).
+            self.assertEqual(adapter.should_reply(raw(message_id="<other@client.example>")), (True, None))
+            again = mail.ReplyLimiter(pathlib.Path(tmp) / "limits", limit=2)
+            self.assertFalse(again.consume("<t1@client.example>"))
+
+    def test_limiter_configuration_and_privacy(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            for bad in (0, -1, mail.MAX_THREAD_REPLY_LIMIT + 1, True, "3"):
+                with self.assertRaises(ValueError):
+                    mail.ReplyLimiter(pathlib.Path(tmp), limit=bad)
+            limiter = mail.ReplyLimiter(pathlib.Path(tmp) / "limits")
+            self.assertTrue(limiter.consume("<secret-thread@client.example>"))
+            folder = pathlib.Path(tmp) / "limits"
+            self.assertEqual(folder.stat().st_mode & 0o777, 0o700)
+            names = [item.name for item in folder.iterdir()]
+            self.assertTrue(all("secret" not in name and "client.example" not in name for name in names))
+            self.assertTrue(all(item.stat().st_mode & 0o777 == 0o600 for item in folder.iterdir()))
+
+
 class OutboundTests(unittest.TestCase):
     def test_prompts_carry_both_signed_tokens_only_when_signing_is_configured(self):
         sent: list[dict] = []

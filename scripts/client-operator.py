@@ -497,6 +497,20 @@ def runtime_file_calls(project_name: str) -> int:
     return 0
 
 
+def runtime_inbox(project_name: str, as_json: bool = False) -> int:
+    """Show everything waiting for a person: approvals, hand-offs and records to review (no personal data)."""
+    container = _governed_tool_container(project_name)
+    inner = ["python", "/opt/model-garden-platform/scripts/runtime-inbox.py"]
+    if as_json:
+        inner.append("--json")
+    result = _run(["docker", "exec", container, *inner])
+    if result.returncode != 0:
+        raise ValueError(result.stderr.strip() or result.stdout.strip() or "runtime inbox command failed")
+    if result.stdout:
+        print(result.stdout.rstrip())
+    return 0
+
+
 def runtime_connection(
     project_name: str,
     command: str,
@@ -583,6 +597,9 @@ def main() -> int:
         closer.add_argument("--by", required=True, help="the named person who did or declined it")
         closer.add_argument("--note")
 
+    inbox = sub.add_parser("inbox", help="show everything waiting for a person: approvals, hand-offs, records to review")
+    inbox.add_argument("--project-name", required=True)
+    inbox.add_argument("--json", action="store_true")
     file_calls = sub.add_parser(
         "file-calls", help="file the voice worker's stored call transcripts into the bound CRM (unmatched queue; run on the client host)"
     )
@@ -657,6 +674,8 @@ def main() -> int:
             return 0
         if args.command == "doctor":
             return doctor(args.workspace, args.environment, args.repo, check_host=args.host)
+        if args.command == "inbox":
+            return runtime_inbox(args.project_name, as_json=args.json)
         if args.command == "file-calls":
             return runtime_file_calls(args.project_name)
         if args.command == "contacts":

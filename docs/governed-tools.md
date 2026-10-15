@@ -154,7 +154,9 @@ python3 scripts/client-operator.py handoff-decline <id> --project-name acme-prod
 
 Creating and closing a hand-off each write a chained `handoff` ledger event with `tier: 4` and `provider: human`; closing records the person's identity and `late` when the deadline passed. As with approvals, that identity is what the operator command asserts (`--by`); the platform does not verify that the person is the assignee or independently confirm that they performed the action. The coworker learns the outcome only through `handoff_status`, whose message says the action has **not** been done while pending, names the person who confirmed it when done (and that the coworker did not do it itself), and says it was **not** done when declined. The receptionist instructions and the `unavailable-action-handoff` eval require that wording.
 
-Delivery today is the built-in inbox (the operator command above). Delivery to Slack, Teams or email, reminders/escalation when a deadline passes, and a person's confirmation arriving through their own channel are not implemented; the operator records the outcome on the person's behalf.
+`python3 scripts/client-operator.py inbox --project-name acme-prod` (also `--json`) is the one view of everything waiting for a person: pending approvals (oldest first), open hand-offs (overdue first, with assignee and deadline) and counts of contact records to review. It names the Tool, assignee, deadline and record ID and the command that shows the exact content, but never action arguments, summaries or personal data, so it can be pasted into a chat. It is a read-only view over the approval, hand-off and contact stores (`platform/core/inbox.py`), not a `tickets.*` provider, and nothing notifies anyone: someone has to look at it.
+
+Delivery today is the built-in inbox (the operator commands above). Delivery to Slack, Teams or email, reminders/escalation when a deadline passes, and a person's confirmation arriving through their own channel are not implemented; the operator records the outcome on the person's behalf.
 
 ## Enterprise audit contract
 
