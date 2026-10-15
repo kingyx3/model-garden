@@ -308,6 +308,11 @@ def remediation_for(dependencies: list[Mapping[str, Any]]) -> str | None:
         if status == "missing":
             return f"Connect {family}: run `python3 scripts/client-operator.py connect {family}` to see the options"
         if status == "no-content":
+            if any(source.get("state") == "stale" for source in dependency.get("content", {}).get("sources", [])):
+                return (
+                    "Review the business knowledge: confirm it is still correct and set a later reviewBy date, "
+                    "then recompile"
+                )
             return (
                 "Approve business knowledge for this coworker: a source with status approved, a current "
                 "effective date and this coworker as audience, then recompile"

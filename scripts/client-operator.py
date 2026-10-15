@@ -444,6 +444,43 @@ def runtime_handoff(
     return 0
 
 
+NOTICE_KINDS = ("assigned", "reminder", "escalation")
+CHANNEL_NAME = re.compile(r"^[a-z][a-z0-9-]{0,31}$")
+
+
+def runtime_handoff_notices(
+    project_name: str,
+    command: str,
+    *,
+    handoff_id: str | None = None,
+    kind: str | None = None,
+    via: str | None = None,
+    escalate_to: str | None = None,
+) -> int:
+    """Print the hand-off notices that should reach a person, or record that one was delivered."""
+    if command not in {"due", "notified"}:
+        raise ValueError("hand-off notice command must be due or notified")
+    if command == "notified":
+        if not isinstance(handoff_id, str) or not REQUEST_ID.fullmatch(handoff_id):
+            raise ValueError("hand-off id must be a 64-character lowercase SHA-256 hex value")
+        if kind not in NOTICE_KINDS:
+            raise ValueError(f"notice kind must be one of {', '.join(NOTICE_KINDS)}")
+        if not isinstance(via, str) or not CHANNEL_NAME.fullmatch(via):
+            raise ValueError("--via must name the delivering channel, for example email or slack")
+    container = _governed_tool_container(project_name)
+    inner = ["python", "/opt/model-garden-platform/scripts/runtime-handoff.py", "/opt/data/.modelgarden/handoffs", command]
+    if command == "notified":
+        inner.extend([handoff_id, kind, "--via", via])
+    elif escalate_to:
+        inner.extend(["--escalate-to", escalate_to])
+    result = _run(["docker", "exec", container, *inner])
+    if result.returncode != 0:
+        raise ValueError(result.stderr.strip() or result.stdout.strip() or "runtime hand-off notice command failed")
+    if result.stdout:
+        print(result.stdout.strip())
+    return 0
+
+
 CONTACT_COMMANDS = {"review", "assign", "dismiss", "erase-contact", "erase-interaction"}
 CONTACT_ID = re.compile(r"^(?:c|i|r)-[0-9a-f]{12,24}$")
 
@@ -597,6 +634,14 @@ def main() -> int:
         closer.add_argument("--by", required=True, help="the named person who did or declined it")
         closer.add_argument("--note")
 
+    due = sub.add_parser("handoffs-due", help="print hand-off notices that should reach a person now (no action arguments)")
+    due.add_argument("--project-name", required=True)
+    due.add_argument("--escalate-to", help="who an overdue hand-off is escalated to (default: the assignee again)")
+    notified = sub.add_parser("handoff-notified", help="record that a hand-off notice was delivered through a channel")
+    notified.add_argument("handoff_id")
+    notified.add_argument("kind", choices=NOTICE_KINDS)
+    notified.add_argument("--project-name", required=True)
+    notified.add_argument("--via", required=True)
     inbox = sub.add_parser("inbox", help="show everything waiting for a person: approvals, hand-offs, records to review")
     inbox.add_argument("--project-name", required=True)
     inbox.add_argument("--json", action="store_true")
@@ -674,6 +719,12 @@ def main() -> int:
             return 0
         if args.command == "doctor":
             return doctor(args.workspace, args.environment, args.repo, check_host=args.host)
+        if args.command == "handoffs-due":
+            return runtime_handoff_notices(args.project_name, "due", escalate_to=args.escalate_to)
+        if args.command == "handoff-notified":
+            return runtime_handoff_notices(
+                args.project_name, "notified", handoff_id=args.handoff_id, kind=args.kind, via=args.via
+            )
         if args.command == "inbox":
             return runtime_inbox(args.project_name, as_json=args.json)
         if args.command == "file-calls":

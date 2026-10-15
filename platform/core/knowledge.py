@@ -199,6 +199,7 @@ def build_index(name: str, text: str, *, filename: str, spec: Mapping[str, Any] 
         "version": spec.get("version"),
         "status": spec.get("status", "draft"),
         "effectiveDate": spec.get("effectiveDate"),
+        "reviewBy": spec.get("reviewBy"),
         "audiences": list(spec.get("audiences", [])),
         "sections": sections,
         "df": document_frequency,
@@ -217,6 +218,14 @@ def availability(index: Mapping[str, Any], *, agent: str | None = None, today: d
             return "source-effective-date-invalid"
         if starts > (today or dt.date.today()):
             return "source-not-yet-effective"
+    review_by = index.get("reviewBy")
+    if review_by:
+        try:
+            last_day = dt.date.fromisoformat(str(review_by))
+        except ValueError:
+            return "source-review-date-invalid"
+        if last_day < (today or dt.date.today()):
+            return "source-stale"
     audiences = index.get("audiences") or []
     if audiences and agent not in audiences:
         return "source-not-for-this-agent"
@@ -227,14 +236,15 @@ def source_state(spec: Mapping[str, Any], *, agent: str | None = None, today: dt
     """Whether one KnowledgeSource declaration may ground answers for an Agent, without reading its file.
 
     ``usable`` or the reason it is not: ``draft``, ``retired``, ``not-yet-effective``,
-    ``effective-date-invalid``, ``not-for-this-agent`` or ``not-indexed`` (a source type that has
+    ``effective-date-invalid``, ``stale`` (past its ``reviewBy`` date), ``review-date-invalid``,
+    ``not-for-this-agent`` or ``not-indexed`` (a source type that has
     no governed, retrievable content here).
     """
     if spec.get("type") != "text-file":
         return "not-indexed"
     reason = availability(
         {"status": spec.get("status", "draft"), "effectiveDate": spec.get("effectiveDate"),
-         "audiences": spec.get("audiences", [])},
+         "reviewBy": spec.get("reviewBy"), "audiences": spec.get("audiences", [])},
         agent=agent, today=today,
     )
     return "usable" if reason is None else reason.removeprefix("source-")
