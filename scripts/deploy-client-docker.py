@@ -51,6 +51,8 @@ RUNTIME_SOURCE_PATHS = (
     pathlib.Path("platform/core/knowledge.py"),
     pathlib.Path("platform/core/contacts.py"),
     pathlib.Path("platform/core/inbox.py"),
+    pathlib.Path("platform/core/memory.py"),
+    pathlib.Path("platform/core/delegation.py"),
     pathlib.Path("platform/channels/text_channel.py"),
     pathlib.Path("platform/channels/email_channel.py"),
     pathlib.Path("platform/channels/slack_channel.py"),
@@ -64,6 +66,7 @@ RUNTIME_SOURCE_PATHS = (
     pathlib.Path("scripts/runtime-contacts.py"),
     pathlib.Path("scripts/runtime-file-calls.py"),
     pathlib.Path("scripts/runtime-inbox.py"),
+    pathlib.Path("scripts/runtime-memory.py"),
     pathlib.Path("scripts/runtime-connection.py"),
     pathlib.Path("VERSION"),
 )
