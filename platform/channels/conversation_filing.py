@@ -211,9 +211,13 @@ def ledger_transcript_failures(
 
 
 def file_call_transcripts(
-    runtime: Any, store: Any, records: Iterable[Mapping[str, Any]], *, log: Callable[[str], None] | None = None
+    runtime: Any, store: Any, records: Iterable[Mapping[str, Any]], *, log: Callable[[str], None] | None = None, recorder: Any | None = None
 ) -> dict[str, int]:
-    """File each call into the unmatched queue; a failure on one record never stops the rest."""
+    """File each call into the unmatched queue; a failure on one record never stops the rest.
+
+    With a ``recorder`` (``conversation_recorder.ConversationRecorder``) each call is also put on the cross-channel conversation
+    timeline. That is best-effort: a recording problem is logged by type and never changes how the call was filed.
+    """
     totals = {"filed": 0, "duplicate": 0, "pending-approval": 0, "failed": 0, "skipped": 0}
     for record in records:
         arguments = interaction_from_call(record)
@@ -227,4 +231,10 @@ def file_call_transcripts(
             if log is not None:
                 log(f"{arguments['transcriptRef']}: {type(exc).__name__}")
         totals[outcome] += 1
+        if recorder is not None:
+            try:
+                recorder.record_call(record)
+            except Exception as exc:  # noqa: BLE001 - timeline problems never change filing
+                if log is not None:
+                    log(f"{arguments['transcriptRef']}: conversation timeline {type(exc).__name__}")
     return totals
