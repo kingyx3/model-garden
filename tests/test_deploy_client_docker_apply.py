@@ -135,7 +135,7 @@ class DeployClientDockerApplyTests(unittest.TestCase):
         self.assertFalse(any("up" in command for command in commands))
 
 
-    def test_microsoft_credential_only_reaches_selected_sidecar_compose_variable(self):
+    def test_retired_microsoft_credential_never_reaches_any_runtime_process(self):
         binding = {
             "apiVersion": "modelgarden.ai/v1",
             "kind": "EnvironmentBinding",
@@ -172,7 +172,7 @@ class DeployClientDockerApplyTests(unittest.TestCase):
         for env in envs:
             self.assertNotIn("MODEL_GARDEN_GOOGLE_CALENDAR_TOKEN", env)
             self.assertNotIn("MODEL_GARDEN_RUNTIME_SECRETS_JSON", env)
-            self.assertEqual(env["MODEL_GARDEN_MICROSOFT_CALENDAR_TOKEN"], "microsoft-token")
+            self.assertNotIn("MODEL_GARDEN_MICROSOFT_CALENDAR_TOKEN", env)
             self.assertEqual(env["MODEL_GARDEN_MODEL_CREDENTIAL"], "model-token")
 
 
