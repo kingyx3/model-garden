@@ -24,74 +24,19 @@ The sidecar is not a control plane and is not exposed on a host port. It is part
 
 Hermes only receives MCP Tool names corresponding to Tools explicitly selected by that Agent. Provisioning fails closed if a selected Tool has no implemented governed runtime binding.
 
-## Client-stack-neutral Calendar integration (Google Workspace / Microsoft 365)
+## Upstream-only SaaS Tools (v0.8.0)
 
-The *Agent* always selects the same portable Tools:
+Model Garden no longer ships bespoke Google/Microsoft Calendar, Gmail/Outlook, HubSpot/Salesforce or Drive API clients or an in-house OAuth-refresh implementation. These systems remain **planned upstream routes**, not available live connections. The reference Calendar Skill and its portable `calendar.availability` and `calendar.book` contracts remain valid, but cannot be activated until an approved external MCP/managed integration demonstrates those exact operations.
 
-- `calendar.availability`: read free/busy state.
-- `calendar.book`: create an event only after the configured exact-action approval.
+Use maintained vendor MCP servers where available; evaluate Activepieces and other maintained open-source/managed projects as alternative backends. The [integration registry](../contracts/v1/integrations.json) states which paths are actually implemented. `platform/core/mcp_passthrough.py` already models approved HTTPS endpoints, operation allow-lists, risk and schema fingerprints. The actual execution gateway, per-coworker owner consent/secret custody and live-provider proof are still outstanding (#157–#159, #87, #129). Do not connect an upstream server directly to Hermes or bypass the governed boundary.
 
-Only the **EnvironmentBinding** chooses the provider. Do not fork Agents or Skills by cloud/office suite. Each isolated client/environment can use Google or Microsoft independently while keeping the same audit and approval contract.
-
-Preferred Google Workspace binding:
-
-```yaml
-environment: dev
-runtime:
-  profile: receptionist
-  model_credential_ref: secret://model/dev
-connectors:
-  calendar:
-    provider: google
-    token_ref: secret://google/dev-calendar
-    calendar_id: primary
-```
-
-Preferred Microsoft 365 binding:
-
-```yaml
-environment: dev
-runtime:
-  profile: receptionist
-  model_credential_ref: secret://model/dev
-connectors:
-  calendar:
-    provider: microsoft
-    token_ref: secret://microsoft/dev-calendar
-    mailbox: receptionist@client.example
-```
-
-The older `connectors.google_calendar` shape remains accepted for existing clients. Do not define multiple calendar provider bindings: deployment rejects ambiguity or unknown providers. The `MODEL_GARDEN_RUNTIME_SECRETS_JSON` for the protected `dev`/`prod` GitHub Environment contains **exactly** the referenced logical keys and operator-supplied runtime tokens. Model credentials are injected into Hermes only; Google/Microsoft Calendar credentials go only to the private governed Tool sidecar. Neither API keys nor tokens belong in Agent, Skill or workspace YAML.
-
-### Authorization responsibility and current support
-
-| Concern | Google Workspace | Microsoft 365 |
-| --- | --- | --- |
-| Implemented API | Google Calendar freeBusy + event creation | Microsoft Graph v1.0 getSchedule + event creation |
-| Mailbox/calendar target | Configured calendar ID | Explicitly approved mailbox email |
-| Authority | Scoped Google OAuth access token | Scoped Entra/Graph OAuth access token |
-| Consent | Client owns account/consent; Model Garden handles setup | Client owns account/consent; Model Garden handles setup, Entra admin where needed |
-| Read permission | Google Calendar free/busy scope or approved equivalent | Graph `Calendars.ReadBasic` (when supported by selected flow) or approved equivalent |
-| Write permission | Calendar event-write permission | Graph `Calendars.ReadWrite` |
-| Connector boundary | Fixed Google API host | Fixed `graph.microsoft.com` Graph v1.0 host |
-
-**Credential boundary (v0.6.1):** Both provider adapters still accept the existing single bearer-token secret for backwards compatibility. An operator may instead place a **JSON-encoded OAuth refresh-credential bundle as the value of the same environment-scoped** `token_ref`, never in Git or Agent/Skill content. Format (placeholders only; do not commit or paste values into docs):
-```json
-{"type":"oauth2_refresh","provider":"google","client_id":"<approved-oauth-client-id>","client_secret":"<secret>","refresh_token":"<client-authorized-refresh-token>"}
-```
-For Microsoft use `"provider":"microsoft"` and add `"tenant_id":"<specific-client-tenant-GUID>"`. The governed sidecar exchanges that credential only against Google's fixed OAuth token endpoint or the specified Microsoft Entra tenant token endpoint. Short-lived access tokens are cached in the sidecar's memory and refreshed before expiry; neither refresh credentials nor access tokens are included in Agent state or audit. Legacy static bearer tokens still expire and are **not production-stable**.
-
-**Still a P0 go-live limitation:** The platform does not conduct OAuth user consent, create provider applications, securely persist **rotated refresh tokens**, perform tenant-side token revocation, guarantee long-lived delegated grants, or provide owner reauthorization/alert delivery. Provider credentials must be provisioned and scoped by the client/consultant; integrate a durable secret/refresh-token rotation and reauthorization lifecycle before unattended live use. See [#66](https://github.com/kingyx3/model-garden/issues/66) and [#86](https://github.com/kingyx3/model-garden/issues/86). Never equate token-refresh unit tests with live authorization proof.
-
-Microsoft Graph sends invitations when creating events with attendees; approval policy and client consent must cover that external side effect. The adapter normalizes timezone-aware RFC3339 arguments to UTC for Graph. Tentative, out-of-office and unknown schedule statuses block availability.
-
-Other Google/Microsoft capabilities described in Confluence (Gmail/Outlook, Drive/SharePoint, Teams, OneDrive) are **target architecture only**, not implemented governed connectors. New providers should be narrow, audited and tested instead of granting an Agent raw Graph/Google API authority.
+**Migration safety:** v0.8.0 is a breaking change for previous native Calendar deployments. Keep an earlier pinned version if a client depends on that integration; upgrade when the replacement is tested and individually authorized. A legacy provider binding or a cached OAuth credential does not establish readiness. The compiler, profile provisioning and Docker deployment fail closed on unsupported Calendar Tools. No Calendar credentials are injected into the sidecar or voice worker in this release.
 
 ## Capability manifest
 
 Deployment writes a non-secret capability manifest per environment (`profile/.modelgarden/capability-manifest.json` in the Docker bundle). For every catalog family it states the status (`available`, `not-granted`, `unbound`, or `unavailable` once a connection has failed or been revoked), provider, tier, granted scopes, connection owner, health and fallback. It carries no token references, calendar IDs, mailboxes or tenant identifiers beyond the client and environment name.
 
-The governed sidecar exposes it to the coworker as the read-only `platform.capabilities` MCP Tool (`platform_capabilities`), so "what can you do here?" is answered from what is actually connected. It is a platform built-in rather than a business Tool, so it bypasses Tool selection and is not ledgered; Hermes receives it whenever the governed sidecar is present. The sidecar is present when the Agent selects a calendar Tool (with its calendar binding) or a Tier 0 Tool (`kb.search`, `crm.read`, `crm.create`, `crm.log-interaction`); a deployment with none of them has no sidecar.
+The governed sidecar exposes it to the coworker as the read-only `platform.capabilities` MCP Tool (`platform_capabilities`), so "what can you do here?" is answered from what is actually connected. It is a platform built-in rather than a business Tool, so it bypasses Tool selection and is not ledgered; Hermes receives it whenever the governed sidecar is present. The sidecar is present when the Agent selects a supported Tier 0 Tool (`kb.search`, `crm.read`, `crm.create`, `crm.log-interaction`); a deployment with none of them has no sidecar.
 
 Connection health is live, not baked into the deployment. The sidecar records `healthy` after a successful connector call, `failed` after a provider 401/403 and `degraded` after other provider errors. Operators can record a revocation or recovery without redeploying Agents:
 
@@ -108,7 +53,7 @@ Every health change is a chained ledger event naming who made it: an operator ch
 
 **Per-coworker offboarding.** When the environment has a per-coworker grant registry (`provider-grants/<client>-<environment>.grants.json`, see "Per-coworker provider grants" in the contracts), `offboard` also revokes every grant in it, each as its own ledger event (`grant.revoke`, secret reference as a digest only), and lists the **secret references** of the revoked grants as `secretRefsToDelete` so each can be removed from the secret store. `client-operator.py offboard --project-name acme-prod --agent receptionist --actor <person>` offboards **one coworker**: its grants are revoked, one `coworker.offboard` event is written, the environment-level connection health is left alone and every other coworker keeps working; the next `platform.capabilities` read shows that coworker's connected Skills as `grant-unavailable`. Repeating an offboarding changes and ledgers nothing. `client-operator.py grants list --project-name acme-prod [--agent receptionist]` shows grants (never a secret reference) and `grants revoke g-... --actor <person>` revokes one. As above, this stops the coworker using the grant; revoking at the provider and deleting the secret remain manual steps.
 
-The next `platform.capabilities` read reports the change. **Runtime enforcement:** a connection recorded as `failed` or `revoked` also denies subsequent governed Calendar reads and writes, including those with an earlier approval, and records a redacted denial in the chained action ledger. Only an authorized operator can mark a reauthorized connection healthy; in-flight API responses cannot clear a revocation. Marking a connection `revoked` is a **local execution kill switch**, not a substitute for revoking the underlying client OAuth grant/provider credential or clearing any pending human approvals. The operator must also revoke the upstream grant and rotate/delete the protected secret under the client offboarding runbook. Do not equate a local status update with external revocation. The Receptionist eval suite checks that an unbound capability is reported with its human hand-off fallback and that the instructions tell the coworker to decline and offer that fallback instead of claiming success.
+The next `platform.capabilities` read reports the change. **Runtime enforcement:** a connection recorded as `failed` or `revoked` also denies subsequent governed calls for that capability (once an upstream executor is integrated), including those with an earlier approval, and records a redacted denial in the chained action ledger. Only an authorized operator can mark a reauthorized connection healthy; in-flight API responses cannot clear a revocation. Marking a connection `revoked` is a **local execution kill switch**, not a substitute for revoking the underlying client OAuth grant/provider credential or clearing any pending human approvals. The operator must also revoke the upstream grant and rotate/delete the protected secret under the client offboarding runbook. Do not equate a local status update with external revocation. The Receptionist eval suite checks that an unbound capability is reported with its human hand-off fallback and that the instructions tell the coworker to decline and offer that fallback instead of claiming success.
 
 ## Exact-action approval
 
