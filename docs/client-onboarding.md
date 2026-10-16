@@ -81,7 +81,7 @@ Before activating or modifying a Skill, run `python3 scripts/client-operator.py 
 
 Before enabling a Skill that requires a provider, verify the integration's status
 in the canonical registry. Merely listing `connectors.crm.provider: hubspot`
-or `connectors.kb.provider: confluence-knowledge` is not sufficient until the adapter
+or `connectors.kb.provider: confluence-knowledge` is not sufficient until the approved upstream route
 is implemented; the readiness and deployment gates reject such claims. The Tier 0
 `connectors.kb: {provider: text-knowledge, tier: 0}` and
 `connectors.crm: {provider: built-in-crm, tier: 0}` bindings are shipped and need no
@@ -94,7 +94,7 @@ The reference receptionist now depends on these two Tier 0 bindings; a client wi
 calendar keeps `book-appointment` under `disabledSkills` and needs nothing else (see
 [contracts](contracts.md#reference-receptionist-on-a-zero-stack-client)).
 Clients can continue to list those Skills under `disabledSkills` until their
-dependencies are implemented and authorized. A shipped Calendar adapter still
+dependencies are implemented and authorized. A planned upstream Calendar route must
 needs actual account consent, working token rotation and live acceptance.
 
 ### Hand-offs and business rules
@@ -138,7 +138,7 @@ The private self-hosted Docker-runner path remains a compatibility/exception opt
 
 ## Client/platform ownership boundary
 
-Platform-owned here: contracts, compiler, Hermes adapter, governed actions, reusable Skills/connectors/channel adapters, keyless cloud bootstrap, Docker target adapter, thin Lago usage adapter, operator helpers and shared CI.
+Platform-owned here: contracts, compiler, Hermes adapter, governed actions, reusable Skills, provider-neutral Tool governance and channel adapters, keyless cloud bootstrap, Docker target adapter, thin Lago usage adapter, operator helpers and shared CI.
 
 Client-specific desired state in the separate private workspace: `modelgarden.yaml`, `platform.lock.yaml`, `agents/`, genuinely client-specific `skills/`, Knowledge references, `evals/`, and environment-specific non-secret configuration.
 
