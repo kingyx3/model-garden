@@ -46,6 +46,7 @@ RUNTIME_SOURCE_PATHS = (
     pathlib.Path("platform/core/policy.py"),
     pathlib.Path("platform/core/policy_deploy.py"),
     pathlib.Path("platform/core/handoff.py"),
+    pathlib.Path("platform/core/handoff_reply.py"),
     pathlib.Path("platform/core/knowledge.py"),
     pathlib.Path("platform/core/contacts.py"),
     pathlib.Path("platform/core/inbox.py"),

@@ -788,6 +788,12 @@ def main() -> int:
     skills.add_argument("--environment", choices=("dev", "prod"), default="dev")
     skills.add_argument("--agent", help="optional named Agent")
 
+    pack = sub.add_parser("onboarding-pack", help="write the owner-readable pack: what works, what needs one thing from you, what runs without asking")
+    pack.add_argument("workspace", type=pathlib.Path, help="private client workspace")
+    pack.add_argument("--environment", choices=("dev", "prod"), default="dev")
+    pack.add_argument("--agent", help="optional named Agent")
+    pack.add_argument("--output", type=pathlib.Path, help="write Markdown here instead of printing it")
+
     connect = sub.add_parser("connect", help="list provider options or preview exact requested permissions (no credentials handled)")
     connect.add_argument("family", help="portable capability family, e.g. calendar, crm, kb, mail")
     connect.add_argument("--provider", help="registered provider ID; omit to list all provider choices")
@@ -830,6 +836,22 @@ def main() -> int:
                 skill["ready"] or not skill.get("enabled", True)
                 for agent in report for skill in agent["skills"]
             ) else 1
+        if args.command == "onboarding-pack":
+            compiler = _load_script("modelgarden_client_pack", "compile-workspace.py")
+            pack_module = _load_script("modelgarden_onboarding_pack", "../platform/core/onboarding_pack.py")
+            registry = _load_script("modelgarden_pack_registry", "integration-directory.py").integrations
+            binding = compiler.load_environment_binding(args.workspace / "environments" / f"{args.environment}.yaml")
+            text = pack_module.render(pack_module.build(
+                compiler.workspace_readiness(args.workspace, args.agent, (), binding),
+                compiler.workspace_approvals(args.workspace, args.agent, ()),
+                options=registry.options,
+            ))
+            if args.output:
+                args.output.write_text(text, encoding="utf-8")
+                print(f"Onboarding pack written to {args.output}")
+            else:
+                sys.stdout.write(text)
+            return 0
         if args.command == "connect":
             integration_module = _load_script("modelgarden_integration_registry", "integration-directory.py")
             registry = integration_module.integrations

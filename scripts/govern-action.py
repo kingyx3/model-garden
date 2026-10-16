@@ -688,17 +688,24 @@ def complete_handoff(
     *,
     audit_path: pathlib.Path | None = None,
     note: str | None = None,
+    via: str | None = None,
 ) -> dict[str, Any]:
     """Close a hand-off as done/declined by a named person and ledger it as a tier-4 action."""
-    document = HANDOFF.complete(store, handoff_id, outcome, by, note=note)
+    document = HANDOFF.complete(store, handoff_id, outcome, by, note=note, via=via)
     ledger: dict[str, Any] = {"tier": 4, "provider": "human"}
     if document.get("capability"):
         ledger["capability"] = document["capability"]
+    # A human task step (#97) is stored as a hand-off whose request has no Tool arguments and may have no Agent name.
+    request = {**document["request"], "agent": document["request"].get("agent") or "unassigned",
+               "arguments": document["request"].get("arguments", {})}
     event = make_audit_event(
         "handoff",
-        document["request"],
+        request,
         outcome=document["status"],
-        details={"handoffId": document["id"], "completedBy": document["completedBy"], "late": bool(document.get("late"))},
+        details={
+            "handoffId": document["id"], "completedBy": document["completedBy"], "late": bool(document.get("late")),
+            **({"via": document["completedVia"]} if document.get("completedVia") else {}),
+        },
         ledger=ledger,
     )
     append_audit_event(audit_path, event)
