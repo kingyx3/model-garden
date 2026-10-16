@@ -172,7 +172,7 @@ Open: reading Skillsets in the compiler or a registry, knowledge-aware prerequis
 - **Attested caller only.** `resolve` takes the runtime-attested Agent name and no argument through which a model, coordinator or delegate could name another coworker or hand over a token. Rights are the originating principal's permissions ∩ the coworker's granted scopes ∩ the Tools enabled for it; revoked, expired or failed grants refuse instead of falling back.
 - **Independent lifecycle and secure upgrade.** Revoking, rotating or degrading one grant never changes another. `upgrade_from_environment` proposes a grant from an environment binding only for a workspace with exactly one Agent and refuses several, so an old shared token is never silently reused. `receipt_fields` gives the attribution a call must carry (Agent, initiating principal, grant, connection, provider-side identity, scopes, request id).
 
-Open: provisioning real per-coworker identities or grants, sidecar resolution from attested caller context, provider-side audit verification, real tenant proof per authentication mode (#129, #110, #86, #95).
+`revoke_all` offboards one coworker (or the whole tenant) in one step, ledgering each revoked grant and returning the secret references the person offboarding must delete; see "Per-coworker offboarding" in the governed Tools document. Open: provisioning real per-coworker identities or grants, sidecar resolution from attested caller context, provider-side audit verification, real tenant proof per authentication mode (#129, #110, #86, #95).
 
 ## Team of Agents
 
@@ -291,6 +291,12 @@ consent, a current access token, live provider health or completed acceptance
 proof. Real OAuth and live proof are still tracked by
 [#66](https://github.com/kingyx3/model-garden/issues/66) and
 [#86](https://github.com/kingyx3/model-garden/issues/86).
+
+## Provider evidence manifest and go-live gate
+
+Whether a provider may be called live is shown, not inferred. `python3 scripts/provider-evidence.py` (`--format markdown` for review) emits one entry per registry provider: family, tier, method and status; the adapter path and its SHA-256; the automated test files that load that adapter and how many tests they hold (a count of tests in those files, so a broad file is over-counted); the reviewed scope set; the retained live tenant proof and its state; the limitations that still apply; and `goLive`, whether a go-live claim is allowed and every blocker. A go-live claim needs a shipped adapter (`built-credential-free` or `live`), automated adapter tests and, for any provider that reaches a third-party tenant (tier 1 and above), a **valid, unexpired proof for the current adapter** with scopes equal to the reviewed set, and the registry must itself say `live`. A Tier 0 provider reaches no third-party tenant, so it needs tests but no tenant proof and keeps the limitation that no deployment evidence is retained. `provider-evidence.py --go-live <provider>` exits non-zero with the blockers.
+
+Live proof is a retained, redacted file `assurance/provider-proof/<provider id>.json` (the registry's `proof` field names it for a `live` provider) with `schemaVersion`, `provider`, `provedAt`, `expiresAt`, `adapterSha256`, `scopes`, `recordedBy`, `evidence` (run ids or artefact names, never content), `redacted: true` and optional `limitations`. Any other key (a tenant identifier, token or content) makes the proof invalid. A proof is bound to the adapter it proved: changing the adapter file invalidates it until the provider is proven again, and an expired proof blocks go-live without breaking unrelated work. `provider-evidence.py --check` (run by `make contracts` and CI) fails only when a registry claim is untrue now: a `live` provider with no valid proof file, a malformed proof, or a proof for an unknown provider. No provider is live today and no proof file is retained, so every tier 1+ provider is blocked. Producing a proof needs a real tenant and a person; the manifest does not call a provider.
 
 ## Enable or disable individual Skills safely
 
