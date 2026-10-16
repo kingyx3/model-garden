@@ -87,7 +87,7 @@ def prepare(
         raise GatewayError("the coworker grant does not belong to this server and credential")
     if grant["isolation"] not in ("own-identity", "isolated-grant"):
         raise GatewayError("shared provider identity is not authorized for unattended execution")
-    return {"server": server, "upstream": upstream, "tool": tool, "risk": entry["risk"], "grant": grant,
+    return {"server": server, "declaration": dict(declaration), "upstream": upstream, "tool": tool, "risk": entry["risk"], "grant": grant,
             "ledger": {"provider": "mcp:" + server["name"], "tier": 2,
                        "connectionId": grant["connectionId"], "grantId": grant["grantId"],
                        "actingIdentity": grant["actingIdentity"], "upstreamTool": upstream}}
@@ -101,6 +101,7 @@ def invoke(
     transport_factory: Callable[[str, str, str], Any],
     secret_resolver: Callable[[str], str],
     dns_resolver: Callable[[str], Iterable[str]],
+    recheck: Callable[[], Mapping[str, Any]],
 ) -> dict[str, Any]:
     """Run one operation over a single pinned-address, vetted upstream MCP session.
 
@@ -112,7 +113,10 @@ def invoke(
     if not isinstance(arguments, Mapping):
         raise GatewayError("arguments must be an object")
     _bounded_json(arguments, MAX_ARGUMENT_BYTES, "arguments")
-    server, upstream = route["server"], route["upstream"]
+    fresh = recheck()
+    if fresh["grant"]["grantId"] != route["grant"]["grantId"] or fresh["declaration"] != route["declaration"]:
+        raise GatewayError("the approved connection changed; retry from a fresh request")
+    server, upstream = fresh["server"], fresh["upstream"]
     qualified = _endpoint().qualify(server["url"], dns_resolver)
     destination = qualified["pinned"][0]
     _endpoint().assert_pinned(destination, qualified["pinned"])
@@ -132,13 +136,16 @@ def invoke(
                 raise GatewayError("approved upstream operation is absent")
             if sum(1 for t in offered if isinstance(t, Mapping) and t.get("name") == upstream) != 1:
                 raise GatewayError("duplicate upstream operation name")
-            gate = _mcp().call_gate(server, selected, approvals)
+            gate = _mcp().call_gate(fresh["declaration"], selected, approvals)
             if gate["tool"] != route["tool"] or gate["risk"] != route["risk"]:
                 raise GatewayError("upstream operation mapping changed")
             schema = selected.get("inputSchema")
             if not isinstance(schema, Mapping):
                 raise GatewayError("upstream input schema is absent")
             Draft202012Validator(schema).validate(dict(arguments))
+            latest = recheck()
+            if latest["grant"]["grantId"] != route["grant"]["grantId"]:
+                raise GatewayError("connection revoked or replaced before execution")
             result = session.call_tool(upstream, dict(arguments))
     except (GatewayError, _mcp().SchemaDriftError, ValidationError):
         raise
