@@ -155,7 +155,8 @@ class RuntimeKbSearchTests(unittest.TestCase):
             self.assertEqual(result["documents"][0]["title"], "Note")
             # Nothing in the retrieved text changed authorization: a write still needs its own approval.
             booking = runtime.desired_state["tools"]
-            self.assertTrue(any(tool["metadata"]["name"] == "calendar.book" and tool["spec"]["approvalRequired"] for tool in booking))
+            self.assertFalse(any(tool["metadata"]["name"] == "calendar.book" for tool in booking))
+            self.assertTrue(any(tool["metadata"]["name"] == "crm.create" and tool["spec"]["approvalRequired"] for tool in booking))
 
 
 class ProvisionAndDeployTests(unittest.TestCase):
