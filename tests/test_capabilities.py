@@ -97,13 +97,12 @@ class CapabilityResolutionTests(unittest.TestCase):
 
     def test_workspace_without_binding_compiles_with_declarations_only(self):
         compiled = compiler.compile_workspace(ROOT / "examples" / "workspace", "receptionist")[0]
-        self.assertEqual(compiled["capabilities"], {"optional": ["tickets"], "required": ["calendar", "crm", "kb"]})
+        self.assertEqual(compiled["capabilities"], {"optional": ["tickets"], "required": ["crm", "kb"]})
 
     def test_required_capability_without_binding_fails_closed_with_clear_message(self):
         with self.assertRaisesRegex(
             ValueError,
-            r"requires capability 'calendar' \(needed by Skill 'book-appointment'\), "
-            r"'crm' \(needed by Skill 'log-conversation'\), 'kb' \(needed by Skill 'answer-faq'\) "
+            r"requires capability 'crm' \(needed by Skill 'log-conversation'\), 'kb' \(needed by Skill 'answer-faq'\) "
             r"but environment 'dev' binds no provider",
         ):
             compiler.compile_workspace(
@@ -149,7 +148,7 @@ class CapabilityResolutionTests(unittest.TestCase):
                 capture_output=True, text=True,
             )
             self.assertEqual(result.returncode, 1)
-            self.assertIn("requires capability 'calendar'", result.stderr)
+            self.assertIn("requires capability 'crm'", result.stderr)
 
 
 class SkillReadinessTests(unittest.TestCase):
