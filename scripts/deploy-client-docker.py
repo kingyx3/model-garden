@@ -65,6 +65,8 @@ RUNTIME_SOURCE_PATHS = (
     pathlib.Path("platform/core/deliverables.py"),
     pathlib.Path("platform/core/skillsets.py"),
     pathlib.Path("platform/core/provider_grants.py"),
+    pathlib.Path("platform/core/grant_readiness.py"),
+    pathlib.Path("platform/core/knowledge_deploy.py"),
     pathlib.Path("platform/core/team.py"),
     pathlib.Path("platform/core/mcp_passthrough.py"),
     pathlib.Path("platform/channels/text_channel.py"),
