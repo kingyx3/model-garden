@@ -22,7 +22,7 @@ class IntegrationRegistryTests(unittest.TestCase):
         providers = registry.load_registry()["providers"]
         self.assertGreaterEqual(len(providers), 18)
         self.assertEqual({p["id"] for p in providers if p["status"] == "built-credential-free"},
-                         {"google-calendar", "microsoft-calendar", "text-knowledge", "built-in-crm"})
+                         {"text-knowledge", "built-in-crm"})
         self.assertFalse(any(p["status"] == "live" for p in providers))
         self.assertEqual({p["family"] for p in providers},
                          {"calendar", "crm", "mail", "kb", "docs", "files", "tickets", "chat", "code"})
@@ -34,7 +34,7 @@ class IntegrationRegistryTests(unittest.TestCase):
             original = registry.load_registry()
             for mutation, message in (
                 ({"adapter": "platform/connectors/missing.py"}, "existing adapter"),
-                ({"adapter": "platform/connectors/google_calendar.py", "status": "live"}, "retained proof"),
+                ({"adapter": "platform/core/contacts.py", "status": "live"}, "retained proof"),
             ):
                 altered = json.loads(json.dumps(original))
                 altered["providers"][0].update(mutation)
@@ -58,12 +58,12 @@ class IntegrationRegistryTests(unittest.TestCase):
 
     def test_connection_preview_is_nonsecret_tool_scoped_and_nonmutating(self):
         read = registry.plan("calendar", "microsoft-calendar", ["calendar.availability"])
-        self.assertEqual(read["scopes"], ["Calendars.Read"])
+        self.assertEqual((read["tier"], read["method"], read["status"]), (2, "governed-mcp", "planned"))
         self.assertFalse(read["readyToConnect"])
-        self.assertIn("consent", read["blocker"])
-        self.assertNotIn("Calendars.ReadWrite", json.dumps(read))
-        both = registry.plan("calendar", "microsoft-calendar", ["calendar.book", "calendar.availability"])
-        self.assertEqual(both["scopes"], ["Calendars.Read", "Calendars.ReadWrite"])
+        self.assertIn("not implemented", read["blocker"])
+        self.assertNotIn("scopes", read)  # discovery cannot provide authority
+        self.assertFalse((ROOT / "platform/connectors").exists())
+
         with self.assertRaisesRegex(ValueError, "only the portable Tools"):
             registry.plan("calendar", "google-calendar", ["mail.send"])
         planned = registry.plan("crm", "zoho-crm", ["crm.read"])
@@ -71,8 +71,8 @@ class IntegrationRegistryTests(unittest.TestCase):
         self.assertIn("not implemented", planned["blocker"])
         self.assertNotIn("scopes", planned)
         in_development = registry.plan("crm", "hubspot", ["crm.read"])
-        self.assertEqual(in_development["status"], "in-development")
-        self.assertIn("not implemented for the governed runtime", in_development["blocker"])
+        self.assertEqual(in_development["status"], "planned")
+        self.assertIn("not implemented", in_development["blocker"])
         self.assertIn("do not request credentials", in_development["blocker"])
         self.assertNotIn("scopes", in_development)  # no consent or scopes are offered for an unserved connector
 
@@ -97,7 +97,7 @@ class IntegrationRegistryTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "only the portable Tools"):
             registry.plan("crm", "built-in-crm", ["crm.update"])
         hubspot = registry.plan("crm", "hubspot", ["crm.read"])
-        self.assertEqual(hubspot["status"], "in-development")
+        self.assertEqual(hubspot["status"], "planned")
         self.assertIn("not implemented", hubspot["blocker"])
         self.assertEqual(registry.plan("crm", "zoho-crm", ["crm.read"])["status"], "planned")
 
@@ -108,7 +108,7 @@ class IntegrationRegistryTests(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("| Microsoft Graph Calendar |", result.stdout)
-        self.assertIn("built-credential-free", result.stdout)
+        self.assertIn("built-credential-free", result.stdout)\n        self.assertIn("| governed-mcp | 2 | planned |", result.stdout)
         self.assertNotIn("| live |", result.stdout)
         self.assertIn("https://github.com/kingyx3/model-garden/issues/66", result.stdout)
 
@@ -125,16 +125,14 @@ class IntegrationRegistryTests(unittest.TestCase):
         )
         self.assertEqual(planned.returncode, 1)
         self.assertIn("Connector not implemented", planned.stdout)
-        ready = subprocess.run(
+        retired = subprocess.run(
             [sys.executable, str(cli), "connect", "calendar", "--provider", "google-calendar",
              "--tools", "calendar.availability", "--owner", "owner@example.test", "--operator", "operator@example.test"],
             capture_output=True, text=True, cwd=ROOT,
         )
-        self.assertEqual(ready.returncode, 0, ready.stderr)
-        result = json.loads(ready.stdout)
-        self.assertEqual(result["scopes"], ["https://www.googleapis.com/auth/calendar.freebusy"])
-        self.assertFalse(result["readyToConnect"])
-        self.assertNotIn("secret://", ready.stdout)
+        self.assertEqual(retired.returncode, 1)
+        self.assertIn("not implemented", retired.stdout)
+        self.assertNotIn("secret://", retired.stdout)
 
     def test_blocked_skill_report_suggests_canonical_connect_action(self):
         import importlib.util
