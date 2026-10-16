@@ -51,6 +51,8 @@ normal deploy  -> Terraform + Model Garden runtime convergence
 
 The current reference deployment is keyless GCP plus an isolated Docker host. Exact boundaries and supported seams live in [`docs/architecture.md`](docs/architecture.md); business/product rationale and future expansion decisions live in Confluence.
 
+**Connector/status authority:** [`contracts/v1/integrations.json`](contracts/v1/integrations.json) and [`scripts/provider-evidence.py`](scripts/provider-evidence.py) determine which adapters are built, in development or actually tenant-live. The [Confluence integration directory](https://modelgarden.atlassian.net/wiki/spaces/BA/pages/12189707) deliberately links to these sources rather than preserving a stale release snapshot. The client-defined MCP/API plus secure-secret onboarding experience ([#159](https://github.com/kingyx3/model-garden/issues/159)) is an architectural target, not a shipped integration workflow.
+
 ## Launch a client
 
 Use a **published** Model Garden release with authenticated `gh`, `git`, Terraform and preferably `gcloud`:

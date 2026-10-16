@@ -205,6 +205,8 @@ Open: a multi-Agent sidecar and deployment, per-Agent usage attribution and ledg
 
 Open: an MCP client in the sidecar with the credential stored there, binding declarations in the EnvironmentBinding and compiler, approval workflow commands, and live evidence with a real upstream server (#87, #89).
 
+**Not yet shipped — customer self-service custom integration (#159).** The existing descriptor/gating model is not a remote MCP connection wizard or generic REST/OpenAPI integration executor. The [client target](https://modelgarden.atlassian.net/wiki/spaces/BA/pages/327715) requires permissioned endpoint and operation review, constrained egress/SSRF checks, secure vault-backed OAuth/API-key enrollment, tenant/coworker-grant isolation, runtime approval/ledger and revoke/rotate. #87 and #89 own execution mechanics, #158 the common gateway, #110 guided onboarding and #159 the client-defined MCP/API experience. No caller may expose arbitrary HTTP requests as a Model Garden Tool, and no secret should enter a prompt or client workspace.
+
 ## Mail, CRM and files adapters (in development)
 
 These adapters implement portable Tools behind an injected transport with credential-free tests only. They are registered `in-development`: the governed sidecar does not serve them, no client consent or per-coworker identity (#129) exists for them, and none has live proof, so a binding that names them is refused and nothing here is marked supported.
