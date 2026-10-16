@@ -214,6 +214,7 @@ class GatewayCase(unittest.TestCase):
 
 class RuntimeBoundaryCase(unittest.TestCase):
     setUp = GatewayCase.setUp
+    prepare = GatewayCase.prepare
 
     def runtime(self):
         workspace = self.root / "workspace"
