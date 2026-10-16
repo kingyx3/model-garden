@@ -39,7 +39,9 @@ A `KnowledgeSource` with `spec.type: text-file` points at one `.txt` or `.md` fi
 
 **Runtime and activation.** The governed sidecar exposes `kb_search` (the `kb.search` Tool) over this module. It runs only when the Agent selected the `kb.search` Tool (see `examples/workspace/tools/kb-search.yaml`) **and** the capability manifest shows `kb` bound to `text-knowledge` at Tier 0; otherwise it refuses with "not connected here". Each search is a governed read: the ledger records provider `text-knowledge`, `tier: 0` and the section IDs and content digests, never the text. A client binds it with `connectors.kb: {provider: text-knowledge, tier: 0}` in the EnvironmentBinding; the registry lists it as `built-credential-free` (adapter `platform/core/knowledge.py`), so a Skill requiring `kb` is ready and the readiness report shows `kb: text-knowledge tier 0`. A deployment that selects `kb.search` gets the governed sidecar even with no calendar bound, and that sidecar holds no provider credential. This is credential-free build evidence only: no live deployment has exercised it.
 
-**Not yet delivered:** document-level permissions, external knowledge providers, freshness/refresh policy and conflict detection (#116, #77). The reference receptionist declares `kb` and `crm` and its evals exercise both Tier 0 paths (see [Reference receptionist on a zero-stack client](#reference-receptionist-on-a-zero-stack-client)).
+**Conflicts and instruction-like text.** When approved sections on the same topic state different prices, amounts or clock times (across sources or inside one), `search_selected` marks each document `conflict: true`, lists the differing values under `conflicts` and returns guidance not to choose one but to say the rules need confirming and escalate; wording differences with the same facts, other topics and sections with no amount or time never conflict, and a draft, retired, stale or other-Agent source cannot create one. `check_source` warns the owner about the same conflicts at upload. Text that reads like an instruction to its reader ("ignore your previous instructions", "reveal your system prompt", "new instructions:") gets `contentWarnings: ["instruction-like-text"]` and an upload warning; it is flagged, never obeyed, and the result stays `dataOnly`. These are heuristics for the owner's attention, not a security boundary, and not a substitute for the governed boundary that already refuses actions the coworker is not authorised to take.
+
+**Not yet delivered:** document-level permissions, external knowledge providers, freshness/refresh policy beyond `reviewBy`, and semantic (non-numeric) conflict detection (#116, #77). The reference receptionist declares `kb` and `crm` and its evals exercise both Tier 0 paths (see [Reference receptionist on a zero-stack client](#reference-receptionist-on-a-zero-stack-client)).
 
 ## Tier 0 contact and interaction log
 
@@ -256,6 +258,17 @@ Open: serving any of these from the sidecar, OAuth consent and token lifecycle (
 - **Operator command.** `runtime-handoff.py <store> deliver --people people.json` runs it for hand-offs with the `inbox` channel only (it carries no transport); everyone else is reported `no-channel`.
 
 Open: wiring this into the sidecar or a scheduler, real Slack, Teams and email transports, acknowledgement-based escalation, OAuth consent, token refresh and provider-side revocation (#86, #88, #97, #110).
+
+## Cross-channel conversations and customer linkage
+
+`platform/core/conversations.py` is the credential-free core of one coherent history across voice, email, chat and hand-off (#115). It is not a CRM, holds no message text and is **not wired to the voice or mail paths**.
+
+- **Ids and references.** A conversation id (`cv-…`) is derived from the tenant, channel and the channel's own call or thread id, so redelivery and restarts reach the same one; an interaction's key comes from its kind and external id, so it is stored once. Interactions are *references* (`transcript:…`, `message:…`, a ledger `requestId`, a content digest, a short outcome label), never text, and carry the Agent, Agent version, task and trace ids. Late arrivals sort by when they happened, then by arrival.
+- **Evidence, then a deliberate link.** Evidence (`email`, `phone`, `sso`, `name`) is kept as a digest of the normalised value with `verified` and a provenance; a name can never be verified. `resolve` asks an injected directory which customers hold each *verified* digest: exactly one makes a `CustomerLink`; two or more is `conflicting-evidence` and goes to the review queue; evidence that is only asserted but matches someone goes to the queue as `asserted-match` and never links itself; anything else stays unlinked. The state is not to be reflected to the caller. A named person confirms or dismisses a queued item and is ledgered.
+- **One timeline per customer.** `customer_timeline` joins every conversation linked to a customer across channels in one ordered list; two different customers never share a timeline, and an unlinked conversation appears in none.
+- **Private and erasable.** One file per tenant (0600 in a 0700 directory; another tenant's file is refused), customer erasure removes every linked conversation and its review items, conversations can be erased singly or purged by retention, and audit events hold identifiers only.
+
+Open: wiring to the call transcript and mail paths and a real directory (the Tier 0 contact store or a CRM), `Conversation` ids in the CRM sync ledger, role-based access and redaction across exports, CRM replacement with a re-link plan, and live evidence (#115).
 
 ## Filing interactions through the sync ledger
 

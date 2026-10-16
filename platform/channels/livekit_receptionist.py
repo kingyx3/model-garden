@@ -260,7 +260,11 @@ async def receptionist(ctx: JobContext) -> None:
             speaker = {"user": "caller", "assistant": "agent"}.get(role)
             text = getattr(item, "text_content", None)
             if speaker and isinstance(text, str):
-                transcript.add_turn(speaker, text, interrupted=bool(getattr(item, "interrupted", False)))
+                confidence = getattr(item, "transcript_confidence", None)  # the speech-to-text confidence, where the model gives one
+                transcript.add_turn(
+                    speaker, text, interrupted=bool(getattr(item, "interrupted", False)),
+                    confidence=confidence if isinstance(confidence, float) and speaker == "caller" else None,
+                )
         except Exception as exc:
             LOGGER.error("call transcript turn not recorded: %s", type(exc).__name__)
 
@@ -276,7 +280,7 @@ async def receptionist(ctx: JobContext) -> None:
                 }
             )
 
-        finalize_transcript(transcript, on_failure=failed)
+        finalize_transcript(transcript, on_failure=failed, auto_summary=True)
 
     ctx.add_shutdown_callback(on_shutdown)
     ctx.add_shutdown_callback(on_transcript_shutdown)

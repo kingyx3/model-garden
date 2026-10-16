@@ -303,7 +303,8 @@ class WorkerWiringTests(unittest.TestCase):
             "allow_interruptions=False",
             "mark_disclosure_played()",
             "self._transcript.suppress()",
-            "finalize_transcript(transcript, on_failure=failed)",
+            "finalize_transcript(transcript, on_failure=failed, auto_summary=True)",
+            'getattr(item, "transcript_confidence", None)',
             "TranscriptWriteFailed",
             'note_outcome("transferred")',
             'note_outcome("message-taken")',
@@ -313,6 +314,58 @@ class WorkerWiringTests(unittest.TestCase):
     def test_worker_never_logs_or_ledgers_transcript_text(self):
         self.assertNotIn("LOGGER.error(f", self.source)
         self.assertNotIn("transcript.build(", self.source)
+
+
+class ExtractiveSummaryTests(unittest.TestCase):
+    """A deterministic call summary that is labelled as such (#107)."""
+
+    def transcript(self, *turns, **kwargs):
+        config = T.TranscriptConfig(enabled=True, path=pathlib.Path("/nonexistent/t.jsonl"), disclosure="This call is recorded.", override_owner=None,
+                                    retention_seconds=86400, patterns=())
+        transcript = T.CallTranscript("abc123", "receptionist", config, started=1_800_000_000, **kwargs)
+        for speaker, text in turns:
+            transcript.add_turn(speaker, text)
+        return transcript
+
+    def test_the_summary_quotes_the_first_caller_turn_the_last_agent_turn_counts_and_outcome(self):
+        transcript = self.transcript(("caller", "Hi, are you open on Saturday?"), ("agent", "We open at 9."), ("caller", "Great, book me in."), ("agent", "Booked for 10am."))
+        record = transcript.build(auto_summary=True)
+        self.assertEqual(record["summarySource"], "extractive")
+        self.assertIn('The caller first said: "Hi, are you open on Saturday?"', record["summary"])
+        self.assertIn('The agent\'s last reply: "Booked for 10am."', record["summary"])
+        self.assertIn("2 caller and 2 agent turns. Outcome: resolved.", record["summary"])
+
+    def test_it_is_off_unless_asked_for_and_a_supplied_summary_always_wins(self):
+        transcript = self.transcript(("caller", "Hello"), ("agent", "Hi"))
+        self.assertNotIn("summary", transcript.build())
+        supplied = transcript.build(summary="Caller asked about hours; booked Friday.", auto_summary=True)
+        self.assertEqual((supplied["summary"], supplied["summarySource"]), ("Caller asked about hours; booked Friday.", "provided"))
+
+    def test_long_turns_are_truncated_and_card_numbers_never_reach_the_summary(self):
+        transcript = self.transcript(("caller", "My card is 4111 1111 1111 1111 " + "and more " * 60), ("agent", "x" * 400))
+        record = transcript.build(auto_summary=True)
+        self.assertNotIn("4111", record["summary"])
+        self.assertLess(len(record["summary"]), 600)
+        self.assertIn("…", record["summary"])
+
+    def test_a_call_with_no_speech_says_so_and_is_deterministic(self):
+        self.assertEqual(self.transcript().build(auto_summary=True)["summary"], "No speech was recorded. Outcome: abandoned.")
+        one = self.transcript(("caller", "Hello"), ("agent", "Hi")).build(auto_summary=True, ended=1)
+        two = self.transcript(("caller", "Hello"), ("agent", "Hi")).build(auto_summary=True, ended=1)
+        self.assertEqual(one, two)
+
+    def test_the_observed_outcome_is_used(self):
+        transcript = self.transcript(("caller", "I want a person"))
+        transcript.note_outcome("transferred")
+        self.assertIn("Outcome: transferred.", transcript.build(auto_summary=True)["summary"])
+
+    def test_finalize_passes_the_option_through(self):
+        transcript = self.transcript(("caller", "Hello"), ("agent", "Hi"))
+        with tempfile.TemporaryDirectory() as tmp:
+            transcript.config = T.TranscriptConfig(enabled=True, path=pathlib.Path(tmp) / "t.jsonl", disclosure="This call is recorded.", override_owner=None,
+                                                   retention_seconds=86400, patterns=())
+            record = T.finalize(transcript, auto_summary=True)
+        self.assertEqual(record["summarySource"], "extractive")
 
 
 if __name__ == "__main__":

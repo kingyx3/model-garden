@@ -51,6 +51,7 @@ MAX_TURNS = 2000
 MAX_TURN_CHARS = 4000
 MAX_SUMMARY_CHARS = 2000
 MAX_REQUEST_IDS = 200
+EXTRACT_CHARS = 160
 MAX_PATTERNS = 20
 MAX_PATTERN_CHARS = 200
 CARD_REPLACEMENT = "[REDACTED:card]"
@@ -270,6 +271,31 @@ class CallTranscript:
             turn["redacted"] = True
         self._turns.append(turn)
 
+    def extractive_summary(self, outcome: str | None = None) -> str:
+        """A deterministic, model-free summary: what the caller first asked, the agent's last reply, turn counts and the outcome.
+
+        It quotes the already-redacted turns (truncated), so it reveals nothing the transcript does not. It is an index into the
+        call, not an understanding of it; the record marks it ``summarySource: extractive`` so nobody mistakes it for a model's.
+        """
+        ordered = sorted(self._turns, key=lambda turn: (turn["offsetSeconds"], turn["index"]))
+        callers = [turn for turn in ordered if turn["speaker"] == "caller"]
+        agents = [turn for turn in ordered if turn["speaker"] == "agent"]
+        final = outcome if outcome in OUTCOMES else self._derived_outcome()
+        if not ordered:
+            return f"No speech was recorded. Outcome: {final}."
+
+        def quote(turn: dict[str, Any]) -> str:
+            text = " ".join(str(turn["text"]).split())
+            return text if len(text) <= EXTRACT_CHARS else text[: EXTRACT_CHARS - 1].rstrip() + "…"
+
+        parts = []
+        if callers:
+            parts.append(f'The caller first said: "{quote(callers[0])}"')
+        if agents:
+            parts.append(f'The agent\'s last reply: "{quote(agents[-1])}"')
+        parts.append(f"{len(callers)} caller and {len(agents)} agent turns. Outcome: {final}.")
+        return " ".join(parts)
+
     def build(
         self,
         *,
@@ -277,8 +303,12 @@ class CallTranscript:
         summary: str | None = None,
         request_ids: Iterable[str] = (),
         ended: int | None = None,
+        auto_summary: bool = False,
     ) -> dict[str, Any]:
-        """Return the closed record; turns are ordered by offset, then arrival."""
+        """Return the closed record; turns are ordered by offset, then arrival.
+
+        ``auto_summary`` writes an extractive summary when the caller supplied none (a supplied one always wins).
+        """
         if outcome is None:
             outcome = self._derived_outcome()
         if outcome not in OUTCOMES:
@@ -287,6 +317,11 @@ class CallTranscript:
         turns = [{**turn, "index": position} for position, turn in enumerate(ordered)]
         counts = dict(self._redactions)
         summary_text: str | None = None
+        summary_source: str | None = None
+        if not (summary and summary.strip()) and auto_summary:
+            summary, summary_source = self.extractive_summary(outcome), "extractive"
+        elif summary and summary.strip():
+            summary_source = "provided"
         if summary and summary.strip():
             bounded, _ = _bounded(summary.strip(), MAX_SUMMARY_CHARS)
             summary_text, summary_counts = redact(bounded, self.config.patterns)
@@ -311,6 +346,7 @@ class CallTranscript:
         }
         if summary_text:
             record["summary"] = summary_text
+            record["summarySource"] = summary_source
         if self._dropped:
             record["droppedTurns"] = self._dropped
         return record
@@ -373,6 +409,7 @@ def finalize(
     summary: str | None = None,
     request_ids: Iterable[str] = (),
     on_failure: Callable[[str], None] | None = None,
+    auto_summary: bool = False,
 ) -> dict[str, Any] | None:
     """Close and store a call's transcript without ever raising into the call.
 
@@ -382,7 +419,7 @@ def finalize(
     if not transcript.config.enabled or transcript.suppressed:
         return None
     try:
-        record = transcript.build(outcome=outcome, summary=summary, request_ids=request_ids)
+        record = transcript.build(outcome=outcome, summary=summary, request_ids=request_ids, auto_summary=auto_summary)
         store_record(transcript.config, record)
         return record
     except Exception as exc:  # storage or formatting must never end or block a call
