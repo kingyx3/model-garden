@@ -11,3 +11,5 @@ gha-creds-*.json
 .enterprise-evidence/
 .model-garden-live-proof/
 .DS_Store
+__pycache__/
+*.pyc

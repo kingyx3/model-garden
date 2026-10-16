@@ -29,6 +29,13 @@ commands are not part of it.
   never both run the same slot. ``mark_outcome`` counts consecutive failures and suspends a schedule after three, and
   ``start_run`` / ``update_run`` / ``runs`` keep a bounded, durable record of each run for ``scheduler.py``.
 
+- **Workspace-managed schedules.** ``reconcile`` makes the store match a list of named definitions (the client's desired state,
+  for example a file kept next to the workspace): a missing one is created, a changed one is updated in place (same id, same
+  run history), and a *managed* one that is no longer listed is **paused** (``pausedReason: removed-from-workspace``), never
+  deleted. A schedule someone created from chat is not managed and is never touched. ``export_desired`` writes the managed
+  schedules back out in the same shape, so the state survives a redeploy and round-trips. Every change is ledgered as
+  identifiers and digests.
+
 Running each firing as a task (with its own ledger timeline), failure notification to the owner and pausing on a person are
 done by ``scheduler.py``; this module is only the store and cron arithmetic.
 """
@@ -61,6 +68,7 @@ MAX_SEEN_EVENTS = 200
 MAX_FAILURES = 3
 MAX_RUNS = 1000
 _TENANT = re.compile(r"^[a-z0-9][a-z0-9-]{0,62}$")
+_NAME = re.compile(r"^[a-z0-9][a-z0-9-]{0,62}$")
 _PRINCIPAL = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:@/+-]{0,127}$")
 _AGENT = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 _FIELD_RANGES = ((0, 59), (0, 23), (1, 31), (1, 12), (0, 7))
@@ -375,6 +383,137 @@ class ScheduleStore:
             schedules[entry["id"]] = entry
         self._record("schedule.create", owner, self._details(entry))
         return dict(entry)
+
+
+    # -- workspace-managed schedules -----------------------------------------------------
+
+    @staticmethod
+    def _normalised(definition: Any) -> dict[str, Any]:
+        """Validate one desired-state definition and return the fields a stored entry holds (no I/O)."""
+        if not isinstance(definition, Mapping):
+            raise ScheduleError("a schedule definition is an object")
+        allowed = {"name", "owner", "agent", "goal", "cron", "event", "budget", "requiredCapabilities", "maxPerHour"}
+        extra = sorted(set(definition) - allowed)
+        if extra:
+            raise ScheduleError("a schedule definition has unsupported keys: " + ", ".join(extra))
+        name = definition.get("name")
+        if not isinstance(name, str) or not _NAME.match(name):
+            raise ScheduleError("a managed schedule needs a name: lowercase letters, digits and dashes")
+        owner = _principal(definition.get("owner"), "owner")
+        agent = definition.get("agent")
+        if not isinstance(agent, str) or not _AGENT.match(agent):
+            raise ScheduleError("agent must be a short Agent name")
+        goal = definition.get("goal")
+        if not isinstance(goal, str) or not goal.strip() or len(goal.strip()) > MAX_GOAL:
+            raise ScheduleError(f"goal must be a non-empty string of at most {MAX_GOAL} characters")
+        if (definition.get("cron") is None) == (definition.get("event") is None):
+            raise ScheduleError("a schedule has exactly one of cron or event")
+        fields: dict[str, Any] = {"name": name, "owner": owner, "agent": agent, "goal": goal.strip(), "budget": _budget(definition.get("budget"))}
+        try:
+            fields["requiredCapabilities"] = sorted(_delegation()._tools(definition.get("requiredCapabilities") or (), "required capabilities"))
+        except PermissionError as exc:
+            raise ScheduleError(str(exc)) from exc
+        if definition.get("cron") is not None:
+            cron = definition["cron"]
+            if not isinstance(cron, str):
+                raise ScheduleError("cron must be a string")
+            parse_cron(cron)
+            _check_interval(cron)
+            fields["cron"] = " ".join(cron.split())
+        else:
+            if definition["event"] not in EVENT_KINDS:
+                raise ScheduleError("event must be one of " + ", ".join(EVENT_KINDS))
+            per_hour = definition.get("maxPerHour", DEFAULT_TRIGGER_PER_HOUR)
+            if not isinstance(per_hour, int) or isinstance(per_hour, bool) or not 1 <= per_hour <= MAX_TRIGGER_PER_HOUR:
+                raise ScheduleError(f"maxPerHour must be an integer from 1 to {MAX_TRIGGER_PER_HOUR}")
+            fields.update(event=definition["event"], maxPerHour=per_hour)
+        return fields
+
+    def reconcile(self, definitions: Iterable[Mapping[str, Any]], *, by: str, now: int | None = None) -> dict[str, list[str]]:
+        """Make the managed schedules match ``definitions``; nothing is applied unless every definition is valid."""
+        who = _principal(by, "by")
+        stamp = int(dt.datetime.now(dt.timezone.utc).timestamp()) if now is None else now
+        wanted: dict[str, dict[str, Any]] = {}
+        for definition in definitions:
+            fields = self._normalised(definition)
+            if fields["name"] in wanted:
+                raise ScheduleError(f"the name {fields['name']} is listed twice")
+            if fields.get("cron") and next_fire(fields["cron"], stamp) is None:
+                raise ScheduleError("this cron expression never fires")
+            wanted[fields["name"]] = fields
+        report: dict[str, list[str]] = {"created": [], "updated": [], "retired": [], "unchanged": []}
+        changes: list[tuple[str, dict[str, Any]]] = []
+        compared = ("owner", "agent", "goal", "budget", "requiredCapabilities", "cron", "event", "maxPerHour")
+        with self._locked() as state:
+            schedules = state["schedules"]
+            managed = {item["managedBy"]: item for item in schedules.values() if item.get("managedBy")}
+            for name, fields in sorted(wanted.items()):
+                entry = managed.get(name)
+                if entry is None:
+                    if len(schedules) >= MAX_SCHEDULES:
+                        raise ScheduleError("the tenant has the maximum number of schedules")
+                    if sum(1 for item in schedules.values() if item["owner"] == fields["owner"]) >= MAX_PER_OWNER:
+                        raise ScheduleError(f"an owner may have at most {MAX_PER_OWNER} schedules")
+                    entry = {
+                        "id": "s-" + secrets.token_hex(6), "tenant": self.tenant, "owner": fields["owner"], "agent": fields["agent"],
+                        "goal": fields["goal"], "goalDigest": goal_digest(fields["goal"]), "cron": fields.get("cron"),
+                        "budget": fields["budget"], "requiredCapabilities": fields["requiredCapabilities"], "state": "active",
+                        "createdAt": stamp, "runs": 0, "managedBy": name,
+                        "nextFire": next_fire(fields["cron"], stamp) if fields.get("cron") else None,
+                    }
+                    if fields.get("event"):
+                        entry.update(kind="trigger", event=fields["event"], maxPerHour=fields["maxPerHour"], recentFires=[], seenEvents=[])
+                    schedules[entry["id"]] = entry
+                    report["created"].append(name)
+                    changes.append(("schedule.create", dict(entry)))
+                    continue
+                if (entry.get("kind") == "trigger") != bool(fields.get("event")):
+                    raise ScheduleError(f"{name} cannot change between a timed schedule and an event trigger; use a new name")
+                before = {key: entry.get(key) for key in compared}
+                after = {key: fields.get(key) for key in compared}
+                reactivate = entry.get("pausedReason") == "removed-from-workspace"
+                if before == after and not reactivate:
+                    report["unchanged"].append(name)
+                    continue
+                entry.update({key: fields[key] for key in ("owner", "agent", "goal", "budget", "requiredCapabilities") if key in fields})
+                entry["goalDigest"] = goal_digest(entry["goal"])
+                if fields.get("cron"):
+                    entry["cron"] = fields["cron"]
+                    if before["cron"] != fields["cron"] or reactivate:
+                        entry["nextFire"] = next_fire(fields["cron"], stamp)
+                if fields.get("event"):
+                    entry["event"], entry["maxPerHour"] = fields["event"], fields["maxPerHour"]
+                if reactivate:
+                    entry["state"] = "active"
+                    entry.pop("pausedReason", None)
+                    entry["consecutiveFailures"] = 0
+                report["updated"].append(name)
+                changes.append(("schedule.update", dict(entry)))
+            for name, entry in sorted(managed.items()):
+                if name not in wanted and entry["state"] == "active":
+                    entry["state"], entry["pausedReason"] = "paused", "removed-from-workspace"
+                    report["retired"].append(name)
+                    changes.append(("schedule.retire", dict(entry)))
+        for action, entry in changes:
+            self._record(action, who, {**self._details(entry), "managedBy": entry.get("managedBy")})
+        return report
+
+    def export_desired(self) -> list[dict[str, Any]]:
+        """The managed schedules as definitions ``reconcile`` accepts (sorted by name); unmanaged schedules are not exported."""
+        with self._locked() as state:
+            managed = [dict(item) for item in state["schedules"].values() if item.get("managedBy")]
+        result = []
+        for entry in sorted(managed, key=lambda item: item["managedBy"]):
+            definition: dict[str, Any] = {
+                "name": entry["managedBy"], "owner": entry["owner"], "agent": entry["agent"], "goal": entry["goal"],
+                "budget": dict(entry["budget"]), "requiredCapabilities": list(entry.get("requiredCapabilities", [])),
+            }
+            if entry.get("kind") == "trigger":
+                definition.update(event=entry["event"], maxPerHour=entry["maxPerHour"])
+            else:
+                definition["cron"] = entry["cron"]
+            result.append(definition)
+        return result
 
     # -- firing -------------------------------------------------------------------------
 
