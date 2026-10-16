@@ -50,7 +50,7 @@ class Case(unittest.TestCase):
                 raise ValueError("unsupported Tool selection")
             scopes = {"calendar.availability": "https://www.googleapis.com/auth/calendar.freebusy",
                       "calendar.book": "https://www.googleapis.com/auth/calendar.events"}
-            return {"tier": 2, "status": "built-credential-free",
+            return {"tier": 2, "status": "live",
                     "scopes": sorted(scopes[t] for t in tools), "blocker": None}
         patch = mock.patch.object(integration, "plan", side_effect=fake_plan)
         patch.start()
