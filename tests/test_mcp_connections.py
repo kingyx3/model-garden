@@ -118,6 +118,39 @@ class ConnectionTests(unittest.TestCase):
         with self.assertRaises(PermissionError):
             self.activate()
 
+    def test_two_connections_of_one_family_resolve_their_own_grants(self):
+        other = dict(SERVER)
+        other["credentialRef"] = "secret://vendor/researcher-alt"
+        second_grant = self.grants.create(
+            agent="receptionist", family="crm", provider="vendor", connection_id="crm-alt",
+            isolation="own-identity", acting_identity="research-alt@acme.example",
+            secret_ref=other["credentialRef"], scopes=["crm.read", "crm.create"],
+            owner="owner@acme.example", by="operator@acme.example", now=NOW,
+        )
+        self.store.stage("crm-alt", agent="receptionist", declaration=other,
+                         by="operator@acme.example", now=NOW)
+        alt = self.store.activate(
+            "crm-alt", agent="receptionist", consented_by="owner@acme.example",
+            by="reviewer@acme.example", offered=[READ, WRITE],
+            approvals=self.approvals, grants=self.grants, now=NOW + 1,
+        )
+        self.assertTrue(alt["active"])
+        self.activate()
+        self.grants.revoke(self.grant["id"], by="operator@acme.example", now=NOW + 2)
+        with self.assertRaises(PermissionError):
+            self.grants.resolve(
+                attested_agent="receptionist", family="crm", tool="crm.read",
+                originator_permissions=["crm.read"], enabled_tools=["crm.read"], now=NOW + 3,
+                connection_id="crm-main",
+            )
+        usable = self.grants.resolve(
+            attested_agent="receptionist", family="crm", tool="crm.read",
+            originator_permissions=["crm.read"], enabled_tools=["crm.read"], now=NOW + 3,
+            connection_id="crm-alt",
+        )
+        self.assertEqual(usable["grantId"], second_grant["id"])
+        self.assertTrue(self.store.resolve("crm-alt", agent="receptionist")["active"])
+
     def test_disabling_cuts_access_on_next_read_and_survives_restart(self):
         self.activate()
         self.store.disable("crm-main", agent="receptionist", by="owner@acme.example")
