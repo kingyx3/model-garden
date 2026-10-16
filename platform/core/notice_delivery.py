@@ -157,9 +157,13 @@ def handoff_source(root: pathlib.Path, *, escalate_to: str | None = None, now: i
 
 
 def connection_source(store: Any, health: Mapping[str, Mapping[str, Any]], connectors: Mapping[str, Mapping[str, Any]],
-                      grants: Iterable[Mapping[str, Any]] = (), *, now: int, escalate_to: str | None = None) -> tuple[list[dict[str, Any]], Mark]:
-    """Due connection and grant notices from a ``NoticeStore`` with the callback that records delivery."""
-    due = store.due(health, connectors, grants, now=now, escalate_to=escalate_to)
+                      grants: Iterable[Mapping[str, Any]] = (), *, now: int, escalate_to: str | None = None,
+                      **options: Any) -> tuple[list[dict[str, Any]], Mark]:
+    """Due connection and grant notices from a ``NoticeStore`` with the callback that records delivery.
+
+    ``options`` pass through to ``NoticeStore.due`` (for example ``acknowledge_within_seconds``).
+    """
+    due = store.due(health, connectors, grants, now=now, escalate_to=escalate_to, **options)
 
     def mark(item: Mapping[str, Any], via: str) -> Any:
         return store.mark_notified(item["notice"]["key"], via=via, now=now)

@@ -788,6 +788,19 @@ def main() -> int:
     skills.add_argument("--environment", choices=("dev", "prod"), default="dev")
     skills.add_argument("--agent", help="optional named Agent")
 
+    change = sub.add_parser("readiness-change", help="preview which Skills a connection would unblock or break (writes nothing)")
+    change.add_argument("workspace", type=pathlib.Path, help="private client workspace")
+    change.add_argument("family", help="capability family, e.g. crm")
+    change.add_argument("--provider", required=True, help="the provider id the connection would bind")
+    change.add_argument("--tier", type=int, required=True, help="that provider's tier")
+    change.add_argument("--scopes", help="comma-separated scopes the connection would hold")
+    change.add_argument("--owner", help="the named owner of the connection")
+    change.add_argument("--replace", action="store_true", help="allow the provider to replace an existing one")
+    change.add_argument("--rescope", action="store_true", help="allow widening scopes or changing owner of an existing binding")
+    change.add_argument("--environment", choices=("dev", "prod"), default="dev")
+    change.add_argument("--agent", help="optional named Agent")
+    change.add_argument("--json", action="store_true", help="print the comparison as JSON")
+
     pack = sub.add_parser("onboarding-pack", help="write the owner-readable pack: what works, what needs one thing from you, what runs without asking")
     pack.add_argument("workspace", type=pathlib.Path, help="private client workspace")
     pack.add_argument("--environment", choices=("dev", "prod"), default="dev")
@@ -836,6 +849,26 @@ def main() -> int:
                 skill["ready"] or not skill.get("enabled", True)
                 for agent in report for skill in agent["skills"]
             ) else 1
+        if args.command == "readiness-change":
+            compiler = _load_script("modelgarden_client_change", "compile-workspace.py")
+            change_module = _load_script("modelgarden_readiness_change", "../platform/core/readiness_change.py")
+            connect_module = _load_script("modelgarden_connect_for_change", "../platform/core/connect.py")
+            binding = compiler.load_environment_binding(args.workspace / "environments" / f"{args.environment}.yaml")
+            fragment = {"provider": args.provider, "tier": args.tier}
+            if args.scopes:
+                fragment["scopes"] = sorted({item.strip() for item in args.scopes.split(",") if item.strip()})
+            if args.owner:
+                fragment["owner"] = args.owner
+            merged = connect_module.merge_binding(binding, args.family, fragment, replace=args.replace, rescope=args.rescope)
+            before = compiler.workspace_readiness(args.workspace, args.agent, (), binding)
+            after = compiler.workspace_readiness(args.workspace, args.agent, (), merged)
+            changes = change_module.diff(before, after)
+            if args.json:
+                print(json.dumps(changes, indent=2, sort_keys=True))
+            else:
+                sys.stdout.write(change_module.render(changes, subject=f"binding {args.family} to {args.provider}"))
+                print("Nothing was written: this is a preview. The binding changes only through the guided connect step.")
+            return 1 if any(item["regressed"] for item in changes) else 0
         if args.command == "onboarding-pack":
             compiler = _load_script("modelgarden_client_pack", "compile-workspace.py")
             pack_module = _load_script("modelgarden_onboarding_pack", "../platform/core/onboarding_pack.py")

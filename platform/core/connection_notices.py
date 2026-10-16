@@ -19,6 +19,11 @@ and owner delivery through a real channel is not implemented.
   carries a reason string, scope, account, secret reference or credential.
 - **Only offered notices can be marked.** Delivery can be recorded only for a key this store offered, so a stray caller cannot
   silence a notice that was never produced.
+- **Told is not seen.** The named owner (or the escalation contact) can :meth:`NoticeStore.acknowledge` a delivered notice, which is
+  ledgered with who and through which channel. A delivered notice nobody acknowledges within the window (default 24 hours) is
+  escalated once to the escalation contact as its own notice, so a failed connection cannot sit unnoticed because a message went
+  to a mailbox no one reads. An acknowledgement only stops the escalation: it does not mark the connection fixed, and it is not
+  accepted from anyone else.
 """
 from __future__ import annotations
 
@@ -34,6 +39,7 @@ from typing import Any
 
 SCHEMA_VERSION = 1
 DEFAULT_EXPIRY_WARNING_SECONDS = 7 * 86400
+DEFAULT_ACKNOWLEDGE_WITHIN_SECONDS = 24 * 3600
 CONNECTION_CONDITIONS = ("degraded", "failed", "revoked")
 MAX_RECORDS = 2000
 _KEY = re.compile(r"^[0-9a-f]{64}$")
@@ -133,12 +139,13 @@ class NoticeStore:
         descriptor = os.open(self.root / ".connection-notices.lock", os.O_RDWR | os.O_CREAT, 0o600)
         try:
             fcntl.flock(descriptor, fcntl.LOCK_EX)
-            state: dict[str, Any] = {"schemaVersion": SCHEMA_VERSION, "offered": {}, "delivered": {}}
+            state: dict[str, Any] = {"schemaVersion": SCHEMA_VERSION, "offered": {}, "delivered": {}, "acknowledged": {}}
             if self.path.is_file():
                 loaded = json.loads(self.path.read_text(encoding="utf-8"))
                 if not isinstance(loaded, dict) or loaded.get("schemaVersion") != SCHEMA_VERSION:
                     raise NoticeError("notice store has an unsupported format")
                 state = loaded
+                state.setdefault("acknowledged", {})
             before = json.dumps(state, sort_keys=True)
             yield state
             if json.dumps(state, sort_keys=True) != before:
@@ -162,18 +169,71 @@ class NoticeStore:
         now: int,
         expiry_warning_seconds: int = DEFAULT_EXPIRY_WARNING_SECONDS,
         escalate_to: str | None = None,
+        acknowledge_within_seconds: int = DEFAULT_ACKNOWLEDGE_WITHIN_SECONDS,
     ) -> list[dict[str, Any]]:
-        """Notices to deliver now: current, and not yet recorded as delivered. Cleared conditions are forgotten."""
+        """Notices to deliver now: current, and not yet recorded as delivered. Cleared conditions are forgotten.
+
+        A delivered notice that has not been acknowledged within ``acknowledge_within_seconds`` is also returned, once, as an
+        ``…-unacknowledged`` notice to ``escalate_to`` (when one is given and is not already the recipient).
+        """
+        if not isinstance(acknowledge_within_seconds, int) or isinstance(acknowledge_within_seconds, bool) or acknowledge_within_seconds < 60:
+            raise NoticeError("the acknowledgement window must be at least 60 seconds")
         active = current_notices(health, connectors, grants, now=now, expiry_warning_seconds=expiry_warning_seconds, escalate_to=escalate_to)
         keys = {notice["key"] for notice in active}
+        keep = keys | {_key("escalation", key) for key in keys}
+        contact = escalate_to if isinstance(escalate_to, str) and _PERSON.match(escalate_to) else None
         with self._locked() as state:
-            state["delivered"] = {key: value for key, value in state["delivered"].items() if key in keys}
-            state["offered"] = {key: value for key, value in state["offered"].items() if key in keys}
+            for table in ("delivered", "offered", "acknowledged"):
+                state[table] = {key: value for key, value in state[table].items() if key in keep}
             pending = [notice for notice in active if notice["key"] not in state["delivered"]]
             for notice in pending:
                 if len(state["offered"]) < MAX_RECORDS:
-                    state["offered"][notice["key"]] = {"kind": notice["kind"], "offeredAt": now}
+                    state["offered"][notice["key"]] = {"kind": notice["kind"], "offeredAt": now, "to": notice.get("to")}
+            for notice in active:
+                told = state["delivered"].get(notice["key"])
+                escalation_key = _key("escalation", notice["key"])
+                if (
+                    contact is None or told is None or notice["key"] in state["acknowledged"]
+                    or escalation_key in state["delivered"] or notice.get("to") == contact
+                    or now - int(told["at"]) < acknowledge_within_seconds
+                ):
+                    continue
+                kind = f"{notice['kind']}-unacknowledged"
+                hours = max(1, acknowledge_within_seconds // 3600)
+                pending.append({
+                    "key": escalation_key, "kind": kind, "family": notice.get("family"), "to": contact, "unowned": False,
+                    "text": f"{notice['text']} The owner was told about this more than {hours} hour(s) ago and has not acknowledged it.",
+                    **({"agent": notice["agent"], "connectionId": notice["connectionId"]} if "agent" in notice else {}),
+                })
+                if len(state["offered"]) < MAX_RECORDS:
+                    state["offered"][escalation_key] = {"kind": kind, "offeredAt": now, "to": contact}
         return pending
+
+    def acknowledge(self, key: str, *, by: str, via: str, now: int, escalate_to: str | None = None) -> dict[str, Any]:
+        """Record that a person has seen a delivered notice; only its named recipient, or the escalation contact, may.
+
+        Acknowledging stops the escalation of that notice. It never changes the connection's health, and a repeat changes nothing.
+        """
+        if not isinstance(key, str) or not _KEY.match(key):
+            raise NoticeError("a notice key is a 64-character lowercase hex value")
+        if not isinstance(via, str) or not _SHORT.match(via):
+            raise NoticeError("name the channel the acknowledgement came through, for example slack or inbox")
+        if not isinstance(by, str) or not _PERSON.match(by):
+            raise NoticeError("an acknowledgement must name the person who gave it")
+        with self._locked() as state:
+            offered, told = state["offered"].get(key), state["delivered"].get(key)
+            if offered is None or told is None:
+                raise NoticeError("no delivered notice has that key")
+            recipient = offered.get("to")
+            if by != recipient and not (isinstance(escalate_to, str) and by == escalate_to):
+                raise NoticeError("only the notice's recipient or the escalation contact can acknowledge it")
+            if key in state["acknowledged"]:
+                return {"key": key, **state["acknowledged"][key], "duplicate": True}
+            record = {"kind": offered["kind"], "by": by, "via": via, "at": now}
+            state["acknowledged"][key] = record
+        if self._audit is not None:
+            self._audit("connection.notice-acknowledged", by, {"noticeKey": key, "kind": record["kind"], "via": via})
+        return {"key": key, **record, "duplicate": False}
 
     def mark_notified(self, key: str, *, via: str, now: int) -> dict[str, Any]:
         """Record delivery of a notice this store offered (and through which channel); a repeat changes nothing."""

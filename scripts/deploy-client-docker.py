@@ -76,6 +76,7 @@ RUNTIME_SOURCE_PATHS = (
     pathlib.Path("platform/core/custom_api.py"),
     pathlib.Path("platform/channels/text_channel.py"),
     pathlib.Path("platform/channels/email_channel.py"),
+    pathlib.Path("platform/channels/approval_confirmation.py"),
     pathlib.Path("platform/channels/slack_channel.py"),
     pathlib.Path("platform/channels/teams_channel.py"),
     pathlib.Path("platform/channels/web_chat.py"),
