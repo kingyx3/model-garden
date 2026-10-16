@@ -246,9 +246,9 @@ class RuntimeBoundaryCase(unittest.TestCase):
         runtime.governance_root.mkdir(exist_ok=True)
         self.registry = grants.GrantRegistry(runtime.governance_root / "provider-grants", tenant="acme-dev")
         self.access = self.registry.create(
-            agent="receptionist", family="crm", provider="hubspot", connection_id="runtime-crm",
+            agent="receptionist", family="crm", provider="hubspot", connection_id="crm-main",
             isolation="own-identity", acting_identity="runtime-bot@acme.example", secret_ref=SECRET_REF,
-            scopes=["crm.create"], owner="owner@acme.example", by="operator@acme.example", now=NOW,
+            scopes=["crm.read", "crm.create"], owner="owner@acme.example", by="operator@acme.example", now=NOW,
         )
         return runtime
 
@@ -256,20 +256,28 @@ class RuntimeBoundaryCase(unittest.TestCase):
         rt = self.runtime()
         rt.upstream_transport = None
         with self.assertRaises(PermissionError):
-            rt.upstream_call(self.declaration, "create_contact", {"fields": {"name": "Alice"}})
+            rt.upstream_call("crm-main", "create_contact", {"fields": {"name": "Alice"}})
         self.assertFalse(self.backend.calls)
 
     def test_write_waits_for_exact_approval_and_includes_coworker_attribution(self):
         rt = self.runtime()
         self.approvals = mcp.SchemaApprovals(rt.governance_root / "mcp-schema-approvals", tenant="acme-dev")
         self.approvals.approve("hubspot", WRITE_TOOL, by="reviewer@platform.example", now=NOW)
-        # A runtime-readiness facade can never let an Agent invent another identity.
+        self.approvals.approve("hubspot", READ_TOOL, by="reviewer@platform.example", now=NOW)
+        connections = runtime_module.MCP_CONNECTIONS.McpConnectionStore(
+            rt.governance_root / "mcp-connections", tenant="acme-dev"
+        )
+        connections.stage("crm-main", agent="receptionist", declaration=self.declaration,
+                          by="operator@acme.example", now=NOW)
+        connections.activate("crm-main", agent="receptionist", consented_by="owner@acme.example",
+                             by="operator@acme.example", offered=[READ_TOOL, WRITE_TOOL],
+                             approvals=self.approvals, grants=self.registry, now=NOW + 1)
         args = {"fields": {"name": "Alice"}}
-        first = rt.upstream_call(self.declaration, "create_contact", args)
+        first = rt.upstream_call("crm-main", "create_contact", args)
         self.assertEqual(first["status"], "pending-approval")
         self.assertFalse(self.backend.calls)
         approval.decide(rt.approval_root, first["request"]["requestId"], approved=True, approver="owner@acme.example")
-        second = rt.upstream_call(self.declaration, "create_contact", args)
+        second = rt.upstream_call("crm-main", "create_contact", args)
         self.assertEqual(second["status"], "executed")
         self.assertEqual(len(self.backend.calls), 1)
         events = [json.loads(x) for x in rt.audit_path.read_text().splitlines()]
@@ -278,6 +286,52 @@ class RuntimeBoundaryCase(unittest.TestCase):
         self.assertIn("runtime-bot@acme.example", audit)
         self.assertNotIn(SECRET, audit)
         self.assertNotIn(SECRET_REF, audit)
+
+    def test_approval_is_invalidated_by_route_replacement_or_independent_disable(self):
+        rt = self.runtime()
+        schema = mcp.SchemaApprovals(rt.governance_root / "mcp-schema-approvals", tenant="acme-dev")
+        schema.approve("hubspot", WRITE_TOOL, by="reviewer@platform.example", now=NOW)
+        schema.approve("hubspot", READ_TOOL, by="reviewer@platform.example", now=NOW)
+        store = runtime_module.MCP_CONNECTIONS.McpConnectionStore(
+            rt.governance_root / "mcp-connections", tenant="acme-dev"
+        )
+        store.stage("crm-main", agent="receptionist", declaration=self.declaration,
+                    by="operator@acme.example", now=NOW)
+        store.activate("crm-main", agent="receptionist", consented_by="owner@acme.example",
+                       by="operator@acme.example", offered=[READ_TOOL, WRITE_TOOL],
+                       approvals=schema, grants=self.registry, now=NOW + 1)
+        args = {"fields": {"name": "Alice"}}
+        pending = rt.upstream_call("crm-main", "create_contact", args)
+        self.assertEqual(pending["status"], "pending-approval")
+        approval.decide(rt.approval_root, pending["request"]["requestId"], approved=True,
+                        approver="owner@acme.example")
+        store.disable("crm-main", agent="receptionist", by="operator@acme.example")
+        with self.assertRaises(PermissionError):
+            rt.upstream_call("crm-main", "create_contact", args)
+        self.assertEqual(len(self.backend.calls), 0)
+        # Even reactivating exactly the same endpoint with the same grant must issue a
+        # fresh activation, not consume the earlier approval decision.
+        store.activate("crm-main", agent="receptionist", consented_by="owner@acme.example",
+                       by="operator@acme.example", offered=[READ_TOOL, WRITE_TOOL],
+                       approvals=schema, grants=self.registry, now=NOW + 2)
+        restarted = rt.upstream_call("crm-main", "create_contact", args)
+        self.assertEqual(restarted["status"], "pending-approval")
+        self.assertNotEqual(restarted["request"]["requestId"], pending["request"]["requestId"])
+        self.assertFalse(self.backend.calls)
+        store.disable("crm-main", agent="receptionist", by="operator@acme.example")
+        # Re-registration requires owner consent again; the original approval must not
+        # grant authority to a modified upstream endpoint even for the same action.
+        replacement = dict(self.declaration)
+        replacement["url"] = "https://other.hubspot.example/mcp"
+        store.stage("crm-main", agent="receptionist", declaration=replacement,
+                    by="operator@acme.example", now=NOW + 2, replace=True)
+        store.activate("crm-main", agent="receptionist", consented_by="owner@acme.example",
+                       by="operator@acme.example", offered=[READ_TOOL, WRITE_TOOL],
+                       approvals=schema, grants=self.registry, now=NOW + 3)
+        new = rt.upstream_call("crm-main", "create_contact", args)
+        self.assertEqual(new["status"], "pending-approval")
+        self.assertNotEqual(new["request"]["requestId"], pending["request"]["requestId"])
+        self.assertFalse(self.backend.calls)
 
 
 if __name__ == "__main__":

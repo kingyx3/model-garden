@@ -239,6 +239,12 @@ Three more vendor-neutral, credential-free pieces for the upstream-only directio
 
 Open for all three: the sidecar wiring and a real MCP or managed client, real vault and enrollment page, tenant RBAC over who may enroll, approve or promote, per-coworker identity provisioning (#129), a registry fetcher, and live evidence for any route.
 
+## Approved upstream MCP activation contract (v0.8.4)
+
+A deployed coworker no longer passes arbitrary MCP server definitions to the internal executor. `McpConnectionStore` is a private per-tenant activation registry: an operator **stages** an explicit, catalog-mapped and risk-matched declaration (disabled); the client owner **consents**; an operator **activates** only after upstream schema fingerprint approvals and the coworker's own matching provider grant exist. Connection IDs must match grants, and status survives restart. `disable` and `replace` make the connection unusable immediately; replacement needs renewed schema review and owner consent. Public status contains only connection ID, provider and digest, not a credential or reference.
+
+Call-time resolution validates the compiled coworker, tenant/environment, selected Tool, provider, grant and activation digest; a changed tool schema or connection revision fails closed. Material approval identifiers include a digest of connection revision and grant to prevent cross-route approval reuse. The implementation has credential-free tests; live source transport, hosted owner enrollment/authentication, actual vault-backed secret input and customer proof **remain unimplemented**, so no external provider becomes live merely by staging an MCP connection.
+
 ## Upstream execution groundwork (v0.8.3)
 
 The runtime now joins the existing MCP declaration/schema approvals, endpoint DNS pinning and per-coworker grant registry with a guarded internal executor and the normal Tool policy, exact-action approval and audit. This is a **credential-free exercised seam**, not a deployed live MCP connector: no arbitrary outbound MCP transport, OAuth integration onboarding, dynamic externally exposed Tool or provider tenant proof exists yet. The injected transport must enforce pinned-address TLS/redirect safety and is refused when absent. Provider statuses stay planned; see [governed tools](governed-tools.md#governed-upstream-mcp-execution-seam-v083).

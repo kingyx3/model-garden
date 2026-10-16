@@ -67,6 +67,7 @@ def prepare(
     enabled_tools: Iterable[str],
     originator_permissions: Iterable[str],
     now: int,
+    connection_id: str | None = None,
 ) -> dict[str, Any]:
     """Resolve only the authenticated coworker's grant; no network or secrets are read."""
     mcp = _mcp()
@@ -83,6 +84,7 @@ def prepare(
     grant = registry.resolve(
         attested_agent=attested_agent, family=tool.split(".", 1)[0], tool=tool,
         originator_permissions=originator_permissions, enabled_tools=enabled_tools, now=now,
+        connection_id=connection_id,
     )
     if grant["provider"] != server["name"] or grant["secretRef"] != server["credentialRef"]:
         raise GatewayError("the coworker grant does not belong to this server and credential")
@@ -115,8 +117,10 @@ def invoke(
         raise GatewayError("arguments must be an object")
     _bounded_json(arguments, MAX_ARGUMENT_BYTES, "arguments")
     fresh = recheck()
-    if (fresh["grant"]["grantId"] != route["grant"]["grantId"] or fresh["declaration"] != route["declaration"]
-            or fresh["server"] != route["server"]):
+    if (fresh["grant"] != route["grant"] or fresh["declaration"] != route["declaration"]
+            or fresh["server"] != route["server"] or fresh.get("connectionRevision") != route.get("connectionRevision")
+            or fresh.get("reviewedFingerprints") != route.get("reviewedFingerprints")
+            or fresh.get("activationId") != route.get("activationId")):
         raise GatewayError("the approved connection changed; retry from a fresh request")
     server, upstream = fresh["server"], fresh["upstream"]
     qualified = _endpoint().qualify(server["url"], dns_resolver)
@@ -139,14 +143,24 @@ def invoke(
             if sum(1 for t in offered if isinstance(t, Mapping) and t.get("name") == upstream) != 1:
                 raise GatewayError("duplicate upstream operation name")
             gate = _mcp().call_gate(fresh["declaration"], selected, approvals)
+            reviewed = route.get("reviewedFingerprints")
+            if reviewed is not None and reviewed.get(upstream) != _mcp().fingerprint(selected):
+                raise GatewayError("operation differs from the last activated review")
             if gate["tool"] != route["tool"] or gate["risk"] != route["risk"]:
                 raise GatewayError("upstream operation mapping changed")
             schema = selected.get("inputSchema")
             if not isinstance(schema, Mapping):
                 raise GatewayError("upstream input schema is absent")
-            Draft202012Validator(schema).validate(dict(arguments))
+            try:
+                Draft202012Validator.check_schema(schema)
+                Draft202012Validator(schema).validate(dict(arguments))
+            except Exception:
+                # Invalid schemas and validation errors may embed confidential arguments.
+                raise GatewayError("upstream operation input is invalid") from None
             latest = recheck()
-            if latest["grant"]["grantId"] != route["grant"]["grantId"]:
+            if (latest["grant"] != route["grant"] or latest.get("connectionRevision") != route.get("connectionRevision")
+                    or latest.get("reviewedFingerprints") != route.get("reviewedFingerprints")
+                    or latest.get("activationId") != route.get("activationId")):
                 raise GatewayError("connection revoked or replaced before execution")
             result = session.call_tool(upstream, dict(arguments))
     except (GatewayError, _mcp().SchemaDriftError, ValidationError):
