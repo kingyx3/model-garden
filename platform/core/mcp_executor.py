@@ -67,6 +67,7 @@ def prepare(
     enabled_tools: Iterable[str],
     originator_permissions: Iterable[str],
     now: int,
+    connection_id: str | None = None,
 ) -> dict[str, Any]:
     """Resolve only the authenticated coworker's grant; no network or secrets are read."""
     mcp = _mcp()
@@ -83,6 +84,7 @@ def prepare(
     grant = registry.resolve(
         attested_agent=attested_agent, family=tool.split(".", 1)[0], tool=tool,
         originator_permissions=originator_permissions, enabled_tools=enabled_tools, now=now,
+        connection_id=connection_id,
     )
     if grant["provider"] != server["name"] or grant["secretRef"] != server["credentialRef"]:
         raise GatewayError("the coworker grant does not belong to this server and credential")
