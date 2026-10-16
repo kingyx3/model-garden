@@ -1,7 +1,7 @@
 {
   "apiVersion": "modelgarden.ai/v1",
   "kind": "IntegrationRegistry",
-  "registryVersion": "0.8.0",
+  "registryVersion": "0.8.1",
   "providers": [
     {
       "id": "google-calendar",
