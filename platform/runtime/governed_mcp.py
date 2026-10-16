@@ -55,6 +55,8 @@ MEMORY = _load_module("model_garden_runtime_memory", ROOT / "platform" / "core" 
 POLICY_DEPLOY = _load_module("model_garden_runtime_policy_deploy", ROOT / "platform" / "core" / "policy_deploy.py")
 KNOWLEDGE_DEPLOY = _load_module("model_garden_runtime_knowledge_deploy", ROOT / "platform" / "core" / "knowledge_deploy.py")
 GRANT_READINESS = _load_module("model_garden_runtime_grant_readiness", ROOT / "platform" / "core" / "grant_readiness.py")
+PROVIDER_GRANTS = _load_module("model_garden_runtime_provider_grants", ROOT / "platform" / "core" / "provider_grants.py")
+MCP_EXECUTOR = _load_module("model_garden_runtime_mcp_executor", ROOT / "platform" / "core" / "mcp_executor.py")
 AUTH_FAILURE = re.compile(r"\((401|403)\)")
 
 
@@ -117,6 +119,9 @@ class GovernedToolRuntime:
         environ: Mapping[str, str] | None = None,
         principal_resolver=None,
         conversation_resolver=None,
+        upstream_transport=None,
+        upstream_dns_resolver=None,
+        upstream_secret_resolver=None,
     ) -> None:
         self.desired_state = _load_json_object(desired_state_path, "compiled desired state")
         if self.desired_state.get("schemaVersion") != 1:
@@ -134,6 +139,10 @@ class GovernedToolRuntime:
         self.principal_resolver = principal_resolver
         # A channel gateway, not the model, attests the current conversation identifier.
         self.conversation_resolver = conversation_resolver
+        # An approved transport is injected by the deployment; no arbitrary model HTTP client.
+        self.upstream_transport = upstream_transport
+        self.upstream_dns_resolver = upstream_dns_resolver
+        self.upstream_secret_resolver = upstream_secret_resolver
         self.read_policy = GOVERN.parse_read_policy(self.environ.get("MODEL_GARDEN_READ_AUDIT"))
         digest = hashlib.sha256(GOVERN._canonical_json(self.desired_state).encode("utf-8")).hexdigest()
         self.agent_version = f"sha256:{digest[:16]}"
@@ -264,6 +273,7 @@ class GovernedToolRuntime:
         read_receipt=None,
         external_object_ref=None,
         tier: int = 1,
+        ledger_extra: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         identity, governance_context, principal_access = self._caller()
         request = GOVERN.build_action_request(
@@ -281,7 +291,7 @@ class GovernedToolRuntime:
                 event = GOVERN.make_audit_event(
                     "authorization", request, outcome="deny",
                     details={"reason": f"connection-{state}"},
-                    ledger=self._ledger(provider=provider, justification=None, tier=tier),
+                    ledger={**self._ledger(provider=provider, justification=None, tier=tier), **(ledger_extra or {})},
                 )
                 GOVERN.append_audit_event(self.audit_path, event)
                 raise PermissionError(f"Tool {tool_name!r} unavailable: {family} connection {state}")
@@ -298,7 +308,7 @@ class GovernedToolRuntime:
                 initiating_user=identity,
                 governance_context=governance_context,
                 audit_path=self.audit_path,
-                ledger=self._ledger(provider=provider, justification=justification, tier=tier),
+                ledger={**self._ledger(provider=provider, justification=justification, tier=tier), **(ledger_extra or {})},
                 principal_access=principal_access,
                 read_receipt=read_receipt,
                 read_policy=self.read_policy,
@@ -325,6 +335,62 @@ class GovernedToolRuntime:
             if family is not None:
                 self._record_health(family, "healthy")
         return result
+
+    def upstream_call(
+        self,
+        declaration: Mapping[str, Any],
+        upstream: str,
+        arguments: dict[str, Any],
+        *,
+        justification: str | None = None,
+    ) -> dict[str, Any]:
+        """Internal approved MCP execution seam; never exposed as a raw model Tool.
+
+        Activation is impossible on a merely planned provider or without an explicitly
+        installed, pinned-address external transport and independently scoped grant.
+        The normal Tool policy and exact-action approval run before outbound execution.
+        """
+        if not (self.upstream_transport and self.upstream_dns_resolver and self.upstream_secret_resolver):
+            raise PermissionError("no approved upstream MCP transport is installed")
+        server = MCP_EXECUTOR._mcp().validate_server(declaration)
+        entry = server["tools"].get(upstream)
+        if entry is None:
+            raise PermissionError("upstream operation is not allowed")
+        tool_name = entry["tool"]
+        selected = GOVERN._selected_tool(self.desired_state, tool_name)
+        if not selected or selected.get("spec", {}).get("type") != "mcp" or selected["spec"].get("risk") != entry["risk"]:
+            raise PermissionError("only compiled, risk-matched MCP Tools may run")
+        manifest = self.capabilities()
+        family = tool_name.split(".", 1)[0]
+        bound = next((item for item in manifest.get("capabilities", []) if item.get("family") == family), None)
+        if not bound or bound.get("status") != "available" or bound.get("provider") != server["name"] or bound.get("tier") != 2:
+            raise PermissionError("upstream capability is not approved and available in this environment")
+        tenant = GRANT_READINESS.tenant_of(manifest)
+        if tenant is None:
+            raise PermissionError("no attested tenant/environment in capability manifest")
+        registry = PROVIDER_GRANTS.GrantRegistry(self.governance_root / GRANT_READINESS.REGISTRY_DIR, tenant=tenant)
+        agent = GOVERN._agent_name(self.desired_state)
+        selected_names = [item.get("metadata", {}).get("name") for item in self.desired_state.get("tools", [])]
+        def check():
+            return MCP_EXECUTOR.prepare(
+                declaration, registry=registry, tenant=tenant, attested_agent=agent,
+                upstream=upstream, enabled_tools=selected_names,
+                originator_permissions=(tool_name,), now=int(time.time()),
+            )
+        route = check()
+        def execute(exact):
+            return MCP_EXECUTOR.invoke(
+                route, exact, approvals=MCP_EXECUTOR._mcp().SchemaApprovals(
+                    self.governance_root / "mcp-schema-approvals", tenant=tenant
+                ), transport_factory=self.upstream_transport, secret_resolver=self.upstream_secret_resolver,
+                dns_resolver=self.upstream_dns_resolver, recheck=check,
+            )
+        return self._execute(
+            tool_name, arguments, execute, family=family, provider=route["ledger"]["provider"],
+            tier=2, justification=justification, ledger_extra={
+                key: value for key, value in route["ledger"].items() if key not in ("provider", "tier")
+            }, external_object_ref=lambda result: result.get("externalObjectRef"),
+        )
 
     def kb_search(
         self,
