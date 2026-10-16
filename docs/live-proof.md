@@ -26,9 +26,8 @@ runtime:
   profile: receptionist
   model_credential_ref: secret://model/dev
 connectors:
-  google_calendar:
-    token_ref: secret://google/dev-calendar
-    calendar_id: primary
+  kb: {provider: text-knowledge, tier: 0}
+  crm: {provider: built-in-crm, tier: 0}
 channels:
   voice:
     provider: livekit
@@ -47,8 +46,6 @@ The local/reference preflight now matches the actual runtime credential contract
 
 ```bash
 export OPENAI_API_KEY='...'
-export MODEL_GARDEN_GOOGLE_CALENDAR_TOKEN='...'
-export MODEL_GARDEN_GOOGLE_CALENDAR_ID='primary'  # optional
 export LIVEKIT_URL='wss://...'
 export LIVEKIT_API_KEY='...'
 export LIVEKIT_API_SECRET='...'
@@ -56,7 +53,7 @@ export LIVEKIT_SIP_TRUNK_ID='...'
 python3 scripts/preflight-live-mvp.py --json
 ```
 
-The preflight checks presence only and never prints secret values.
+The preflight never prints secret values. Until the upstream governed Calendar execution path and a real tenant proof are implemented, it explicitly reports booking as **blocked**, even if a legacy Calendar token is present.
 
 ## Evidence-producing acceptance
 
@@ -64,7 +61,7 @@ After the runtime is deployed, run the normal acceptance scenario:
 
 1. make a real inbound SIP call;
 2. complete at least one real model turn;
-3. run Calendar availability and one approval-gated booking or other governed action;
+3. run an implemented governed action. Calendar availability/booking remains blocked until a vetted upstream MCP provider and separate tenant proof exist;
 4. exercise either the human-transfer path or message-capture fallback;
 5. verify the call ends cleanly;
 6. run the proof collector on the Docker host.
@@ -114,7 +111,7 @@ The following remain external evidence or founder actions rather than missing pl
 - legal entity, bank/payment collection, bookkeeping, tax/invoicing setup;
 - legal review of commercial/privacy terms for the operating jurisdictions and client sectors;
 - insurance purchase/decision;
-- real GCP/model/Calendar/LiveKit credentials, live scoped Google or Microsoft Calendar authorization/renewal when selected, and the post-revocation keyless redeploy;
+- real GCP/model/LiveKit credentials, an approved upstream integration with per-coworker scoped authorizations for each chosen business system, and the post-revocation keyless redeploy;
 - an actual inbound call and real business transaction;
 - real client economics, ROI, testimonial/case-study/referral permission and pipeline outcomes.
 
