@@ -184,7 +184,7 @@ class Case(unittest.TestCase):
 
     def test_the_same_interaction_files_through_either_crm_with_the_same_states(self):
         runs = {}
-        for name, executor, arguments in (("hubspot", self.upstream.log_interaction, self.hs()),
+        for name, executor, arguments in (("upstream", self.upstream.log_interaction, self.hs()),
                                           ("built-in", lambda args: self.store.log_interaction(args, now=T0), self.tier0())):
             ledger = sync.SyncLedger(self.root / f"swap-{name}", tenant="acme-prod")
             first = filing.file_interaction(ledger, executor, arguments, channel="voice", external_id="CA-7", interaction_type="call", now=T0)
