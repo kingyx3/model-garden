@@ -80,6 +80,10 @@ LEDGER_STRING_KEYS = (
     "capability",
     "provider",
     "externalObjectRef",
+    "grantId",
+    "connectionId",
+    "actingIdentity",
+    "upstreamTool",
 )
 LEDGER_INT_KEYS = ("tier",)
 _BOUNDED_KEYS = frozenset({"originatingPrincipal", "channel", "triggerRef", "taskId", "parentRequestId"})
