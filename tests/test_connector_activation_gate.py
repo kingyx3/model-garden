@@ -134,9 +134,11 @@ class ConnectorActivationGateTests(unittest.TestCase):
         self.assertEqual(tickets["fallback"], "human-handoff")
 
     def test_deployment_rejects_fake_binding_even_if_compilation_was_bypassed(self):
-        desired = compiler.compile_workspace(ROOT / "examples/workspace", "receptionist")[0]
+        desired = compiler.compile_workspace(self.active_workspace(), "receptionist")[0]
         fake = {"environment": "dev", "connectors": {
-            "calendar": {"provider": "not-real", "tier": 1},
+            "calendar": {"provider": "not-real", "tier": 2},
+            "kb": {"provider": "text-knowledge", "tier": 0},
+            "crm": {"provider": "built-in-crm", "tier": 0},
         }}
         with self.assertRaisesRegex(ValueError, "book-appointment"):
             deployer._capability_manifest(desired, fake)
