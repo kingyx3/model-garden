@@ -24,21 +24,17 @@ deployer = load("deployer_connector_activation", "scripts/deploy-client-docker.p
 
 
 class ConnectorActivationGateTests(unittest.TestCase):
-    def test_real_adapters_are_usable_but_unproven_without_live_credentials(self):
-        for provider in ("google", "microsoft"):
+    def test_retired_calendar_adapters_never_unlock_skills(self):
+        for provider in ("google", "microsoft", "google-calendar", "microsoft-calendar"):
             binding = {"environment": "dev", "connectors": {
-                "calendar": {"provider": provider, "tier": 1, "token_ref": "secret://calendar/dev"},
+                "calendar": {"provider": provider, "tier": 2, "token_ref": "secret://calendar/dev"},
                 "kb": {"provider": "text-knowledge", "tier": 0},
                 "crm": {"provider": "built-in-crm", "tier": 0},
             }}
-            self.assertEqual(capabilities.bound_providers(binding)["calendar"]["provider"], provider)
-            compiled = compiler.compile_workspace(ROOT / "examples/workspace", "receptionist",
-                                                  environment_binding=binding)[0]
-            self.assertEqual(compiled["capabilities"]["resolution"][0]["status"], "bound")
-            manifest = capabilities.build_manifest(compiled, binding)
-            calendar = next(x for x in manifest["capabilities"] if x["family"] == "calendar")
-            self.assertEqual(calendar["health"], "unknown")
-            self.assertNotIn("secret://", json.dumps(manifest))
+            self.assertNotIn("calendar", capabilities.bound_providers(binding))
+            with self.assertRaisesRegex(ValueError, "book-appointment"):
+                compiler.compile_workspace(ROOT / "examples/workspace", "receptionist",
+                                           environment_binding=binding)
 
     def test_planned_or_unregistered_provider_cannot_unlock_required_skill(self):
         for provider in ("hubspot", "jira", "not-yet-built"):
@@ -56,7 +52,7 @@ class ConnectorActivationGateTests(unittest.TestCase):
             self.assertEqual(book["dependencies"][0]["status"], "missing")
 
     def test_correct_provider_wrong_tier_does_not_unlock_skill(self):
-        for tier in (0, 2, 3, 4):
+        for tier in (0, 1, 2, 3, 4):
             binding = {"environment": "dev", "connectors": {
                 "calendar": {"provider": "google", "tier": tier}
             }}
@@ -142,7 +138,7 @@ class ConnectorActivationGateTests(unittest.TestCase):
     def test_legacy_calendar_binding_keeps_backward_compatibility(self):
         for key, expected in (("google_calendar", "google"), ("microsoft_calendar", "microsoft")):
             binding = {"connectors": {key: {"token_ref": "secret://calendar/dev"}}}
-            self.assertEqual(capabilities.bound_providers(binding)["calendar"]["provider"], expected)
+            self.assertNotIn("calendar", capabilities.bound_providers(binding))
 
 
 if __name__ == "__main__":
