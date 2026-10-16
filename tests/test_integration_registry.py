@@ -108,7 +108,8 @@ class IntegrationRegistryTests(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("| Microsoft Graph Calendar |", result.stdout)
-        self.assertIn("built-credential-free", result.stdout)\n        self.assertIn("| governed-mcp | 2 | planned |", result.stdout)
+        self.assertIn("built-credential-free", result.stdout)
+        self.assertIn("| governed-mcp | 2 | planned |", result.stdout)
         self.assertNotIn("| live |", result.stdout)
         self.assertIn("https://github.com/kingyx3/model-garden/issues/66", result.stdout)
 
