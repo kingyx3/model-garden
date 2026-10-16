@@ -118,3 +118,7 @@ The same module can file an email once an adapter exists: a sender verified by t
 ## Status
 
 The contract, directory and governance wiring are implemented and tested credential-free. The Slack, Teams, email and web chat adapters above implement the verification and identity rules credential-free and have no live proof; an email provider adapter (poller) and a hosted web chat page are separate stories and must implement this contract rather than bypass it. The support-mailbox handler has no mailbox poller, model or live proof either.
+
+## Coworker memory in authenticated chat
+
+The governed MCP surface exposes `memory_remember`, `memory_list` and `memory_delete` for mapped client members. Chat gateways must supply the verified `Principal` and an attested conversation identifier; without them, access fails closed. The model never chooses an identity, another conversation ID or another Agent's memory. Entries default to the current conversation; `agent` and `client` scopes are explicit. Lists include only the current member's entries; deletion is owner-only unless the transport-attested member has the `admin` role. Content is stored in the private governed volume; ledger events hold IDs and hashes, not text. Restricted content is refused by default until an authenticated, reviewed policy path exists. Admin export/purge remain operator-only via `runtime-memory.py`; this is not a public admin chat command. Runtime-native memory implementations may replace the store only if they preserve this contract.

@@ -26,6 +26,7 @@ SCHEMA_DIR = ROOT / "contracts" / "v1"
 SCHEMAS = {
     "Agent": "agent.schema.json",
     "Skill": "skill.schema.json",
+    "Skillset": "skillset.schema.json",
     "ModelProfile": "model-profile.schema.json",
     "Tool": "tool.schema.json",
     "KnowledgeSource": "knowledge-source.schema.json",
@@ -98,6 +99,17 @@ def _load_knowledge_deploy():
 KNOWLEDGE_DEPLOY = _load_knowledge_deploy()
 
 
+def _load_skillsets():
+    spec = importlib.util.spec_from_file_location("model_garden_compiler_skillsets", ROOT / "platform" / "core" / "skillsets.py")
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+    return module
+
+
+SKILLSETS = _load_skillsets()
+
+
 def load_validators() -> dict[str, Draft202012Validator]:
     validators: dict[str, Draft202012Validator] = {}
     for kind, filename in SCHEMAS.items():
@@ -152,6 +164,16 @@ def load_workspace(workspace: pathlib.Path, library_roots: tuple[pathlib.Path, .
                 errors.append(f"{path}:{location}: {error.message}")
             if schema_errors:
                 continue
+            if kind == "Skillset":
+                try:
+                    SKILLSETS.validate_skillset({
+                        "name": document["metadata"]["name"],
+                        "version": document["metadata"]["version"],
+                        **document["spec"],
+                    })
+                except SKILLSETS.SkillsetError as exc:
+                    errors.append(f"{path}: {exc}")
+                    continue
             if kind == "Tool":
                 contract_errors = CAPABILITIES.tool_contract_errors(document)
                 errors.extend(f"{path}: {error}" for error in contract_errors)
@@ -225,7 +247,50 @@ def materialize_knowledge_file(workspace, name, resource, source_paths, source_r
     return {"source": label, "content": text, "sha256": report["sha256"], "sectionCount": report["sectionCount"]}, []
 
 
+def expand_agent_skillsets(agent, resources):
+    """Resolve pinned Skillset references independently for one Agent; no Tool grants are introduced."""
+    spec = agent["spec"]
+    if not spec.get("skillsets") and not spec.get("enabledSkills"):
+        return agent, None  # exact backward compatibility for legacy direct-Skill workspaces
+    catalog = {}
+    for bundle in resources["Skillset"].values():
+        metadata = bundle["metadata"]
+        catalog.setdefault(metadata["name"], {})[metadata["version"]] = {
+            "name": metadata["name"], "version": metadata["version"], **bundle["spec"],
+        }
+    versions = {
+        name: skill.get("metadata", {}).get("version", "0.0.0")
+        for name, skill in resources["Skill"].items()
+    }
+    try:
+        rows = SKILLSETS.resolve(
+            {"skills": spec.get("skills", []), "skillsets": spec.get("skillsets", [])},
+            catalog, versions,
+        )
+        enabled = set(spec.get("skills", [])) | set(spec.get("enabledSkills", []))
+        disabled = set(spec.get("disabledSkills", []))
+        conflict = enabled.intersection(disabled).intersection(spec.get("enabledSkills", []))
+        if conflict:
+            raise SKILLSETS.SkillsetError(
+                "Skills cannot be simultaneously enabled and disabled: " + ", ".join(sorted(conflict))
+            )
+        states = SKILLSETS.activation(rows, enabled - disabled)
+    except SKILLSETS.SkillsetError as exc:
+        raise ValueError(f"Workspace compilation failed: Agent {agent['metadata']['name']!r}: {exc}") from exc
+    # The runtime understands only individual Skill selections. Bundles are declarative provenance, never
+    # a permission source; disabled members have no instructions or exclusive Tools in desired state.
+    effective = {
+        **agent,
+        "spec": {
+            **spec,
+            **SKILLSETS.compile_fields(states),
+        },
+    }
+    return effective, states
+
+
 def resolve_agent(workspace, agent, resources, source_paths, source_roots, environment_binding=None):
+    agent, skill_selection = expand_agent_skillsets(agent, resources)
     name = agent["metadata"]["name"]
     spec = agent["spec"]
     errors: list[str] = []
@@ -357,6 +422,8 @@ def resolve_agent(workspace, agent, resources, source_paths, source_roots, envir
         compiled["knowledgeContent"] = knowledge_content
     if capabilities is not None:
         compiled["capabilities"] = capabilities
+    if skill_selection is not None:
+        compiled["skillSelection"] = skill_selection
     if disabled:
         # Preserve only capability declarations for disabled Skills. Their
         # instructions and Tools are never exported as executable resources.
@@ -411,7 +478,8 @@ def workspace_readiness(
     """Per-Skill capability readiness for each selected Agent, without failing closed."""
     resources, _, _ = load_workspace(workspace, library_roots)
     report = []
-    for agent in _selected_agents(resources, agent_name):
+    for selected in _selected_agents(resources, agent_name):
+        agent, _ = expand_agent_skillsets(selected, resources)
         configured = agent["spec"].get("skills", [])
         disabled = set(agent["spec"].get("disabledSkills", []))
         unknown_disabled = sorted(disabled - set(configured))
@@ -446,7 +514,8 @@ def workspace_approvals(
     """Per-Skill view of which Tool actions run automatically, need approval or are denied."""
     resources, _, _ = load_workspace(workspace, library_roots)
     report = []
-    for agent in _selected_agents(resources, agent_name):
+    for selected in _selected_agents(resources, agent_name):
+        agent, _ = expand_agent_skillsets(selected, resources)
         spec = agent["spec"]
         name = agent["metadata"]["name"]
         missing = [
