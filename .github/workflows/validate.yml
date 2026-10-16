@@ -103,14 +103,27 @@ jobs:
           grep -q '"name": "reasoning.high"' /tmp/account-researcher.json
           python3 scripts/compile-workspace.py examples/workspace --agent receptionist --output /tmp/receptionist.json
           grep -q '"name": "receptionist"' /tmp/receptionist.json
-          grep -q '"name": "book-appointment"' /tmp/receptionist.json
-          grep -q '"name": "calendar.book"' /tmp/receptionist.json
-          grep -q '"name": "business-information"' /tmp/receptionist.json
+          python3 - <<'PY'
+          import json
+          with open("/tmp/receptionist.json", encoding="utf-8") as source:
+              state = json.load(source)
+          skills = {item["metadata"]["name"] for item in state["skills"]}
+          tools = {item["metadata"]["name"] for item in state["tools"]}
+          knowledge = {item["metadata"]["name"] for item in state["knowledge"]}
+          disabled = {item["metadata"]["name"] for item in state.get("disabledSkillDeclarations", [])}
+          assert "book-appointment" not in skills, "retired booking must not run by default"
+          assert "book-appointment" in disabled, "portable booking declaration must remain discoverable"
+          assert not ({"calendar.availability", "calendar.book"} & tools), "no native Calendar execution"
+          assert {"answer-faq", "log-conversation"} <= skills
+          assert {"kb.search", "crm.create", "crm.log-interaction"} <= tools
+          assert "business-information" in knowledge
+          PY
       - name: Materialize reference Hermes profile
         run: |
           python3 scripts/provision-hermes-profile.py /tmp/receptionist.json /tmp/hermes-receptionist
           grep -q 'approved-openai-model' /tmp/hermes-receptionist/config.yaml
-          grep -q 'Do not invent availability' /tmp/hermes-receptionist/skills/model-garden/book-appointment/SKILL.md
+          grep -q 'answer-faq' /tmp/hermes-receptionist/skills/model-garden/answer-faq/SKILL.md
+          test ! -e /tmp/hermes-receptionist/skills/model-garden/book-appointment/SKILL.md
           test ! -e /tmp/hermes-receptionist/.env
           python3 scripts/provision-hermes-profile.py /tmp/receptionist.json /tmp/hermes-receptionist | grep -q 'already matches desired state'
       - name: Validate shell scripts

@@ -42,11 +42,14 @@ class StatusConsistencyTests(unittest.TestCase):
         for sentence in (
             "The `built-in-crm` log is not yet implemented.",
             "Text Knowledge (`text-knowledge`) is NEXT on the roadmap.",
-            "Google Calendar is planned.",
+            "The `built-in-crm` provider is NEXT.",
         ):
             errors = self.errors(f"# Docs\n\n{sentence}\n")
             self.assertEqual(len(errors), 1, (sentence, errors))
             self.assertIn("docs/contracts.md:3", errors[0])
+
+    def test_a_retired_calendar_provider_can_be_described_as_planned(self):
+        self.assertEqual(self.errors("# Docs\\n\\nGoogle Calendar is planned.\\n"), [])
 
     def test_a_stale_claim_about_the_reference_receptionist_is_reported(self):
         stale = "**Not yet delivered:** the reference receptionist does not yet declare `kb` and `crm` as required capabilities."

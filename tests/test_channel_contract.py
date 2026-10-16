@@ -206,10 +206,15 @@ class ContractCase(unittest.TestCase):
     def runtime(self, surface: Surface, principal, calendar: FakeCalendar):
         sub = self.root / surface.name
         sub.mkdir(exist_ok=True)
+        binding = {"connectors": {"kb": {"provider": "text-knowledge", "tier": 0},
+                                  "crm": {"provider": "built-in-crm", "tier": 0}}}
+        manifest_file = sub / "manifest.json"
+        manifest_file.write_text(json.dumps(runtime_module.CAPABILITIES.build_manifest(self.desired, binding)))
         return runtime_module.GovernedToolRuntime(
             self.root / "desired.json", sub / "audit.jsonl", sub / "approvals",
-            environ={"MODEL_GARDEN_GOOGLE_CALENDAR_TOKEN": "t", "MODEL_GARDEN_INITIATING_IDENTITY": "runtime:hermes"},
-            calendar_transport=calendar, principal_resolver=lambda: principal,
+            environ={"MODEL_GARDEN_CAPABILITY_MANIFEST": str(manifest_file),
+                     "MODEL_GARDEN_INITIATING_IDENTITY": "runtime:hermes"},
+            principal_resolver=lambda: principal,
         )
 
     def audit(self, surface: Surface) -> list[dict]:
@@ -250,18 +255,17 @@ class SharedContractTests(ContractCase):
             self.assertTrue(principal.identity.startswith(f"unmapped:{surface.name}:"))
             calendar = FakeCalendar()
             runtime = self.runtime(surface, principal, calendar)
-            self.assertEqual(runtime.calendar_availability(**WINDOW)["status"], "executed")
+            self.assertEqual(runtime.kb_search(query="opening hours")["status"], "executed")
             with self.assertRaises(PermissionError):
-                runtime.calendar_book(**WINDOW)
+                runtime.crm_create(fields={"name": "Demo"})
             denial = self.audit(surface)[-1]
             self.assertEqual((denial["outcome"], denial["details"]["reason"]), ("deny", "principal-not-authorized"))
             self.assertEqual(denial["governance"]["channel"], surface.name)
-            self.assertEqual(len(calendar.calls), 1)  # only the read reached the provider
 
     def test_a_mapped_member_needs_approval_for_a_write_and_the_request_names_them_and_the_surface(self):
         for surface in self.each():
             principal = DIRECTORY.principal_for(surface.message("bob"))
-            pending = self.runtime(surface, principal, FakeCalendar()).calendar_book(**WINDOW)
+            pending = self.runtime(surface, principal, FakeCalendar()).crm_create(fields={"name": "Demo"})
             self.assertEqual(pending["status"], "pending-approval")
             self.assertEqual(pending["request"]["initiatingUser"], "bob@acme.example")
             self.assertEqual(pending["request"]["governance"]["channel"], surface.name)
@@ -269,7 +273,7 @@ class SharedContractTests(ContractCase):
     def test_only_a_mapped_approvers_structured_click_decides_and_the_approver_is_recorded(self):
         for surface in self.each():
             principal = DIRECTORY.principal_for(surface.message("bob"))
-            pending = self.runtime(surface, principal, FakeCalendar()).calendar_book(**WINDOW)
+            pending = self.runtime(surface, principal, FakeCalendar()).crm_create(fields={"name": "Demo"})
             request_id, store = pending["request"]["requestId"], self.root / surface.name / "approvals"
 
             def decide(request, *, approved, approver, store=store):
@@ -291,7 +295,7 @@ class SharedContractTests(ContractCase):
         before = json.dumps(self.desired, sort_keys=True)
         for surface in self.each():
             principal = DIRECTORY.principal_for(surface.message("bob"))
-            self.runtime(surface, principal, FakeCalendar()).calendar_availability(**WINDOW)
+            self.runtime(surface, principal, FakeCalendar()).kb_search(query="opening hours")
         self.assertEqual(json.dumps(self.desired, sort_keys=True), before)
         self.assertEqual(json.loads((self.root / "desired.json").read_text()), self.desired)
 

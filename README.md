@@ -70,7 +70,7 @@ python3 scripts/launch.py acme \
 assurance/                    enterprise DDQ/evidence registry and mappings
 contracts/v1/                 versioned portable resource contracts
 examples/workspace/           reference client desired state and evals
-platform/connectors/          thin business-system adapters
+platform/core/mcp_passthrough.py  pinned upstream operation approval (no vendor API clients)
 platform/channels/            replaceable channel adapters
 platform/runtime/             governed runtime/MCP boundary
 platform/metering/            external metering adapters

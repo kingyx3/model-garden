@@ -310,37 +310,5 @@ class LedgerReadEventTests(unittest.TestCase):
             with self.assertRaises(ValueError, msg=bad):
                 govern.parse_read_policy(bad)
 
-    def test_runtime_calendar_read_is_ledgered_with_provenance(self):
-        class Transport:
-            def __call__(self, method, url, headers, payload):
-                return 200, {"calendars": {"primary": {"busy": []}}}
-
-        with tempfile.TemporaryDirectory() as tmp:
-            root = pathlib.Path(tmp)
-            desired = compiler.compile_workspace(ROOT / "examples" / "workspace", "receptionist")[0]
-            (root / "desired.json").write_text(json.dumps(desired), encoding="utf-8")
-            runtime = runtime_module.GovernedToolRuntime(
-                root / "desired.json",
-                root / "audit.jsonl",
-                root / "approvals",
-                environ={"MODEL_GARDEN_GOOGLE_CALENDAR_TOKEN": "t", "MODEL_GARDEN_WORKSPACE_REVISION": "git:feed"},
-                calendar_transport=Transport(),
-            )
-            runtime.calendar_availability(
-                start="2026-09-16T10:00:00+08:00", end="2026-09-16T10:30:00+08:00", justification="Caller asked about 10am."
-            )
-            recorded = events(root / "audit.jsonl")
-        # The first successful use also records the connection as healthy, as its own ledger event.
-        self.assertEqual([event["event"] for event in recorded], ["authorization", "execution", "read", "operator-action"])
-        self.assertEqual((recorded[-1]["action"], recorded[-1]["details"]), ("connection.health", {"family": "calendar", "health": "healthy"}))
-        ledger = recorded[2]["ledger"]
-        self.assertEqual(ledger["provider"], "google")
-        self.assertEqual(ledger["workspaceRevision"], "git:feed")
-        self.assertEqual(ledger["platformRelease"], (ROOT / "VERSION").read_text().strip())
-        self.assertTrue(ledger["agentVersion"].startswith("sha256:"))
-        self.assertEqual(ledger["justification"], "Caller asked about 10am.")
-        self.assertEqual(recorded[2]["details"]["reads"][0]["sourceId"], "calendar:google")
-
-
 if __name__ == "__main__":
     unittest.main()

@@ -56,12 +56,9 @@ Credential ownership follows the target account/data/commercial relationship. Fo
 
 ## Connect the client's business stack
 
-- **Google Workspace client:** Model Garden configures the approved Google Calendar OAuth/integration and uses `connectors.calendar.provider: google`; the client authorizes the relevant Calendar account. No Google Cloud administration is demanded from an ordinary SMB business user by default.
-- **Microsoft 365 client:** Model Garden configures the approved Entra/Graph Calendar integration and uses `connectors.calendar.provider: microsoft` with an explicit mailbox. The client supplies the relevant account authorization and an Entra administrator participates only if its consent/policy requires it.
-- Both provider paths expose the *same* `calendar.availability` / `calendar.book` Agent Tools, approvals, audit and client workspace lifecycle. Provider credentials never live in Agent/Skill definitions.
-- **Do not equate a configured short-lived OAuth access token with production onboarding completion.** Refresh/revocation, delegated vs application permission scope, account ownership and live connectivity must be proven for the selected client before autonomous use. Microsoft Outlook mail/Teams/SharePoint and Google Gmail/Drive are not yet built-in governed connectors.
+- **Google Workspace or Microsoft 365 client:** use a verified third-party/vendor-maintained MCP server or integration platform, approved for that client's exact calendar/mail/files operations. Model Garden deliberately does not maintain native Google/Microsoft API clients; the upstream gateway and owner consent/identity lifecycle are still to be completed (#157–#159). Do not activate Calendar Skills until that evidence exists. Do not send credentials into Agent/Skill content.
 
-The precise supported calendar binding and current credential limitations live in [`governed-tools.md`](governed-tools.md). Broader business/provider intent is owned by the Google Workspace and Microsoft 365 Confluence integration guides.
+The upstream-only integration status and limitations live in [`governed-tools.md`](governed-tools.md). Broader business/provider intent is owned by the Google Workspace and Microsoft 365 Confluence integration guides.
 
 ## Business configuration is separate from deployment
 

@@ -1,117 +1,63 @@
 {
   "apiVersion": "modelgarden.ai/v1",
   "kind": "IntegrationRegistry",
-  "registryVersion": "1.0.0",
+  "registryVersion": "0.8.0",
   "providers": [
     {
       "id": "google-calendar",
       "name": "Google Calendar",
       "family": "calendar",
-      "method": "native",
-      "tier": 1,
-      "status": "built-credential-free",
+      "method": "governed-mcp",
+      "tier": 2,
+      "status": "planned",
       "tools": [
         "calendar.availability",
         "calendar.book"
       ],
-      "issue": 66,
-      "adapter": "platform/connectors/google_calendar.py",
-      "scopeByTool": {
-        "calendar.availability": [
-          "https://www.googleapis.com/auth/calendar.freebusy"
-        ],
-        "calendar.book": [
-          "https://www.googleapis.com/auth/calendar.events"
-        ]
-      }
+      "issue": 66
     },
     {
       "id": "microsoft-calendar",
       "name": "Microsoft Graph Calendar",
       "family": "calendar",
-      "method": "native",
-      "tier": 1,
-      "status": "built-credential-free",
+      "method": "governed-mcp",
+      "tier": 2,
+      "status": "planned",
       "tools": [
         "calendar.availability",
         "calendar.book"
       ],
-      "issue": 66,
-      "adapter": "platform/connectors/microsoft_calendar.py",
-      "scopeByTool": {
-        "calendar.availability": [
-          "Calendars.Read"
-        ],
-        "calendar.book": [
-          "Calendars.ReadWrite"
-        ]
-      }
+      "issue": 66
     },
     {
       "id": "hubspot",
       "name": "HubSpot CRM",
       "family": "crm",
-      "method": "native",
-      "tier": 1,
-      "status": "in-development",
+      "method": "governed-mcp",
+      "tier": 2,
+      "status": "planned",
       "tools": [
         "crm.read",
         "crm.update",
         "crm.create",
         "crm.log-interaction"
       ],
-      "issue": 93,
-      "adapter": "platform/connectors/hubspot.py",
-      "scopeByTool": {
-        "crm.read": [
-          "crm.objects.contacts.read",
-          "crm.objects.companies.read",
-          "crm.objects.deals.read"
-        ],
-        "crm.update": [
-          "crm.objects.contacts.write",
-          "crm.objects.companies.write",
-          "crm.objects.deals.write"
-        ],
-        "crm.create": [
-          "crm.objects.contacts.write",
-          "crm.objects.companies.write",
-          "crm.objects.deals.write"
-        ],
-        "crm.log-interaction": [
-          "crm.objects.contacts.write"
-        ]
-      }
+      "issue": 93
     },
     {
       "id": "salesforce",
       "name": "Salesforce CRM",
       "family": "crm",
-      "method": "native",
-      "tier": 1,
-      "status": "in-development",
+      "method": "governed-mcp",
+      "tier": 2,
+      "status": "planned",
       "tools": [
         "crm.read",
         "crm.update",
         "crm.create",
         "crm.log-interaction"
       ],
-      "issue": 93,
-      "adapter": "platform/connectors/salesforce.py",
-      "scopeByTool": {
-        "crm.read": [
-          "api"
-        ],
-        "crm.update": [
-          "api"
-        ],
-        "crm.create": [
-          "api"
-        ],
-        "crm.log-interaction": [
-          "api"
-        ]
-      }
+      "issue": 93
     },
     {
       "id": "zoho-crm",
@@ -150,61 +96,31 @@
       "id": "gmail",
       "name": "Gmail",
       "family": "mail",
-      "method": "native",
-      "tier": 1,
-      "status": "in-development",
+      "method": "governed-mcp",
+      "tier": 2,
+      "status": "planned",
       "tools": [
         "mail.search",
         "mail.read",
         "mail.draft",
         "mail.send"
       ],
-      "issue": 90,
-      "adapter": "platform/connectors/gmail.py",
-      "scopeByTool": {
-        "mail.search": [
-          "https://www.googleapis.com/auth/gmail.readonly"
-        ],
-        "mail.read": [
-          "https://www.googleapis.com/auth/gmail.readonly"
-        ],
-        "mail.draft": [
-          "https://www.googleapis.com/auth/gmail.compose"
-        ],
-        "mail.send": [
-          "https://www.googleapis.com/auth/gmail.send"
-        ]
-      }
+      "issue": 90
     },
     {
       "id": "outlook",
       "name": "Microsoft Outlook shared mailbox",
       "family": "mail",
-      "method": "native",
-      "tier": 1,
-      "status": "in-development",
+      "method": "governed-mcp",
+      "tier": 2,
+      "status": "planned",
       "tools": [
         "mail.search",
         "mail.read",
         "mail.draft",
         "mail.send"
       ],
-      "issue": 90,
-      "adapter": "platform/connectors/microsoft_mail.py",
-      "scopeByTool": {
-        "mail.search": [
-          "Mail.Read"
-        ],
-        "mail.read": [
-          "Mail.Read"
-        ],
-        "mail.draft": [
-          "Mail.ReadWrite"
-        ],
-        "mail.send": [
-          "Mail.Send"
-        ]
-      }
+      "issue": 90
     },
     {
       "id": "text-knowledge",
@@ -250,34 +166,22 @@
       "id": "google-drive",
       "name": "Google Drive",
       "family": "files",
-      "method": "native",
-      "tier": 1,
-      "status": "in-development",
+      "method": "governed-mcp",
+      "tier": 2,
+      "status": "planned",
       "tools": [
         "files.search",
         "files.read",
         "files.write"
       ],
-      "issue": 91,
-      "adapter": "platform/connectors/google_drive.py",
-      "scopeByTool": {
-        "files.search": [
-          "https://www.googleapis.com/auth/drive.readonly"
-        ],
-        "files.read": [
-          "https://www.googleapis.com/auth/drive.readonly"
-        ],
-        "files.write": [
-          "https://www.googleapis.com/auth/drive.file"
-        ]
-      }
+      "issue": 91
     },
     {
       "id": "sharepoint-onedrive",
       "name": "SharePoint / OneDrive",
       "family": "files",
-      "method": "native",
-      "tier": 1,
+      "method": "governed-mcp",
+      "tier": 2,
       "status": "planned",
       "tools": [
         "files.search",
@@ -291,8 +195,8 @@
       "id": "google-docs",
       "name": "Google Docs",
       "family": "docs",
-      "method": "native",
-      "tier": 1,
+      "method": "governed-mcp",
+      "tier": 2,
       "status": "planned",
       "tools": [
         "docs.read",
@@ -305,8 +209,8 @@
       "id": "microsoft-docs",
       "name": "Microsoft 365 documents",
       "family": "docs",
-      "method": "native",
-      "tier": 1,
+      "method": "governed-mcp",
+      "tier": 2,
       "status": "planned",
       "tools": [
         "docs.read",
@@ -332,8 +236,8 @@
       "id": "teams",
       "name": "Microsoft Teams",
       "family": "chat",
-      "method": "native",
-      "tier": 1,
+      "method": "governed-mcp",
+      "tier": 2,
       "status": "planned",
       "tools": [
         "chat.read",

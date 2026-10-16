@@ -6,8 +6,6 @@ state before a connector can execute. Connector credentials are injected only in
 service, never into the Hermes/model process.
 
 MVP supported Tools:
-- calendar.availability: provider-neutral Google/Microsoft free/busy read
-- calendar.book: provider-neutral event creation, with exact-action approval when required
 - platform.capabilities: read-only, non-secret manifest of what this environment can and
   cannot do, with live connection health; it is a platform built-in, not a business Tool
 - kb.search: Tier 0 search of the client's own approved business-rules text (no provider
@@ -48,10 +46,7 @@ def _load_module(name: str, path: pathlib.Path):
 
 
 GOVERN = _load_module("model_garden_govern_action", ROOT / "scripts" / "govern-action.py")
-GOOGLE_CALENDAR = _load_module("model_garden_google_calendar", ROOT / "platform" / "connectors" / "google_calendar.py")
-MICROSOFT_CALENDAR = _load_module("model_garden_microsoft_calendar", ROOT / "platform" / "connectors" / "microsoft_calendar.py")
 CAPABILITIES = _load_module("model_garden_runtime_capabilities", ROOT / "platform" / "core" / "capabilities.py")
-OAUTH = _load_module("model_garden_oauth_refresh", ROOT / "platform" / "connectors" / "oauth_refresh.py")
 TEXT_CHANNEL = _load_module("model_garden_text_channel", ROOT / "platform" / "channels" / "text_channel.py")
 HANDOFF = _load_module("model_garden_runtime_handoff", ROOT / "platform" / "core" / "handoff.py")
 KNOWLEDGE = _load_module("model_garden_runtime_knowledge", ROOT / "platform" / "core" / "knowledge.py")
@@ -120,10 +115,8 @@ class GovernedToolRuntime:
         approval_root: pathlib.Path,
         *,
         environ: Mapping[str, str] | None = None,
-        calendar_transport=None,
         principal_resolver=None,
         conversation_resolver=None,
-        oauth_transport=None,
     ) -> None:
         self.desired_state = _load_json_object(desired_state_path, "compiled desired state")
         if self.desired_state.get("schemaVersion") != 1:
@@ -136,9 +129,6 @@ class GovernedToolRuntime:
         self.environ = dict(os.environ if environ is None else environ)
         # Default named person for Tier 4 hand-offs; a human-only policy rule names its own.
         self.handoff_assignee = self.environ.get("MODEL_GARDEN_HANDOFF_ASSIGNEE", "").strip() or None
-        self.calendar_transport = calendar_transport
-        self.oauth_transport = oauth_transport
-        self._credential_cache = {}
         # A channel gateway supplies the verified principal for the current request.
         # Without one, the static runtime workload identity is used, as before.
         self.principal_resolver = principal_resolver
@@ -174,9 +164,6 @@ class GovernedToolRuntime:
                 if isinstance(model, str) and model:
                     context["model"] = model
         return context
-
-    def _calendar_provider(self) -> str:
-        return self.environ.get("MODEL_GARDEN_CALENDAR_PROVIDER", "google")
 
     def _ledger(self, *, provider: str | None, justification: str | None, tier: int = 1) -> dict[str, Any]:
         ledger: dict[str, Any] = {"agentVersion": self.agent_version}
@@ -215,41 +202,10 @@ class GovernedToolRuntime:
         if path is not None and path.is_file():
             manifest = _load_json_object(path, "capability manifest")
         else:
-            selected = {tool.get("metadata", {}).get("name") for tool in self.desired_state.get("tools", [])}
-            connectors = {"calendar": {"provider": self._calendar_provider()}} if selected & {"calendar.availability", "calendar.book"} else {}
-            manifest = CAPABILITIES.build_manifest(self.desired_state, {"connectors": connectors})
+            manifest = CAPABILITIES.build_manifest(self.desired_state, {"connectors": {}})
         manifest = CAPABILITIES.apply_connection_health(manifest, CAPABILITIES.read_connection_health(self.governance_root))
         # With a per-coworker grant registry present, a connected Skill is ready only if this coworker holds its own usable grant.
         return GRANT_READINESS.overlay_from_root(manifest, self.governance_root / GRANT_READINESS.REGISTRY_DIR, now=int(time.time()))
-
-    def _calendar(self):
-        provider = self._calendar_provider()
-        if provider == "google":
-            token = self.environ.get("MODEL_GARDEN_GOOGLE_CALENDAR_TOKEN")
-            if not token:
-                raise RuntimeError("Google Calendar credential is not configured for the governed Tool service")
-            return GOOGLE_CALENDAR.GoogleCalendarClient(
-                self._access_token(provider, token),
-                calendar_id=self.environ.get("MODEL_GARDEN_GOOGLE_CALENDAR_ID", "primary"),
-                transport=self.calendar_transport,
-            )
-        if provider == "microsoft":
-            token = self.environ.get("MODEL_GARDEN_MICROSOFT_CALENDAR_TOKEN")
-            if not token:
-                raise RuntimeError("Microsoft Calendar credential is not configured for the governed Tool service")
-            return MICROSOFT_CALENDAR.MicrosoftCalendarClient(
-                self._access_token(provider, token),
-                mailbox=self.environ.get("MODEL_GARDEN_MICROSOFT_CALENDAR_MAILBOX", ""),
-                transport=self.calendar_transport,
-            )
-        raise ValueError("Unsupported Calendar provider; choose google or microsoft")
-
-    def _access_token(self, provider: str, raw_secret: str) -> str:
-        credential = self._credential_cache.get(provider)
-        if credential is None:
-            credential = OAUTH.CalendarCredential(raw_secret, provider, transport=self.oauth_transport)
-            self._credential_cache[provider] = credential
-        return credential.token()
 
     def _take_approval(self, request_id: str) -> tuple[dict[str, Any] | None, pathlib.Path | None]:
         """Atomically claim one decision without letting a crashed claim block fresh approval."""
@@ -369,66 +325,6 @@ class GovernedToolRuntime:
             if family is not None:
                 self._record_health(family, "healthy")
         return result
-
-    def calendar_availability(
-        self,
-        *,
-        start: str,
-        end: str,
-        timezone: str | None = None,
-        justification: str | None = None,
-    ) -> dict[str, Any]:
-        arguments: dict[str, Any] = {"start": start, "end": end}
-        if timezone is not None:
-            arguments["timezone"] = timezone
-        provider = self._calendar_provider()
-        return self._execute(
-            "calendar.availability",
-            arguments,
-            lambda exact: self._calendar().check_availability(
-                start=exact["start"],
-                end=exact["end"],
-                timezone=exact.get("timezone"),
-            ),
-            family="calendar",
-            provider=provider,
-            justification=justification,
-            read_receipt=lambda result: [{"sourceId": f"calendar:{provider}", "content": result}],
-        )
-
-    def calendar_book(
-        self,
-        *,
-        start: str,
-        end: str,
-        summary: str = "Appointment",
-        timezone: str | None = None,
-        description: str | None = None,
-        attendees: list[str] | None = None,
-        justification: str | None = None,
-    ) -> dict[str, Any]:
-        arguments: dict[str, Any] = {"start": start, "end": end, "summary": summary}
-        if timezone is not None:
-            arguments["timezone"] = timezone
-        if description is not None:
-            arguments["description"] = description
-        if attendees is not None:
-            arguments["attendees"] = attendees
-        provider = self._calendar_provider()
-
-        def event_reference(result: Any) -> str | None:
-            event_id = result.get("eventId") if isinstance(result, dict) else None
-            return f"{provider}-calendar:event/{event_id}" if isinstance(event_id, str) and event_id else None
-
-        return self._execute(
-            "calendar.book",
-            arguments,
-            lambda exact: self._calendar().book(exact),
-            family="calendar",
-            provider=provider,
-            justification=justification,
-            external_object_ref=event_reference,
-        )
 
     def kb_search(
         self,
@@ -704,43 +600,6 @@ def build_server(runtime: GovernedToolRuntime) -> MCPServer:
     def platform_capabilities() -> dict[str, Any]:
         """List what this coworker can and cannot do here: capability, provider, tier, health and fallback."""
         return runtime.capabilities()
-
-    @mcp.tool(name="calendar_availability")
-    def calendar_availability(
-        start: str,
-        end: str,
-        timezone: str | None = None,
-        justification: str | None = None,
-    ) -> dict[str, Any]:
-        """Check an approved calendar for free/busy state in an exact RFC3339 interval.
-
-        justification: one short sentence on why this read is needed (recorded in the audit ledger).
-        """
-        return runtime.calendar_availability(start=start, end=end, timezone=timezone, justification=justification)
-
-    @mcp.tool(name="calendar_book")
-    def calendar_book(
-        start: str,
-        end: str,
-        summary: str = "Appointment",
-        timezone: str | None = None,
-        description: str | None = None,
-        attendees: list[str] | None = None,
-        justification: str | None = None,
-    ) -> dict[str, Any]:
-        """Request one governed calendar booking; approval-required actions return pending first.
-
-        justification: one short sentence on why this booking is being made (recorded in the audit ledger).
-        """
-        return runtime.calendar_book(
-            start=start,
-            end=end,
-            summary=summary,
-            timezone=timezone,
-            description=description,
-            attendees=attendees,
-            justification=justification,
-        )
 
     @mcp.tool(name="kb_search")
     def kb_search(query: str, source: str | None = None, limit: int = 3, justification: str | None = None) -> dict[str, Any]:

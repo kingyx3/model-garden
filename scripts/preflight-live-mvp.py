@@ -15,7 +15,6 @@ import sys
 
 REQUIREMENTS = {
     "model": ("OPENAI_API_KEY",),
-    "calendar": ("MODEL_GARDEN_GOOGLE_CALENDAR_TOKEN",),
     "voice": ("LIVEKIT_URL", "LIVEKIT_API_KEY", "LIVEKIT_API_SECRET", "LIVEKIT_SIP_TRUNK_ID"),
 }
 
@@ -26,6 +25,9 @@ def check(env: dict[str, str], *, require_docker: bool = True) -> dict:
         absent = [name for name in names if not env.get(name, "").strip()]
         if absent:
             missing[capability] = absent
+    # Calendar client code was retired in v0.8.0. A token alone cannot prove
+    # that an upstream route supports governed booking or isolated grants.
+    missing["calendar"] = ["approved upstream MCP execution and tenant proof (not implemented)"]
     if require_docker and shutil.which("docker") is None:
         missing["runtime"] = ["docker"]
     return {
@@ -33,7 +35,6 @@ def check(env: dict[str, str], *, require_docker: bool = True) -> dict:
         "missing": missing,
         "requiredCapabilities": ["model", "calendar", "voice", "runtime"],
         "optionalBindings": {
-            "calendar": ["MODEL_GARDEN_GOOGLE_CALENDAR_ID"],
             "voice": ["MODEL_GARDEN_HUMAN_TRANSFER_TARGET", "LIVEKIT_DISPATCH_RULE_ID"],
         },
     }

@@ -192,13 +192,9 @@ def apply(binding_path: pathlib.Path, bundle_dir: pathlib.Path, project: str, se
     runtime_env["MODEL_GARDEN_LIVEKIT_API_KEY"] = api_key
     runtime_env["MODEL_GARDEN_LIVEKIT_API_SECRET"] = api_secret
     runtime_env["MODEL_GARDEN_HERMES_API_KEY"] = internal_key
-    spec = binding.get("spec", {})
-    connectors = spec.get("connectors", {}) if isinstance(spec, dict) else {}
-    calendar = connectors.get("google_calendar") if isinstance(connectors, dict) else None
-    if isinstance(calendar, dict):
-        ref = calendar.get("token_ref")
-        if isinstance(ref, str) and ref in resolved:
-            runtime_env["MODEL_GARDEN_GOOGLE_CALENDAR_TOKEN"] = resolved[ref]
+    # Voice channels never receive third-party business-system credentials.
+    runtime_env.pop("MODEL_GARDEN_GOOGLE_CALENDAR_TOKEN", None)
+    runtime_env.pop("MODEL_GARDEN_MICROSOFT_CALENDAR_TOKEN", None)
 
     compose = ["docker", "compose", "-p", project, "-f", str(base), "-f", str(overlay)]
     try:

@@ -125,9 +125,9 @@ class SkillActivationTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "book-appointment"):
                 compiler.compile_workspace(workspace, "receptionist",
                                            environment_binding={"environment": "dev"})
-            ready = compiler.compile_workspace(workspace, "receptionist", environment_binding=WITH_CALENDAR)[0]
-            self.assertIn("book-appointment", [s["metadata"]["name"] for s in ready["skills"]])
-            self.assertIn("calendar.book", [t["metadata"]["name"] for t in ready["tools"]])
+            # Merely naming a retired provider cannot activate or provision the skill.
+            with self.assertRaisesRegex(ValueError, "book-appointment"):
+                compiler.compile_workspace(workspace, "receptionist", environment_binding=WITH_CALENDAR)
 
     def test_disabled_must_be_explicitly_listed_and_existing(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -154,25 +154,13 @@ class SkillActivationTests(unittest.TestCase):
                 ["calendar.availability", "kb.search", "crm.create", "crm.log-interaction"],
             )
 
-    def test_runtime_revocation_recomputes_required_skill_readiness(self):
-        compiled = compiler.compile_workspace(
-            ROOT / "examples/workspace", "receptionist", environment_binding=WITH_CALENDAR
-        )[0]
-        manifest = capabilities.build_manifest(compiled, WITH_CALENDAR)
+    def test_retired_calendar_never_becomes_ready_from_a_fake_health_flag(self):
+        desired = compiler.compile_workspace(ROOT / "examples/workspace", "receptionist")[0]
+        manifest = capabilities.build_manifest(desired, WITH_CALENDAR)
         before = next(x for x in manifest["skills"] if x["name"] == "book-appointment")
-        self.assertTrue(before["ready"])
-        assert manifest["capabilities"]
-        revoked = capabilities.apply_connection_health(
-            manifest, {"calendar": {"health": "revoked", "updatedAt": "2026-10-14T00:00:00Z"}}
-        )
-        after = next(x for x in revoked["skills"] if x["name"] == "book-appointment")
-        self.assertFalse(after["ready"])
-        self.assertFalse(after["canEnable"])
-        self.assertEqual(after["dependencies"][0]["status"], "unavailable")
-        self.assertTrue(before["ready"], "runtime health overlay must not mutate cached deploy-time manifest")
-        self.assertNotIn("secret://", json.dumps(revoked))
+        self.assertFalse(before["ready"])
         recovered = capabilities.apply_connection_health(manifest, {"calendar": {"health": "healthy"}})
-        self.assertTrue(next(x for x in recovered["skills"] if x["name"] == "book-appointment")["ready"])
+        self.assertFalse(next(x for x in recovered["skills"] if x["name"] == "book-appointment")["ready"])
 
     def test_optional_failed_connection_degrades_without_blocking(self):
         skill = {"metadata": {"name": "take-message"}, "spec": {"optionalCapabilities": ["tickets"]}}

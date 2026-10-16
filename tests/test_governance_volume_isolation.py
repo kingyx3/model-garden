@@ -21,7 +21,7 @@ class GovernanceVolumeIsolationTests(unittest.TestCase):
                 "acme-prod",
                 "openai",
                 {"version": "0.21.2", "commit": "a" * 40},
-                calendar=("google", "secret://google/prod", "primary"),
+                built_in_tools=True,
             )
         )
 
@@ -41,7 +41,7 @@ class GovernanceVolumeIsolationTests(unittest.TestCase):
                 "acme-dev",
                 "openai",
                 {"version": "0.21.2", "commit": "a" * 40},
-                calendar=None,
+                built_in_tools=False,
             )
         )
 

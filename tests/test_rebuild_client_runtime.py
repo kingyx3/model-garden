@@ -86,20 +86,8 @@ class RebuildClientRuntimeTests(unittest.TestCase):
             resolved = rebuild.resolve_platform_release(workspace, root / "cache", str(repository))
             profile = root / "hermes-profile"
 
-            changed = rebuild.rebuild(workspace, "receptionist", profile, platform_root=resolved)
-
-            skill_path = pathlib.Path("skills/model-garden/book-appointment/SKILL.md")
-            self.assertIn(skill_path, changed)
-            self.assertTrue((profile / skill_path).is_file())
-            skill = (profile / skill_path).read_text(encoding="utf-8")
-            self.assertIn("calendar.availability", skill)
-            self.assertIn("calendar.book", skill)
-            config = yaml.safe_load((profile / "config.yaml").read_text(encoding="utf-8"))
-            self.assertEqual(
-                config["mcp_servers"]["model_garden"]["tools"]["include"],
-                ["calendar_availability", "calendar_book", "handoff_request", "handoff_status", "platform_capabilities"],
-            )
-
+            with self.assertRaisesRegex(ValueError, "no governed runtime implementation.*calendar"):
+                rebuild.rebuild(workspace, "receptionist", profile, platform_root=resolved)
     def test_missing_locked_release_tag_fails_closed_and_cleans_cache(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = pathlib.Path(tmp)

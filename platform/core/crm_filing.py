@@ -2,7 +2,7 @@
 
 A finished call or email has to land in the client's CRM whichever CRM that is, survive outages and redelivery, and never be
 reported as filed unless the provider said so (#108, #115). This module is the runner for that: it takes the portable
-``crm.log-interaction`` arguments and an *executor* (the Tier 0 contact log, the HubSpot adapter or any later adapter, all with
+``crm.log-interaction`` arguments and an *executor* (the Tier 0 contact log or an approved upstream MCP executor, all with
 the same ``arguments -> result`` shape), and records each attempt in ``crm_sync.SyncLedger``. It contains no provider code, is
 credential-free and is **not yet wired** to the voice or mail paths.
 

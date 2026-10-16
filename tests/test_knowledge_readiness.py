@@ -105,7 +105,7 @@ class ReadinessContentTests(unittest.TestCase):
                 self.assertFalse(skills["answer-faq"]["canEnable"])
                 self.assertEqual(skills["answer-faq"]["dependencies"][0]["status"], "no-content")
                 self.assertTrue(skills["take-message"]["ready"])
-                self.assertTrue(skills["book-appointment"]["ready"])
+                self.assertFalse(skills["book-appointment"]["ready"])  # upstream not yet connected
                 text = compiler.format_readiness(report)
                 self.assertIn("NO APPROVED CONTENT", text)
                 self.assertIn("BLOCKED", text)
@@ -213,9 +213,12 @@ class RemediationTests(unittest.TestCase):
             revoked = capabilities.apply_connection_health(manifest, {"calendar": {"health": "revoked", "updatedAt": "2026-06-01T00:00:00Z"}})
             booking = next(s for s in revoked["skills"] if s["name"] == "book-appointment")
             self.assertFalse(booking["ready"])
-            self.assertIn("reauthorize the calendar connection", booking["remediation"])
+            self.assertIn("Connect calendar", booking["remediation"])
             healed = capabilities.apply_connection_health(manifest, {"calendar": {"health": "healthy", "updatedAt": "2026-06-01T00:00:00Z"}})
-            self.assertNotIn("remediation", next(s for s in healed["skills"] if s["name"] == "book-appointment"))
+            recovered = next(s for s in healed["skills"] if s["name"] == "book-appointment")
+            # A healthy flag cannot authorize an unimplemented upstream adapter.
+            self.assertFalse(recovered["ready"])
+            self.assertIn("Connect calendar", recovered["remediation"])
 
 
 if __name__ == "__main__":

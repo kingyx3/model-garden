@@ -4,8 +4,12 @@ from __future__ import annotations
 import importlib.util
 import json
 import pathlib
+import shutil
+import tempfile
 import unittest
 from unittest import mock
+
+import yaml
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 
@@ -24,21 +28,28 @@ deployer = load("deployer_connector_activation", "scripts/deploy-client-docker.p
 
 
 class ConnectorActivationGateTests(unittest.TestCase):
-    def test_real_adapters_are_usable_but_unproven_without_live_credentials(self):
-        for provider in ("google", "microsoft"):
+    def active_workspace(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        workspace = pathlib.Path(temporary.name) / "workspace"
+        shutil.copytree(ROOT / "examples/workspace", workspace)
+        path = workspace / "agents/front-office/receptionist/agent.yaml"
+        agent = yaml.safe_load(path.read_text())
+        agent["spec"]["disabledSkills"] = []
+        path.write_text(yaml.safe_dump(agent))
+        return workspace
+
+    def test_retired_calendar_adapters_never_unlock_skills(self):
+        for provider in ("google", "microsoft", "google-calendar", "microsoft-calendar"):
             binding = {"environment": "dev", "connectors": {
-                "calendar": {"provider": provider, "tier": 1, "token_ref": "secret://calendar/dev"},
+                "calendar": {"provider": provider, "tier": 2, "token_ref": "secret://calendar/dev"},
                 "kb": {"provider": "text-knowledge", "tier": 0},
                 "crm": {"provider": "built-in-crm", "tier": 0},
             }}
-            self.assertEqual(capabilities.bound_providers(binding)["calendar"]["provider"], provider)
-            compiled = compiler.compile_workspace(ROOT / "examples/workspace", "receptionist",
-                                                  environment_binding=binding)[0]
-            self.assertEqual(compiled["capabilities"]["resolution"][0]["status"], "bound")
-            manifest = capabilities.build_manifest(compiled, binding)
-            calendar = next(x for x in manifest["capabilities"] if x["family"] == "calendar")
-            self.assertEqual(calendar["health"], "unknown")
-            self.assertNotIn("secret://", json.dumps(manifest))
+            self.assertNotIn("calendar", capabilities.bound_providers(binding))
+            with self.assertRaisesRegex(ValueError, "book-appointment"):
+                compiler.compile_workspace(self.active_workspace(), "receptionist",
+                                           environment_binding=binding)
 
     def test_planned_or_unregistered_provider_cannot_unlock_required_skill(self):
         for provider in ("hubspot", "jira", "not-yet-built"):
@@ -47,16 +58,16 @@ class ConnectorActivationGateTests(unittest.TestCase):
             }}
             self.assertNotIn("calendar", capabilities.bound_providers(binding))
             with self.assertRaisesRegex(ValueError, "book-appointment"):
-                compiler.compile_workspace(ROOT / "examples/workspace", "receptionist",
+                compiler.compile_workspace(self.active_workspace(), "receptionist",
                                            environment_binding=binding)
-            report = compiler.workspace_readiness(ROOT / "examples/workspace",
+            report = compiler.workspace_readiness(self.active_workspace(),
                                                   "receptionist", (), binding)
             book = next(x for x in report[0]["skills"] if x["name"] == "book-appointment")
             self.assertFalse(book["ready"])
             self.assertEqual(book["dependencies"][0]["status"], "missing")
 
     def test_correct_provider_wrong_tier_does_not_unlock_skill(self):
-        for tier in (0, 2, 3, 4):
+        for tier in (0, 1, 2, 3, 4):
             binding = {"environment": "dev", "connectors": {
                 "calendar": {"provider": "google", "tier": tier}
             }}
@@ -123,9 +134,11 @@ class ConnectorActivationGateTests(unittest.TestCase):
         self.assertEqual(tickets["fallback"], "human-handoff")
 
     def test_deployment_rejects_fake_binding_even_if_compilation_was_bypassed(self):
-        desired = compiler.compile_workspace(ROOT / "examples/workspace", "receptionist")[0]
+        desired = compiler.compile_workspace(self.active_workspace(), "receptionist")[0]
         fake = {"environment": "dev", "connectors": {
-            "calendar": {"provider": "not-real", "tier": 1},
+            "calendar": {"provider": "not-real", "tier": 2},
+            "kb": {"provider": "text-knowledge", "tier": 0},
+            "crm": {"provider": "built-in-crm", "tier": 0},
         }}
         with self.assertRaisesRegex(ValueError, "book-appointment"):
             deployer._capability_manifest(desired, fake)
@@ -142,7 +155,7 @@ class ConnectorActivationGateTests(unittest.TestCase):
     def test_legacy_calendar_binding_keeps_backward_compatibility(self):
         for key, expected in (("google_calendar", "google"), ("microsoft_calendar", "microsoft")):
             binding = {"connectors": {key: {"token_ref": "secret://calendar/dev"}}}
-            self.assertEqual(capabilities.bound_providers(binding)["calendar"]["provider"], expected)
+            self.assertNotIn("calendar", capabilities.bound_providers(binding))
 
 
 if __name__ == "__main__":

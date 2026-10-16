@@ -6,7 +6,7 @@ This page is the repository authority for **who owns which credential/account, w
 
 ## Ownership rule
 
-**Tool/connector code and credentials are separate concerns.** Model Garden owns reusable Tool/connector implementations. The credential or authorization used by a Tool should belong to the party that owns the target account, data or commercial provider relationship.
+**Governance and upstream integration credentials are separate concerns.** Model Garden owns the portable Tool contracts and governed gateway, not bespoke vendor clients. The credential or authorization used by a Tool should belong to the party that owns the target account, data or commercial provider relationship.
 
 | Credential / account | Default for managed SMB client | Use client-owned instead when… | Reference live proof |
 |---|---|---|---|
@@ -57,9 +57,9 @@ environment: dev
 runtime:
   profile: receptionist
   model_credential_ref: secret://model/dev
-calendar:
-  connector: google-calendar
-  credential_ref: secret://google/dev-calendar
+connectors:
+  kb: {provider: text-knowledge, tier: 0}
+  crm: {provider: built-in-crm, tier: 0}
 ```
 
 The actual manually maintained runtime values are stored in the protected GitHub `dev` and `prod` Environments as the aggregate secret:
@@ -68,7 +68,7 @@ The actual manually maintained runtime values are stored in the protected GitHub
 |---|---|
 | `MODEL_GARDEN_RUNTIME_SECRETS_JSON` | JSON object whose keys exactly match the `secret://` references required by that environment. Missing or extra keys fail closed. |
 
-OAuth refresh tokens or other dynamic grants created by an end-user/provider authorization flow may be stored by an independently reviewed governed runtime/provider authorization store where appropriate; they are never business-authored workspace content. **The current Google and Microsoft Calendar adapters accept access tokens but do not implement consent or token renewal**. Before deploying unattended client integrations, establish a secure, revocable token refresh/rotation path; a one-off short-lived access token is not enough. See [`governed-tools.md`](governed-tools.md).
+OAuth refresh tokens or other dynamic grants created by an end-user/provider authorization flow may be stored by an independently reviewed governed runtime/provider authorization store where appropriate; they are never business-authored workspace content. **Model Garden v0.8.0 does not ship native Google/Microsoft Calendar or other SaaS adapter tokens/refresh flows.** Approved upstream infrastructure must own provider OAuth and rotation; the governed boundary must enforce each coworker's revocable identity, approved operations and audit before unattended client integrations. See [`governed-tools.md`](governed-tools.md).
 
 The deployment process resolves the aggregate map, removes it before Docker execution and injects only the credentials required by the selected runtime processes/capabilities. Hermes/model execution must not receive unrelated Calendar, CRM or telephony credentials; governed Tool sidecars receive only their connector-specific credentials.
 
@@ -103,5 +103,5 @@ Do not provision a self-hosted runner for the preferred managed GCP path merely 
 - Prompts, Skills and Agent instructions cannot create or expand authority.
 - Record owner, purpose and revocation path for every production integration.
 - Rotate provider/runtime credentials independently of Terraform state and client business definitions.
-- Calendar OAuth refresh credential bundles, when used, are the **string value** of an existing protected `secret://` reference, not workspace YAML. This provides in-memory access-token refresh only; secure upstream consent, persistence of rotated refresh tokens, revocation, expiry alerting and live proof remain open under [#66](https://github.com/kingyx3/model-garden/issues/66).
+- Provider OAuth and refresh-secret custody belong to approved upstream integrations or a vetted credential store, not bespoke Model Garden vendor adapters; owner consent, scoped access, revocation, expiry alerting and live proof remain open under [#66](https://github.com/kingyx3/model-garden/issues/66), #86 and #159.
 - Add another cloud/provider path only from real deployment evidence; preserve the same externalized-secret, least-privilege and short-lived-identity invariants.

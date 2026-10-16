@@ -140,7 +140,7 @@ def binding_environment(binding: Mapping[str, Any]) -> str | None:
 
 
 def _implemented_connector(family: str, provider: str, tier: int) -> bool:
-    """Only a shipped adapter at its declared tier satisfies a dependency.
+    """Only shipped Tier 0 implementations or verified adapters satisfy a dependency.
 
     The registry is an implementation inventory, not proof of live OAuth consent.
     Historical Calendar provider aliases remain backward compatible.
@@ -177,6 +177,7 @@ def bound_providers(binding: Mapping[str, Any], catalog: dict[str, Any] | None =
         raise ValueError("EnvironmentBinding connectors must be an object")
     known = families(catalog)
     bound: dict[str, dict[str, Any]] = {}
+    declared_families: set[str] = set()
     for key, value in connectors.items():
         if not isinstance(value, Mapping):
             raise ValueError(f"EnvironmentBinding connectors.{key} must be an object")
@@ -188,8 +189,9 @@ def bound_providers(binding: Mapping[str, Any], catalog: dict[str, Any] | None =
             continue
         if not isinstance(provider, str) or not provider:
             raise ValueError(f"EnvironmentBinding connectors.{key}.provider must be a non-empty string")
-        if family in bound:
+        if family in declared_families:
             raise ValueError(f"EnvironmentBinding binds more than one provider for capability {family!r}")
+        declared_families.add(family)
         tier = value.get("tier", 1)
         if not isinstance(tier, int) or isinstance(tier, bool) or tier not in TIERS:
             raise ValueError(f"EnvironmentBinding connectors.{key}.tier must be an integer 0-4")

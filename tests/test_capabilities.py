@@ -45,18 +45,6 @@ GOOGLE_BINDING = {
 TIER_ZERO_CONNECTORS = {key: GOOGLE_BINDING["connectors"][key] for key in ("kb", "crm")}
 
 
-class FakeCalendarTransport:
-    def __init__(self, status: int = 200):
-        self.status = status
-
-    def __call__(self, method, url, headers, payload):
-        if self.status != 200:
-            return self.status, {"error": {"message": "token revoked"}}
-        if url.endswith("/freeBusy"):
-            return 200, {"calendars": {"primary": {"busy": []}}}
-        return 200, {"id": "evt-1", "status": "confirmed", "htmlLink": "https://calendar.invalid/evt-1"}
-
-
 class CapabilityCatalogTests(unittest.TestCase):
     def test_catalog_matches_its_schema_and_covers_every_family(self):
         schema = json.loads((ROOT / "contracts" / "v1" / "capability-catalog.schema.json").read_text())
@@ -109,46 +97,17 @@ class CapabilityResolutionTests(unittest.TestCase):
 
     def test_workspace_without_binding_compiles_with_declarations_only(self):
         compiled = compiler.compile_workspace(ROOT / "examples" / "workspace", "receptionist")[0]
-        self.assertEqual(compiled["capabilities"], {"optional": ["tickets"], "required": ["calendar", "crm", "kb"]})
-
-    def test_required_capability_bound_and_optional_reported_degraded(self):
-        compiled = compiler.compile_workspace(
-            ROOT / "examples" / "workspace", "receptionist", environment_binding=GOOGLE_BINDING
-        )[0]
-        resolution = compiled["capabilities"]["resolution"]
-        self.assertEqual(
-            resolution,
-            [
-                {"capability": "calendar", "family": "calendar", "required": True, "status": "bound", "provider": "google", "tier": 1},
-                {"capability": "crm", "family": "crm", "required": True, "status": "bound", "provider": "built-in-crm", "tier": 0},
-                {"capability": "kb", "family": "kb", "required": True, "status": "bound", "provider": "text-knowledge", "tier": 0},
-                {"capability": "tickets", "family": "tickets", "required": False, "status": "degraded", "fallbackTier": 4},
-            ],
-        )
-        self.assertEqual(compiled["capabilities"]["degraded"], ["tickets"])
+        self.assertEqual(compiled["capabilities"], {"optional": ["tickets"], "required": ["crm", "kb"]})
 
     def test_required_capability_without_binding_fails_closed_with_clear_message(self):
         with self.assertRaisesRegex(
             ValueError,
-            r"requires capability 'calendar' \(needed by Skill 'book-appointment'\), "
-            r"'crm' \(needed by Skill 'log-conversation'\), 'kb' \(needed by Skill 'answer-faq'\) "
+            r"requires capability 'crm' \(needed by Skill 'log-conversation'\), 'kb' \(needed by Skill 'answer-faq'\) "
             r"but environment 'dev' binds no provider",
         ):
             compiler.compile_workspace(
                 ROOT / "examples" / "workspace", "receptionist", environment_binding={"environment": "dev"}
             )
-
-    def test_legacy_and_microsoft_calendar_bindings_resolve_identically(self):
-        for connectors, provider in (
-            ({"google_calendar": {"token_ref": "secret://g", "calendar_id": "primary"}, **TIER_ZERO_CONNECTORS}, "google"),
-            ({"calendar": {"provider": "microsoft", "token_ref": "secret://m", "mailbox": "r@client.example"}, **TIER_ZERO_CONNECTORS}, "microsoft"),
-        ):
-            compiled = compiler.compile_workspace(
-                ROOT / "examples" / "workspace",
-                "receptionist",
-                environment_binding={"apiVersion": "modelgarden.ai/v1", "kind": "EnvironmentBinding", "spec": {"environment": "prod", "connectors": connectors}},
-            )[0]
-            self.assertEqual(compiled["capabilities"]["resolution"][0]["provider"], provider)
 
     def test_ambiguous_calendar_binding_is_rejected(self):
         binding = {"connectors": {"calendar": {"provider": "google"}, "microsoft_calendar": {"mailbox": "x@y.example"}}}
@@ -189,7 +148,7 @@ class CapabilityResolutionTests(unittest.TestCase):
                 capture_output=True, text=True,
             )
             self.assertEqual(result.returncode, 1)
-            self.assertIn("requires capability 'calendar'", result.stderr)
+            self.assertIn("requires capability 'crm'", result.stderr)
 
 
 class SkillReadinessTests(unittest.TestCase):
@@ -209,40 +168,6 @@ class SkillReadinessTests(unittest.TestCase):
                  "--environment-binding", str(path), *extra],
                 capture_output=True, text=True,
             )
-
-    def test_readiness_per_skill_with_google_calendar(self):
-        agent, skills = self._receptionist()
-        report = {entry["name"]: entry for entry in capabilities.skill_readiness(agent, skills, GOOGLE_BINDING)}
-        self.assertEqual(sorted(report), ["answer-faq", "book-appointment", "human-handoff", "log-conversation", "take-message"])
-        self.assertTrue(all(entry["kind"] == "Skill" and entry["ready"] for entry in report.values()))
-        self.assertEqual(
-            report["book-appointment"]["dependencies"],
-            [{"capability": "calendar", "family": "calendar", "required": True, "status": "bound", "provider": "google", "tier": 1}],
-        )
-        self.assertEqual(
-            report["take-message"]["dependencies"],
-            [{"capability": "tickets", "family": "tickets", "required": False, "status": "degraded", "fallbackTier": 4}],
-        )
-        self.assertEqual(
-            report["answer-faq"]["dependencies"],
-            [{"capability": "kb", "family": "kb", "required": True, "status": "bound", "provider": "text-knowledge", "tier": 0}],
-        )
-        self.assertEqual(
-            report["log-conversation"]["dependencies"],
-            [{"capability": "crm", "family": "crm", "required": True, "status": "bound", "provider": "built-in-crm", "tier": 0}],
-        )
-        self.assertEqual(report["human-handoff"]["dependencies"], [])
-        rendered = json.dumps(report)
-        for forbidden in ("token_ref", "secret://", "calendar_id", "frontdesk@acme-tenant.example", "scopes", "owner"):
-            self.assertNotIn(forbidden, rendered)
-
-    def test_compiled_output_carries_readiness(self):
-        compiled = compiler.compile_workspace(
-            ROOT / "examples" / "workspace", "receptionist", environment_binding=GOOGLE_BINDING
-        )[0]
-        names = [entry["name"] for entry in compiled["capabilities"]["skills"]]
-        self.assertEqual(names, ["answer-faq", "take-message", "human-handoff", "book-appointment", "log-conversation"])
-        self.assertNotIn("calendar_id", json.dumps(compiled["capabilities"]))
 
     def test_agent_declarations_get_their_own_entry(self):
         agent = {"metadata": {"name": "solo"}, "spec": {"optionalCapabilities": ["mail"]}}
@@ -271,56 +196,11 @@ class SkillReadinessTests(unittest.TestCase):
                 required_by=capabilities.skills_requiring(skills),
             )
 
-    def test_readiness_cli_prints_table_and_exits_by_blocked_state(self):
-        result = self._run_cli(GOOGLE_BINDING, "--agent", "receptionist", "--readiness")
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("book-appointment", result.stdout)
-        self.assertIn("calendar: google tier 1", result.stdout)
-        self.assertIn("tickets (optional): degraded -> fallback tier 4", result.stdout)
-        self.assertNotIn("frontdesk@acme-tenant.example", result.stdout)
-
-        blocked = self._run_cli({"environment": "dev"}, "--agent", "receptionist", "--readiness")
-        self.assertEqual(blocked.returncode, 1)
-        self.assertRegex(blocked.stdout, r"book-appointment\s+BLOCKED\s+calendar: MISSING")
-
-
 class CapabilityManifestTests(unittest.TestCase):
     def _desired(self) -> dict:
         desired = compiler.compile_workspace(ROOT / "examples" / "workspace", "receptionist")[0]
         desired["source"]["client"] = "acme"
         return desired
-
-    def test_manifest_is_truthful_and_secret_free(self):
-        manifest = capabilities.build_manifest(self._desired(), GOOGLE_BINDING)
-        by_family = {entry["family"]: entry for entry in manifest["capabilities"]}
-        self.assertEqual(manifest["client"], "acme")
-        self.assertEqual(manifest["environment"], "dev")
-        self.assertEqual(by_family["calendar"]["status"], "available")
-        self.assertEqual(by_family["calendar"]["provider"], "google")
-        self.assertEqual(by_family["calendar"]["tier"], 1)
-        self.assertEqual(by_family["calendar"]["scopes"], ["https://www.googleapis.com/auth/calendar.events"])
-        self.assertEqual(by_family["calendar"]["connectionOwner"], "office-manager@acme.example")
-        self.assertEqual(by_family["calendar"]["tools"], ["calendar.availability", "calendar.book"])
-        self.assertEqual(by_family["tickets"]["status"], "unbound")
-        self.assertEqual(by_family["tickets"]["fallback"], "human-handoff")
-        self.assertTrue(by_family["tickets"]["optional"])
-        rendered = json.dumps(manifest)
-        for forbidden in ("secret://", "token", "frontdesk@acme-tenant.example", "calendar_id"):
-            self.assertNotIn(forbidden, rendered)
-
-    def test_runtime_manifest_recomputes_skill_readiness_from_target_environment(self):
-        desired = self._desired()
-        # Desired state compiled without a binding has no deploy-time snapshot.
-        self.assertNotIn("skills", desired["capabilities"])
-        blocked = capabilities.build_manifest(desired, {"environment": "dev"})
-        blocked_booking = next(s for s in blocked["skills"] if s["name"] == "book-appointment")
-        self.assertFalse(blocked_booking["ready"])
-        self.assertEqual(blocked_booking["dependencies"][0]["status"], "missing")
-        available = capabilities.build_manifest(desired, GOOGLE_BINDING)
-        booking = next(s for s in available["skills"] if s["name"] == "book-appointment")
-        self.assertTrue(booking["ready"])
-        self.assertEqual(booking["dependencies"][0]["provider"], "google")
-        self.assertNotIn("secret://", json.dumps(available))
 
     def test_old_profile_missing_disabled_declarations_fails_closed(self):
         desired = self._desired()
@@ -337,113 +217,12 @@ class CapabilityManifestTests(unittest.TestCase):
         booking_after = next(s for s in degraded["skills"] if s["name"] == "book-appointment")
         self.assertFalse(booking_after["canEnable"])
 
-    def test_revoked_connection_becomes_unavailable_with_fallback(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            root = pathlib.Path(tmp)
-            capabilities.record_connection_health(root, "calendar", "revoked", actor="operator@acme.example", reason="consent withdrawn")
-            manifest = capabilities.apply_connection_health(
-                capabilities.build_manifest(self._desired(), GOOGLE_BINDING),
-                capabilities.read_connection_health(root),
-            )
-        calendar = next(entry for entry in manifest["capabilities"] if entry["family"] == "calendar")
-        self.assertEqual(calendar["status"], "unavailable")
-        self.assertEqual(calendar["health"], "revoked")
-        self.assertEqual(calendar["fallback"], "human-handoff")
-
     def test_connection_health_rejects_unknown_family_and_state(self):
         with tempfile.TemporaryDirectory() as tmp:
             with self.assertRaises(ValueError):
                 capabilities.record_connection_health(pathlib.Path(tmp), "../etc", "revoked", actor="op")
             with self.assertRaises(ValueError):
                 capabilities.record_connection_health(pathlib.Path(tmp), "calendar", "great", actor="op")
-
-    def _runtime(self, root: pathlib.Path, transport, manifest: pathlib.Path | None = None):
-        desired_path = root / "desired.json"
-        desired_path.write_text(json.dumps(self._desired()), encoding="utf-8")
-        environ = {"MODEL_GARDEN_GOOGLE_CALENDAR_TOKEN": "calendar-secret"}
-        if manifest is not None:
-            environ["MODEL_GARDEN_CAPABILITY_MANIFEST"] = str(manifest)
-        return runtime_module.GovernedToolRuntime(
-            desired_path,
-            root / "governance" / "audit.jsonl",
-            root / "governance" / "approvals",
-            environ=environ,
-            calendar_transport=transport,
-        )
-
-    def test_runtime_tool_reflects_revocation_without_redeploy(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            root = pathlib.Path(tmp)
-            manifest_path = root / "capability-manifest.json"
-            manifest_path.write_text(json.dumps(capabilities.build_manifest(self._desired(), GOOGLE_BINDING)))
-            runtime = self._runtime(root, FakeCalendarTransport(), manifest_path)
-            before = {entry["family"]: entry for entry in runtime.capabilities()["capabilities"]}
-            self.assertEqual(before["calendar"]["status"], "available")
-
-            capabilities.record_connection_health(root / "governance", "calendar", "revoked", actor="operator")
-            after = {entry["family"]: entry for entry in runtime.capabilities()["capabilities"]}
-            self.assertEqual(after["calendar"]["status"], "unavailable")
-            self.assertNotIn("calendar-secret", json.dumps(after))
-
-    def test_runtime_records_provider_auth_failure_then_recovery(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            root = pathlib.Path(tmp)
-            transport = FakeCalendarTransport(status=401)
-            runtime = self._runtime(root, transport)
-            with self.assertRaises(RuntimeError):
-                runtime.calendar_availability(start="2026-09-16T10:00:00+08:00", end="2026-09-16T10:30:00+08:00")
-            calendar = next(e for e in runtime.capabilities()["capabilities"] if e["family"] == "calendar")
-            self.assertEqual((calendar["status"], calendar["health"]), ("unavailable", "failed"))
-
-            transport.status = 200
-            # Auth failures no longer recover merely because a retry would succeed.
-            # A named operator must record reauthorization before retry is allowed.
-            with self.assertRaisesRegex(PermissionError, "connection failed"):
-                runtime.calendar_availability(start="2026-09-16T10:00:00+08:00", end="2026-09-16T10:30:00+08:00")
-            capabilities.record_connection_health(
-                root / "governance", "calendar", "healthy",
-                actor="operator", reason="reauthorized after token renewal",
-            )
-            runtime.calendar_availability(start="2026-09-16T10:00:00+08:00", end="2026-09-16T10:30:00+08:00")
-            calendar = next(e for e in runtime.capabilities()["capabilities"] if e["family"] == "calendar")
-            self.assertEqual((calendar["status"], calendar["health"]), ("available", "healthy"))
-
-    def test_deployment_writes_manifest_and_fails_closed_on_unbound_required(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            root = pathlib.Path(tmp)
-            profile = root / "profile"
-            (profile / ".modelgarden").mkdir(parents=True)
-            (profile / "SOUL.md").write_text("# Receptionist\n", encoding="utf-8")
-            (profile / "config.yaml").write_text(yaml.safe_dump({"model": {"provider": "openai", "default": "m"}}), encoding="utf-8")
-            (profile / ".modelgarden" / "desired-state.json").write_text(json.dumps(self._desired()), encoding="utf-8")
-            spec = {"environment": "dev", "runtime": {"profile": "receptionist", "model_credential_ref": "secret://model/dev"}}
-            unbound = root / "unbound.json"
-            unbound.write_text(json.dumps({"apiVersion": "modelgarden.ai/v1", "kind": "EnvironmentBinding", "spec": spec}))
-            with self.assertRaisesRegex(ValueError, "Calendar Tools require"):
-                deployer.render_bundle(profile, unbound, root / "bundle-a", "acme-dev")
-            with self.assertRaisesRegex(ValueError, "requires capability 'calendar'"):
-                deployer._capability_manifest(self._desired(), json.loads(unbound.read_text()))
-
-            bound = root / "bound.json"
-            bound.write_text(json.dumps({
-                "apiVersion": "modelgarden.ai/v1",
-                "kind": "EnvironmentBinding",
-                "spec": {**spec, "connectors": GOOGLE_BINDING["connectors"], "audit": {"reads": "sampled:10"}},
-            }))
-            metadata = deployer.render_bundle(profile, bound, root / "bundle-b", "acme-dev")
-            manifest_path = root / "bundle-b" / "profile" / ".modelgarden" / "capability-manifest.json"
-            manifest = json.loads(manifest_path.read_text())
-            compose = yaml.safe_load((root / "bundle-b" / "compose.yaml").read_text())
-            tools_env = compose["services"]["governed-tools"]["environment"]
-            self.assertEqual(manifest["kind"], "CapabilityManifest")
-            self.assertEqual(metadata["unboundCapabilities"], ["tickets"])
-            self.assertEqual(len(metadata["capabilityManifestSha256"]), 64)
-            self.assertEqual(tools_env["MODEL_GARDEN_CAPABILITY_MANIFEST"], "/opt/profile-seed/.modelgarden/capability-manifest.json")
-            self.assertEqual(tools_env["MODEL_GARDEN_READ_AUDIT"], "sampled:10")
-            self.assertNotIn("secret://", manifest_path.read_text())
-            platform_copy = root / "bundle-b" / "model-garden-platform"
-            for relative in ("platform/core/capabilities.py", "platform/core/policy.py", "platform/core/handoff.py", "scripts/runtime-handoff.py", "contracts/v1/capabilities.json", "platform/channels/text_channel.py", "VERSION"):
-                self.assertTrue((platform_copy / relative).is_file(), relative)
 
     def test_invalid_read_audit_mode_is_rejected(self):
         with self.assertRaisesRegex(ValueError, "audit.reads"):

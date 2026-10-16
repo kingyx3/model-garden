@@ -31,7 +31,6 @@ KB_BINDING = {"environment": "dev", "connectors": {"kb": {"provider": "text-know
 FULL_BINDING = {"environment": "dev", "connectors": {
     **KB_BINDING["connectors"],
     "crm": {"provider": "built-in-crm", "tier": 0},
-    "calendar": {"provider": "google", "tier": 1, "token_ref": "secret://calendar/dev"},
 }}
 
 
@@ -156,18 +155,24 @@ class RuntimeKbSearchTests(unittest.TestCase):
             self.assertEqual(result["documents"][0]["title"], "Note")
             # Nothing in the retrieved text changed authorization: a write still needs its own approval.
             booking = runtime.desired_state["tools"]
-            self.assertTrue(any(tool["metadata"]["name"] == "calendar.book" and tool["spec"]["approvalRequired"] for tool in booking))
+            self.assertFalse(any(tool["metadata"]["name"] == "calendar.book" for tool in booking))
+            self.assertTrue(any(tool["metadata"]["name"] == "crm.create" and tool["spec"]["approvalRequired"] for tool in booking))
 
 
 class ProvisionAndDeployTests(unittest.TestCase):
     def test_hermes_config_exposes_kb_search_for_the_selected_tool(self):
         with tempfile.TemporaryDirectory() as tmp:
-            desired = compiler.compile_workspace(workspace(tmp), "receptionist")[0]
+            ws = workspace(tmp)
+            agent_file = ws / "agents/front-office/receptionist/agent.yaml"
+            agent = yaml.safe_load(agent_file.read_text())
+            agent["spec"]["disabledSkills"] = ["book-appointment"]
+            agent_file.write_text(yaml.safe_dump(agent))
+            desired = compiler.compile_workspace(ws, "receptionist")[0]
             files = provisioner.build_profile_files(desired)
             config = yaml.safe_load(files[pathlib.Path("config.yaml")])
             include = config["mcp_servers"]["model_garden"]["tools"]["include"]
             self.assertEqual(include, [
-                "calendar_availability", "calendar_book", "crm_create", "crm_log_interaction",
+                "crm_create", "crm_log_interaction",
                 "handoff_request", "handoff_status", "kb_search", "platform_capabilities",
             ])
             state = json.loads(files[pathlib.Path(".modelgarden") / "desired-state.json"])
@@ -216,19 +221,15 @@ class ProvisionAndDeployTests(unittest.TestCase):
             kb = next(item for item in manifest["capabilities"] if item["family"] == "kb")
             self.assertEqual((kb["status"], kb["provider"], kb["tier"]), ("available", "text-knowledge", 0))
 
-    def test_kb_and_calendar_together_keep_the_calendar_credentials_isolated(self):
+    def test_retired_calendar_credentials_cannot_make_a_kb_bundle_call_calendar(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = pathlib.Path(tmp)
-            connectors = {**KB_BINDING["connectors"], "calendar": {"provider": "google", "token_ref": "secret://google/dev-calendar", "calendar_id": "primary"}}
-            bundle = root / "bundle"
-            metadata = deployer.render_bundle(
-                self.profile(root, ("kb.search", "calendar.availability", "calendar.book")), self.binding(root, connectors), bundle, "acme-dev"
-            )
-            compose = yaml.safe_load((bundle / "compose.yaml").read_text(encoding="utf-8"))
-            environment = compose["services"]["governed-tools"]["environment"]
-            self.assertEqual(environment["MODEL_GARDEN_CALENDAR_PROVIDER"], "google")
-            self.assertIn("MODEL_GARDEN_GOOGLE_CALENDAR_TOKEN", environment)
-            self.assertEqual(metadata["googleCalendarCredentialRef"], "secret://google/dev-calendar")
+            connectors = {**KB_BINDING["connectors"],
+                          "calendar": {"provider": "google", "token_ref": "secret://google/dev-calendar"}}
+            with self.assertRaisesRegex(ValueError, "native Calendar connectors were retired"):
+                deployer.render_bundle(
+                    self.profile(root, ("kb.search", "calendar.availability")),
+                    self.binding(root, connectors), root / "bundle", "acme-dev")
 
     def test_no_governed_tools_still_means_no_sidecar(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -241,6 +242,10 @@ class ReadinessTests(unittest.TestCase):
     def test_a_skill_requiring_kb_is_ready_with_the_tier_zero_provider_and_compiles(self):
         with tempfile.TemporaryDirectory() as tmp:
             ws = workspace(tmp)
+            agent_file = ws / "agents/front-office/receptionist/agent.yaml"
+            agent = yaml.safe_load(agent_file.read_text())
+            agent["spec"]["disabledSkills"] = ["book-appointment"]
+            agent_file.write_text(yaml.safe_dump(agent))
             skill = ws / "skills" / "answer-faq" / "skill.yaml"
             document = yaml.safe_load(skill.read_text())
             document["spec"]["requiredCapabilities"] = ["kb"]
@@ -254,10 +259,10 @@ class ReadinessTests(unittest.TestCase):
             compiled = compiler.compile_workspace(ws, "receptionist", environment_binding=FULL_BINDING)[0]
             self.assertNotIn("kb", compiled["capabilities"]["degraded"])  # the optional tickets capability stays degraded
             # Without the binding the Skill is blocked and compilation fails closed, naming the Skill.
-            blocked = compiler.workspace_readiness(ws, "receptionist", (), {"environment": "dev", "connectors": {"calendar": FULL_BINDING["connectors"]["calendar"]}})
+            blocked = compiler.workspace_readiness(ws, "receptionist", (), {"environment": "dev", "connectors": {}})
             self.assertFalse(next(item for item in blocked[0]["skills"] if item["name"] == "answer-faq")["ready"])
             with self.assertRaisesRegex(ValueError, "answer-faq"):
-                compiler.compile_workspace(ws, "receptionist", environment_binding={"environment": "dev", "connectors": {"calendar": FULL_BINDING["connectors"]["calendar"]}})
+                compiler.compile_workspace(ws, "receptionist", environment_binding={"environment": "dev", "connectors": {}})
 
 
 if __name__ == "__main__":

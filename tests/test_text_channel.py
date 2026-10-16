@@ -161,12 +161,15 @@ class RuntimePrincipalTests(unittest.TestCase):
     def _runtime(self, root: pathlib.Path, principal, transport):
         desired = compiler.compile_workspace(ROOT / "examples" / "workspace", "receptionist")[0]
         (root / "desired.json").write_text(json.dumps(desired), encoding="utf-8")
+        binding = {"connectors": {"kb": {"provider": "text-knowledge", "tier": 0},
+                                  "crm": {"provider": "built-in-crm", "tier": 0}}}
+        manifest = runtime_module.CAPABILITIES.build_manifest(desired, binding)
+        manifest_file = root / "manifest.json"
+        manifest_file.write_text(json.dumps(manifest))
         return runtime_module.GovernedToolRuntime(
-            root / "desired.json",
-            root / "audit.jsonl",
-            root / "approvals",
-            environ={"MODEL_GARDEN_GOOGLE_CALENDAR_TOKEN": "t", "MODEL_GARDEN_INITIATING_IDENTITY": "runtime:hermes"},
-            calendar_transport=transport,
+            root / "desired.json", root / "audit.jsonl", root / "approvals",
+            environ={"MODEL_GARDEN_CAPABILITY_MANIFEST": str(manifest_file),
+                     "MODEL_GARDEN_INITIATING_IDENTITY": "runtime:hermes"},
             principal_resolver=lambda: principal,
         )
 
@@ -176,12 +179,11 @@ class RuntimePrincipalTests(unittest.TestCase):
             root = pathlib.Path(tmp)
             transport = FakeCalendarTransport()
             runtime = self._runtime(root, principal, transport)
-            read = runtime.calendar_availability(start="2026-09-16T10:00:00+08:00", end="2026-09-16T10:30:00+08:00")
+            read = runtime.kb_search(query="opening hours")
             with self.assertRaises(PermissionError):
-                runtime.calendar_book(start="2026-09-16T10:00:00+08:00", end="2026-09-16T10:30:00+08:00")
+                runtime.crm_create(fields={"name": "Demo"})
             audit = [json.loads(line) for line in (root / "audit.jsonl").read_text().splitlines()]
         self.assertEqual(read["status"], "executed")
-        self.assertEqual(len(transport.calls), 1)
         self.assertEqual(audit[-1]["outcome"], "deny")
         self.assertEqual(audit[-1]["details"]["reason"], "principal-not-authorized")
         self.assertEqual(audit[-1]["governance"]["channel"], "slack")
@@ -191,7 +193,7 @@ class RuntimePrincipalTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = pathlib.Path(tmp)
             runtime = self._runtime(root, principal, FakeCalendarTransport())
-            pending = runtime.calendar_book(start="2026-09-16T10:00:00+08:00", end="2026-09-16T10:30:00+08:00")
+            pending = runtime.crm_create(fields={"name": "Demo"})
         self.assertEqual(pending["status"], "pending-approval")
         self.assertEqual(pending["request"]["initiatingUser"], "bob@acme.example")
         self.assertEqual(pending["request"]["governance"]["originatingPrincipal"], "bob@acme.example")

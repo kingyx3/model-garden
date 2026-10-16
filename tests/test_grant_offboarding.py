@@ -7,10 +7,13 @@ import io
 import json
 import os
 import pathlib
+import shutil
 import sys
 import tempfile
 import unittest
 from unittest import mock
+
+import yaml
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 
@@ -48,11 +51,24 @@ class Case(unittest.TestCase):
         self.root = pathlib.Path(self._tmp.name)
         self.store = self.root / "governance"
         self.store.mkdir()
-        desired = compiler.compile_workspace(ROOT / "examples" / "workspace", "receptionist", environment_binding=BINDING)[0]
+        # Future provider is simulated in the manifest; never treated as built in production.
+        ws = self.root / "workspace"
+        shutil.copytree(ROOT / "examples/workspace", ws)
+        path = ws / "agents/front-office/receptionist/agent.yaml"
+        agent = yaml.safe_load(path.read_text())
+        agent["spec"]["disabledSkills"] = []
+        path.write_text(yaml.safe_dump(agent))
+        desired = compiler.compile_workspace(ws, "receptionist")[0]
         desired["source"]["client"] = "acme"
         (self.root / "desired.json").write_text(json.dumps(desired), encoding="utf-8")
         self.manifest_path = self.root / "manifest.json"
-        self.manifest_path.write_text(json.dumps(capabilities.build_manifest(desired, BINDING)), encoding="utf-8")
+        real = capabilities._implemented_connector
+        with mock.patch.object(capabilities, "_implemented_connector",
+                               side_effect=lambda family, provider, tier:
+                               True if (family, provider, tier) == ("calendar", "google", 1)
+                               else real(family, provider, tier)):
+            manifest = capabilities.build_manifest(desired, BINDING)
+        self.manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
         self.audit = self.store / "audit.jsonl"
         self.registry = grants_module.GrantRegistry(
             self.store / "provider-grants", tenant="acme-dev",
