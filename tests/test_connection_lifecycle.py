@@ -47,11 +47,15 @@ class Case(unittest.TestCase):
         self.root = pathlib.Path(self._tmp.name)
         self.store = self.root / "governance"
         self.store.mkdir()
-        desired = compiler.compile_workspace(ROOT / "examples" / "workspace", "receptionist", environment_binding=BINDING)[0]
+        desired = compiler.compile_workspace(ROOT / "examples" / "workspace", "receptionist")[0]
         desired["source"]["client"] = "acme"
         (self.root / "desired.json").write_text(json.dumps(desired), encoding="utf-8")
         self.manifest_path = self.root / "manifest.json"
-        self.manifest_path.write_text(json.dumps(capabilities.build_manifest(desired, BINDING)), encoding="utf-8")
+        # Synthetic external connection exercises generic offboarding only; no vendor adapter is implied.
+        manifest = capabilities.build_manifest(desired, BINDING)
+        external = next(item for item in manifest["capabilities"] if item["family"] == "calendar")
+        external.update(status="available", tier=2, provider="fake-approved-mcp")
+        self.manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
 
     def run_cli(self, *argv, env=None):
         out, err = io.StringIO(), io.StringIO()
