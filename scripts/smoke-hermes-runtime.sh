@@ -17,7 +17,21 @@ if [[ -z "$repo" || -z "$commit" || -z "$version" ]]; then
   exit 1
 fi
 
-python3 "$ROOT/scripts/compile-workspace.py" "$ROOT/examples/workspace" --agent receptionist --output "$DESIRED_STATE"
+# The bundled receptionist demonstrates an optional future booking Skill. The retired
+# native Calendar cannot be provisioned until a reviewed upstream route is active.
+SMOKE_WORKSPACE="$(mktemp -d)"
+trap 'rm -rf "$SMOKE_WORKSPACE"' EXIT
+cp -R "$ROOT/examples/workspace/." "$SMOKE_WORKSPACE/"
+python3 - "$SMOKE_WORKSPACE/agents/front-office/receptionist/agent.yaml" <<'PYDISABLE'
+from pathlib import Path
+import sys
+import yaml
+file = Path(sys.argv[1])
+agent = yaml.safe_load(file.read_text())
+agent["spec"]["disabledSkills"] = ["book-appointment"]
+file.write_text(yaml.safe_dump(agent, sort_keys=False))
+PYDISABLE
+python3 "$ROOT/scripts/compile-workspace.py" "$SMOKE_WORKSPACE" --agent receptionist --output "$DESIRED_STATE"
 rm -rf "$PROFILE_DIR"
 python3 "$ROOT/scripts/provision-hermes-profile.py" "$DESIRED_STATE" "$PROFILE_DIR"
 
@@ -35,7 +49,7 @@ if [[ "$actual_version" != "$version" ]]; then
 fi
 
 HERMES_HOME="$PROFILE_DIR" "$VENV_DIR/bin/hermes" skills list > /tmp/model-garden-hermes-skills.txt
-for skill in answer-faq take-message human-handoff book-appointment; do
+for skill in answer-faq take-message human-handoff; do
   grep -q "$skill" /tmp/model-garden-hermes-skills.txt || {
     echo "Hermes did not discover Model Garden Skill: $skill" >&2
     cat /tmp/model-garden-hermes-skills.txt >&2
@@ -63,7 +77,7 @@ assert config["model"]["default"] == "approved-openai-model"
 
 skills_dir = get_skills_dir().resolve()
 assert skills_dir == (home / "skills").resolve()
-expected = {"answer-faq", "take-message", "human-handoff", "book-appointment"}
+expected = {"answer-faq", "take-message", "human-handoff", "log-conversation"}
 seen = set()
 for skill_file in (skills_dir / "model-garden").glob("*/SKILL.md"):
     frontmatter, body = parse_frontmatter(skill_file.read_text())
