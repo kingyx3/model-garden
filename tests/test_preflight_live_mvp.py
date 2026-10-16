@@ -28,7 +28,8 @@ class LiveMvpPreflightTests(unittest.TestCase):
     @mock.patch.object(preflight.shutil, "which", return_value="/usr/bin/docker")
     def test_retired_native_calendar_token_never_passes_upstream_proof_gate(self, _which):
         result = preflight.check(self.complete_env())
-        self.assertFalse(result["ready"])\n        self.assertIn("approved upstream MCP execution", result["missing"]["calendar"][0])
+        self.assertFalse(result["ready"])
+        self.assertIn("approved upstream MCP execution", result["missing"]["calendar"][0])
 
     @mock.patch.object(preflight.shutil, "which", return_value=None)
     def test_reports_missing_capabilities_without_secret_values(self, _which):
