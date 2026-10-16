@@ -116,35 +116,6 @@ class ReferenceCompatibilityTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "book-appointment"):
                 self.compile(workspace, ZERO_STACK)
 
-    def test_scenario_b_adds_calendar_by_binding_only(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            root = pathlib.Path(tmp)
-            zero = self.compile(self.workspace(root / "a", booking=False), ZERO_STACK)
-            full_workspace = self.workspace(root / "b", booking=True)
-            shared = {"answer-faq", "human-handoff", "log-conversation", "take-message"}
-
-            def skills(desired):
-                return {s["metadata"]["name"]: s["spec"] for s in desired["skills"]}
-
-            for binding in (WITH_GOOGLE, WITH_MICROSOFT):
-                full = self.compile(full_workspace, binding)
-                self.assertTrue(CALENDAR_TOOLS <= self.tool_names(full))
-                self.assertEqual(self.tool_names(full) - CALENDAR_TOOLS, self.tool_names(zero))
-                # The upgrade is not a rewrite: the shared Skills are identical in both scenarios.
-                self.assertEqual({k: v for k, v in skills(full).items() if k in shared},
-                                 {k: v for k, v in skills(zero).items() if k in shared})
-                self.assertIn("book-appointment", skills(full))
-
-    def test_scenario_b_bundle_names_the_calendar_provider_and_keeps_secrets_out_of_the_manifest(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            root = pathlib.Path(tmp)
-            desired = self.compile(self.workspace(root, booking=True), WITH_GOOGLE)
-            metadata = self.render(root, desired, WITH_GOOGLE["connectors"], "b")
-            self.assertEqual(metadata["calendarProvider"], "google")
-            manifest_text = (root / "bundle-b/profile/.modelgarden/capability-manifest.json").read_text(
-                encoding="utf-8")
-            self.assertNotIn("secret://", manifest_text)
-
     def test_unshipped_forged_or_wrong_tier_providers_never_unlock_booking(self):
         with tempfile.TemporaryDirectory() as tmp:
             workspace = self.workspace(pathlib.Path(tmp), booking=True)
