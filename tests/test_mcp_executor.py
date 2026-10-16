@@ -157,6 +157,13 @@ class GatewayCase(unittest.TestCase):
         with self.assertRaises(gateway.GatewayError):
             self.prepare()
 
+    def test_reviewed_endpoint_and_mapping_cannot_be_swapped_after_preflight(self):
+        self.approvals.approve("hubspot", READ_TOOL, by="reviewer@platform.example", now=NOW)
+        self.declaration["url"] = "https://another.vendor.example/mcp"
+        with self.assertRaises(gateway.GatewayError):
+            self.invoke()
+        self.assertFalse(self.backend.connected)
+
     def test_revocation_and_rotation_after_approval_fail_closed(self):
         self.approvals.approve("hubspot", READ_TOOL, by="reviewer@platform.example", now=NOW)
         self.registry.revoke(self.access["id"], by="operator@acme.example", now=NOW + 2)
