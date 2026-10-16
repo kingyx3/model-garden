@@ -24,6 +24,12 @@ The sidecar is not a control plane and is not exposed on a host port. It is part
 
 Hermes only receives MCP Tool names corresponding to Tools explicitly selected by that Agent. Provisioning fails closed if a selected Tool has no implemented governed runtime binding.
 
+## Governed upstream MCP execution seam (v0.8.3)
+
+The internal governed runtime now has a credential-free, injectable MCP execution seam (`platform/core/mcp_executor.py` and `GovernedToolRuntime.upstream_call`). Before an outbound request, it requires a selected portable Tool with catalog-matching risk; an available and approved Tier 2 binding; tenant- and coworker-specific provider authorization with independent identity, correct Tool grant, scoped secret reference and usable health; and a currently approved upstream tool schema. Requests execute through the **existing** allow/approval/deny and exact-action approval/audit boundary, with connection, grant, acting identity and upstream operation attribution. A revoked grant, missing permission, changed/poisoned tool schema, private or rebinding DNS answer, unsafe input schema, or missing credential fails closed. Tests inject two business operations on an upstream transport fixture.
+
+**No live MCP network connector is shipped or automatically activated.** The seam requires a separately vetted transport factory, DNS resolver and scoped credential resolver injected into the sidecar; the transport MUST connect to the pinned public IP with HTTPS hostname verification and no redirects. Model Garden does not implement a parallel HTTP transport or OAuth provider client. Production readiness still requires a maintained MCP SDK adapter or reviewed upstream integration service, real owner consent/secret custody, constrained egress and tenant proof (#87/#158/#86/#129/#66); the canonical registry keeps SaaS providers planned. No arbitrary raw MCP call is registered for the model. The next vertical slice is to qualify one real upstream transport and publish only approved portable Tools.
+
 ## Upstream-only SaaS Tools (v0.8.0)
 
 Model Garden no longer ships bespoke Google/Microsoft Calendar, Gmail/Outlook, HubSpot/Salesforce or Drive API clients or an in-house OAuth-refresh implementation. These systems remain **planned upstream routes**, not available live connections. The reference Calendar Skill and its portable `calendar.availability` and `calendar.book` contracts remain valid, but cannot be activated until an approved external MCP/managed integration demonstrates those exact operations.
