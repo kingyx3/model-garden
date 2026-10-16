@@ -11,7 +11,7 @@ Supported v1 business resources:
 - `KnowledgeSource` — approved source and data classification.
 - `Policy` — client-owned approval rules, enforced by the governed boundary (see [Client approval policy](#client-approval-policy)); a dedicated policy engine remains out of scope.
 
-**Target, not shipped:** reusable `Skillset` catalogue packages will reference versioned Skills, but do not grant Tools or force every member active. Today an Agent selects `spec.skills` and may disable individual members with `spec.disabledSkills`. First-class Skillset selection, deduplication and bundle resolution remain [#128](https://github.com/kingyx3/model-garden/issues/128); business behavior is defined in the [target architecture](https://modelgarden.atlassian.net/wiki/spaces/BA/pages/11796484).
+**Shipped contract:** reusable `Skillset` catalogue packages group versioned Skills without granting Tool permissions or forcing activation. Each coworker explicitly selects enabled members; the compiler resolves dependencies and enforces independent readiness (details below). Business intent is defined in the [target architecture](https://modelgarden.atlassian.net/wiki/spaces/BA/pages/11796484).
 
 ## Capability contracts
 
@@ -332,7 +332,7 @@ compiler, `client-operator skills` readiness report, non-secret coworker
 `platform.capabilities` manifest and Docker deployment now consult
 `contracts/v1/integrations.json` to determine **implemented** support. Only
 `built-credential-free` or `live` providers with a matching family, correct tier
-and a real local adapter satisfy a dependency. Historical Calendar aliases may still be parsed, but none can activate the retired native Calendar integrations.
+and an implemented Tier 0 local backend (or, in future, a separately vetted, authorized upstream executor) satisfy a dependency. Currently **only** `text-knowledge` and `built-in-crm` qualify; historical Calendar aliases do not activate retired integrations.
 
 A planned HubSpot/Jira/Zoho/SharePoint/Drive provider, an unregistered provider,
 or a Tier 0 provider bound at the wrong tier or under the wrong family (for example
@@ -388,7 +388,7 @@ The governed sidecar fingerprints the KnowledgeSources in its compiled desired s
 
 ### Status consistency
 
-The integration registry and versioned tests are the authority for implementation status. `python3 scripts/check-status-consistency.py` (run by CI and `make contracts`) fails when a doc calls a built provider planned or unimplemented, calls an unproven provider live, denies capabilities the reference receptionist does declare, or when the Tier 0 providers stop being `built-credential-free` at tier 0 with no live proof. It cannot directly validate Confluence pages. When the registry changes, run `python3 scripts/integration-directory.py --format markdown` and reconcile the [Confluence Integration Directory](https://modelgarden.atlassian.net/wiki/spaces/BA/pages/12189707) against its generated statuses; review the [target architecture](https://modelgarden.atlassian.net/wiki/spaces/BA/pages/11796484) and [receptionist reference](https://modelgarden.atlassian.net/wiki/spaces/BA/pages/1114125) only for misleading implementation claims. Never change `built-credential-free` to `live` without retained client/provider proof. The remaining automation work is tracked in [#131](https://github.com/kingyx3/model-garden/issues/131).
+The integration registry and versioned tests are the authority for implementation status. `python3 scripts/check-status-consistency.py` (run by CI and `make contracts`) fails when a doc calls a built provider planned or unimplemented, calls an unproven provider live, denies capabilities the reference receptionist does declare, or when the Tier 0 providers stop being `built-credential-free` at tier 0 with no live proof. It cannot directly validate Confluence pages. When the registry changes, run `python3 scripts/integration-directory.py --format markdown` and reconcile the [Confluence Integration Directory](https://modelgarden.atlassian.net/wiki/spaces/BA/pages/12189707) against its generated statuses; review the [target architecture](https://modelgarden.atlassian.net/wiki/spaces/BA/pages/11796484) and [receptionist reference](https://modelgarden.atlassian.net/wiki/spaces/BA/pages/1114125) only for misleading implementation claims. Never change `built-credential-free` to `live` without retained client/provider proof. Any Confluence status review should stay lightweight and use the authoritative registry, not a second integration catalog or sync job. The remaining status consistency work is tracked in [#131](https://github.com/kingyx3/model-garden/issues/131).
 
 ### Reference receptionist on a zero-stack client
 
