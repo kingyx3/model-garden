@@ -176,7 +176,7 @@ class Case(unittest.TestCase):
         self.assertLess(main.index("ledger_policy_deployment(runtime)"), main.index("server.run("))
         deployer = _load("deploy_docker_for_policy_deploy", "scripts/deploy-client-docker.py")
         self.assertIn(pathlib.Path("platform/core/policy_deploy.py"), deployer.RUNTIME_SOURCE_PATHS)
-        compose = deployer._compose("acme-dev", "openai", {"version": "1", "commit": "c"}, calendar=None, built_in_tools=True)
+        compose = deployer._compose("acme-dev", "openai", {"version": "1", "commit": "c"}, built_in_tools=True)
         self.assertIn("MODEL_GARDEN_DEPLOYED_BY", compose)
 
     def test_policy_input_is_not_mutated(self):
