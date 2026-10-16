@@ -119,7 +119,8 @@ def invoke(
     fresh = recheck()
     if (fresh["grant"] != route["grant"] or fresh["declaration"] != route["declaration"]
             or fresh["server"] != route["server"] or fresh.get("connectionRevision") != route.get("connectionRevision")
-            or fresh.get("reviewedFingerprints") != route.get("reviewedFingerprints")):
+            or fresh.get("reviewedFingerprints") != route.get("reviewedFingerprints")
+            or fresh.get("activationId") != route.get("activationId")):
         raise GatewayError("the approved connection changed; retry from a fresh request")
     server, upstream = fresh["server"], fresh["upstream"]
     qualified = _endpoint().qualify(server["url"], dns_resolver)
@@ -158,7 +159,8 @@ def invoke(
                 raise GatewayError("upstream operation input is invalid") from None
             latest = recheck()
             if (latest["grant"] != route["grant"] or latest.get("connectionRevision") != route.get("connectionRevision")
-                    or latest.get("reviewedFingerprints") != route.get("reviewedFingerprints")):
+                    or latest.get("reviewedFingerprints") != route.get("reviewedFingerprints")
+                    or latest.get("activationId") != route.get("activationId")):
                 raise GatewayError("connection revoked or replaced before execution")
             result = session.call_tool(upstream, dict(arguments))
     except (GatewayError, _mcp().SchemaDriftError, ValidationError):
