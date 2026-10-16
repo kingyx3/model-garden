@@ -26,7 +26,7 @@ def load(name, path):
 
 
 gateway = load("gateway_under_test", "platform/core/mcp_executor.py")
-mcp = load("mcp_for_gateway_tests", "platform/core/mcp_passthrough.py")
+mcp = gateway._mcp()
 grants = load("grants_for_gateway_tests", "platform/core/provider_grants.py")
 compiler = load("compiler_for_gateway_tests", "scripts/compile-workspace.py")
 runtime_module = load("runtime_for_gateway_tests", "platform/runtime/governed_mcp.py")
@@ -205,7 +205,9 @@ class GatewayCase(unittest.TestCase):
             self.prepare()
 
 
-class RuntimeBoundaryCase(GatewayCase):
+class RuntimeBoundaryCase(unittest.TestCase):
+    setUp = GatewayCase.setUp
+
     def runtime(self):
         workspace = self.root / "workspace"
         shutil.copytree(ROOT / "examples/workspace", workspace)
