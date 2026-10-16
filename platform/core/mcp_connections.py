@@ -185,10 +185,12 @@ class McpConnectionStore:
                 raise ConnectionRefused("a declared upstream operation is absent or duplicated")
             _mcp().call_gate(entry["declaration"], tool, approvals)
             # prepare enforces matched provider, exact credential reference and independent grant.
-            _gateway().prepare(
+            scoped = _gateway().prepare(
                 entry["declaration"], registry=grants, tenant=self.tenant, attested_agent=agent, upstream=upstream,
                 enabled_tools=(spec["tool"],), originator_permissions=(spec["tool"],), now=now,
             )
+            if scoped["grant"]["connectionId"] != connection_id:
+                raise ConnectionRefused("the coworker grant belongs to a different connection")
             fingerprints[upstream] = _mcp().fingerprint(tool)
         with self._locked() as state:
             actual = state["connections"].get(key)
