@@ -636,12 +636,15 @@ def runtime_connection(
     health: str | None = None,
     actor: str | None = None,
     reason: str | None = None,
+    agent: str | None = None,
 ) -> int:
     """Show or set live connection health; the capability manifest reflects it immediately."""
     if command not in {"list", "set", "offboard"}:
         raise ValueError("runtime connection command must be list, set or offboard")
     if command == "offboard" and (not isinstance(actor, str) or not actor.strip()):
-        raise ValueError("--actor must name the person offboarding the environment")
+        raise ValueError("--actor must name the person offboarding")
+    if agent is not None and not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}", agent):
+        raise ValueError("--agent must be a short Agent name")
     container = _governed_tool_container(project_name)
     inner = [
         "python",
@@ -661,11 +664,37 @@ def runtime_connection(
             inner.extend(["--reason", reason])
     if command == "offboard":
         inner.extend(["--actor", actor.strip()])
+        if agent:
+            inner.extend(["--agent", agent])
         if reason:
             inner.extend(["--reason", reason])
     result = _run(["docker", "exec", container, *inner])
     if result.returncode != 0:
         raise ValueError(result.stderr.strip() or result.stdout.strip() or "runtime connection command failed")
+    if result.stdout:
+        print(result.stdout.strip())
+    return 0
+
+
+def runtime_grants(project_name: str, command: str, *, agent: str | None = None, grant_id: str | None = None, actor: str | None = None) -> int:
+    """Show or revoke per-coworker provider grants on a client runtime (no secret reference is shown)."""
+    if command not in {"list", "revoke"}:
+        raise ValueError("grants command must be list or revoke")
+    inner = ["python", "/opt/model-garden-platform/scripts/runtime-connection.py", "/opt/data/.modelgarden", "grants", command]
+    if command == "list":
+        if agent is not None:
+            if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}", agent):
+                raise ValueError("--agent must be a short Agent name")
+            inner.extend(["--agent", agent])
+    else:
+        if not isinstance(grant_id, str) or not re.fullmatch(r"g-[0-9a-f]{12}", grant_id):
+            raise ValueError("grant id must look like g-0123456789ab")
+        if not isinstance(actor, str) or not actor.strip():
+            raise ValueError("--actor must name the person revoking the grant")
+        inner.extend([grant_id, "--actor", actor.strip()])
+    result = _run(["docker", "exec", _governed_tool_container(project_name), *inner])
+    if result.returncode != 0:
+        raise ValueError(result.stderr.strip() or result.stdout.strip() or "runtime grants command failed")
     if result.stdout:
         print(result.stdout.strip())
     return 0
@@ -773,8 +802,15 @@ def main() -> int:
         "offboard", help="revoke every bound external connection and print the manual provider, secret and data steps"
     )
     offboard.add_argument("--project-name", required=True)
-    offboard.add_argument("--actor", required=True, help="the named person offboarding this environment")
+    offboard.add_argument("--actor", required=True, help="the named person offboarding")
     offboard.add_argument("--reason")
+    offboard.add_argument("--agent", help="offboard this coworker only (revoke its provider grants; every other coworker keeps working)")
+    grants = sub.add_parser("grants", help="show or revoke per-coworker provider grants on a client runtime")
+    grants.add_argument("grants_command", choices=("list", "revoke"))
+    grants.add_argument("grant_id", nargs="?", help="grant to revoke (g-...)")
+    grants.add_argument("--project-name", required=True)
+    grants.add_argument("--agent", help="list only this coworker's grants")
+    grants.add_argument("--actor", help="the named person revoking (required for revoke)")
     connection = sub.add_parser("connection", help="mark one connector healthy, degraded, failed or revoked")
     connection.add_argument("family", help="capability family, e.g. calendar")
     connection.add_argument("health", choices=("healthy", "degraded", "failed", "revoked"))
@@ -812,7 +848,9 @@ def main() -> int:
         if args.command == "connections":
             return runtime_connection(args.project_name, "list")
         if args.command == "offboard":
-            return runtime_connection(args.project_name, "offboard", actor=args.actor, reason=args.reason)
+            return runtime_connection(args.project_name, "offboard", actor=args.actor, reason=args.reason, agent=args.agent)
+        if args.command == "grants":
+            return runtime_grants(args.project_name, args.grants_command, agent=args.agent, grant_id=args.grant_id, actor=args.actor)
         if args.command == "connection":
             return runtime_connection(
                 args.project_name, "set", family=args.family, health=args.health, actor=args.actor, reason=args.reason

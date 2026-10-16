@@ -204,6 +204,28 @@ class GrantRegistry:
             return {}
         return self._change(grant_id, by, "grant.revoke", apply)
 
+    def revoke_all(self, *, by: str, now: int, agent: str | None = None) -> list[dict[str, Any]]:
+        """Offboard: revoke every live grant of one coworker (``agent``) or of the whole tenant (``agent=None``).
+
+        Each revoked grant is ledgered like a single revoke (secret reference as a digest only). The result lists the
+        revoked grants as operators see them, plus ``secretRef`` so the person offboarding knows which entries to delete from
+        the secret store: revoking here only stops the coworker using the grant, it does not delete the credential or revoke
+        it at the provider. Already-revoked grants are left as they are, so repeating the call changes nothing.
+        """
+        who = _check(by, _PERSON, "by must name who offboarded it")
+        if agent is not None:
+            agent = _check(agent, _AGENT, "agent must be a short Agent name")
+        revoked: list[dict[str, Any]] = []
+        with self._locked() as state:
+            for grant in state["grants"].values():
+                if (agent is None or grant["agent"] == agent) and not grant.get("revokedAt"):
+                    grant["revokedAt"] = now
+                    grant["health"] = "failed"
+                    revoked.append(dict(grant))
+        for grant in sorted(revoked, key=lambda item: (item["createdAt"], item["id"])):
+            self._record("grant.revoke", who, grant, offboarded=True)
+        return [{**self._public(grant), "secretRef": grant["secretRef"]} for grant in sorted(revoked, key=lambda item: (item["createdAt"], item["id"]))]
+
     def rotate(self, grant_id: str, *, secret_ref: str, by: str, now: int) -> dict[str, Any]:
         """Replace this coworker's credential reference with a new one nobody else holds."""
         secret_ref = _check(secret_ref, _SECRET_REF, "the credential must be a secret:// reference, never the value")

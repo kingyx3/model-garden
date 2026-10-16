@@ -6,6 +6,7 @@ dev:
 contracts:
 	python3 scripts/validate-workspace.py examples/workspace
 	python3 scripts/check-status-consistency.py
+	python3 scripts/provider-evidence.py --check
 
 tests:
 	python3 -m unittest discover -s tests -v
