@@ -239,6 +239,10 @@ Three more vendor-neutral, credential-free pieces for the upstream-only directio
 
 Open for all three: the sidecar wiring and a real MCP or managed client, real vault and enrollment page, tenant RBAC over who may enroll, approve or promote, per-coworker identity provisioning (#129), a registry fetcher, and live evidence for any route.
 
+## Upstream execution groundwork (v0.8.3)
+
+The runtime now joins the existing MCP declaration/schema approvals, endpoint DNS pinning and per-coworker grant registry with a guarded internal executor and the normal Tool policy, exact-action approval and audit. This is a **credential-free exercised seam**, not a deployed live MCP connector: no arbitrary outbound MCP transport, OAuth integration onboarding, dynamic externally exposed Tool or provider tenant proof exists yet. The injected transport must enforce pinned-address TLS/redirect safety and is refused when absent. Provider statuses stay planned; see [governed tools](governed-tools.md#governed-upstream-mcp-execution-seam-v083).
+
 ## Upstream-only provider integrations (v0.8.0)
 
 Model Garden does **not** implement or maintain vendor-specific REST clients. The former native Google/Microsoft Calendar, Gmail, Outlook, HubSpot, Salesforce and Google Drive modules and their dedicated transport/test helpers were retired in v0.8.0. The registry keeps those provider names **planned** with method `governed-mcp` and tier 2 so clients know the intended coverage; it does not claim that any external server is approved, connected or live.

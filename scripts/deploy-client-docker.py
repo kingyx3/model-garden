@@ -68,6 +68,7 @@ RUNTIME_SOURCE_PATHS = (
     pathlib.Path("platform/core/knowledge_deploy.py"),
     pathlib.Path("platform/core/team.py"),
     pathlib.Path("platform/core/mcp_passthrough.py"),
+    pathlib.Path("platform/core/mcp_executor.py"),
     pathlib.Path("platform/core/endpoint_guard.py"),
     pathlib.Path("platform/core/mcp_tool_review.py"),
     pathlib.Path("platform/core/custom_api.py"),
