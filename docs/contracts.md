@@ -229,7 +229,17 @@ Open: serving any of these from the sidecar, OAuth consent and token lifecycle (
 - **Once per state, at least once.** A notice has a stable key (connection or grant, condition, when the state began), is offered until delivery is recorded, and is not repeated for an unchanged state. A cleared condition is forgotten so a recurrence is told again. Only a notice the store offered can be marked delivered; `connection.notice-delivered` is ledgered with the key, kind and channel.
 - **Non-secret.** Notices name the family or the grant's connection, the condition and a recovery step, never a reason string, scope, account, secret reference or the provider-side identity.
 
-Open: delivering notices through Slack, Teams, email or the inbox, escalation after a notice goes unacknowledged, OAuth consent, token refresh and provider-side revocation (#86, #110).
+### Delivering notices to the named person's channel
+
+`platform/core/notice_delivery.py` is the credential-free runner between these notices (and the Tier 4 hand-off notices, which carry human task steps) and a channel (#88, #97, #86). A small people directory maps a named person to one channel and one address (for a chat channel, the id of the conversation with that person; the directory refuses credentials and unknown keys). Each channel is an injected `send(address, text)`; `adapter_sender` wraps a channel adapter's `send_reply`. It holds no credential and is **not wired into the sidecar or a scheduler**; no real channel delivery has live proof.
+
+- **The person's channel.** A person with no directory entry, or a channel with no registered sender, is reported `no-channel` and the notice stays due; `inbox` counts as a channel only when the person's entry says so, so a notice is never marked delivered because it was merely visible.
+- **At least once.** Delivery is recorded after the send succeeds. A failed send records only the error type, leaves the notice due and does not stop the rest of the batch; a send whose recording then fails is reported `unmarked` and sent again next run rather than lost.
+- **Unowned stays loud.** A notice with no recipient is reported `unowned` and ledgered every run.
+- **Safe text.** Notices carry the Tool, deadline and reference, never the action's arguments. The ledger (`notice.delivered`, `notice.delivery-failed`, `notice.undeliverable`) records source, kind, reference, channel and error type, never the message text or the address.
+- **Operator command.** `runtime-handoff.py <store> deliver --people people.json` runs it for hand-offs with the `inbox` channel only (it carries no transport); everyone else is reported `no-channel`.
+
+Open: wiring this into the sidecar or a scheduler, real Slack, Teams and email transports, acknowledgement-based escalation, OAuth consent, token refresh and provider-side revocation (#86, #88, #97, #110).
 
 ## Filing interactions through the sync ledger
 
@@ -250,7 +260,9 @@ Open: wiring this to the voice transcript and support-mailbox paths, a payload s
 - **Apply.** The read-only connection test runs first. If it fails nothing is recorded and the failure is ledgered; on success the coworker's own grant is recorded (`provider_grants.py`, so a second coworker never inherits the first one's credential) and the binding fragment (provider, tier, scopes, owner, never a secret) is returned for `merge_binding`, which leaves the input untouched, keeps a live `token_ref` for the same provider and makes replacing a provider explicit.
 - **Ledger.** `connection.connect`, `connection.connect-failed` and `connection.disconnect` name the operator and the client owner with identifiers, never a credential, reference or account. `disconnect` revokes one coworker's grant and affects no other.
 
-Open: owner OAuth consent and token acquisition, credential storage, a live test, re-scoping, re-running Skill readiness after a change, and the interactive CLI (#110, #86, #129).
+- **Changing a working connection.** `merge_binding` refuses, unless the caller passes `rescope`, to widen the scopes of a binding that already lists scopes or to change its owner, in addition to the existing explicit `replace` for a provider; `describe_change` shows exactly what a fragment would change. A legacy binding with no `scopes` key is narrowed, not widened, by naming scopes. `replace` moves a coworker to a new grant without leaving it with none: the test and the new grant first (a failure changes nothing), then the injected binding write, then revoking the previous grant. If the write fails the new grant is revoked, the previous grant stays in force and `connection.rolled-back` is ledgered; success ledgers `connection.replaced` with both grant ids and says if revoking the old grant failed (`previousRevoked: false`).
+
+Open: owner OAuth consent and token acquisition, credential storage, a live test, re-running Skill readiness after a change, and the interactive CLI (#110, #86, #129).
 
 Stable operational contract:
 

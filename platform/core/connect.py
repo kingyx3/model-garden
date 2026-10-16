@@ -21,7 +21,13 @@ itself (the read-only test is injected) or edit a file; it is not wired to the i
 - **Ledgered with both people.** Connect, failed connect and disconnect each call the audit hook naming the operator and the
   client owner, with identifiers, never a credential, reference or account.
 
-Not done here: owner OAuth consent and token acquisition, storing the credential, a live test, re-scoping, and re-running Skill
+- **Changing a working connection is explicit and reversible.** ``merge_binding`` refuses, unless the caller says so, to widen the
+  scopes of an existing binding, change its owner or switch its provider; ``describe_change`` shows exactly what a fragment would
+  change. ``replace`` connects the new grant first (the test must pass), writes the binding through an injected callable, and
+  only then revokes the previous grant. If the write fails the new grant is revoked and the previous grant and binding are left
+  as they were, and both outcomes are ledgered (``connection.replaced`` / ``connection.rolled-back``).
+
+Not done here: owner OAuth consent and token acquisition, storing the credential, a live test, and re-running Skill
 readiness after a change (the caller does that against the new binding).
 """
 from __future__ import annotations
@@ -191,8 +197,32 @@ def disconnect(
     return grant
 
 
-def merge_binding(binding: Mapping[str, Any], family: str, fragment: Mapping[str, Any], *, replace: bool = False) -> dict[str, Any]:
-    """A copy of the EnvironmentBinding with ``connectors.<family>`` set from a connect fragment; the input is never changed."""
+def describe_change(existing: Mapping[str, Any] | None, fragment: Mapping[str, Any]) -> dict[str, Any]:
+    """What applying ``fragment`` over an existing ``connectors.<family>`` entry would change (nothing secret is compared)."""
+    if not isinstance(existing, Mapping):
+        return {"new": True, "providerChanged": False, "ownerChanged": False, "broadened": [], "narrowed": []}
+    # A legacy binding with no ``scopes`` key had no stated limit, so naming scopes for it narrows it; only a binding that already
+    # lists scopes can be widened.
+    scoped = "scopes" in existing
+    old_scopes = {str(item) for item in existing.get("scopes") or ()}
+    new_scopes = {str(item) for item in fragment.get("scopes") or ()} if scoped else old_scopes
+    return {
+        "new": False,
+        "providerChanged": existing.get("provider") not in (None, fragment.get("provider")),
+        "ownerChanged": existing.get("owner") not in (None, fragment.get("owner")),
+        "broadened": sorted(new_scopes - old_scopes),
+        "narrowed": sorted(old_scopes - new_scopes),
+    }
+
+
+def merge_binding(
+    binding: Mapping[str, Any], family: str, fragment: Mapping[str, Any], *, replace: bool = False, rescope: bool = False
+) -> dict[str, Any]:
+    """A copy of the EnvironmentBinding with ``connectors.<family>`` set from a connect fragment; the input is never changed.
+
+    Replacing the provider needs ``replace``; widening the scopes or changing the owner of an existing binding needs ``rescope``,
+    so neither can happen by accident or through a refresh that quietly asks for more.
+    """
     if set(fragment) - set(BINDING_KEYS):
         raise ConnectError("a binding fragment holds only provider, tier, scopes and owner; never a secret")
     if not isinstance(family, str) or not re.fullmatch(r"[a-z]+", family):
@@ -200,8 +230,14 @@ def merge_binding(binding: Mapping[str, Any], family: str, fragment: Mapping[str
     merged = copy.deepcopy(dict(binding))
     connectors = merged.setdefault("connectors", {})
     existing = connectors.get(family)
-    if isinstance(existing, Mapping) and existing.get("provider") not in (None, fragment.get("provider")) and not replace:
+    change = describe_change(existing, fragment)
+    if change["providerChanged"] and not replace:
         raise ConnectError(f"{family} is already bound to {existing.get('provider')}; replacing a provider must be explicit")
+    if not change["providerChanged"] and not rescope:
+        if change["broadened"]:
+            raise ConnectError(f"{family} would gain scopes ({', '.join(change['broadened'])}); widening access must be explicit")
+        if change["ownerChanged"]:
+            raise ConnectError(f"{family} would change owner; a change of owner must be explicit")
     kept: dict[str, Any] = {}
     if isinstance(existing, Mapping):
         same_provider = existing.get("provider") in (None, fragment.get("provider"))
@@ -210,3 +246,52 @@ def merge_binding(binding: Mapping[str, Any], family: str, fragment: Mapping[str
         kept = {key: value for key, value in existing.items() if key not in BINDING_KEYS and (same_provider or key != "token_ref")}
     connectors[family] = {**kept, **{key: fragment[key] for key in BINDING_KEYS if key in fragment}}
     return merged
+
+
+def replace(
+    proposal: Mapping[str, Any],
+    registry: Any,
+    *,
+    previous_grant_id: str,
+    write_binding: Callable[[Mapping[str, Any]], Any],
+    owner_consent: str,
+    connection_test: Callable[[], Mapping[str, Any]],
+    connection_id: str,
+    isolation: str,
+    acting_identity: str,
+    secret_ref: str,
+    now: int,
+    audit: Audit | None = None,
+) -> dict[str, Any]:
+    """Move a coworker to a new grant without ever leaving it with none.
+
+    Order: the test and the new grant (``apply``; a failure changes nothing), then ``write_binding(fragment)``, then revoking
+    the previous grant. If ``write_binding`` raises, the new grant is revoked and the previous grant stays in force; the
+    binding was never changed by this function and the failure is ledgered. Revoking the previous grant after a successful
+    write is retried by the caller if it fails: the binding already names the new grant's scopes, so the old one is only
+    surplus access, and the result says so (``previousRevoked: False``).
+    """
+    previous = next((item for item in registry.list(agent=proposal.get("agent")) if item.get("id") == previous_grant_id), None)
+    if previous is None or previous.get("revokedAt"):
+        raise ConnectError("the grant being replaced is not an active grant of this coworker")
+    if (previous.get("agent"), previous.get("family")) != (proposal.get("agent"), proposal.get("family")):
+        raise ConnectError("a grant can only be replaced by a grant for the same coworker and capability")
+    result = apply(
+        proposal, registry, owner_consent=owner_consent, connection_test=connection_test, connection_id=connection_id,
+        isolation=isolation, acting_identity=acting_identity, secret_ref=secret_ref, now=now, audit=audit,
+    )
+    base = {"agent": proposal["agent"], "family": proposal["family"], "provider": proposal["provider"], "owner": proposal["owner"],
+            "operator": proposal["operator"], "previousGrantId": previous_grant_id, "newGrantId": result["grant"]["id"]}
+    try:
+        write_binding(result["binding"])
+    except Exception as exc:  # noqa: BLE001 - whatever stops the write, the previous working grant must stay in force
+        registry.revoke(result["grant"]["id"], by=proposal["operator"], now=now)
+        _record(audit, "connection.rolled-back", proposal["operator"], {**base, "reason": f"binding-write:{type(exc).__name__}"})
+        raise ConnectError(f"the binding could not be written ({type(exc).__name__}); the new grant was revoked and the previous one is unchanged") from exc
+    revoked = True
+    try:
+        registry.revoke(previous_grant_id, by=proposal["operator"], now=now)
+    except Exception:  # noqa: BLE001 - surplus access is reported, never hidden
+        revoked = False
+    _record(audit, "connection.replaced", proposal["operator"], {**base, "previousRevoked": revoked})
+    return {**result, "previousGrantId": previous_grant_id, "previousRevoked": revoked}

@@ -6,6 +6,7 @@
   runtime-handoff.py /opt/data/.modelgarden/handoffs decline <id> --by jordan@client.example --note "not our policy"
   runtime-handoff.py /opt/data/.modelgarden/handoffs due [--escalate-to owner@client.example]
   runtime-handoff.py /opt/data/.modelgarden/handoffs notified <id> assigned|reminder|escalation --via email
+  runtime-handoff.py /opt/data/.modelgarden/handoffs deliver --people people.json [--escalate-to owner@client.example]
 
 Closing a hand-off writes a chained `handoff` event (tier 4, provider human) naming the person.
 The coworker may report only what this record says: it never claims a person acted before then.
@@ -15,6 +16,12 @@ escalation once overdue). They carry the Tool, deadline and reference, never the
 Delivery is the deployment's channel transport; after the provider accepts a notice, `notified` records
 it (and ledgers an operator action naming the channel) so it is not offered again. A notice that was not
 recorded is offered again.
+
+`deliver` runs that loop from a people directory (`{"jordan@client.example": {"channel": "inbox"}}`): each due
+notice goes to the channel its recipient chose and is recorded only after it is delivered. This command carries
+no channel credentials, so it can deliver to `inbox` only; a person whose channel needs a transport (slack,
+teams, email) is reported as `no-channel` and stays due for a deployment that registers one
+(`platform/core/notice_delivery.py`). Nothing is marked delivered because it was merely visible.
 """
 from __future__ import annotations
 
@@ -37,6 +44,7 @@ def _load(name: str, path: pathlib.Path):
 
 GOVERN = _load("runtime_handoff_govern", ROOT / "scripts" / "govern-action.py")
 HANDOFF = GOVERN.HANDOFF
+DELIVERY = _load("runtime_handoff_delivery", ROOT / "platform" / "core" / "notice_delivery.py")
 
 
 def summary(document: dict) -> dict:
@@ -59,6 +67,9 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("list", help="list pending hand-offs with their exact content")
     due = sub.add_parser("due", help="print the notices that should reach a person now (no arguments, safe for any channel)")
     due.add_argument("--escalate-to", help="who an overdue hand-off is escalated to (default: the assignee again)")
+    deliver = sub.add_parser("deliver", help="deliver the due notices to each person's chosen channel (inbox only without a transport)")
+    deliver.add_argument("--people", type=pathlib.Path, required=True, help="JSON object: person -> {channel, address}")
+    deliver.add_argument("--escalate-to", help="who an overdue hand-off is escalated to (default: the assignee again)")
     notified = sub.add_parser("notified", help="record that a notice was delivered")
     notified.add_argument("handoff_id")
     notified.add_argument("kind", choices=HANDOFF.NOTICE_KINDS)
@@ -73,6 +84,14 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if args.command == "due":
             print(json.dumps(HANDOFF.due_notices(args.store, escalate_to=args.escalate_to), indent=2, sort_keys=True))
+            return 0
+        if args.command == "deliver":
+            directory = DELIVERY.Directory(json.loads(args.people.read_text(encoding="utf-8")))
+            results = DELIVERY.deliver(
+                [DELIVERY.handoff_source(args.store, escalate_to=args.escalate_to)], directory, {},
+                audit=lambda action, by, details: GOVERN.record_operator_action(audit_path, action, by, details),
+            )
+            print(json.dumps(results, indent=2, sort_keys=True))
             return 0
         if args.command == "notified":
             HANDOFF.mark_notified(args.store, args.handoff_id, args.kind, via=args.via)
