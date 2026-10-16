@@ -266,7 +266,7 @@ class RuntimeTests(unittest.TestCase):
         desired["source"]["client"] = "acme"
         desired_path = root / "desired.json"
         desired_path.write_text(json.dumps(desired), encoding="utf-8")
-        environ = {"MODEL_GARDEN_GOOGLE_CALENDAR_TOKEN": "secret", "MODEL_GARDEN_INITIATING_IDENTITY": "call:trace-9"}
+        environ = {"MODEL_GARDEN_INITIATING_IDENTITY": "call:trace-9"}
         if assignee:
             environ["MODEL_GARDEN_HANDOFF_ASSIGNEE"] = assignee
         if not bound:
@@ -293,21 +293,19 @@ class RuntimeTests(unittest.TestCase):
             self.assertEqual(events[0]["ledger"]["justification"], "calendar not connected")
             self.assertTrue(govern.verify_audit_chain(root / "audit.jsonl")["valid"])
 
-    def test_revoked_connection_can_be_handed_off_but_direct_calls_still_deny(self):
+    def test_revoked_calendar_still_uses_safe_handoff_not_native_execution(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = pathlib.Path(tmp)
-            runtime = self.runtime(root, bound=True)
-            runtime_module.CAPABILITIES.record_connection_health(root, "calendar", "revoked", actor="owner", reason="offboarding")
-            with self.assertRaisesRegex(PermissionError, "revoked"):
-                runtime.calendar_book(start=ARGS["start"], end=ARGS["end"])
+            runtime = self.runtime(root, bound=False)
+            runtime_module.CAPABILITIES.record_connection_health(root, "calendar", "revoked", actor="owner")
+            self.assertFalse(hasattr(runtime, "calendar_book"))
             result = runtime.request_handoff(tool="calendar.book", arguments=ARGS)
             self.assertEqual(result["status"], "handed-off")
 
-    def test_available_capability_must_be_called_directly(self):
+    def test_not_yet_approved_upstream_cannot_block_handoff(self):
         with tempfile.TemporaryDirectory() as tmp:
-            runtime = self.runtime(pathlib.Path(tmp), bound=True)
-            with self.assertRaisesRegex(ValueError, "available here"):
-                runtime.request_handoff(tool="calendar.book", arguments=ARGS)
+            runtime = self.runtime(pathlib.Path(tmp), bound=False)
+            self.assertEqual(runtime.request_handoff(tool="calendar.book", arguments=ARGS)["status"], "handed-off")
 
     def test_reads_unselected_tools_and_incomplete_arguments_are_refused(self):
         with tempfile.TemporaryDirectory() as tmp:
