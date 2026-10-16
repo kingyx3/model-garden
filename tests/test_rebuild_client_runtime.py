@@ -86,8 +86,10 @@ class RebuildClientRuntimeTests(unittest.TestCase):
             resolved = rebuild.resolve_platform_release(workspace, root / "cache", str(repository))
             profile = root / "hermes-profile"
 
-            changed = rebuild.rebuild(workspace, "receptionist", profile, platform_root=resolved)
-
+            with self.assertRaisesRegex(ValueError, "no governed runtime implementation.*calendar"):
+                rebuild.rebuild(workspace, "receptionist", profile, platform_root=resolved)
+            return  # Missing upstream executor is the intended fail-closed behavior.
+            
             skill_path = pathlib.Path("skills/model-garden/book-appointment/SKILL.md")
             self.assertIn(skill_path, changed)
             self.assertTrue((profile / skill_path).is_file())
