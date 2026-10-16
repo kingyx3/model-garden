@@ -12,7 +12,8 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 class EnterpriseSDLCTests(unittest.TestCase):
     def test_third_party_actions_are_commit_pinned(self):
         workflow = (ROOT / ".github" / "workflows" / "validate.yml").read_text(encoding="utf-8")
-        actions = re.findall(r"(?m)^\s*-\s*uses:\s*([^\s#]+)", workflow)
+        parsed = yaml.safe_load(workflow)
+        actions = [step["uses"] for job in parsed["jobs"].values() for step in job.get("steps", []) if "uses" in step]
         self.assertTrue(actions, "validation workflow must use pinned GitHub Actions")
         for action in actions:
             if action.startswith("./"):
