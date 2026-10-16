@@ -188,6 +188,7 @@ class McpConnectionStore:
             scoped = _gateway().prepare(
                 entry["declaration"], registry=grants, tenant=self.tenant, attested_agent=agent, upstream=upstream,
                 enabled_tools=(spec["tool"],), originator_permissions=(spec["tool"],), now=now,
+                connection_id=connection_id,
             )
             if scoped["grant"]["connectionId"] != connection_id:
                 raise ConnectionRefused("the coworker grant belongs to a different connection")
