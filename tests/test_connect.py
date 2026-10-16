@@ -209,6 +209,99 @@ class Case(unittest.TestCase):
         with self.assertRaises(Error):
             connect.merge_binding({}, "Calendar", {"provider": "x"})
 
+    # -- changing a working connection --------------------------------------------------
+
+    def existing_binding(self, **overrides):
+        entry = {"provider": "google-calendar", "tier": 1, "scopes": ["https://www.googleapis.com/auth/calendar.freebusy"], "owner": OWNER}
+        entry.update(overrides)
+        return {"connectors": {"calendar": entry}}
+
+    def test_describe_change_names_exactly_what_would_change(self):
+        fragment = {"provider": "google-calendar", "tier": 1, "scopes": ["a", "b"], "owner": "other@client.example"}
+        change = connect.describe_change({"provider": "google-calendar", "scopes": ["b", "c"], "owner": OWNER}, fragment)
+        self.assertEqual((change["broadened"], change["narrowed"], change["ownerChanged"], change["providerChanged"]), (["a"], ["c"], True, False))
+        self.assertTrue(connect.describe_change(None, fragment)["new"])
+
+    def test_widening_scopes_or_changing_owner_of_a_scoped_binding_must_be_explicit(self):
+        binding = self.existing_binding()
+        wider = {"provider": "google-calendar", "tier": 1, "scopes": ["https://www.googleapis.com/auth/calendar.freebusy", "https://www.googleapis.com/auth/calendar.events"], "owner": OWNER}
+        with self.assertRaisesRegex(Error, "widening access must be explicit"):
+            connect.merge_binding(binding, "calendar", wider)
+        self.assertEqual(connect.merge_binding(binding, "calendar", wider, rescope=True)["connectors"]["calendar"]["scopes"], wider["scopes"])
+        other_owner = {**wider, "scopes": binding["connectors"]["calendar"]["scopes"], "owner": "someone-else@client.example"}
+        with self.assertRaisesRegex(Error, "change of owner must be explicit"):
+            connect.merge_binding(binding, "calendar", other_owner)
+        narrower = {**other_owner, "owner": OWNER, "scopes": []}
+        self.assertEqual(connect.merge_binding(binding, "calendar", narrower)["connectors"]["calendar"]["scopes"], [])  # narrowing needs no ceremony
+        self.assertEqual(binding, self.existing_binding())
+
+    def replace(self, proposal, previous, write, **overrides):
+        values = dict(previous_grant_id=previous, write_binding=write, owner_consent=proposal["digest"], connection_test=passing,
+                      connection_id="calendar-front-2", isolation="isolated-grant", acting_identity="grant-receptionist-2", secret_ref=SECRET_B,
+                      now=T0 + 10, audit=lambda *event: self.events.append(event))
+        values.update(overrides)
+        return connect.replace(proposal, self.registry, **values)
+
+    def test_replace_connects_the_new_grant_writes_the_binding_and_only_then_revokes_the_old_one(self):
+        old = self.apply(self.plan())["grant"]["id"]
+        written = []
+        result = self.replace(self.plan(), old, written.append)
+        self.assertEqual((result["previousRevoked"], len(written)), (True, 1))
+        active = {grant["id"] for grant in self.registry.list(agent="receptionist") if not grant.get("revokedAt")}
+        self.assertEqual(active, {result["grant"]["id"]})
+        replaced = [event for event in self.events if event[0] == "connection.replaced"]
+        self.assertEqual(len(replaced), 1)
+        self.assertEqual((replaced[0][2]["previousGrantId"], replaced[0][2]["newGrantId"]), (old, result["grant"]["id"]))
+        self.assertNotIn(SECRET_B, json.dumps(self.events))
+
+    def test_a_failed_binding_write_revokes_the_new_grant_and_leaves_the_working_one_alone(self):
+        old = self.apply(self.plan())["grant"]["id"]
+
+        def failing(_fragment):
+            raise OSError("disk full")
+
+        with self.assertRaisesRegex(Error, "previous one is unchanged"):
+            self.replace(self.plan(), old, failing)
+        grants_now = self.registry.list(agent="receptionist")
+        self.assertEqual([grant["id"] for grant in grants_now if not grant.get("revokedAt")], [old])
+        rolled = [event for event in self.events if event[0] == "connection.rolled-back"]
+        self.assertEqual(len(rolled), 1)
+        self.assertEqual(rolled[0][2]["reason"], "binding-write:OSError")
+        self.assertFalse([event for event in self.events if event[0] == "connection.replaced"])
+
+    def test_a_failed_test_changes_nothing_and_the_binding_is_never_written(self):
+        old = self.apply(self.plan())["grant"]["id"]
+        written = []
+        with self.assertRaisesRegex(Error, "nothing was changed"):
+            self.replace(self.plan(), old, written.append, connection_test=lambda: {"ok": False})
+        self.assertEqual(written, [])
+        self.assertEqual([grant["id"] for grant in self.registry.list(agent="receptionist") if not grant.get("revokedAt")], [old])
+
+    def test_only_an_active_grant_of_the_same_coworker_and_capability_can_be_replaced(self):
+        mine = self.apply(self.plan())["grant"]["id"]
+        other = self.apply(self.plan(agent="researcher"), connection_id="calendar-research", acting_identity="grant-researcher-1", secret_ref=SECRET_A.replace("receptionist", "researcher"))["grant"]["id"]
+        with self.assertRaises(Error):
+            self.replace(self.plan(), other, lambda _: None)
+        with self.assertRaises(Error):
+            self.replace(self.plan(), "g" * 12, lambda _: None)
+        self.registry.revoke(mine, by=OPERATOR, now=T0 + 5)
+        with self.assertRaises(Error):
+            self.replace(self.plan(), mine, lambda _: None)
+
+    def test_a_failed_revocation_of_the_old_grant_is_reported_not_hidden(self):
+        old = self.apply(self.plan())["grant"]["id"]
+        real = self.registry.revoke
+
+        def flaky(grant_id, **kwargs):
+            if grant_id == old:
+                raise PermissionError("registry unavailable")
+            return real(grant_id, **kwargs)
+
+        self.registry.revoke = flaky  # type: ignore[method-assign]
+        result = self.replace(self.plan(), old, lambda _: None)
+        self.assertFalse(result["previousRevoked"])
+        self.assertFalse([e for e in self.events if e[0] == "connection.replaced"][0][2]["previousRevoked"])
+
 
 if __name__ == "__main__":
     unittest.main()

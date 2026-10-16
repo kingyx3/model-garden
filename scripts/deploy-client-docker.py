@@ -61,6 +61,7 @@ RUNTIME_SOURCE_PATHS = (
     pathlib.Path("platform/core/artifacts.py"),
     pathlib.Path("platform/core/builtin_files.py"),
     pathlib.Path("platform/core/connection_notices.py"),
+    pathlib.Path("platform/core/notice_delivery.py"),
     pathlib.Path("platform/core/crm_filing.py"),
     pathlib.Path("platform/core/connect.py"),
     pathlib.Path("platform/core/deliverables.py"),
