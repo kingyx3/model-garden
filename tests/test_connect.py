@@ -7,6 +7,7 @@ import pathlib
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 
@@ -38,10 +39,26 @@ class Case(unittest.TestCase):
         self._tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self._tmp.cleanup)
         self.events: list[tuple] = []
+        # Synthetic upstream approval exists exclusively in this test fixture.
+        # The real production registry must continue to refuse unshipped vendors.
+        integration = connect._integrations()
+        real_plan = integration.plan
+        def fake_plan(family, provider, tools):
+            if provider != "test-upstream":
+                return real_plan(family, provider, tools)
+            if family != "calendar" or not tools or not set(tools) <= {"calendar.availability", "calendar.book"}:
+                raise ValueError("unsupported Tool selection")
+            scopes = {"calendar.availability": "https://www.googleapis.com/auth/calendar.freebusy",
+                      "calendar.book": "https://www.googleapis.com/auth/calendar.events"}
+            return {"tier": 2, "status": "built-credential-free",
+                    "scopes": sorted(scopes[t] for t in tools), "blocker": None}
+        patch = mock.patch.object(integration, "plan", side_effect=fake_plan)
+        patch.start()
+        self.addCleanup(patch.stop)
         self.registry = grants.GrantRegistry(pathlib.Path(self._tmp.name) / "grants", tenant="acme-prod")
 
     def plan(self, **overrides):
-        values = dict(family="calendar", provider="google-calendar", tools=["calendar.availability"], agent="receptionist", owner=OWNER, operator=OPERATOR)
+        values = dict(family="calendar", provider="test-upstream", tools=["calendar.availability"], agent="receptionist", owner=OWNER, operator=OPERATOR)
         values.update(overrides)
         return connect.plan(**values)
 
@@ -55,7 +72,7 @@ class Case(unittest.TestCase):
 
     def test_a_plan_names_the_coworker_the_exact_scopes_and_carries_a_digest(self):
         plan = self.plan()
-        self.assertEqual((plan["connectable"], plan["agent"], plan["tier"], plan["tools"]), (True, "receptionist", 1, ["calendar.availability"]))
+        self.assertEqual((plan["connectable"], plan["agent"], plan["tier"], plan["tools"]), (True, "receptionist", 2, ["calendar.availability"]))
         self.assertEqual(plan["scopes"], ["https://www.googleapis.com/auth/calendar.freebusy"])
         self.assertNotIn("calendar.events", json.dumps(plan))
         self.assertEqual(plan["digest"], self.plan()["digest"])  # deterministic
@@ -111,8 +128,8 @@ class Case(unittest.TestCase):
         result = self.apply(proposal)
         grant = result["grant"]
         self.assertEqual((grant["agent"], grant["family"], grant["provider"], grant["owner"], grant["scopes"]),
-                         ("receptionist", "calendar", "google-calendar", OWNER, ["calendar.availability"]))
-        self.assertEqual(result["binding"], {"provider": "google-calendar", "tier": 1, "scopes": ["https://www.googleapis.com/auth/calendar.freebusy"], "owner": OWNER})
+                         ("receptionist", "calendar", "test-upstream", OWNER, ["calendar.availability"]))
+        self.assertEqual(result["binding"], {"provider": "test-upstream", "tier": 2, "scopes": ["https://www.googleapis.com/auth/calendar.freebusy"], "owner": OWNER})
         self.assertNotIn("secret", json.dumps(result["binding"]).lower())
         self.assertEqual([item["id"] for item in self.registry.list(agent="receptionist")], [grant["id"]])
         action, by, details = self.events[-1]
@@ -185,22 +202,22 @@ class Case(unittest.TestCase):
     # -- binding merge ------------------------------------------------------------------
 
     def test_the_binding_gains_the_fragment_without_changing_the_input_or_dropping_a_live_token_reference(self):
-        original = {"environment": "dev", "connectors": {"calendar": {"provider": "google-calendar", "token_ref": "secret://google/dev", "tier": 1}}}
+        original = {"environment": "dev", "connectors": {"calendar": {"provider": "test-upstream", "token_ref": "secret://google/dev", "tier": 2}}}
         fragment = self.apply(self.plan())["binding"]
         merged = connect.merge_binding(original, "calendar", fragment)
         self.assertEqual(merged["connectors"]["calendar"]["owner"], OWNER)
         self.assertEqual(merged["connectors"]["calendar"]["token_ref"], "secret://google/dev")  # still serving the running sidecar
-        self.assertEqual(original["connectors"]["calendar"], {"provider": "google-calendar", "token_ref": "secret://google/dev", "tier": 1})
+        self.assertEqual(original["connectors"]["calendar"], {"provider": "test-upstream", "token_ref": "secret://google/dev", "tier": 2})
         empty = connect.merge_binding({"environment": "dev"}, "calendar", fragment)
-        self.assertEqual(empty["connectors"]["calendar"]["provider"], "google-calendar")
+        self.assertEqual(empty["connectors"]["calendar"]["provider"], "test-upstream")
 
     def test_replacing_a_provider_must_be_explicit_and_drops_the_old_providers_token_reference(self):
         original = {"connectors": {"calendar": {"provider": "microsoft-calendar", "token_ref": "secret://ms/dev"}}}
-        fragment = {"provider": "google-calendar", "tier": 1, "scopes": ["s"], "owner": OWNER}
+        fragment = {"provider": "test-upstream", "tier": 2, "scopes": ["s"], "owner": OWNER}
         with self.assertRaisesRegex(Error, "must be explicit"):
             connect.merge_binding(original, "calendar", fragment)
         replaced = connect.merge_binding(original, "calendar", fragment, replace=True)
-        self.assertEqual(replaced["connectors"]["calendar"], {"provider": "google-calendar", "tier": 1, "scopes": ["s"], "owner": OWNER})
+        self.assertEqual(replaced["connectors"]["calendar"], {"provider": "test-upstream", "tier": 2, "scopes": ["s"], "owner": OWNER})
 
     def test_a_fragment_can_never_carry_a_secret_and_the_family_is_checked(self):
         for fragment in ({"provider": "x", "token_ref": "secret://x"}, {"provider": "x", "secret": "hunter2"}, {"provider": "x", "password": "p"}):
@@ -212,19 +229,19 @@ class Case(unittest.TestCase):
     # -- changing a working connection --------------------------------------------------
 
     def existing_binding(self, **overrides):
-        entry = {"provider": "google-calendar", "tier": 1, "scopes": ["https://www.googleapis.com/auth/calendar.freebusy"], "owner": OWNER}
+        entry = {"provider": "test-upstream", "tier": 2, "scopes": ["https://www.googleapis.com/auth/calendar.freebusy"], "owner": OWNER}
         entry.update(overrides)
         return {"connectors": {"calendar": entry}}
 
     def test_describe_change_names_exactly_what_would_change(self):
-        fragment = {"provider": "google-calendar", "tier": 1, "scopes": ["a", "b"], "owner": "other@client.example"}
-        change = connect.describe_change({"provider": "google-calendar", "scopes": ["b", "c"], "owner": OWNER}, fragment)
+        fragment = {"provider": "test-upstream", "tier": 2, "scopes": ["a", "b"], "owner": "other@client.example"}
+        change = connect.describe_change({"provider": "test-upstream", "scopes": ["b", "c"], "owner": OWNER}, fragment)
         self.assertEqual((change["broadened"], change["narrowed"], change["ownerChanged"], change["providerChanged"]), (["a"], ["c"], True, False))
         self.assertTrue(connect.describe_change(None, fragment)["new"])
 
     def test_widening_scopes_or_changing_owner_of_a_scoped_binding_must_be_explicit(self):
         binding = self.existing_binding()
-        wider = {"provider": "google-calendar", "tier": 1, "scopes": ["https://www.googleapis.com/auth/calendar.freebusy", "https://www.googleapis.com/auth/calendar.events"], "owner": OWNER}
+        wider = {"provider": "test-upstream", "tier": 2, "scopes": ["https://www.googleapis.com/auth/calendar.freebusy", "https://www.googleapis.com/auth/calendar.events"], "owner": OWNER}
         with self.assertRaisesRegex(Error, "widening access must be explicit"):
             connect.merge_binding(binding, "calendar", wider)
         self.assertEqual(connect.merge_binding(binding, "calendar", wider, rescope=True)["connectors"]["calendar"]["scopes"], wider["scopes"])
