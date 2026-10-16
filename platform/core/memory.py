@@ -160,7 +160,7 @@ class MemoryStore:
         text_digest = digest(cleaned)
         with self._locked() as state:
             entries = state["entries"]
-            existing = next((entry for entry in entries.values() if entry["scope"] == scope and entry["digest"] == text_digest), None)
+            existing = next((entry for entry in entries.values() if entry["scope"] == scope and entry["digest"] == text_digest and entry.get("owner") == owner), None)
             if existing is not None:
                 return {**existing, "duplicate": True}
             if len(entries) >= MAX_ENTRIES:

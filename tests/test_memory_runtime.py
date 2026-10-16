@@ -60,6 +60,19 @@ class MemoryChatCase(unittest.TestCase):
         self.assertEqual(self.worker.memory_delete(first["memoryId"])["deleted"], first["memoryId"])
         self.assertEqual(self.worker.memory_list()["memories"], [])
 
+    def test_identical_memory_is_not_deduplicated_across_owners(self):
+        alice = self.worker.memory_remember(text="Same shared preference", scope="client")
+        self.user = principal("bob@client.example")
+        bob = self.worker.memory_remember(text="Same shared preference", scope="client")
+        self.assertNotEqual(alice["memoryId"], bob["memoryId"])
+        self.assertFalse(bob["duplicate"])
+        self.assertEqual(len(self.worker.memory_list(scope="client")["memories"]), 1)
+        self.user = principal("alice@client.example")
+        self.assertEqual(len(self.worker.memory_list(scope="client")["memories"]), 1)
+        self.worker.memory_delete(alice["memoryId"])
+        self.user = principal("bob@client.example")
+        self.assertEqual(len(self.worker.memory_list(scope="client")["memories"]), 1)
+
     def test_conversation_and_agent_scopes_are_independent_and_non_forgeable(self):
         self.worker.memory_remember(text="Private thread", scope="conversation")
         self.worker.memory_remember(text="Agent preference", scope="agent")
