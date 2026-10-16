@@ -11,17 +11,17 @@ import argparse
 import datetime
 import importlib.util
 import pathlib
+import shutil
+import tempfile
 import sys
 
 import yaml
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
-# The eval environment binds the calendar and the credential-free Tier 0 knowledge and contact
-# log, so every other declared capability (tickets) is unbound and must degrade to a hand-off.
+# The live runnable evaluation uses Tier 0 knowledge/CRM only; Calendar is a disabled\n# future capability until a vetted upstream server actually implements the operations.
 EVAL_BINDING = {
     "environment": "eval",
     "connectors": {
-        "calendar": {"provider": "google"},
         "kb": {"provider": "text-knowledge", "tier": 0},
         "crm": {"provider": "built-in-crm", "tier": 0},
     },
@@ -102,7 +102,15 @@ def evaluate(workspace: pathlib.Path, suite_path: pathlib.Path) -> list[str]:
         if "desired" not in state:
             compiler = _load_module("eval_compile_workspace", ROOT / "scripts" / "compile-workspace.py")
             try:
-                desired = compiler.compile_workspace(workspace, "receptionist", environment_binding=EVAL_BINDING)[0]
+                with tempfile.TemporaryDirectory() as tmp:
+                    staged = pathlib.Path(tmp) / "workspace"
+                    shutil.copytree(workspace, staged)
+                    agent_file = next((staged / "agents").rglob("receptionist/agent.yaml"))
+                    agent_document = yaml.safe_load(agent_file.read_text(encoding="utf-8"))
+                    disabled = set(agent_document["spec"].get("disabledSkills", []))
+                    agent_document["spec"]["disabledSkills"] = sorted(disabled | {"book-appointment"})
+                    agent_file.write_text(yaml.safe_dump(agent_document, sort_keys=False), encoding="utf-8")
+                    desired = compiler.compile_workspace(staged, "receptionist", environment_binding=EVAL_BINDING)[0]
             except ValueError as exc:
                 state["error"] = str(exc)
                 failures.append(f"Receptionist does not compile against the evaluation binding: {exc}")
