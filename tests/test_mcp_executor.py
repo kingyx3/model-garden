@@ -246,7 +246,7 @@ class RuntimeBoundaryCase(unittest.TestCase):
         runtime.governance_root.mkdir(exist_ok=True)
         self.registry = grants.GrantRegistry(runtime.governance_root / "provider-grants", tenant="acme-dev")
         self.access = self.registry.create(
-            agent="receptionist", family="crm", provider="hubspot", connection_id="runtime-crm",
+            agent="receptionist", family="crm", provider="hubspot", connection_id="crm-main",
             isolation="own-identity", acting_identity="runtime-bot@acme.example", secret_ref=SECRET_REF,
             scopes=["crm.create"], owner="owner@acme.example", by="operator@acme.example", now=NOW,
         )
