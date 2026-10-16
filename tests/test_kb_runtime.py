@@ -261,7 +261,7 @@ class ReadinessTests(unittest.TestCase):
             blocked = compiler.workspace_readiness(ws, "receptionist", (), {"environment": "dev", "connectors": {}})
             self.assertFalse(next(item for item in blocked[0]["skills"] if item["name"] == "answer-faq")["ready"])
             with self.assertRaisesRegex(ValueError, "answer-faq"):
-                compiler.compile_workspace(ws, "receptionist", environment_binding={"environment": "dev", "connectors": {"calendar": FULL_BINDING["connectors"]["calendar"]}})
+                compiler.compile_workspace(ws, "receptionist", environment_binding={"environment": "dev", "connectors": {}})
 
 
 if __name__ == "__main__":
