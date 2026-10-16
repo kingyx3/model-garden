@@ -166,6 +166,10 @@ class PolicyEffectTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             workspace = pathlib.Path(tmp) / "workspace"
             shutil.copytree(ROOT / "examples" / "workspace", workspace)
+            agent_file = workspace / "agents/front-office/receptionist/agent.yaml"
+            agent = yaml.safe_load(agent_file.read_text())
+            agent["spec"]["disabledSkills"] = []
+            agent_file.write_text(yaml.safe_dump(agent))
             path = workspace / "policies" / "default.yaml"
             document = yaml.safe_load(path.read_text())
             document["spec"]["rules"].append({"id": "by-hand", "effect": "human-only", "actions": ["calendar.book"]})
@@ -262,7 +266,14 @@ class BoundaryTests(unittest.TestCase):
 
 class RuntimeTests(unittest.TestCase):
     def runtime(self, root: pathlib.Path, *, bound: bool, assignee: str | None = "front-desk@client.example"):
-        desired = compiler.compile_workspace(ROOT / "examples" / "workspace", "receptionist")[0]
+        import shutil
+        workspace = root / "workspace"
+        shutil.copytree(ROOT / "examples/workspace", workspace)
+        agent_file = workspace / "agents/front-office/receptionist/agent.yaml"
+        agent = yaml.safe_load(agent_file.read_text())
+        agent["spec"]["disabledSkills"] = []
+        agent_file.write_text(yaml.safe_dump(agent))
+        desired = compiler.compile_workspace(workspace, "receptionist")[0]
         desired["source"]["client"] = "acme"
         desired_path = root / "desired.json"
         desired_path.write_text(json.dumps(desired), encoding="utf-8")
