@@ -390,6 +390,7 @@ class GovernedToolRuntime:
             )
             if prepared["grant"]["connectionId"] != connection_id:
                 raise MCP_CONNECTIONS.ConnectionRefused("coworker grant belongs to another connection")
+            prepared["activationId"] = current["activationId"]
             prepared["connectionRevision"] = current["revision"]
             prepared["reviewedFingerprints"] = current["reviewedFingerprints"]
             return prepared
@@ -408,7 +409,7 @@ class GovernedToolRuntime:
             }, external_object_ref=lambda result: result.get("externalObjectRef"),
             # Approvals cannot transfer to another route or credential with identical arguments.
             governance_extra={"credentialScope": hashlib.sha256(
-                f"{tenant}|{agent}|{connection_id}|{connection['revision']}|{route['grant']['grantId']}".encode()
+                f"{tenant}|{agent}|{connection_id}|{connection['revision']}|{connection['activationId']}|{route['grant']['grantId']}".encode()
             ).hexdigest()},
         )
 
