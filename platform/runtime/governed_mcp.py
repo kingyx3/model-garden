@@ -388,6 +388,8 @@ class GovernedToolRuntime:
                 upstream=upstream, enabled_tools=selected_names,
                 originator_permissions=(tool_name,), now=int(time.time()),
             )
+            if prepared["grant"]["connectionId"] != connection_id:
+                raise MCP_CONNECTIONS.ConnectionRefused("coworker grant belongs to another connection")
             prepared["connectionRevision"] = current["revision"]
             prepared["reviewedFingerprints"] = current["reviewedFingerprints"]
             return prepared
