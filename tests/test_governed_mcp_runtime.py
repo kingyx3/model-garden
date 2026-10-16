@@ -69,7 +69,8 @@ class GovernedMcpRuntimeTests(unittest.TestCase):
                 sorted(tool.name for tool in tools),
                 [
                     "calendar_availability", "calendar_book", "crm_create", "crm_log_interaction", "crm_read",
-                    "handoff_request", "handoff_status", "kb_search", "platform_capabilities",
+                    "handoff_request", "handoff_status", "kb_search", "memory_delete", "memory_list",
+                    "memory_remember", "platform_capabilities",
                 ],
             )
 
