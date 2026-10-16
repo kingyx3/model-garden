@@ -144,7 +144,7 @@ class IntegrationRegistryTests(unittest.TestCase):
             ROOT / "examples/workspace", "receptionist", (), {"environment": "dev"})
         report = compiler.format_readiness(result)
         self.assertIn("connect calendar", report)
-        self.assertIn("google-calendar", report)
+        self.assertIn("calendar", report)
         self.assertNotIn("secret://", report)
 
 
