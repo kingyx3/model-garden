@@ -64,13 +64,12 @@ class CrmCatalogTests(unittest.TestCase):
             for tool in provider["tools"]
             if tool in ("crm.create", "crm.log-interaction")
         }
-        # Zoho (#93) must not list them before its adapter exists. HubSpot and Salesforce have adapters in
-        # development (credential-free tests only), so they list them but are neither built nor live.
+        # Vendor names describe possible upstream routes only; none includes first-party adapter code.
         self.assertEqual(claimed, {"built-in-crm", "hubspot", "salesforce"})
         for name in ("hubspot", "salesforce"):
             provider = next(item for item in registry["providers"] if item["id"] == name)
-            self.assertEqual(provider["status"], "in-development")
-            self.assertEqual(provider["adapter"], f"platform/connectors/{name}.py")
+            self.assertEqual(provider["status"], "planned")
+            self.assertEqual((provider["method"], provider["tier"]), ("governed-mcp", 2))\n            self.assertNotIn("adapter", provider)
             self.assertNotIn("proof", provider)
         built_in = next(provider for provider in registry["providers"] if provider["id"] == "built-in-crm")
         self.assertEqual(built_in["status"], "built-credential-free")
