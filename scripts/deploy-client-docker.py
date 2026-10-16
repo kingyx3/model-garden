@@ -55,6 +55,7 @@ RUNTIME_SOURCE_PATHS = (
     pathlib.Path("platform/core/memory.py"),
     pathlib.Path("platform/core/delegation.py"),
     pathlib.Path("platform/core/schedules.py"),
+    pathlib.Path("platform/core/scheduler.py"),
     pathlib.Path("platform/core/human_step.py"),
     pathlib.Path("platform/core/crm_sync.py"),
     pathlib.Path("platform/core/artifacts.py"),
