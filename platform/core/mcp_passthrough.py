@@ -5,12 +5,18 @@ credential-free contract for what the governed sidecar may expose from such a se
 and is not wired into the sidecar. The sidecar would be the only thing that ever talks to the upstream server;
 Hermes still sees only the sidecar's own Tools.
 
+- **Public endpoints only.** The URL is also checked by ``endpoint_guard.parse_endpoint``: https on port 443, a public host
+  name or address (no localhost, private, link-local, metadata or numeric-trick hosts). Resolution is checked and pinned at
+  connect time with ``endpoint_guard.qualify`` / ``assert_pinned``; nothing here makes a network call.
 - **Explicit declaration.** A server is declared with a name, an https URL (no embedded credentials), a ``secret://``
   credential *reference* and an allow-list of upstream tool names. Every allowed tool carries an explicit risk class
   (``read``, ``write``, ``privileged``, ``external-communication``) and may also be mapped to a portable capability Tool
   such as ``crm.read``; an unclassified entry is refused when the declaration is validated, so nothing is exposed by default.
 - **Unlisted means invisible.** An upstream tool that is not in the allow-list is never exposed, however the server
   describes it. A listed tool that the server no longer offers is reported missing, not exposed.
+- **Metadata review.** Before a tool can be approved, exposed or forwarded, ``mcp_tool_review.review`` checks its description and
+  schema for hidden characters, instruction-like text (tool poisoning), oversized or remote-referencing schemas; a blocking
+  finding refuses approval and hides the tool even if an earlier pin exists, naming only a code and a path.
 - **Schema pinning.** An operator approves a tool by fingerprint (a SHA-256 over its name, description and input
   schema). If the upstream definition later changes (a new parameter, or a rewritten description, which is how a
   poisoned tool is introduced) the tool is hidden and calls fail closed until it is approved again.
@@ -24,10 +30,12 @@ from __future__ import annotations
 import contextlib
 import fcntl
 import hashlib
+import importlib.util
 import json
 import os
 import pathlib
 import re
+import sys
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from typing import Any
 from urllib.parse import urlsplit
@@ -53,6 +61,28 @@ class SchemaDriftError(PermissionError):
     """Raised when an upstream tool is not approved, or its definition changed since it was."""
 
 
+def _guard():
+    name = "model_garden_mcp_endpoint_guard"
+    if name not in sys.modules:
+        spec = importlib.util.spec_from_file_location(name, pathlib.Path(__file__).with_name("endpoint_guard.py"))
+        module = importlib.util.module_from_spec(spec)
+        assert spec.loader is not None
+        sys.modules[name] = module
+        spec.loader.exec_module(module)
+    return sys.modules[name]
+
+
+def _review():
+    name = "model_garden_mcp_tool_review"
+    if name not in sys.modules:
+        spec = importlib.util.spec_from_file_location(name, pathlib.Path(__file__).with_name("mcp_tool_review.py"))
+        module = importlib.util.module_from_spec(spec)
+        assert spec.loader is not None
+        sys.modules[name] = module
+        spec.loader.exec_module(module)
+    return sys.modules[name]
+
+
 def fingerprint(tool: Mapping[str, Any]) -> str:
     """A stable digest of what the model would be shown and what the call accepts."""
     material = {"name": tool.get("name"), "description": tool.get("description", ""), "inputSchema": tool.get("inputSchema", {})}
@@ -73,6 +103,10 @@ def validate_server(declaration: Any) -> dict[str, Any]:
     parts = urlsplit(url) if isinstance(url, str) else None
     if parts is None or parts.scheme != "https" or not parts.hostname or parts.username or parts.password or parts.query or parts.fragment:
         raise McpDeclarationError("url must be an https address without credentials, query or fragment")
+    try:  # the address a customer typed must not be a private, metadata or local destination (resolution is checked at connect time)
+        _guard().parse_endpoint(url)
+    except ValueError as exc:
+        raise McpDeclarationError(f"url is not an acceptable public endpoint: {exc}") from exc
     reference = declaration.get("credentialRef")
     if not isinstance(reference, str) or not _SECRET_REF.match(reference):
         raise McpDeclarationError("the credential must be a secret:// reference, never the value")
@@ -153,6 +187,9 @@ class SchemaApprovals:
             raise McpDeclarationError("approval names the person who reviewed the tool")
         if not isinstance(tool.get("name"), str) or not _UPSTREAM.match(tool["name"]):
             raise McpDeclarationError("the upstream tool needs a plain name")
+        unsafe = _review().blocking_codes(_review().review(tool))
+        if unsafe:
+            raise McpDeclarationError(f"{tool['name']} cannot be approved: its own description or schema looks unsafe ({', '.join(unsafe)}); ask the server's owner to fix it")
         print_ = fingerprint(tool)
         key = f"{server}/{tool['name']}"
         with self._locked() as state:
@@ -196,6 +233,10 @@ def exposed_catalog(
         if tool is None:
             hidden.append({"upstream": upstream, "reason": "missing-upstream"})
             continue
+        unsafe = _review().blocking_codes(_review().review(tool))
+        if unsafe:  # even an approved pin is hidden if the definition it pinned (or a drifted one) is unsafe
+            hidden.append({"upstream": upstream, "reason": "unsafe-metadata", "findings": unsafe})
+            continue
         state = approvals.status(server["name"], tool)
         if state != "approved":
             hidden.append({"upstream": upstream, "reason": state})
@@ -237,5 +278,8 @@ def call_gate(declaration: Mapping[str, Any], upstream_tool: Mapping[str, Any], 
     entry = server["tools"].get(name) if isinstance(name, str) else None
     if entry is None:
         raise SchemaDriftError(f"{name} is not on {server['name']}'s allow-list")
+    unsafe = _review().blocking_codes(_review().review(upstream_tool))
+    if unsafe:
+        raise SchemaDriftError(f"upstream tool {server['name']}/{name} has unsafe metadata ({', '.join(unsafe)}) and is not forwarded")
     approvals.check(server["name"], upstream_tool)
     return {**ledger_fields(declaration, name), "risk": entry["risk"], "approvalRequired": entry["risk"] != "read", "tool": entry["tool"]}
