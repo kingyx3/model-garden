@@ -189,6 +189,10 @@ class CompiledConditionTests(unittest.TestCase):
     def workspace(self, tmp: str, *extra_rules: dict) -> pathlib.Path:
         target = pathlib.Path(tmp) / "workspace"
         shutil.copytree(ROOT / "examples" / "workspace", target)
+        agent_file = target / "agents/front-office/receptionist/agent.yaml"
+        agent = yaml.safe_load(agent_file.read_text())
+        agent["spec"]["disabledSkills"] = []
+        agent_file.write_text(yaml.safe_dump(agent))
         path = target / "policies" / "default.yaml"
         document = yaml.safe_load(path.read_text())
         document["spec"]["rules"].extend(extra_rules)
