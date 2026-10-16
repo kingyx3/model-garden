@@ -4,6 +4,7 @@ import copy
 import importlib.util
 import json
 import pathlib
+import shutil
 import tempfile
 import unittest
 
@@ -26,7 +27,15 @@ adapter_spec.loader.exec_module(adapter)
 
 class ProvisionHermesProfileTests(unittest.TestCase):
     def receptionist_desired_state(self) -> dict:
-        return compiler.compile_workspace(ROOT / "examples" / "workspace", "receptionist")[0]
+        with tempfile.TemporaryDirectory() as tmp:
+            work = pathlib.Path(tmp) / "workspace"
+            shutil.copytree(ROOT / "examples/workspace", work)
+            agent_file = work / "agents/front-office/receptionist/agent.yaml"
+            import yaml
+            agent = yaml.safe_load(agent_file.read_text())
+            agent["spec"]["disabledSkills"] = ["book-appointment"]
+            agent_file.write_text(yaml.safe_dump(agent))
+            return compiler.compile_workspace(work, "receptionist")[0]
 
     def test_materializes_disposable_profile_with_only_selected_governed_mcp_tools(self) -> None:
         desired_state = self.receptionist_desired_state()
@@ -47,7 +56,7 @@ class ProvisionHermesProfileTests(unittest.TestCase):
         self.assertEqual(
             governed["tools"]["include"],
             [
-                "calendar_availability", "calendar_book", "crm_create", "crm_log_interaction",
+                "crm_create", "crm_log_interaction",
                 "handoff_request", "handoff_status", "kb_search", "platform_capabilities",
             ],
         )
@@ -57,11 +66,7 @@ class ProvisionHermesProfileTests(unittest.TestCase):
         self.assertNotIn("credential", json.dumps(config).lower())
 
         skill_path = pathlib.Path("skills/model-garden/book-appointment/SKILL.md")
-        self.assertIn(skill_path, files)
-        self.assertIn("name: book-appointment", files[skill_path])
-        self.assertIn("Do not invent availability", files[skill_path])
-        self.assertIn("calendar.availability", files[skill_path])
-        self.assertIn("calendar.book", files[skill_path])
+        self.assertNotIn(skill_path, files)  # retired until upstream execution is approved
 
     def test_profile_without_tools_has_no_mcp_server(self) -> None:
         desired_state = self.receptionist_desired_state()
