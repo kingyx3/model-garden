@@ -386,7 +386,7 @@ class GovernedToolRuntime:
             prepared = MCP_EXECUTOR.prepare(
                 current["declaration"], registry=registry, tenant=tenant, attested_agent=agent,
                 upstream=upstream, enabled_tools=selected_names,
-                originator_permissions=(tool_name,), now=int(time.time()),
+                originator_permissions=(tool_name,), now=int(time.time()), connection_id=connection_id,
             )
             if prepared["grant"]["connectionId"] != connection_id:
                 raise MCP_CONNECTIONS.ConnectionRefused("coworker grant belongs to another connection")
