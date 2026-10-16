@@ -5,9 +5,13 @@ import copy
 import importlib.util
 import json
 import pathlib
+import shutil
 import sys
 import tempfile
 import unittest
+from unittest import mock
+
+import yaml
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 
@@ -36,10 +40,27 @@ BINDING = {"environment": "prod", "connectors": {
 }}
 
 
+def test_desired() -> dict:
+    """Enable future booking only in this unit-test fixture, never in production."""
+    with tempfile.TemporaryDirectory() as tmp:
+        ws = pathlib.Path(tmp) / "workspace"
+        shutil.copytree(ROOT / "examples/workspace", ws)
+        config = ws / "agents/front-office/receptionist/agent.yaml"
+        document = yaml.safe_load(config.read_text())
+        document["spec"]["disabledSkills"] = []
+        config.write_text(yaml.safe_dump(document))
+        return compiler.compile_workspace(ws, "receptionist")[0]
+
+
 def manifest_for(agent: str = "receptionist") -> dict:
-    desired = compiler.compile_workspace(ROOT / "examples" / "workspace", "receptionist")[0]
+    desired = test_desired()
     desired["source"]["client"] = "acme"
-    result = capabilities.build_manifest(desired, BINDING)
+    real = capabilities._implemented_connector
+    with mock.patch.object(capabilities, "_implemented_connector",
+                           side_effect=lambda family, provider, tier:
+                           True if (family, provider, tier) == ("calendar", "google", 1)
+                           else real(family, provider, tier)):
+        result = capabilities.build_manifest(desired, BINDING)
     result["agent"] = agent
     return result
 
@@ -194,7 +215,7 @@ class Case(unittest.TestCase):
     def test_the_sidecar_manifest_reflects_grants_only_when_a_registry_exists(self):
         manifest_path = pathlib.Path(self._tmp.name) / "manifest.json"
         manifest_path.write_text(json.dumps(self.manifest), encoding="utf-8")
-        desired = compiler.compile_workspace(ROOT / "examples" / "workspace", "receptionist")[0]
+        desired = test_desired()
         desired["source"]["client"] = "acme"
         desired_path = pathlib.Path(self._tmp.name) / "desired.json"
         desired_path.write_text(json.dumps(desired), encoding="utf-8")
