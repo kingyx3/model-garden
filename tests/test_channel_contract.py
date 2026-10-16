@@ -273,7 +273,7 @@ class SharedContractTests(ContractCase):
     def test_only_a_mapped_approvers_structured_click_decides_and_the_approver_is_recorded(self):
         for surface in self.each():
             principal = DIRECTORY.principal_for(surface.message("bob"))
-            pending = self.runtime(surface, principal, FakeCalendar()).calendar_book(**WINDOW)
+            pending = self.runtime(surface, principal, FakeCalendar()).crm_create(fields={"name": "Demo"})
             request_id, store = pending["request"]["requestId"], self.root / surface.name / "approvals"
 
             def decide(request, *, approved, approver, store=store):
