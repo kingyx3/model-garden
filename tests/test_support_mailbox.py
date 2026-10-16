@@ -7,7 +7,7 @@ import pathlib
 import sys
 import tempfile
 import unittest
-import urllib.parse
+import base64
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 
@@ -24,7 +24,6 @@ def _load(name: str, relative: str):
 support = _load("support_mailbox_under_test", "platform/channels/support_mailbox.py")
 email_channel = support._email()
 text = email_channel.TEXT
-gmail = _load("gmail_for_support", "platform/connectors/gmail.py")
 contacts = _load("contacts_for_support", "platform/core/contacts.py")
 sync = support._filing()._sync()
 T0 = 1_800_000_000
@@ -40,23 +39,25 @@ def raw(*, sender="Alex Tan <alex@customer.example>", message_id="<c1@customer.e
             "Content-Type: text/plain; charset=utf-8\r\n\r\n" + body + "\r\n").encode("utf-8")
 
 
-class FakeGmail:
+class FakeUpstreamMail:
+    """Approved external mail executor contract, without any vendor API implementation."""
+
     def __init__(self) -> None:
         self.drafts: list[dict] = []
         self.sent: list[str] = []
         self.fail = False
 
-    def __call__(self, method, url, headers, payload):
+    def draft(self, arguments):
         if self.fail:
-            return 500, {"error": {"message": "boom"}}
-        path = urllib.parse.urlparse(url).path
-        if method == "POST" and path.endswith("/drafts"):
-            self.drafts.append(payload)
-            return 200, {"id": f"d{len(self.drafts)}"}
-        if method == "POST" and path.endswith("/drafts/send"):
-            self.sent.append(payload["id"])
-            return 200, {"id": "sent1"}
-        return 404, {}
+            raise RuntimeError("upstream mail unavailable")
+        recipients = arguments["to"]
+        subject = arguments["subject"]
+        body = arguments["body"]
+        encoded = base64.urlsafe_b64encode(
+            f"Subject: {subject}\\nTo: {', '.join(recipients)}\\n\\n{body}".encode()
+        ).decode()
+        self.drafts.append({"message": {"raw": encoded}})
+        return {"draftId": f"d{len(self.drafts)}", "externalObjectRef": f"mail:draft/{len(self.drafts)}"}
 
 
 class Case(unittest.TestCase):
@@ -64,8 +65,8 @@ class Case(unittest.TestCase):
         self._tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self._tmp.cleanup)
         self.root = pathlib.Path(self._tmp.name)
-        self.transport = FakeGmail()
-        self.mail = gmail.GmailClient("tok", mailbox=MAILBOX, transport=self.transport)
+        self.transport = FakeUpstreamMail()
+        self.mail = self.transport
         self.events: list[tuple] = []
         self.ledger = sync.SyncLedger(self.root / "sync", tenant="acme-prod", audit=lambda *event: self.events.append(event))
         self.store = contacts.ContactStore(self.root / "contacts")
