@@ -42,9 +42,6 @@ BUILT_IN_TOOLS = {"kb.search", "crm.read", "crm.create", "crm.log-interaction"}
 RUNTIME_SOURCE_PATHS = (
     pathlib.Path("requirements-runtime.txt"),
     pathlib.Path("platform/runtime/governed_mcp.py"),
-    pathlib.Path("platform/connectors/google_calendar.py"),
-    pathlib.Path("platform/connectors/microsoft_calendar.py"),
-    pathlib.Path("platform/connectors/oauth_refresh.py"),
     pathlib.Path("platform/core/capabilities.py"),
     pathlib.Path("platform/core/policy.py"),
     pathlib.Path("platform/core/policy_deploy.py"),
@@ -226,41 +223,6 @@ def _validate_binding(binding: dict[str, Any]) -> tuple[str, str]:
     return environment, credential_ref
 
 
-def _calendar_binding(binding: dict[str, Any], selected_tools: set[str]) -> tuple[str, str, str] | None:
-    """Resolve one provider without changing portable calendar Tool definitions.
-
-    Prefer connectors.calendar; allow legacy connectors.google_calendar. Never
-    silently pick one of multiple configured providers.
-    """
-    if not (selected_tools & CALENDAR_TOOLS):
-        return None
-    spec = binding.get("spec")
-    connectors = spec.get("connectors") if isinstance(spec, dict) else None
-    if not isinstance(connectors, dict):
-        raise ValueError("Docker target failed: Calendar Tools require connectors.calendar or connectors.google_calendar")
-    configured = [key for key in ("calendar", "google_calendar", "microsoft_calendar") if key in connectors]
-    if len(configured) != 1:
-        raise ValueError("Docker target failed: exactly one calendar provider binding is required")
-    key = configured[0]
-    calendar = connectors[key]
-    if not isinstance(calendar, dict):
-        raise ValueError(f"Docker target failed: connectors.{key} must be an object")
-    provider = calendar.get("provider") if key == "calendar" else key.split("_")[0]
-    if provider not in {"google", "microsoft"}:
-        raise ValueError("Docker target failed: calendar provider must be google or microsoft")
-    ref = calendar.get("token_ref")
-    if not isinstance(ref, str) or not ref.startswith("secret://") or len(ref) <= len("secret://"):
-        raise ValueError(f"Docker target failed: connectors.{key}.token_ref must be a non-empty secret:// reference")
-    calendar_id = calendar.get("calendar_id", "primary") if provider == "google" else calendar.get("mailbox")
-    if not isinstance(calendar_id, str) or not calendar_id.strip():
-        raise ValueError(f"Docker target failed: connectors.{key} needs calendar_id (Google) or mailbox (Microsoft)")
-    if provider == "microsoft" and (
-        "/" in calendar_id or "@" not in calendar_id or any(c.isspace() for c in calendar_id)
-    ):
-        raise ValueError("Docker target failed: Microsoft calendar mailbox must be an email address")
-    return provider, ref, calendar_id
-
-
 def _collect_secret_refs(value: Any) -> set[str]:
     refs: set[str] = set()
     if isinstance(value, dict):
@@ -360,7 +322,6 @@ def _compose(
     provider: str,
     lock: dict[str, str],
     *,
-    calendar: tuple[str, str, str] | None,
     read_audit: str | None = None,
     built_in_tools: bool = False,
 ) -> str:
@@ -384,18 +345,7 @@ def _compose(
     }
     services: dict[str, Any] = {"hermes": hermes}
     volumes: dict[str, Any] = {"hermes-data": {}}
-    if calendar is not None or built_in_tools:
-        connector_env: dict[str, str] = {}
-        if calendar is not None:
-            calendar_provider, _, calendar_id = calendar
-            connector_env = (
-                {"MODEL_GARDEN_GOOGLE_CALENDAR_TOKEN": "${MODEL_GARDEN_GOOGLE_CALENDAR_TOKEN:?required}",
-                 "MODEL_GARDEN_GOOGLE_CALENDAR_ID": calendar_id}
-                if calendar_provider == "google" else
-                {"MODEL_GARDEN_MICROSOFT_CALENDAR_TOKEN": "${MODEL_GARDEN_MICROSOFT_CALENDAR_TOKEN:?required}",
-                 "MODEL_GARDEN_MICROSOFT_CALENDAR_MAILBOX": calendar_id}
-            )
-            connector_env["MODEL_GARDEN_CALENDAR_PROVIDER"] = calendar_provider
+    if built_in_tools:
         services["governed-tools"] = {
             "image": f"model-garden-{project_name}:current",
             "restart": "unless-stopped",
@@ -409,7 +359,6 @@ def _compose(
                 "MODEL_GARDEN_DEPLOYED_BY": "${MODEL_GARDEN_DEPLOYED_BY:-}",
                 "MODEL_GARDEN_CAPABILITY_MANIFEST": f"/opt/profile-seed/{MANIFEST_PATH.as_posix()}",
                 **({"MODEL_GARDEN_READ_AUDIT": read_audit} if read_audit else {}),
-                **connector_env,
             },
             "volumes": ["governance-data:/opt/data"],
             "healthcheck": _healthcheck(9120),
@@ -479,7 +428,8 @@ def render_bundle(
     selected_tools = _selected_tools(profile_dir)
     binding = _load_json(binding_path, "EnvironmentBinding")
     environment, credential_ref = _validate_binding(binding)
-    calendar = _calendar_binding(binding, selected_tools)
+    if selected_tools & CALENDAR_TOOLS:
+        raise ValueError("Docker target failed: native Calendar connectors were retired; an approved upstream MCP route is required before deploying Calendar Tools")
     manifest = _capability_manifest(_desired_state(profile_dir), binding)
     read_audit = _read_audit_mode(binding)
     built_in_tools = bool(selected_tools & BUILT_IN_TOOLS)
@@ -495,7 +445,7 @@ def render_bundle(
     (bundle_dir / "entrypoint.sh").write_text(_entrypoint(), encoding="utf-8")
     (bundle_dir / "Dockerfile").write_text(_dockerfile(lock), encoding="utf-8")
     (bundle_dir / "compose.yaml").write_text(
-        _compose(project_name, provider, lock, calendar=calendar, read_audit=read_audit, built_in_tools=built_in_tools),
+        _compose(project_name, provider, lock, read_audit=read_audit, built_in_tools=built_in_tools),
         encoding="utf-8",
     )
     metadata = {
@@ -506,7 +456,7 @@ def render_bundle(
         "provider": provider,
         "modelCredentialRef": credential_ref,
         "selectedTools": sorted(selected_tools),
-        "governedToolService": calendar is not None or built_in_tools,
+        "governedToolService": built_in_tools,
         "hermes": {"version": lock["version"], "revision": lock["commit"]},
         "bindingSha256": hashlib.sha256(normalized_binding.encode("utf-8")).hexdigest(),
         "capabilityManifestSha256": hashlib.sha256(manifest_text.encode("utf-8")).hexdigest(),
@@ -514,11 +464,6 @@ def render_bundle(
             entry["family"] for entry in manifest["capabilities"] if entry["status"] == "unbound" and (entry["required"] or entry["optional"])
         ),
     }
-    if calendar is not None:
-        metadata["calendarProvider"] = calendar[0]
-        metadata["calendarCredentialRef"] = calendar[1]
-        if calendar[0] == "google":
-            metadata["googleCalendarCredentialRef"] = calendar[1]
     (bundle_dir / "deployment-metadata.json").write_text(
         json.dumps(metadata, indent=2, sort_keys=True) + "\n", encoding="utf-8"
     )
@@ -595,22 +540,9 @@ def apply_bundle(
     runtime_env = os.environ.copy()
     runtime_env.pop("MODEL_GARDEN_RUNTIME_SECRETS_JSON", None)
     runtime_env["MODEL_GARDEN_MODEL_CREDENTIAL"] = model_secret
-    spec = binding.get("spec", {})
-    connectors = spec.get("connectors", {}) if isinstance(spec, dict) else {}
-    # Never inherit credentials for an unselected provider from the operator shell.
+    # Retired vendor-token environment variables never reach the replacement runtime.
     runtime_env.pop("MODEL_GARDEN_GOOGLE_CALENDAR_TOKEN", None)
     runtime_env.pop("MODEL_GARDEN_MICROSOFT_CALENDAR_TOKEN", None)
-    if isinstance(connectors, dict) and any(
-        key in connectors for key in ("calendar", "google_calendar", "microsoft_calendar")
-    ):
-        calendar = _calendar_binding(binding, CALENDAR_TOOLS)
-        if calendar is not None:
-            calendar_provider, calendar_ref, _ = calendar
-            secret_variable = (
-                "MODEL_GARDEN_GOOGLE_CALENDAR_TOKEN" if calendar_provider == "google"
-                else "MODEL_GARDEN_MICROSOFT_CALENDAR_TOKEN"
-            )
-            runtime_env[secret_variable] = resolved[calendar_ref]
 
     compose = ["docker", "compose", "-p", project_name, "-f", str(bundle_dir / "compose.yaml")]
     image = f"model-garden-{project_name}:current"
