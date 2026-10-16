@@ -48,12 +48,11 @@ class CompileWorkspaceTests(unittest.TestCase):
     def test_receptionist_materializes_skill_instructions(self) -> None:
         workspace = ROOT / "examples" / "workspace"
         compiled = compiler.compile_workspace(workspace, "receptionist")[0]
-        self.assertEqual(sorted(compiled["skillInstructions"]), ["answer-faq", "book-appointment", "human-handoff", "log-conversation", "take-message"])
-        self.assertIn("Do not invent availability", compiled["skillInstructions"]["book-appointment"]["content"])
-        self.assertTrue(compiled["skillInstructions"]["book-appointment"]["source"].endswith("instructions.md"))
+        self.assertEqual(sorted(compiled["skillInstructions"]), ["answer-faq", "human-handoff", "log-conversation", "take-message"])
+        self.assertNotIn("book-appointment", compiled["skillInstructions"])
         self.assertEqual(
             [tool["metadata"]["name"] for tool in compiled["tools"]],
-            ["calendar.availability", "calendar.book", "kb.search", "crm.create", "crm.log-interaction"],
+            ["kb.search", "crm.create", "crm.log-interaction"],
         )
 
     def test_missing_reference_fails_closed(self) -> None:
@@ -87,6 +86,7 @@ class CompileWorkspaceTests(unittest.TestCase):
             shutil.copytree(source, workspace)
             agent_path = workspace / "agents" / "front-office" / "receptionist" / "agent.yaml"
             agent = yaml.safe_load(agent_path.read_text())
+            agent["spec"]["disabledSkills"] = []
             agent["spec"]["tools"] = []
             agent_path.write_text(yaml.safe_dump(agent, sort_keys=False))
             with self.assertRaisesRegex(ValueError, "Skill 'book-appointment' requires Tool 'calendar.book', but Agent 'receptionist' did not select it"):
@@ -98,6 +98,10 @@ class CompileWorkspaceTests(unittest.TestCase):
             workspace = pathlib.Path(tmp) / "workspace"
             library = pathlib.Path(tmp) / "library"
             shutil.copytree(source, workspace)
+            agent_file = workspace / "agents/front-office/receptionist/agent.yaml"
+            agent = yaml.safe_load(agent_file.read_text())
+            agent["spec"]["disabledSkills"] = []
+            agent_file.write_text(yaml.safe_dump(agent))
             library.mkdir()
             shutil.copytree(workspace / "skills" / "book-appointment", library / "skills" / "book-appointment")
             (library / "tools").mkdir()
