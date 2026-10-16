@@ -57,6 +57,7 @@ KNOWLEDGE_DEPLOY = _load_module("model_garden_runtime_knowledge_deploy", ROOT / 
 GRANT_READINESS = _load_module("model_garden_runtime_grant_readiness", ROOT / "platform" / "core" / "grant_readiness.py")
 PROVIDER_GRANTS = _load_module("model_garden_runtime_provider_grants", ROOT / "platform" / "core" / "provider_grants.py")
 MCP_EXECUTOR = _load_module("model_garden_runtime_mcp_executor", ROOT / "platform" / "core" / "mcp_executor.py")
+MCP_CONNECTIONS = _load_module("model_garden_runtime_mcp_connections", ROOT / "platform" / "core" / "mcp_connections.py")
 AUTH_FAILURE = re.compile(r"\((401|403)\)")
 
 
@@ -274,8 +275,10 @@ class GovernedToolRuntime:
         external_object_ref=None,
         tier: int = 1,
         ledger_extra: Mapping[str, Any] | None = None,
+        governance_extra: Mapping[str, str] | None = None,
     ) -> dict[str, Any]:
         identity, governance_context, principal_access = self._caller()
+        governance_context.update(governance_extra or {})
         request = GOVERN.build_action_request(
             self.desired_state,
             tool_name,
@@ -338,7 +341,7 @@ class GovernedToolRuntime:
 
     def upstream_call(
         self,
-        declaration: Mapping[str, Any],
+        connection_id: str,
         upstream: str,
         arguments: dict[str, Any],
         *,
@@ -352,6 +355,15 @@ class GovernedToolRuntime:
         """
         if not (self.upstream_transport and self.upstream_dns_resolver and self.upstream_secret_resolver):
             raise PermissionError("no approved upstream MCP transport is installed")
+        manifest = self.capabilities()
+        tenant = GRANT_READINESS.tenant_of(manifest)
+        source = self.desired_state.get("source", {})
+        if not tenant or not isinstance(source, dict) or manifest.get("client") != source.get("client"):
+            raise PermissionError("capability manifest does not match the attested client")
+        agent = GOVERN._agent_name(self.desired_state)
+        connections = MCP_CONNECTIONS.McpConnectionStore(self.governance_root / "mcp-connections", tenant=tenant)
+        connection = connections.resolve(connection_id, agent=agent)
+        declaration = connection["declaration"]
         server = MCP_EXECUTOR._mcp().validate_server(declaration)
         entry = server["tools"].get(upstream)
         if entry is None:
@@ -360,23 +372,25 @@ class GovernedToolRuntime:
         selected = GOVERN._selected_tool(self.desired_state, tool_name)
         if not selected or selected.get("spec", {}).get("type") != "mcp" or selected["spec"].get("risk") != entry["risk"]:
             raise PermissionError("only compiled, risk-matched MCP Tools may run")
-        manifest = self.capabilities()
         family = tool_name.split(".", 1)[0]
         bound = next((item for item in manifest.get("capabilities", []) if item.get("family") == family), None)
         if not bound or bound.get("status") != "available" or bound.get("provider") != server["name"] or bound.get("tier") != 2:
             raise PermissionError("upstream capability is not approved and available in this environment")
-        tenant = GRANT_READINESS.tenant_of(manifest)
-        if tenant is None:
-            raise PermissionError("no attested tenant/environment in capability manifest")
         registry = PROVIDER_GRANTS.GrantRegistry(self.governance_root / GRANT_READINESS.REGISTRY_DIR, tenant=tenant)
-        agent = GOVERN._agent_name(self.desired_state)
         selected_names = [item.get("metadata", {}).get("name") for item in self.desired_state.get("tools", [])]
         def check():
-            return MCP_EXECUTOR.prepare(
-                declaration, registry=registry, tenant=tenant, attested_agent=agent,
+            # Resolve on every use, including after approval and just before the write.
+            current = connections.resolve(connection_id, agent=agent)
+            if current["revision"] != connection["revision"] or current["declaration"] != declaration:
+                raise MCP_CONNECTIONS.ConnectionRefused("approved MCP connection revision changed")
+            prepared = MCP_EXECUTOR.prepare(
+                current["declaration"], registry=registry, tenant=tenant, attested_agent=agent,
                 upstream=upstream, enabled_tools=selected_names,
                 originator_permissions=(tool_name,), now=int(time.time()),
             )
+            prepared["connectionRevision"] = current["revision"]
+            prepared["reviewedFingerprints"] = current["reviewedFingerprints"]
+            return prepared
         route = check()
         def execute(exact):
             return MCP_EXECUTOR.invoke(
@@ -390,6 +404,10 @@ class GovernedToolRuntime:
             tier=2, justification=justification, ledger_extra={
                 key: value for key, value in route["ledger"].items() if key not in ("provider", "tier")
             }, external_object_ref=lambda result: result.get("externalObjectRef"),
+            # Approvals cannot transfer to another route or credential with identical arguments.
+            governance_extra={"credentialScope": hashlib.sha256(
+                f"{tenant}|{agent}|{connection_id}|{connection['revision']}|{route['grant']['grantId']}".encode()
+            ).hexdigest()},
         )
 
     def kb_search(
