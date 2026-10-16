@@ -143,7 +143,7 @@ class McpConnectionStore:
             if not catalog or catalog["risk"] != tool["risk"]:
                 raise ConnectionRefused("operation and portable Tool catalog risks must agree")
         revision = _digest(server)
-        entry = {"id": connection_id, "agent": agent, "declaration": server,
+        entry = {"id": connection_id, "agent": agent, "declaration": copy.deepcopy(dict(declaration)),
                  "revision": revision, "active": False, "stagedBy": who, "stagedAt": now}
         with self._locked() as state:
             old = state["connections"].get(key)
@@ -170,7 +170,7 @@ class McpConnectionStore:
             entry = copy.deepcopy(state["connections"].get(key))
         if entry is None:
             raise ConnectionRefused("no such coworker connection")
-        server = entry["declaration"]
+        server = _mcp().validate_server(entry["declaration"])
         if owner != server["owner"]:
             raise ConnectionRefused("consent must come from the named client owner")
         if grants.tenant != self.tenant or approvals.tenant != self.tenant:
@@ -183,10 +183,10 @@ class McpConnectionStore:
             tool = catalog.get(upstream)
             if tool is None or sum(1 for item in offered if isinstance(item, Mapping) and item.get("name") == upstream) != 1:
                 raise ConnectionRefused("a declared upstream operation is absent or duplicated")
-            _mcp().call_gate(server, tool, approvals)
+            _mcp().call_gate(entry["declaration"], tool, approvals)
             # prepare enforces matched provider, exact credential reference and independent grant.
             _gateway().prepare(
-                server, registry=grants, tenant=self.tenant, attested_agent=agent, upstream=upstream,
+                entry["declaration"], registry=grants, tenant=self.tenant, attested_agent=agent, upstream=upstream,
                 enabled_tools=(spec["tool"],), originator_permissions=(spec["tool"],), now=now,
             )
             fingerprints[upstream] = _mcp().fingerprint(tool)
@@ -220,7 +220,7 @@ class McpConnectionStore:
             item = copy.deepcopy(state["connections"].get(key))
         if item is None or item.get("agent") != agent or not item.get("active"):
             raise ConnectionRefused("MCP connection is not active for this coworker")
-        if item.get("revision") != _digest(item["declaration"]) or not item.get("reviewedFingerprints"):
+        if item.get("revision") != _digest(_mcp().validate_server(item["declaration"])) or not item.get("reviewedFingerprints"):
             raise ConnectionRefused("MCP connection requires renewed review")
         return item
 
