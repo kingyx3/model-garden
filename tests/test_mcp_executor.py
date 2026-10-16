@@ -256,20 +256,27 @@ class RuntimeBoundaryCase(unittest.TestCase):
         rt = self.runtime()
         rt.upstream_transport = None
         with self.assertRaises(PermissionError):
-            rt.upstream_call(self.declaration, "create_contact", {"fields": {"name": "Alice"}})
+            rt.upstream_call("crm-main", "create_contact", {"fields": {"name": "Alice"}})
         self.assertFalse(self.backend.calls)
 
     def test_write_waits_for_exact_approval_and_includes_coworker_attribution(self):
         rt = self.runtime()
         self.approvals = mcp.SchemaApprovals(rt.governance_root / "mcp-schema-approvals", tenant="acme-dev")
         self.approvals.approve("hubspot", WRITE_TOOL, by="reviewer@platform.example", now=NOW)
-        # A runtime-readiness facade can never let an Agent invent another identity.
+        connections = runtime_module.MCP_CONNECTIONS.McpConnectionStore(
+            rt.governance_root / "mcp-connections", tenant="acme-dev"
+        )
+        connections.stage("crm-main", agent="receptionist", declaration=self.declaration,
+                          by="operator@acme.example", now=NOW)
+        connections.activate("crm-main", agent="receptionist", consented_by="owner@acme.example",
+                             by="operator@acme.example", offered=[WRITE_TOOL],
+                             approvals=self.approvals, grants=self.registry, now=NOW + 1)
         args = {"fields": {"name": "Alice"}}
-        first = rt.upstream_call(self.declaration, "create_contact", args)
+        first = rt.upstream_call("crm-main", "create_contact", args)
         self.assertEqual(first["status"], "pending-approval")
         self.assertFalse(self.backend.calls)
         approval.decide(rt.approval_root, first["request"]["requestId"], approved=True, approver="owner@acme.example")
-        second = rt.upstream_call(self.declaration, "create_contact", args)
+        second = rt.upstream_call("crm-main", "create_contact", args)
         self.assertEqual(second["status"], "executed")
         self.assertEqual(len(self.backend.calls), 1)
         events = [json.loads(x) for x in rt.audit_path.read_text().splitlines()]
