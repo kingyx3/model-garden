@@ -18,7 +18,8 @@ Matching rules (the privacy-critical part):
   after a person assigned it) is skipped, so re-running after a retry, a restart or a webhook
   redelivery adds nothing.
 - Summaries carry the outcome and size of the conversation, or the model-produced summary when the
-  record has one; never transcript text or message bodies.
+  record has one; never transcript text or message bodies. A record's *extractive* summary (the worker's
+  model-free index, which quotes the first and last turns) is therefore not filed: it stays in the transcript store.
 """
 from __future__ import annotations
 
@@ -47,7 +48,7 @@ def interaction_from_call(record: Mapping[str, Any]) -> dict[str, Any] | None:
         return None
     turns = record.get("turns") if isinstance(record.get("turns"), list) else []
     ended = record.get("endedAt") if isinstance(record.get("endedAt"), int) else started
-    summary = record.get("summary") if isinstance(record.get("summary"), str) and record["summary"].strip() else None
+    summary = record.get("summary") if isinstance(record.get("summary"), str) and record["summary"].strip() and record.get("summarySource") != "extractive" else None
     if summary is None:
         summary = f"Phone call, {max(0, ended - started)} seconds, {len(turns)} turns, outcome {outcome or 'unknown'}."
     arguments: dict[str, Any] = {

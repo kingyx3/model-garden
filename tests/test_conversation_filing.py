@@ -105,6 +105,15 @@ class CallInteractionTests(unittest.TestCase):
         self.assertIn("95 seconds, 2 turns, outcome message-taken", arguments["summary"])
         self.assertNotIn("Hargreaves", json.dumps(arguments))
 
+    def test_an_extractive_summary_that_quotes_the_call_is_never_filed(self):
+        record = transcript(summary='The caller first said: "my boiler is broken at 12 Acacia Road". 1 caller and 1 agent turns. Outcome: resolved.')
+        record["summarySource"] = "extractive"
+        arguments = filing.interaction_from_call(record)
+        self.assertNotIn("Acacia", arguments["summary"])
+        self.assertIn("outcome", arguments["summary"])
+        record["summarySource"] = "provided"
+        self.assertIn("Acacia", filing.interaction_from_call(record)["summary"])  # a model's summary is still filed, as before
+
     def test_a_model_summary_is_preferred_and_malformed_records_are_skipped(self):
         self.assertEqual(filing.interaction_from_call(transcript(summary="Wants a callback on Tuesday."))["summary"],
                          "Wants a callback on Tuesday.")

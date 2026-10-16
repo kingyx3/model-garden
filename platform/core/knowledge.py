@@ -13,7 +13,10 @@ prices it may quote, booking and escalation rules). This module is the credentia
   a reason, so the caller clarifies or escalates instead of inventing a rule.
 
 Retrieved text is untrusted reference data: results are flagged `dataOnly` and never carry
-instructions. Each client/environment searches only the content compiled into its own desired
+instructions. Text that reads like an instruction to the reader ("ignore your instructions") is
+flagged `instruction-like-text` on its document, and two approved sections with the same topic but
+different prices, amounts or times are flagged as a conflict (see `conflicts`) so the coworker
+says the rules disagree and escalates instead of choosing one. Each client/environment searches only the content compiled into its own desired
 state. The governed runtime exposes it as `kb_search` and the registry lists `text-knowledge` as
 `built-credential-free`; there is no live acceptance evidence yet.
 """
@@ -38,6 +41,14 @@ _STOPWORDS = frozenset(
     "their there they this to us was we what when where which who will with you your".split()
 )
 _WORD = re.compile(r"[a-z0-9][a-z0-9'\-]*")
+# A fact worth contradicting: a money amount or a clock time. Words are not compared, so wording differences never conflict.
+_FACT = re.compile(r"(?<![\w.])(?:S\$|[$£€])\s?\d[\d,]*(?:\.\d+)?|\b\d{1,2}(?::\d{2})?\s?(?:am|pm)\b|\b\d{1,2}:\d{2}\b", re.IGNORECASE)
+_INSTRUCTION_LIKE = (
+    re.compile(r"\b(?:ignore|disregard|forget|override)\b[^.\n]{0,40}\b(?:previous|prior|above|earlier|all|your|the|these)\b[^.\n]{0,40}\b(?:instructions?|rules?|prompts?|polic(?:y|ies))\b", re.IGNORECASE),
+    re.compile(r"\b(?:system|developer)\s+(?:prompt|message|instructions?)\b", re.IGNORECASE),
+    re.compile(r"\bnew\s+instructions?\s*:", re.IGNORECASE),
+    re.compile(r"\b(?:reveal|print|show|send|email|forward)\b[^.\n]{0,60}\b(?:instructions|prompt|credentials?|passwords?|api[- ]?keys?|secrets?)\b", re.IGNORECASE),
+)
 _MD_HEADING = re.compile(r"^(#{1,6})\s+(.+?)\s*#*\s*$")
 _NUMBERED = re.compile(r"^\d+[.)]\s+\S")
 _UNDERLINE = re.compile(r"^(=+|-+)\s*$")
@@ -174,6 +185,10 @@ def check_source(text: str, *, filename: str) -> dict[str, Any]:
         warnings.append("no headings found: answers can only cite generic parts; add headings per topic (hours, prices, escalation)")
     if len({section["title"] for section in sections}) != len(sections):
         warnings.append("some section titles repeat; citations use the numbered section ID")
+    for conflict in find_conflicts([{"title": section["title"], "content": section["text"], "citation": section["id"]} for section in sections]):
+        warnings.append(f"conflicting values under \"{conflict['topic']}\" ({', '.join(conflict['differences'])}): the owner must say which is right before it is approved")
+    if any(instruction_warnings(section["text"]) for section in sections):
+        warnings.append("some text reads like instructions to the coworker; knowledge is reference data only and will be treated as such")
     lowered = text.lower()
     for topic, hints in (("hours", ("hours", "open")), ("escalation", ("escalat", "hand off", "human")), ("prices", ("price", "fee", "cost", "$"))):
         if not any(hint in lowered for hint in hints):
@@ -250,6 +265,50 @@ def source_state(spec: Mapping[str, Any], *, agent: str | None = None, today: dt
     return "usable" if reason is None else reason.removeprefix("source-")
 
 
+def _facts(text: str) -> frozenset[str]:
+    return frozenset(re.sub(r"\s+", "", match.group(0).lower()) for match in _FACT.finditer(text))
+
+
+def _topic(title: str) -> str:
+    return " ".join(sorted({_stem(word) for word in _tokens(title)}))
+
+
+def instruction_warnings(text: str) -> list[str]:
+    """``["instruction-like-text"]`` when the text reads like an instruction to its reader; it is flagged, never obeyed."""
+    return ["instruction-like-text"] if any(pattern.search(text) for pattern in _INSTRUCTION_LIKE) else []
+
+
+def find_conflicts(documents: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Sections on the same topic whose prices, amounts or times disagree; marks each such document ``conflict: true``.
+
+    Two documents conflict when their titles name the same topic and both state facts, but not the same facts. The
+    difference is reported as the values themselves. Sections with different wording and the same facts do not conflict,
+    and a section with no amount or time never does.
+    """
+    groups: dict[str, list[dict[str, Any]]] = {}
+    for document in documents:
+        topic = _topic(document["title"])
+        if topic and _facts(document["content"]):
+            groups.setdefault(topic, []).append(document)
+    conflicts: list[dict[str, Any]] = []
+    for topic, members in sorted(groups.items()):
+        distinct = {_facts(member["content"]) for member in members}
+        if len(distinct) < 2:
+            continue
+        values = sorted(set().union(*distinct) - frozenset.intersection(*distinct))
+        for member in members:
+            member["conflict"] = True
+        conflicts.append({"topic": members[0]["title"], "citations": [member["citation"] for member in members], "differences": values})
+    return conflicts
+
+
+def _conflict_guidance(result: dict[str, Any], conflicts: list[dict[str, Any]]) -> None:
+    if conflicts:
+        result["conflicts"] = conflicts
+        result["guidance"] = ("approved sections disagree on " + "; ".join(item["topic"] for item in conflicts)
+                              + ": do not choose one; tell the customer you will confirm and escalate to the owner")
+
+
 def search(
     index: Mapping[str, Any],
     query: str,
@@ -288,7 +347,12 @@ def search(
         }
         for negative, _, section in scored[:limit]
     ]
+    for document in documents:
+        warnings = instruction_warnings(document["content"])
+        if warnings:
+            document["contentWarnings"] = warnings
     result: dict[str, Any] = {"documents": documents, "dataOnly": True}
+    _conflict_guidance(result, find_conflicts(documents))
     if not documents:
         result["reason"] = "no-matching-section"
     return result
@@ -326,7 +390,11 @@ def search_selected(
         if outcome.get("reason") and not outcome["documents"]:
             reasons[name] = outcome["reason"]
     documents.sort(key=lambda doc: -doc["score"])
-    result: dict[str, Any] = {"documents": documents[: max(1, min(int(limit), MAX_RESULTS))], "dataOnly": True}
+    for document in documents:  # conflicts that only show up across sources: approved sources must not disagree silently
+        document.pop("conflict", None)
+    kept = documents[: max(1, min(int(limit), MAX_RESULTS))]
+    result: dict[str, Any] = {"documents": kept, "dataOnly": True}
+    _conflict_guidance(result, find_conflicts(kept))
     if not result["documents"]:
         result["reason"] = next(iter(reasons.values()), "no-matching-section")
         result["sources"] = reasons
