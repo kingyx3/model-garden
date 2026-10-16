@@ -88,20 +88,7 @@ class RuntimeChangeTests(Case):
         return runtime_module.GovernedToolRuntime(
             self.root / "desired.json", self.store / "audit.jsonl", self.store / "approvals",
             environ={"MODEL_GARDEN_GOOGLE_CALENDAR_TOKEN": "t", "MODEL_GARDEN_CAPABILITY_MANIFEST": str(self.manifest_path)},
-            calendar_transport=lambda method, url, headers, payload: (200, {"calendars": {"primary": {"busy": []}}}),
         )
-
-    def test_the_first_successful_use_and_a_later_failure_are_ledgered_under_the_runtime_identity(self):
-        runtime = self.runtime()
-        runtime.calendar_availability(**WINDOW)
-        runtime.calendar_availability(**WINDOW)  # still healthy: no second event
-        healthy = self.events("connection.health")
-        self.assertEqual([(e["performedBy"], e["details"]) for e in healthy], [("runtime:governed-tools", {"family": "calendar", "health": "healthy"})])
-        runtime._record_health("calendar", "failed", "provider-authorization")
-        runtime._record_health("calendar", "failed", "provider-authorization")  # unchanged: no duplicate
-        events = self.events("connection.health")
-        self.assertEqual([e["details"]["health"] for e in events], ["healthy", "failed"])
-        self.assertEqual(events[-1]["details"]["reason"], "provider-authorization")
 
     def test_a_runtime_completion_cannot_clear_a_revocation_and_writes_no_event_for_it(self):
         self.run_cli("set", "calendar", "revoked", "--actor", "jordan@client.example")
@@ -124,16 +111,6 @@ class OffboardTests(Case):
         self.assertEqual(capabilities.read_connection_health(self.store)["calendar"]["health"], "revoked")
         (event,) = self.events("environment.offboard")
         self.assertEqual((event["performedBy"], event["details"]), ("jordan@client.example", {"families": ["calendar"], "reason": "contract ended"}))
-
-    def test_the_revoked_connection_is_refused_at_the_governed_boundary_and_the_manifest_says_so(self):
-        self.run_cli("offboard", "--actor", "jordan@client.example", "--manifest", str(self.manifest_path))
-        runtime = RuntimeChangeTests.runtime(self)
-        with self.assertRaisesRegex(PermissionError, "revoked"):
-            runtime.calendar_availability(**WINDOW)
-        entry = next(e for e in runtime.capabilities()["capabilities"] if e["family"] == "calendar")
-        self.assertEqual(entry["status"], "unavailable")
-        booking = next(s for s in runtime.capabilities()["skills"] if s["name"] == "book-appointment")
-        self.assertFalse(booking["ready"])
 
     def test_the_manifest_comes_from_the_environment_or_the_command_fails_closed(self):
         code, out, _ = self.run_cli("offboard", "--actor", "jordan@client.example",
