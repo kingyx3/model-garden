@@ -309,6 +309,16 @@ class RuntimeBoundaryCase(unittest.TestCase):
         with self.assertRaises(PermissionError):
             rt.upstream_call("crm-main", "create_contact", args)
         self.assertEqual(len(self.backend.calls), 0)
+        # Even reactivating exactly the same endpoint with the same grant must issue a
+        # fresh activation, not consume the earlier approval decision.
+        store.activate("crm-main", agent="receptionist", consented_by="owner@acme.example",
+                       by="operator@acme.example", offered=[READ_TOOL, WRITE_TOOL],
+                       approvals=schema, grants=self.registry, now=NOW + 2)
+        restarted = rt.upstream_call("crm-main", "create_contact", args)
+        self.assertEqual(restarted["status"], "pending-approval")
+        self.assertNotEqual(restarted["request"]["requestId"], pending["request"]["requestId"])
+        self.assertFalse(self.backend.calls)
+        store.disable("crm-main", agent="receptionist", by="operator@acme.example")
         # Re-registration requires owner consent again; the original approval must not
         # grant authority to a modified upstream endpoint even for the same action.
         replacement = dict(self.declaration)
