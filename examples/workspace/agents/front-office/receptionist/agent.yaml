@@ -16,6 +16,8 @@ spec:
     - human-handoff
     - book-appointment
     - log-conversation
+  disabledSkills:
+    - book-appointment  # Requires a proven, approved upstream MCP Calendar route.
   tools:
     - calendar.availability
     - calendar.book
