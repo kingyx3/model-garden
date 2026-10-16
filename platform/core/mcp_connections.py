@@ -17,6 +17,7 @@ import json
 import os
 import pathlib
 import re
+import secrets
 import sys
 import tempfile
 from collections.abc import Callable, Iterator, Mapping, Sequence
@@ -198,7 +199,8 @@ class McpConnectionStore:
             if actual is None or actual["revision"] != entry["revision"]:
                 raise ConnectionRefused("connection changed during review; review the new revision")
             actual.update(active=True, approvedBy=reviewer, consentedBy=owner,
-                          activatedAt=now, reviewedFingerprints=fingerprints)
+                          activatedAt=now, activationId=secrets.token_hex(16),
+                          reviewedFingerprints=fingerprints)
             outcome = copy.deepcopy(actual)
         self._record("mcp.connection-activate", reviewer, outcome,
                      ownerConsent=owner, reviewedTools=sorted(fingerprints))
@@ -223,7 +225,8 @@ class McpConnectionStore:
             item = copy.deepcopy(state["connections"].get(key))
         if item is None or item.get("agent") != agent or not item.get("active"):
             raise ConnectionRefused("MCP connection is not active for this coworker")
-        if item.get("revision") != _digest(_mcp().validate_server(item["declaration"])) or not item.get("reviewedFingerprints"):
+        if (item.get("revision") != _digest(_mcp().validate_server(item["declaration"]))
+                or not item.get("reviewedFingerprints") or not item.get("activationId")):
             raise ConnectionRefused("MCP connection requires renewed review")
         return item
 
