@@ -85,6 +85,19 @@ def _load_knowledge():
 KNOWLEDGE = _load_knowledge()
 
 
+def _load_knowledge_deploy():
+    module_spec = importlib.util.spec_from_file_location(
+        "model_garden_knowledge_deploy_for_compile", ROOT / "platform" / "core" / "knowledge_deploy.py"
+    )
+    module = importlib.util.module_from_spec(module_spec)
+    assert module_spec.loader is not None
+    module_spec.loader.exec_module(module)
+    return module
+
+
+KNOWLEDGE_DEPLOY = _load_knowledge_deploy()
+
+
 def load_validators() -> dict[str, Draft202012Validator]:
     validators: dict[str, Draft202012Validator] = {}
     for kind, filename in SCHEMAS.items():
@@ -292,6 +305,7 @@ def resolve_agent(workspace, agent, resources, source_paths, source_roots, envir
         f"Agent {name!r}: {error}"
         for error in POLICY.relaxation_errors(resolved["policies"], resolved["tools"], trusted_owners)
     )
+    errors.extend(f"Agent {name!r}: {error}" for error in KNOWLEDGE_DEPLOY.approval_owner_errors(resolved["knowledge"], trusted_owners))
     declarations = CAPABILITIES.collect_declarations(agent, resolved["skills"])
     errors.extend(CAPABILITIES.declaration_errors(declarations, f"Agent {name!r} or one of its Skills"))
     capabilities: dict[str, Any] | None = None
@@ -508,6 +522,13 @@ def _dependency_text(dependency: dict[str, Any]) -> str:
     if dependency["status"] == "no-content":
         states = ", ".join(f"{item['name']} {item['state']}" for item in dependency["content"]["sources"]) or "no source selected"
         return f"{label}: {dependency['provider']} tier {dependency['tier']} but NO APPROVED CONTENT ({states})"
+    if dependency["status"] in ("no-grant", "grant-unavailable", "grant-scope"):
+        reasons = {
+            "no-grant": "NO GRANT for this coworker",
+            "grant-unavailable": "this coworker's grant is REVOKED, EXPIRED or FAILED",
+            "grant-scope": "this coworker's grant does not cover " + ", ".join(dependency.get("missingTools", [])),
+        }
+        return f"{label}: {dependency['provider']} tier {dependency['tier']} but {reasons[dependency['status']]}"
     return f"{label}: degraded -> fallback tier {dependency['fallbackTier']}"
 
 

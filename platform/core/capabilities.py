@@ -31,7 +31,7 @@ TIERS = (0, 1, 2, 3, 4)
 HUMAN_HANDOFF_TIER = 4
 CONNECTION_HEALTH = ("healthy", "degraded", "failed", "revoked")
 UNAVAILABLE_HEALTH = {"failed", "revoked"}
-BLOCKING = {"missing", "no-content", "unavailable"}
+BLOCKING = {"missing", "no-content", "unavailable", "no-grant", "grant-unavailable", "grant-scope"}
 LEGACY_CONNECTOR_KEYS = {"google_calendar": ("calendar", "google"), "microsoft_calendar": ("calendar", "microsoft")}
 SAFE_SCOPE = re.compile(r"^[A-Za-z0-9._:/+-]{1,200}$")
 SAFE_NAME = re.compile(r"^[a-z]+$")
@@ -319,6 +319,18 @@ def remediation_for(dependencies: list[Mapping[str, Any]]) -> str | None:
             )
         if status == "unavailable":
             return f"Ask the operator to reauthorize the {family} connection, then record it as healthy"
+        if status == "no-grant":
+            return (
+                f"Give this coworker its own {family} access: run `python3 scripts/client-operator.py connect {family}` "
+                "and provision a grant for it (another coworker's access cannot be used)"
+            )
+        if status == "grant-unavailable":
+            return f"Ask the operator to renew or replace this coworker's {family} grant, which is revoked, expired or failed"
+        if status == "grant-scope":
+            tools = ", ".join(dependency.get("missingTools", []))
+            return f"Ask the operator to re-scope this coworker's {family} grant to include: {tools}" if tools else (
+                f"Ask the operator to re-scope this coworker's {family} grant to cover the Tools it selected"
+            )
     return None
 
 

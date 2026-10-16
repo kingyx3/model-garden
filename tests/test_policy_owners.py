@@ -109,6 +109,11 @@ class CompileTests(unittest.TestCase):
                 rule["actions"] = [a for a in rule["actions"] if a != "*.create"]
         document["spec"]["rules"].append(signed(owner, {"id": "auto-create", "effect": "allow", "actions": ["crm.create"]}))
         path.write_text(yaml.safe_dump(document))
+        # Approved business knowledge also needs a named owner once the environment lists its owners (#116).
+        knowledge = target / "knowledge" / "rules-of-engagement.yaml"
+        source = yaml.safe_load(knowledge.read_text())
+        source["metadata"]["owner"] = "owner@client.example"
+        knowledge.write_text(yaml.safe_dump(source))
         return target
 
     def compile(self, workspace, binding):

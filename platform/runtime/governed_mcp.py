@@ -28,6 +28,7 @@ import json
 import os
 import pathlib
 import re
+import time
 import uuid
 from typing import Any, Mapping
 
@@ -56,6 +57,8 @@ HANDOFF = _load_module("model_garden_runtime_handoff", ROOT / "platform" / "core
 KNOWLEDGE = _load_module("model_garden_runtime_knowledge", ROOT / "platform" / "core" / "knowledge.py")
 CONTACTS = _load_module("model_garden_runtime_contacts", ROOT / "platform" / "core" / "contacts.py")
 POLICY_DEPLOY = _load_module("model_garden_runtime_policy_deploy", ROOT / "platform" / "core" / "policy_deploy.py")
+KNOWLEDGE_DEPLOY = _load_module("model_garden_runtime_knowledge_deploy", ROOT / "platform" / "core" / "knowledge_deploy.py")
+GRANT_READINESS = _load_module("model_garden_runtime_grant_readiness", ROOT / "platform" / "core" / "grant_readiness.py")
 AUTH_FAILURE = re.compile(r"\((401|403)\)")
 
 
@@ -210,7 +213,9 @@ class GovernedToolRuntime:
             selected = {tool.get("metadata", {}).get("name") for tool in self.desired_state.get("tools", [])}
             connectors = {"calendar": {"provider": self._calendar_provider()}} if selected & {"calendar.availability", "calendar.book"} else {}
             manifest = CAPABILITIES.build_manifest(self.desired_state, {"connectors": connectors})
-        return CAPABILITIES.apply_connection_health(manifest, CAPABILITIES.read_connection_health(self.governance_root))
+        manifest = CAPABILITIES.apply_connection_health(manifest, CAPABILITIES.read_connection_health(self.governance_root))
+        # With a per-coworker grant registry present, a connected Skill is ready only if this coworker holds its own usable grant.
+        return GRANT_READINESS.overlay_from_root(manifest, self.governance_root / GRANT_READINESS.REGISTRY_DIR, now=int(time.time()))
 
     def _calendar(self):
         provider = self._calendar_provider()
@@ -766,6 +771,14 @@ def ledger_policy_deployment(runtime: GovernedToolRuntime, environ: Mapping[str,
     )
 
 
+def ledger_knowledge_deployment(runtime: GovernedToolRuntime, environ: Mapping[str, str] | None = None) -> dict[str, Any]:
+    """Ledger a change to the approved business rules (which source, which fields, version and digest, who deployed it)."""
+    return KNOWLEDGE_DEPLOY.record_deployment(
+        KNOWLEDGE_DEPLOY.fingerprint(runtime.desired_state), runtime.governance_root, changed_by=POLICY_DEPLOY.deployer(environ),
+        record=lambda before, after, by: KNOWLEDGE_DEPLOY.record_change(GOVERN, runtime.audit_path, before, after, by),
+    )
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -789,6 +802,7 @@ def main() -> int:
 
     runtime = GovernedToolRuntime(args.desired_state, args.audit_path, args.approval_root)
     ledger_policy_deployment(runtime)
+    ledger_knowledge_deployment(runtime)
     server = build_server(runtime)
     server.run(
         transport="streamable-http",
