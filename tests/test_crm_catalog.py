@@ -69,7 +69,8 @@ class CrmCatalogTests(unittest.TestCase):
         for name in ("hubspot", "salesforce"):
             provider = next(item for item in registry["providers"] if item["id"] == name)
             self.assertEqual(provider["status"], "planned")
-            self.assertEqual((provider["method"], provider["tier"]), ("governed-mcp", 2))\n            self.assertNotIn("adapter", provider)
+            self.assertEqual((provider["method"], provider["tier"]), ("governed-mcp", 2))
+            self.assertNotIn("adapter", provider)
             self.assertNotIn("proof", provider)
         built_in = next(provider for provider in registry["providers"] if provider["id"] == "built-in-crm")
         self.assertEqual(built_in["status"], "built-credential-free")
