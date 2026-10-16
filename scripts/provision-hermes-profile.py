@@ -22,8 +22,6 @@ SAFE_NAME = re.compile(r"^[A-Za-z0-9._-]+$")
 MANAGED_STATE = pathlib.Path(".modelgarden") / "desired-state.json"
 MANAGED_SKILL_ROOT = pathlib.Path("skills") / "model-garden"
 MCP_TOOL_NAMES = {
-    "calendar.availability": "calendar_availability",
-    "calendar.book": "calendar_book",
     "kb.search": "kb_search",
     "crm.read": "crm_read",
     "crm.create": "crm_create",
