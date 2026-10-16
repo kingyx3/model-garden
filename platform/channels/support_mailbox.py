@@ -147,6 +147,7 @@ class SupportMailbox:
         escalate: Callable[[dict[str, Any]], Any] | None = None,
         handled: MessageLog | None = None,
         audit: Audit | None = None,
+        conversations: Any | None = None,
     ) -> None:
         if not callable(mail.get("mail.draft")):
             raise ValueError("the support mailbox needs a mail.draft executor")
@@ -167,6 +168,7 @@ class SupportMailbox:
         self._contact_for = contact_for or (lambda _address: "unmatched")
         self._request_send, self._send_categories = request_send, frozenset(chosen)
         self._escalate, self._handled, self._audit = escalate, handled, audit
+        self._conversations = conversations  # a ConversationRecorder: the thread is also put on the cross-channel timeline
 
     # -- helpers -----------------------------------------------------------------------------
 
@@ -246,6 +248,14 @@ class SupportMailbox:
         verified = not address.startswith(email.UNVERIFIED_PREFIX)
 
         def done(out: dict[str, Any]) -> dict[str, Any]:
+            if self._conversations is not None and out.get("status") != "ignored":
+                try:  # best-effort: a timeline problem must never stop a reply or lose the message
+                    out["conversation"] = self._conversations.record_email(
+                        thread, message.message_id, now, verified_sender=address if verified else None, outcome=out.get("status"),
+                        handed_to_person=out.get("status") == "needs-person",
+                    )["state"]
+                except Exception as exc:  # noqa: BLE001
+                    out["conversation"] = f"unavailable:{type(exc).__name__}"
             if self._handled is not None:
                 self._handled.mark(message.message_id)
             return self._record(out)

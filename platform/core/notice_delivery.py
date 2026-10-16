@@ -112,6 +112,15 @@ def _normalise(source: str, notices: Iterable[Mapping[str, Any]], reference: Cal
     return result
 
 
+def source(
+    name: str, notices: Iterable[Mapping[str, Any]], mark: Mark, *, reference: Callable[[Mapping[str, Any]], str]
+) -> tuple[list[dict[str, Any]], Mark]:
+    """Any other notice producer as a delivery source: ``notices`` carry ``to``, ``text`` and ``kind``; ``mark(item, via)`` records delivery."""
+    if not isinstance(name, str) or not re.fullmatch(r"[a-z][a-z0-9-]{0,31}", name):
+        raise DeliveryError("a source name is a short lowercase word")
+    return _normalise(name, notices, reference), mark
+
+
 def handoff_source(root: pathlib.Path, *, escalate_to: str | None = None, now: int | None = None) -> tuple[list[dict[str, Any]], Mark]:
     """Due Tier 4 hand-off notices (and so, human task steps) with the callback that records delivery."""
     handoff = _sibling("model_garden_notice_handoff", "handoff.py")

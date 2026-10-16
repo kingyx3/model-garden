@@ -341,6 +341,20 @@ class ContactStore:
                 if contact.get("keys", {}).get("email") == needle
             )
 
+    def identities(self) -> list[tuple[str, str, str]]:
+        """``(contactId, kind, normalised value)`` for every email and phone a contact holds, for the platform's own linking step.
+
+        Like ``find_by_email`` this is internal: not a Tool, never shown to a caller or sender, and it says nothing about whether
+        the value was verified (Tier 0 identity evidence is always ``asserted``). A conversation layer may use it only to look up
+        *verified* evidence, or to propose a match for a person to confirm.
+        """
+        with self._locked() as state:
+            return sorted(
+                (contact_id, kind, value)
+                for contact_id, contact in state["contacts"].items()
+                for kind, value in contact.get("keys", {}).items() if kind in ("email", "phone") and isinstance(value, str)
+            )
+
     def has_reference(self, reference: str) -> bool:
         """Whether an interaction with this transcript/message reference is already filed anywhere."""
         with self._locked() as state:
