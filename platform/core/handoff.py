@@ -152,9 +152,13 @@ def complete(
     by: str,
     *,
     note: str | None = None,
+    via: str | None = None,
     now: int | None = None,
 ) -> dict[str, Any]:
-    """Close a pending hand-off as ``done`` or ``declined`` by a named person; single use."""
+    """Close a pending hand-off as ``done`` or ``declined`` by a named person; single use.
+
+    ``via`` names the channel the person answered through when it was not the operator command (``slack``, ``email``…).
+    """
     if outcome not in OUTCOMES:
         raise HandoffError(f"outcome must be one of {', '.join(OUTCOMES)}")
     handoff_id = _check_id(handoff_id)
@@ -172,6 +176,8 @@ def complete(
     )
     if note and note.strip():
         document["note"] = note.strip()[:MAX_NOTE]
+    if via is not None:
+        document["completedVia"] = _name(via, "reply channel")
     closed_path = pathlib.Path(root) / "closed" / f"{handoff_id}-{completed}.json"
     _write(closed_path, document)
     pending_path.unlink()
@@ -194,7 +200,7 @@ def due_notices(
 
     - ``assigned``: the named person has not yet been told it exists;
     - ``reminder``: shortly before the deadline (a quarter of the window, between 30 minutes and
-      2 hours), while it is still open;
+      2 hours), while it is still open and the person has not acknowledged it;
     - ``escalation``: once the deadline has passed, to ``escalate_to`` when given, else to the assignee
       again. A hand-off is never silently dropped.
 
@@ -214,7 +220,8 @@ def due_notices(
         wanted: list[tuple[str, str]] = []
         if "assigned" not in sent:
             wanted.append(("assigned", document["assignee"]))
-        if "reminder" not in sent and not overdue and current >= deadline - lead:
+        acknowledged = isinstance(document.get("acknowledged"), dict)
+        if "reminder" not in sent and not acknowledged and not overdue and current >= deadline - lead:
             wanted.append(("reminder", document["assignee"]))
         if "escalation" not in sent and overdue:
             wanted.append(("escalation", escalation_target or document["assignee"]))
@@ -252,6 +259,27 @@ def mark_notified(
         return document
     notices[kind] = {"at": int(time.time()) if now is None else now, "via": channel}
     document["notices"] = notices
+    _write(path, document)
+    return document
+
+
+def acknowledge(
+    root: pathlib.Path, handoff_id: str, by: str, *, via: str, now: int | None = None
+) -> dict[str, Any]:
+    """Record that a named person has seen a pending hand-off and has it in hand; a repeat is a no-op.
+
+    An acknowledgement only quiets the pre-deadline ``reminder``. It never closes the hand-off and never prevents the
+    ``escalation`` once the deadline passes: seen is not done.
+    """
+    handoff_id = _check_id(handoff_id)
+    person, channel = _name(by, "acknowledging person"), _name(via, "reply channel")
+    path = pathlib.Path(root) / "pending" / f"{handoff_id}.json"
+    if not path.is_file():
+        raise HandoffError(f"no pending hand-off exists for {handoff_id}")
+    document = _read(path)
+    if isinstance(document.get("acknowledged"), dict):
+        return document
+    document["acknowledged"] = {"by": person, "at": int(time.time()) if now is None else now, "via": channel}
     _write(path, document)
     return document
 

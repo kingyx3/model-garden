@@ -7,6 +7,8 @@
   runtime-handoff.py /opt/data/.modelgarden/handoffs due [--escalate-to owner@client.example]
   runtime-handoff.py /opt/data/.modelgarden/handoffs notified <id> assigned|reminder|escalation --via email
   runtime-handoff.py /opt/data/.modelgarden/handoffs deliver --people people.json [--escalate-to owner@client.example]
+  runtime-handoff.py /opt/data/.modelgarden/handoffs reply --people people.json --channel slack --conversation D012345 \
+      --sender U012345 --direct "done 3fa1c9b2e4d1 booked it"
 
 Closing a hand-off writes a chained `handoff` event (tier 4, provider human) naming the person.
 The coworker may report only what this record says: it never claims a person acted before then.
@@ -22,6 +24,11 @@ notice goes to the channel its recipient chose and is recorded only after it is 
 no channel credentials, so it can deliver to `inbox` only; a person whose channel needs a transport (slack,
 teams, email) is reported as `no-channel` and stays due for a deployment that registers one
 (`platform/core/notice_delivery.py`). Nothing is marked delivered because it was merely visible.
+
+`reply` is the way back (`platform/core/handoff_reply.py`): a channel adapter that has authenticated an inbound message passes its
+channel, conversation id and verified sender id here with `--direct` for a one-to-one conversation, and the person's `done <ref>`,
+`declined <ref> [note]` or `seen <ref>` closes or acknowledges the hand-off under the directory identity, ledgered as the person and
+channel. It prints the JSON result whose `reply` the adapter sends back. Without `--direct` nothing is closed.
 """
 from __future__ import annotations
 
@@ -45,6 +52,7 @@ def _load(name: str, path: pathlib.Path):
 GOVERN = _load("runtime_handoff_govern", ROOT / "scripts" / "govern-action.py")
 HANDOFF = GOVERN.HANDOFF
 DELIVERY = _load("runtime_handoff_delivery", ROOT / "platform" / "core" / "notice_delivery.py")
+REPLY = _load("runtime_handoff_reply", ROOT / "platform" / "core" / "handoff_reply.py")
 
 
 def summary(document: dict) -> dict:
@@ -70,6 +78,14 @@ def main(argv: list[str] | None = None) -> int:
     deliver = sub.add_parser("deliver", help="deliver the due notices to each person's chosen channel (inbox only without a transport)")
     deliver.add_argument("--people", type=pathlib.Path, required=True, help="JSON object: person -> {channel, address}")
     deliver.add_argument("--escalate-to", help="who an overdue hand-off is escalated to (default: the assignee again)")
+    answer = sub.add_parser("reply", help="apply a person's channel reply (done/declined/seen <ref>) from an adapter-authenticated message")
+    answer.add_argument("--people", type=pathlib.Path, required=True, help="JSON object: person -> {channel, address, identity?}")
+    answer.add_argument("--channel", required=True, help="the channel the verified message arrived on, for example slack")
+    answer.add_argument("--conversation", required=True, help="the verified conversation id it arrived in")
+    answer.add_argument("--sender", help="the adapter-verified user id of the sender on that channel")
+    answer.add_argument("--direct", action="store_true", help="the conversation is one-to-one with the sender (required to close)")
+    answer.add_argument("--escalate-to", help="the escalation contact who may also answer once a hand-off is overdue")
+    answer.add_argument("text", help="the message text")
     notified = sub.add_parser("notified", help="record that a notice was delivered")
     notified.add_argument("handoff_id")
     notified.add_argument("kind", choices=HANDOFF.NOTICE_KINDS)
@@ -93,6 +109,18 @@ def main(argv: list[str] | None = None) -> int:
             )
             print(json.dumps(results, indent=2, sort_keys=True))
             return 0
+        if args.command == "reply":
+            replies = REPLY.HandoffReplies(
+                args.store, DELIVERY.Directory(json.loads(args.people.read_text(encoding="utf-8"))),
+                complete=lambda handoff_id, outcome, by, **kwargs: GOVERN.complete_handoff(
+                    args.store, handoff_id, outcome, by, audit_path=audit_path, **kwargs
+                ),
+                escalate_to=args.escalate_to,
+                audit=lambda action, by, details: GOVERN.record_operator_action(audit_path, action, by, details),
+            )
+            result = replies.handle(args.channel, args.conversation, args.text, direct=args.direct, sender_id=args.sender)
+            print(json.dumps(result, indent=2, sort_keys=True))
+            return 0 if result["status"] in ("closed", "acknowledged") else 1
         if args.command == "notified":
             HANDOFF.mark_notified(args.store, args.handoff_id, args.kind, via=args.via)
             GOVERN.record_operator_action(

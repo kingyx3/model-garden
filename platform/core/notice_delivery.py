@@ -65,23 +65,46 @@ class Directory:
         if not isinstance(people, Mapping) or len(people) > MAX_PEOPLE:
             raise DeliveryError(f"the people directory is an object of at most {MAX_PEOPLE} people")
         entries: dict[str, tuple[str, str]] = {}
+        identities: dict[str, str] = {}
         for person, entry in people.items():
             if not isinstance(person, str) or not _PERSON.match(person):
                 raise DeliveryError("a directory person must be a named identity, never a password or token")
-            if not isinstance(entry, Mapping) or set(entry) - {"channel", "address"}:
-                raise DeliveryError(f"{person}: an entry holds only channel and address")
-            channel, address = entry.get("channel"), entry.get("address", "")
+            if not isinstance(entry, Mapping) or set(entry) - {"channel", "address", "identity"}:
+                raise DeliveryError(f"{person}: an entry holds only channel, address and an optional identity")
+            channel, address, identity = entry.get("channel"), entry.get("address", ""), entry.get("identity")
             if not isinstance(channel, str) or not _CHANNEL.match(channel):
                 raise DeliveryError(f"{person}: channel must be a short lowercase name such as slack, teams, email or inbox")
             if channel == "inbox":
                 address = ""
             elif not isinstance(address, str) or not _ADDRESS.match(address) or _SECRETISH.search(address):
                 raise DeliveryError(f"{person}: address must be one line naming where to reach them, never a credential")
+            if identity is not None and (not isinstance(identity, str) or not _ADDRESS.match(identity) or _SECRETISH.search(identity)):
+                raise DeliveryError(f"{person}: identity must be the channel's own user id for them, never a credential")
             entries[person] = (channel, address)
+            if identity is not None:
+                identities[person] = identity
         self._entries = entries
+        self._identities = identities
 
     def lookup(self, person: str | None) -> tuple[str, str] | None:
         return self._entries.get(person) if isinstance(person, str) else None
+
+    def identify(self, channel: str, address: str, sender_id: str | None = None) -> str | None:
+        """Who an inbound message came from: the one person whose entry is exactly this channel and conversation.
+
+        Used only for a message the channel adapter has already authenticated and that arrived in a direct (one-to-one)
+        conversation. When the entry also records the person's own ``identity`` on that channel, ``sender_id`` must match it;
+        an address held by two people identifies nobody. ``inbox`` has no address, so it never identifies anyone.
+        """
+        if not isinstance(channel, str) or not isinstance(address, str) or not address or channel == "inbox":
+            return None
+        holders = [person for person, entry in self._entries.items() if entry == (channel, address)]
+        if len(holders) != 1:
+            return None
+        wanted = self._identities.get(holders[0])
+        if wanted is not None and sender_id != wanted:
+            return None
+        return holders[0]
 
     def __len__(self) -> int:
         return len(self._entries)
