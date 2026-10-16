@@ -3,9 +3,12 @@ from __future__ import annotations
 
 import importlib.util
 import pathlib
+import shutil
 import sys
 import tempfile
 import unittest
+
+import yaml
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 
@@ -39,7 +42,15 @@ BINDING = {
 class Case(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
-        cls.states = compiler.compile_workspace(ROOT / "examples/workspace", None, environment_binding=BINDING)
+        # Hypothetical upstream provider is used only to test Agent-level grant isolation.
+        with tempfile.TemporaryDirectory() as tmp:
+            ws = pathlib.Path(tmp) / "workspace"
+            shutil.copytree(ROOT / "examples/workspace", ws)
+            path = ws / "agents/front-office/receptionist/agent.yaml"
+            agent = yaml.safe_load(path.read_text())
+            agent["spec"]["disabledSkills"] = []
+            path.write_text(yaml.safe_dump(agent))
+            cls.states = compiler.compile_workspace(ws, None)
 
     def setUp(self) -> None:
         self._tmp = tempfile.TemporaryDirectory()
