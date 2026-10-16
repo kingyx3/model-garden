@@ -12,14 +12,18 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 class EnterpriseSDLCTests(unittest.TestCase):
     def test_third_party_actions_are_commit_pinned(self):
         workflow = (ROOT / ".github" / "workflows" / "validate.yml").read_text(encoding="utf-8")
-        mutable = re.findall(r"uses:\s+[^\s]+@v\d+(?:\s|$)", workflow)
-        self.assertEqual(mutable, [], f"mutable GitHub Action tags found: {mutable}")
-        for expected in (
-            "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
-            "hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e",
-            "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a",
-        ):
-            self.assertIn(expected, workflow)
+        parsed = yaml.safe_load(workflow)
+        actions = [step["uses"] for job in parsed["jobs"].values() for step in job.get("steps", []) if "uses" in step]
+        self.assertTrue(actions, "validation workflow must use pinned GitHub Actions")
+        for action in actions:
+            if action.startswith("./"):
+                continue  # Local actions don't have remote commit references.
+            self.assertRegex(action, r"^[^@\s]+@[0-9a-f]{40}$", f"action is not pinned to a commit: {action}")
+        for required in ("actions/checkout", "hashicorp/setup-terraform", "actions/upload-artifact"):
+            self.assertTrue(
+                any(action.startswith(f"{required}@") for action in actions),
+                f"expected action missing: {required}",
+            )
 
     def test_generated_production_workflow_pins_actions_and_checks_source(self):
         workflow = (ROOT / "templates" / "client-workflows" / "gcp-keyless.yml").read_text(encoding="utf-8")
