@@ -220,5 +220,75 @@ class CompilerIntegrationCase(unittest.TestCase):
             self.compile_with(list(AVAILABLE))  # a bundle cannot make a calendar appear
 
 
+
+class WorkspaceSkillsetIntegrationCase(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.workspace = pathlib.Path(self.temp.name) / "workspace"
+        shutil.copytree(ROOT / "examples" / "workspace", self.workspace)
+        self.agent_file = self.workspace / "agents/front-office/receptionist/agent.yaml"
+        self.bundle_path = self.workspace / "skillsets/front-office.yaml"
+        self.bundle_path.parent.mkdir(parents=True)
+        self.bundle_path.write_text(yaml.safe_dump({
+            "apiVersion": "modelgarden.ai/v1", "kind": "Skillset",
+            "metadata": {"name": "front-office", "owner": "front-office", "version": "1.0.0"},
+            "spec": {"skills": [{"name": "answer-faq", "version": "1.1.0"}, "book-appointment", "log-conversation"]}
+        }, sort_keys=False))
+
+    def configure(self, *, direct=(), enabled=(), disabled=(), bundle=True):
+        agent = yaml.safe_load(self.agent_file.read_text())
+        agent["spec"]["skills"] = list(direct)
+        agent["spec"]["skillsets"] = [{"name": "front-office", "version": "1.0.0"}] if bundle else []
+        agent["spec"]["enabledSkills"] = list(enabled)
+        agent["spec"]["disabledSkills"] = list(disabled)
+        self.agent_file.write_text(yaml.safe_dump(agent, sort_keys=False))
+
+    def test_bundle_selection_is_inert_until_enabled_and_legacy_direct_selection_still_works(self):
+        self.configure(enabled=["answer-faq"])
+        desired = compiler.compile_workspace(self.workspace, "receptionist")[0]
+        self.assertEqual([row["metadata"]["name"] for row in desired["skills"]], ["answer-faq"])
+        self.assertNotIn("calendar.book", {row["metadata"]["name"] for row in desired["tools"]})
+        self.assertEqual(set(desired["skillInstructions"]), {"answer-faq"})
+        self.assertEqual([row["skill"] for row in desired["skillSelection"] if row["enabled"]], ["answer-faq"])
+        self.assertEqual(len(desired["disabledSkillDeclarations"]), 2)
+
+    def test_direct_plus_bundle_deduplicates_and_reuses_normal_dependency_gate(self):
+        self.configure(direct=["log-conversation"], enabled=["answer-faq"])
+        desired = compiler.compile_workspace(self.workspace, "receptionist")[0]
+        self.assertEqual({row["metadata"]["name"] for row in desired["skills"]}, {"answer-faq", "log-conversation"})
+        self.assertEqual(len(desired["skillSelection"]), 3)
+        self.assertEqual(desired["skillSelection"][-1]["via"], ["direct", "front-office"])
+
+    def test_bad_selection_pin_disabled_conflict_and_missing_skill_fail_closed(self):
+        self.configure(enabled=["not-selected"])
+        with self.assertRaisesRegex(ValueError, "not selected"):
+            compiler.compile_workspace(self.workspace, "receptionist")
+        self.configure(enabled=["answer-faq"], disabled=["answer-faq"])
+        with self.assertRaisesRegex(ValueError, "simultaneously"):
+            compiler.compile_workspace(self.workspace, "receptionist")
+        self.configure(enabled=["answer-faq"])
+        bundle_doc = yaml.safe_load(self.bundle_path.read_text())
+        bundle_doc["spec"]["skills"][0]["version"] = "9.9.9"
+        self.bundle_path.write_text(yaml.safe_dump(bundle_doc, sort_keys=False))
+        with self.assertRaisesRegex(ValueError, "pins Skill"):
+            compiler.compile_workspace(self.workspace, "receptionist")
+
+    def test_readiness_and_approval_preview_agree_with_compiled_activation(self):
+        self.configure(enabled=["answer-faq"])
+        binding = {
+            "environment": "dev", "connectors": {
+                "kb": {"provider": "text-knowledge"}, "crm": {"provider": "built-in-crm"},
+            },
+        }
+        report = compiler.workspace_readiness(self.workspace, "receptionist", (), binding)
+        ready = {row["name"]: row["enabled"] for row in report[0]["skills"] if row["kind"] == "Skill"}
+        self.assertTrue(ready["answer-faq"])
+        self.assertFalse(ready["book-appointment"])
+        previews = compiler.workspace_approvals(self.workspace, "receptionist", ())
+        self.assertEqual({row["skill"] for row in previews[0]["skills"] if row["skill"]}, {"answer-faq"})
+
+
+
 if __name__ == "__main__":
     unittest.main()

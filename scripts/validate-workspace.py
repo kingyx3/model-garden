@@ -15,6 +15,7 @@ SCHEMA_DIR = ROOT / "contracts" / "v1"
 SCHEMAS = {
     "Agent": "agent.schema.json",
     "Skill": "skill.schema.json",
+    "Skillset": "skillset.schema.json",
     "ModelProfile": "model-profile.schema.json",
     "Tool": "tool.schema.json",
     "KnowledgeSource": "knowledge-source.schema.json",

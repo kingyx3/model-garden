@@ -346,3 +346,7 @@ python3 scripts/validate-workspace.py examples/workspace
 ```
 
 The examples are intentionally small and should become the seed for a separate customer workspace template later.
+
+## First-class Skillsets
+
+A `Skillset` is a versioned, credential-free catalogue resource (`kind: Skillset`, `metadata.name/owner/version`, `spec.skills` and optional `spec.includes`/`spec.provenance`). Agents pin it under `spec.skillsets: [{name: front-office, version: 1.0.0}]`. Selection **does not** enable any bundled Skill: `spec.enabledSkills` explicitly names active bundled members. Legacy direct `spec.skills` remain enabled unless in `disabledSkills`. Each compiled Agent expands bundles independently and exports a non-secret `skillSelection` summary. Missing/pin-conflicting/cyclic bundle references are errors; disabled members have no executable instructions or exclusive Tools. Bundles cannot introduce connector credentials, Agent-level Tools, or permissions. Changes follow the normal reviewed workspace PR, evaluation and deployment approval path; a prior revision can be redeployed to roll back.
