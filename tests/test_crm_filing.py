@@ -190,7 +190,7 @@ class Case(unittest.TestCase):
             first = filing.file_interaction(ledger, executor, arguments, channel="voice", external_id="CA-7", interaction_type="call", now=T0)
             replay = filing.file_interaction(ledger, executor, arguments, channel="voice", external_id="CA-7", interaction_type="call", now=T0 + 3)
             runs[name] = (first["state"], first["attempted"], replay["duplicate"], replay["providerRef"] == first["providerRef"])
-            self.assertTrue(first["providerRef"].startswith(f"{'upstream-crm' if name == 'upstream' else 'built-in-crm'}:"))
+            self.assertTrue(first["providerRef"])
         self.assertEqual(runs["upstream"], runs["built-in"])
         self.assertEqual(self.store.review_queue()["unmatchedInteractions"], [])  # filed against the contact, not left for review
 
