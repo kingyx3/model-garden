@@ -37,7 +37,7 @@ class IntegrationRegistryTests(unittest.TestCase):
                 ({"adapter": "platform/core/contacts.py", "status": "live"}, "retained proof"),
             ):
                 altered = json.loads(json.dumps(original))
-                altered["providers"][0].update(mutation)
+                next(p for p in altered["providers"] if p["id"] == "text-knowledge").update(mutation)
                 path.write_text(json.dumps(altered))
                 with self.assertRaisesRegex(ValueError, message):
                     registry.load_registry(path)
