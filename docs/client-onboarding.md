@@ -73,11 +73,11 @@ python3 scripts/launch.py acme \
   --role-title "Operations Coordinator"
 ```
 
-Change Model Garden core only when a reusable Skill, connector, governance capability or runtime seam is genuinely missing.
+Change Model Garden core only when a reusable Skill, provider-neutral governance capability or runtime seam is genuinely missing. Integrations must use maintained upstream providers, not new bespoke SaaS clients.
 
 ## Business-owner Skill selection and activation gate
 
-Before activating or modifying a Skill, run `python3 scripts/client-operator.py skills <private-client-workspace> --environment dev --agent <name>`. Show the owner the dependency state and next `connect <family>` step. Keep a Skill listed in the Agent's `spec.skills` but inactive with `spec.disabledSkills: [skill-name]` while its permission or data dependency is missing. Re-enable only after connection and explicit DEV validation; it cannot compile with an unbound required capability. The coworker's capability manifest reflects this state, including a runtime failure/revocation of a previously working connection. A shared `Skillset` is currently a **target catalogue package**, not an available workspace resource: use individual Skills and `disabledSkills` until [#128](https://github.com/kingyx3/model-garden/issues/128) is implemented. No nontechnical Agent Studio is shipped ([#130](https://github.com/kingyx3/model-garden/issues/130)).
+Before activating or modifying a Skill, run `python3 scripts/client-operator.py skills <private-client-workspace> --environment dev --agent <name>`. Show the owner the dependency state and next `connect <family>` step. Keep a Skill listed in the Agent's `spec.skills` but inactive with `spec.disabledSkills: [skill-name]` while its permission or data dependency is missing. Re-enable only after connection and explicit DEV validation; it cannot compile with an unbound required capability. The coworker's capability manifest reflects this state, including a runtime failure/revocation of a previously working connection. A shared `Skillset` groups versioned Skills but does not grant access; enable members independently and review each member's readiness. See [#128](https://github.com/kingyx3/model-garden/issues/128). No nontechnical Agent Studio is shipped ([#130](https://github.com/kingyx3/model-garden/issues/130)).
 
 Before enabling a Skill that requires a provider, verify the integration's status
 in the canonical registry. Merely listing `connectors.crm.provider: hubspot`
@@ -94,8 +94,7 @@ The reference receptionist now depends on these two Tier 0 bindings; a client wi
 calendar keeps `book-appointment` under `disabledSkills` and needs nothing else (see
 [contracts](contracts.md#reference-receptionist-on-a-zero-stack-client)).
 Clients can continue to list those Skills under `disabledSkills` until their
-dependencies are implemented and authorized. A planned upstream Calendar route must
-needs actual account consent, working token rotation and live acceptance.
+dependencies are implemented and authorized. A planned upstream Calendar route requires client-owner consent, separately scoped coworker credentials, approved gateway execution and real-tenant acceptance before activation.
 
 ### Hand-offs and business rules
 
