@@ -105,7 +105,7 @@ class ReadinessContentTests(unittest.TestCase):
                 self.assertFalse(skills["answer-faq"]["canEnable"])
                 self.assertEqual(skills["answer-faq"]["dependencies"][0]["status"], "no-content")
                 self.assertTrue(skills["take-message"]["ready"])
-                self.assertTrue(skills["book-appointment"]["ready"])
+                self.assertFalse(skills["book-appointment"]["ready"])  # upstream not yet connected
                 text = compiler.format_readiness(report)
                 self.assertIn("NO APPROVED CONTENT", text)
                 self.assertIn("BLOCKED", text)
