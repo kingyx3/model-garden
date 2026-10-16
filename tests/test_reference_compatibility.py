@@ -47,10 +47,10 @@ class ReferenceCompatibilityTests(unittest.TestCase):
     def workspace(self, root: pathlib.Path, *, booking: bool) -> pathlib.Path:
         workspace = root / "client"
         shutil.copytree(ROOT / "examples/workspace", workspace)
-        if not booking:
+        if True:
             path = workspace / "agents/front-office/receptionist/agent.yaml"
             agent = yaml.safe_load(path.read_text(encoding="utf-8"))
-            agent["spec"]["disabledSkills"] = ["book-appointment"]
+            agent["spec"]["disabledSkills"] = [] if booking else ["book-appointment"]
             path.write_text(yaml.safe_dump(agent, sort_keys=False), encoding="utf-8")
         return workspace
 
