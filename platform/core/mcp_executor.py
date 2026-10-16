@@ -7,6 +7,7 @@ transport, owner consent and retained tenant proof are available, providers stay
 """
 from __future__ import annotations
 
+import copy
 import importlib.util
 import json
 import pathlib
@@ -87,7 +88,7 @@ def prepare(
         raise GatewayError("the coworker grant does not belong to this server and credential")
     if grant["isolation"] not in ("own-identity", "isolated-grant"):
         raise GatewayError("shared provider identity is not authorized for unattended execution")
-    return {"server": server, "declaration": dict(declaration), "upstream": upstream, "tool": tool, "risk": entry["risk"], "grant": grant,
+    return {"server": server, "declaration": copy.deepcopy(dict(declaration)), "upstream": upstream, "tool": tool, "risk": entry["risk"], "grant": grant,
             "ledger": {"provider": "mcp:" + server["name"], "tier": 2,
                        "connectionId": grant["connectionId"], "grantId": grant["grantId"],
                        "actingIdentity": grant["actingIdentity"], "upstreamTool": upstream}}
@@ -114,7 +115,8 @@ def invoke(
         raise GatewayError("arguments must be an object")
     _bounded_json(arguments, MAX_ARGUMENT_BYTES, "arguments")
     fresh = recheck()
-    if fresh["grant"]["grantId"] != route["grant"]["grantId"] or fresh["declaration"] != route["declaration"]:
+    if (fresh["grant"]["grantId"] != route["grant"]["grantId"] or fresh["declaration"] != route["declaration"]
+            or fresh["server"] != route["server"]):
         raise GatewayError("the approved connection changed; retry from a fresh request")
     server, upstream = fresh["server"], fresh["upstream"]
     qualified = _endpoint().qualify(server["url"], dns_resolver)
