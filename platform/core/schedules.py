@@ -2,8 +2,8 @@
 
 "Send me a pipeline summary every Monday" must keep working without anyone prompting the coworker, and it
 must never become a way to do more than the person who asked could do. This module is the contract for that
-(#99); it is a credential-free store and cron arithmetic, **not a scheduler**. Nothing here wakes a coworker,
-and event triggers (new email, ticket or chat message) and chat commands are not part of it.
+(#99); it is a credential-free store and cron arithmetic, **not a scheduler**. Nothing here wakes a coworker, and chat
+commands are not part of it.
 
 - **A named owner bounds every run.** A schedule belongs to one principal. A run's task envelope comes from
   ``delegation.root_envelope`` with that owner as the originating principal, so the run's authority is the
@@ -20,8 +20,17 @@ and event triggers (new email, ticket or chat message) and chat commands are not
 - **Per tenant, private, bounded.** One file per tenant (mode 0600 in a 0700 directory, atomic writes under a
   lock); another tenant's file is refused; at most 20 schedules per owner and 500 per tenant.
 
-Failure notification to the owner and running each firing as a task with its own ledger timeline belong to a
-runtime and are not implemented here.
+- **Event triggers share the store.** A trigger (``create_trigger``) is an entry with an event kind (``mail.received``,
+  ``ticket.created`` or ``chat.message``) instead of a cron. It has the same owner, budget and owner-only controls, a
+  per-hour run limit (default 6, at most 60) so a burst of events cannot become a flood of runs, and it never runs twice for
+  the same event: the event reference is kept as a digest. The event itself is data, never authority; only its kind and a
+  digest of its reference go to the run.
+- **Atomic claims.** ``claim_due`` and ``claim_event`` take a slot or an event under the store's lock, so two processes can
+  never both run the same slot. ``mark_outcome`` counts consecutive failures and suspends a schedule after three, and
+  ``start_run`` / ``update_run`` / ``runs`` keep a bounded, durable record of each run for ``scheduler.py``.
+
+Running each firing as a task (with its own ledger timeline), failure notification to the owner and pausing on a person are
+done by ``scheduler.py``; this module is only the store and cron arithmetic.
 """
 from __future__ import annotations
 
@@ -45,6 +54,12 @@ MAX_SCHEDULES = 500
 MAX_GOAL = 500
 MIN_INTERVAL_SECONDS = 15 * 60
 BUDGET_KEYS = ("tokens", "costCents", "steps")
+EVENT_KINDS = ("mail.received", "ticket.created", "chat.message")
+DEFAULT_TRIGGER_PER_HOUR = 6
+MAX_TRIGGER_PER_HOUR = 60
+MAX_SEEN_EVENTS = 200
+MAX_FAILURES = 3
+MAX_RUNS = 1000
 _TENANT = re.compile(r"^[a-z0-9][a-z0-9-]{0,62}$")
 _PRINCIPAL = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:@/+-]{0,127}$")
 _AGENT = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
@@ -262,6 +277,9 @@ class ScheduleStore:
 
     @staticmethod
     def _details(entry: Mapping[str, Any]) -> dict[str, Any]:
+        if entry.get("kind") == "trigger":
+            return {"scheduleId": entry["id"], "agent": entry["agent"], "event": entry["event"], "goalDigest": entry["goalDigest"],
+                    "budget": entry["budget"]}
         return {"scheduleId": entry["id"], "agent": entry["agent"], "cron": entry["cron"], "goalDigest": entry["goalDigest"],
                 "budget": entry["budget"]}
 
@@ -303,7 +321,10 @@ class ScheduleStore:
             if not admin and entry["owner"] != who:
                 raise ScheduleError("only the owner of a schedule or an administrator may change it")
             entry["state"] = "active"
-            entry["nextFire"] = next_fire(entry["cron"], stamp)
+            entry.pop("pausedReason", None)
+            entry["consecutiveFailures"] = 0
+            if entry.get("cron"):
+                entry["nextFire"] = next_fire(entry["cron"], stamp)
             result = dict(entry)
         self._record("schedule.resume", who, {**self._details(result), "admin": bool(admin)})
         return result
@@ -311,7 +332,168 @@ class ScheduleStore:
     def delete(self, schedule_id: str, *, requested_by: str, admin: bool = False) -> dict[str, Any]:
         return self._change(schedule_id, requested_by, admin, "schedule.delete", None)
 
+    def create_trigger(
+        self,
+        *,
+        owner: str,
+        agent: str,
+        goal: str,
+        event: str,
+        budget: Mapping[str, int],
+        required_capabilities: Iterable[str] = (),
+        max_per_hour: int = DEFAULT_TRIGGER_PER_HOUR,
+        now: int | None = None,
+    ) -> dict[str, Any]:
+        """Add an active event trigger for ``owner``: it runs once for each matching event, up to ``max_per_hour`` an hour."""
+        owner = _principal(owner, "owner")
+        if not isinstance(agent, str) or not _AGENT.match(agent):
+            raise ScheduleError("agent must be a short Agent name")
+        if not isinstance(goal, str) or not goal.strip() or len(goal.strip()) > MAX_GOAL:
+            raise ScheduleError(f"goal must be a non-empty string of at most {MAX_GOAL} characters")
+        if event not in EVENT_KINDS:
+            raise ScheduleError("event must be one of " + ", ".join(EVENT_KINDS))
+        if not isinstance(max_per_hour, int) or isinstance(max_per_hour, bool) or not 1 <= max_per_hour <= MAX_TRIGGER_PER_HOUR:
+            raise ScheduleError(f"max_per_hour must be an integer from 1 to {MAX_TRIGGER_PER_HOUR}")
+        cleaned_budget = _budget(budget)
+        try:
+            required = sorted(_delegation()._tools(required_capabilities, "required capabilities"))
+        except PermissionError as exc:
+            raise ScheduleError(str(exc)) from exc
+        stamp = int(dt.datetime.now(dt.timezone.utc).timestamp()) if now is None else now
+        with self._locked() as state:
+            schedules = state["schedules"]
+            if len(schedules) >= MAX_SCHEDULES:
+                raise ScheduleError("the tenant has the maximum number of schedules")
+            if sum(1 for item in schedules.values() if item["owner"] == owner) >= MAX_PER_OWNER:
+                raise ScheduleError(f"an owner may have at most {MAX_PER_OWNER} schedules")
+            entry = {
+                "id": "s-" + secrets.token_hex(6), "kind": "trigger", "tenant": self.tenant, "owner": owner, "agent": agent,
+                "goal": goal.strip(), "goalDigest": goal_digest(goal.strip()), "event": event, "cron": None, "nextFire": None,
+                "maxPerHour": max_per_hour, "budget": cleaned_budget, "requiredCapabilities": required, "state": "active",
+                "createdAt": stamp, "runs": 0, "recentFires": [], "seenEvents": [],
+            }
+            schedules[entry["id"]] = entry
+        self._record("schedule.create", owner, self._details(entry))
+        return dict(entry)
+
     # -- firing -------------------------------------------------------------------------
+
+    def claim_due(self, *, now: int | None = None, limit: int = 20) -> list[dict[str, Any]]:
+        """Atomically take every active cron schedule whose slot has arrived (at most ``limit``), moving each to its next slot.
+
+        Unlike ``due`` followed by ``mark_fired``, two processes calling this together can never both take the same slot.
+        Each returned entry already carries its new run number in ``runs``.
+        """
+        stamp = int(dt.datetime.now(dt.timezone.utc).timestamp()) if now is None else now
+        claimed: list[dict[str, Any]] = []
+        with self._locked() as state:
+            ready = sorted(
+                (item for item in state["schedules"].values()
+                 if item["state"] == "active" and item.get("cron") and item.get("nextFire") is not None and item["nextFire"] <= stamp),
+                key=lambda item: (item["nextFire"], item["id"]),
+            )
+            for entry in ready[:limit]:
+                entry["runs"] = int(entry.get("runs", 0)) + 1
+                entry["lastFiredAt"] = stamp
+                entry["nextFire"] = next_fire(entry["cron"], stamp)
+                claimed.append(dict(entry))
+        for entry in claimed:
+            self._record("schedule.fire", f"schedule:{entry['id']}", {**self._details(entry), "run": entry["runs"]})
+        return claimed
+
+    def claim_event(self, event: str, event_ref: str, *, now: int | None = None) -> dict[str, list[dict[str, Any]]]:
+        """Atomically take the active triggers for ``event``: ``{"claimed": [...], "limited": [...], "duplicate": [...]}``.
+
+        ``event_ref`` is an opaque identifier of the event (a message id); only its digest is kept. A trigger that already
+        handled this event is ``duplicate``; one that has used its per-hour allowance is ``limited`` (the event is not
+        queued: it is dropped for that trigger and the caller is told).
+        """
+        if event not in EVENT_KINDS:
+            raise ScheduleError("event must be one of " + ", ".join(EVENT_KINDS))
+        if not isinstance(event_ref, str) or not event_ref or len(event_ref) > 512:
+            raise ScheduleError("an event needs a reference of at most 512 characters")
+        stamp = int(dt.datetime.now(dt.timezone.utc).timestamp()) if now is None else now
+        digest = hashlib.sha256(event_ref.encode("utf-8")).hexdigest()
+        result: dict[str, list[dict[str, Any]]] = {"claimed": [], "limited": [], "duplicate": []}
+        with self._locked() as state:
+            for entry in sorted(state["schedules"].values(), key=lambda item: (item["createdAt"], item["id"])):
+                if entry.get("kind") != "trigger" or entry["state"] != "active" or entry.get("event") != event:
+                    continue
+                if digest in entry.get("seenEvents", []):
+                    result["duplicate"].append(dict(entry))
+                    continue
+                recent = [moment for moment in entry.get("recentFires", []) if moment > stamp - 3600]
+                entry["recentFires"] = recent
+                entry["seenEvents"] = [*entry.get("seenEvents", []), digest][-MAX_SEEN_EVENTS:]
+                if len(recent) >= entry["maxPerHour"]:
+                    result["limited"].append(dict(entry))
+                    continue
+                entry["recentFires"] = [*recent, stamp]
+                entry["runs"] = int(entry.get("runs", 0)) + 1
+                entry["lastFiredAt"] = stamp
+                result["claimed"].append(dict(entry))
+        for entry in result["claimed"]:
+            self._record("schedule.fire", f"schedule:{entry['id']}", {**self._details(entry), "run": entry["runs"], "eventDigest": digest})
+        for entry in result["limited"]:
+            self._record("schedule.rate-limited", f"schedule:{entry['id']}", {**self._details(entry), "eventDigest": digest})
+        return result
+
+    def mark_outcome(self, schedule_id: str, *, ok: bool, now: int | None = None) -> dict[str, Any]:
+        """Record how a run ended. Three failures in a row suspend the schedule (``pausedReason: repeated-failures``)."""
+        stamp = int(dt.datetime.now(dt.timezone.utc).timestamp()) if now is None else now
+        suspended = False
+        with self._locked() as state:
+            entry = state["schedules"].get(schedule_id)
+            if entry is None:
+                raise ScheduleError("no such schedule")
+            entry["lastOutcome"], entry["lastOutcomeAt"] = ("ok" if ok else "failed"), stamp
+            entry["consecutiveFailures"] = 0 if ok else int(entry.get("consecutiveFailures", 0)) + 1
+            if not ok and entry["consecutiveFailures"] >= MAX_FAILURES and entry["state"] == "active":
+                entry["state"], entry["pausedReason"] = "paused", "repeated-failures"
+                suspended = True
+            result = dict(entry)
+        if suspended:
+            self._record("schedule.suspend", f"schedule:{schedule_id}", {**self._details(result), "reason": "repeated-failures"})
+        return result
+
+    # -- run records ---------------------------------------------------------------------
+
+    def start_run(self, task_id: str, schedule: Mapping[str, Any], *, now: int, trigger: str) -> dict[str, Any]:
+        """Remember one run (state ``running``). The record holds identifiers, states and counts only; never the goal."""
+        record = {
+            "taskId": task_id, "scheduleId": schedule["id"], "agent": schedule["agent"], "owner": schedule["owner"],
+            "trigger": trigger, "state": "running", "startedAt": now,
+        }
+        with self._locked() as state:
+            runs = state.setdefault("runs", {})
+            runs[task_id] = record
+            if len(runs) > MAX_RUNS:
+                finished = sorted((item for item in runs.values() if item["state"] not in ("running", "waiting")), key=lambda item: item["startedAt"])
+                for old in finished[: len(runs) - MAX_RUNS]:
+                    runs.pop(old["taskId"], None)
+        return dict(record)
+
+    def update_run(self, task_id: str, **fields: Any) -> dict[str, Any]:
+        with self._locked() as state:
+            record = state.setdefault("runs", {}).get(task_id)
+            if record is None:
+                raise ScheduleError("no such run")
+            record.update(fields)
+            return dict(record)
+
+    def runs(self, *, states: tuple[str, ...] | None = None, schedule_id: str | None = None) -> list[dict[str, Any]]:
+        with self._locked() as state:
+            records = [dict(item) for item in state.get("runs", {}).values()]
+        if states is not None:
+            records = [item for item in records if item["state"] in states]
+        if schedule_id is not None:
+            records = [item for item in records if item["scheduleId"] == schedule_id]
+        return sorted(records, key=lambda item: (item["startedAt"], item["taskId"]))
+
+    def get(self, schedule_id: str) -> dict[str, Any] | None:
+        with self._locked() as state:
+            entry = state["schedules"].get(schedule_id)
+            return dict(entry) if entry is not None else None
 
     def due(self, *, now: int | None = None) -> list[dict[str, Any]]:
         """Active schedules whose slot has arrived. Missed slots collapse into one firing."""

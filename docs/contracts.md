@@ -100,7 +100,7 @@ Not yet supported: classification of free-text content (for example deciding tha
 - **Bounds.** Depth (default 3), fan-out (default 5) and loops (an Agent already in the chain) are refused; a child's budget and deadline can only be tighter than what the parent has left, and a parent whose budget is exhausted cannot delegate (a task with an exhausted bound must halt and its owner be told, which nothing sends yet).
 - **Governance and ledger.** `governance_context` yields the `originatingPrincipal`, `taskId` and `delegationChain` fields the governed boundary already binds into every `requestId`; `permits` is the check a runtime must make before policy evaluation; `record_hop` ledgers each hop as a `delegation.hop` event holding identifiers, counts and a digest of the goal, never the goal.
 
-Open: the runtime-native handoff or A2A decision, a multi-Agent runtime that calls these rules, owner notification on budget exhaustion and live evidence (#96, #95, #71).
+`scheduler.py`'s `BudgetMeter` halts a run that charges past its budget, ledgers `task.budget-exhausted` and notifies the owner (see "Running scheduled and triggered tasks"). Open: the runtime-native handoff or A2A decision, a multi-Agent runtime that calls these rules, budget exhaustion of a *delegated* task across hops and live evidence (#96, #95, #71).
 
 ## Coworker memory
 
@@ -112,13 +112,23 @@ Open: the runtime-native handoff or A2A decision, a multi-Agent runtime that cal
 
 ## Scheduled coworker tasks
 
-`platform/core/schedules.py` is the contract for recurring work with a named owner ("send me a pipeline summary every Monday"). It is a credential-free store and cron arithmetic with tests, **not a scheduler**: nothing wakes a coworker, and event triggers (new email, ticket, chat message) and chat commands are not part of it (#99).
+`platform/core/schedules.py` is the contract for recurring work with a named owner ("send me a pipeline summary every Monday"). It is a credential-free store and cron arithmetic with tests, **not a scheduler**: nothing here wakes a coworker (the runner is `platform/core/scheduler.py`, below), and chat commands are not part of it (#99). It also holds **event triggers**: an entry with an event kind (`mail.received`, `ticket.created` or `chat.message`) instead of a cron, with the same owner, budget and owner-only controls, a per-hour run limit (default 6, at most 60) and a digest of each handled event reference so an event never runs a trigger twice. `claim_due` and `claim_event` take a slot or an event atomically under the store's lock, `mark_outcome` counts consecutive failures (three suspend a schedule with `pausedReason: repeated-failures`) and a bounded, durable record of each run is kept for the runner.
 
 - **Named owner and budget.** Every schedule belongs to one principal and must carry a per-run budget (`tokens`, `costCents` and/or `steps`, each at least 1). A run's task envelope comes from `delegation.root_envelope` with the owner as the originating principal, so its authority is the Agent's grants narrowed to the owner's permissions *at run time*; when the owner loses a permission the next run is refused (`ScheduleError`) instead of widened.
 - **Cron-like, UTC.** Five fields with `*`, lists, ranges and `/step`; when both day fields are restricted either may match, as in standard cron. Fires closer than 15 minutes apart are refused. After downtime a schedule fires once for the slots it missed, and resuming after a pause never replays old slots.
 - **Owner-only control.** Only the owner or an administrator pauses, resumes or deletes a schedule; at most 20 schedules per owner and 500 per tenant. One private file per tenant (another tenant's file is refused). Every change calls the audit hook with identifiers, the budget and a digest of the goal, never the goal.
 
-Open: a scheduler that fires runs as tasks with their own ledger timeline, owner notification on failure, event triggers, chat create/list/pause/delete and live evidence (#99, #73).
+### Running scheduled and triggered tasks
+
+`platform/core/scheduler.py` makes each firing a task. It is credential-free and calls no provider (the coworker is an injected `runner`), and it is **not wired** to the sidecar, a clock or an event source: a deployment calls `run_due` on a timer and `run_event` when something arrives.
+
+- **A task with a timeline.** A run is `<schedule id>:run-<n>`; it writes `task.start` and `task.finish` ledger events (identifiers, the goal's digest, budget, spend and outcome; never the goal, an event body or an error message) plus the human-step events below, and `timeline` reads one task's events back in order. Authority is built with `run_envelope` from the owner's *current* permissions, so an owner who lost a permission stops the run (`authority-refused`). An event reaches the runner only as its kind and a digest of its reference: it is data, never authority.
+- **At most once.** The slot or event is claimed before the run starts, so two schedulers never run the same one and a restart never repeats it. A process that dies mid-run leaves the run `running` in the store (visible, not silently retried): a repeated side effect is worse than a late run. Events the coworker itself produced (`self_originated`) never trigger.
+- **Budget halts and tells the owner.** The runner receives a `BudgetMeter`; charging past the per-run budget raises `BudgetExhausted` after recording the overspend, the run ends `failed` (`budget-exhausted`), `task.budget-exhausted` is ledgered and the owner gets a notice. Usage the runner reports at the end is charged the same way; spending exactly the budget is allowed.
+- **Failures notify, repeated ones suspend.** A refused authority, runner error or exhausted budget produces one owner notice (`{key, kind, to, scheduleId, taskId, reason, text}` with no goal or error text, delivered through an injected `notify`; a failed delivery is returned as `delivered: false`, never lost) and counts toward three consecutive failures, after which the schedule is paused with a `schedule-suspended` notice.
+- **Pausing on a person.** A runner may return `{"status": "waiting", "step", "assignee", "ask", ...}`; the run opens a durable Tier 4 hand-off (`human_step.py`) and ends the call. `resume_waiting` reads each waiting run's hand-off: the person's answer resumes the runner with their identity and note (data only; the envelope's authority does not change), a decline or timeout follows the fallback (`fail`, `skip`, or `escalate` once to a named person), a timed-out hand-off is closed so it does not linger in the inbox, and the opening, the person's answer and a timeout are ledgered in the task's timeline (the note only as a digest).
+
+Open: delivery of owner notices and human steps to the person's own channel, chat create/list/pause/delete, schedules as exportable workspace desired state, a real event source, a runner backed by the governed boundary and live evidence (#99, #96, #97, #73).
 
 ## Human step in a task
 
@@ -129,7 +139,7 @@ Open: a scheduler that fires runs as tasks with their own ledger timeline, owner
 - **No widening.** The answer is data for the task; it never changes the envelope's authority.
 - **Ledger.** `task.human-step.opened` (under the Agent), `task.human-step.resolved` (under the person) and `task.human-step.timed-out` (under the task) hold identifiers, the outcome, lateness and digests of the ask and note.
 
-Open: delivery to the person's own channel and acknowledgement from it, a runtime that pauses and resumes a task on this, and live evidence (#97, #88).
+`scheduler.py` is the first runner that pauses a task on this step and resumes it (see "Running scheduled and triggered tasks"). Open: delivery to the person's own channel and acknowledgement from it, a multi-Agent runtime that uses it, and live evidence (#97, #88).
 
 ## CRM sync states
 
