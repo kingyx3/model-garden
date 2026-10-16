@@ -299,8 +299,8 @@ class ApprovalLinks:
         ).encode("utf-8"))
         return f"{payload}.{self._sign(payload)}"
 
-    def consume(self, token: str) -> ApprovalResponse:
-        """Verify and spend a token. Raises ``ChannelVerificationError`` for anything not genuine."""
+    def _verified(self, token: str) -> tuple[str, str, str]:
+        """The request id, approver and decision of a genuine, unexpired token (nothing is spent)."""
         try:
             payload, _, signature = token.strip().partition(".")
             if not payload or not signature or not hmac.compare_digest(signature, self._sign(payload)):
@@ -318,6 +318,22 @@ class ApprovalLinks:
             raise ChannelVerificationError("approval link is not valid")
         if self._clock() >= expires:
             raise ChannelVerificationError("approval link has expired")
+        return request_id, approver, decision
+
+    def peek(self, token: str) -> tuple[str, str, str]:
+        """Check a token without spending it: ``(request_id, approver, decision)``, or ``ChannelVerificationError``.
+
+        This is what a page shown on a GET may use. Mail scanners and previewers fetch links, so only :meth:`consume` (on an explicit
+        confirmation) ever spends one. A link already used is refused here as well, so a stale page is not offered.
+        """
+        request_id, approver, decision = self._verified(token)
+        if (self._root / self._pair(request_id, approver)).exists():
+            raise ChannelVerificationError("approval link was already used")
+        return request_id, approver, decision
+
+    def consume(self, token: str) -> ApprovalResponse:
+        """Verify and spend a token. Raises ``ChannelVerificationError`` for anything not genuine."""
+        request_id, approver, decision = self._verified(token)
         self._root.mkdir(parents=True, exist_ok=True, mode=0o700)
         try:
             descriptor = os.open(self._root / self._pair(request_id, approver), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
