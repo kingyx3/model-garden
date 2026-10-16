@@ -4,8 +4,12 @@ from __future__ import annotations
 import importlib.util
 import json
 import pathlib
+import shutil
+import tempfile
 import unittest
 from unittest import mock
+
+import yaml
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 
@@ -24,6 +28,17 @@ deployer = load("deployer_connector_activation", "scripts/deploy-client-docker.p
 
 
 class ConnectorActivationGateTests(unittest.TestCase):
+    def active_workspace(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        workspace = pathlib.Path(temporary.name) / "workspace"
+        shutil.copytree(ROOT / "examples/workspace", workspace)
+        path = workspace / "agents/front-office/receptionist/agent.yaml"
+        agent = yaml.safe_load(path.read_text())
+        agent["spec"]["disabledSkills"] = []
+        path.write_text(yaml.safe_dump(agent))
+        return workspace
+
     def test_retired_calendar_adapters_never_unlock_skills(self):
         for provider in ("google", "microsoft", "google-calendar", "microsoft-calendar"):
             binding = {"environment": "dev", "connectors": {
@@ -33,7 +48,7 @@ class ConnectorActivationGateTests(unittest.TestCase):
             }}
             self.assertNotIn("calendar", capabilities.bound_providers(binding))
             with self.assertRaisesRegex(ValueError, "book-appointment"):
-                compiler.compile_workspace(ROOT / "examples/workspace", "receptionist",
+                compiler.compile_workspace(self.active_workspace(), "receptionist",
                                            environment_binding=binding)
 
     def test_planned_or_unregistered_provider_cannot_unlock_required_skill(self):
@@ -43,9 +58,9 @@ class ConnectorActivationGateTests(unittest.TestCase):
             }}
             self.assertNotIn("calendar", capabilities.bound_providers(binding))
             with self.assertRaisesRegex(ValueError, "book-appointment"):
-                compiler.compile_workspace(ROOT / "examples/workspace", "receptionist",
+                compiler.compile_workspace(self.active_workspace(), "receptionist",
                                            environment_binding=binding)
-            report = compiler.workspace_readiness(ROOT / "examples/workspace",
+            report = compiler.workspace_readiness(self.active_workspace(),
                                                   "receptionist", (), binding)
             book = next(x for x in report[0]["skills"] if x["name"] == "book-appointment")
             self.assertFalse(book["ready"])
