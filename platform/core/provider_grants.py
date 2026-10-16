@@ -268,6 +268,7 @@ class GrantRegistry:
         originator_permissions: Iterable[str],
         enabled_tools: Iterable[str],
         now: int,
+        connection_id: str | None = None,
     ) -> dict[str, Any]:
         """The grant an attested coworker may use for ``tool``, or ``GrantError``.
 
@@ -275,8 +276,12 @@ class GrantRegistry:
         result carries the secret *reference* the connector should resolve for this coworker alone.
         """
         agent = _check(attested_agent, _AGENT, "the attested Agent name is required")
+        if connection_id is not None:
+            connection_id = _check(connection_id, _CONNECTION, "the attested connection ID is required")
         with self._locked() as state:
-            candidates = [dict(item) for item in state["grants"].values() if item["agent"] == agent and item["family"] == family]
+            candidates = [dict(item) for item in state["grants"].values()
+                          if item["agent"] == agent and item["family"] == family
+                          and (connection_id is None or item["connectionId"] == connection_id)]
         if not candidates:
             raise GrantError(f"{agent} has no {family} grant of its own")
         usable = []
