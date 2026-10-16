@@ -89,12 +89,29 @@
       "family": "crm",
       "method": "native",
       "tier": 1,
-      "status": "planned",
+      "status": "in-development",
       "tools": [
         "crm.read",
-        "crm.update"
+        "crm.update",
+        "crm.create",
+        "crm.log-interaction"
       ],
-      "issue": 93
+      "issue": 93,
+      "adapter": "platform/connectors/salesforce.py",
+      "scopeByTool": {
+        "crm.read": [
+          "api"
+        ],
+        "crm.update": [
+          "api"
+        ],
+        "crm.create": [
+          "api"
+        ],
+        "crm.log-interaction": [
+          "api"
+        ]
+      }
     },
     {
       "id": "zoho-crm",
@@ -235,14 +252,25 @@
       "family": "files",
       "method": "native",
       "tier": 1,
-      "status": "planned",
+      "status": "in-development",
       "tools": [
         "files.search",
         "files.read",
-        "files.write",
-        "files.share"
+        "files.write"
       ],
-      "issue": 91
+      "issue": 91,
+      "adapter": "platform/connectors/google_drive.py",
+      "scopeByTool": {
+        "files.search": [
+          "https://www.googleapis.com/auth/drive.readonly"
+        ],
+        "files.read": [
+          "https://www.googleapis.com/auth/drive.readonly"
+        ],
+        "files.write": [
+          "https://www.googleapis.com/auth/drive.file"
+        ]
+      }
     },
     {
       "id": "sharepoint-onedrive",
