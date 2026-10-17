@@ -10,7 +10,14 @@ prices it may quote, booking and escalation rules). This module is the credentia
   contract, every document carrying its section citation, source digest and version;
 - only content that the client owner has marked `approved`, that is effective today and that
   names this Agent (when audiences are set) is searchable; anything else returns no documents and
-  a reason, so the caller clarifies or escalates instead of inventing a rule.
+  a reason, so the caller clarifies or escalates instead of inventing a rule;
+- the owner's `classification` limits who is answered from a source: `public` and `internal` ground any
+  answer (a business's quoted prices are "internal" until it says otherwise), `confidential` grounds
+  only a verified, mapped team member (never a public or unattributed caller such as a customer's
+  email or call), and `restricted` is not served by the built-in store at all, because it has no
+  document-level permissions; it needs a provider that does. A `locale` label lets a caller ask for
+  one language, and each returned section carries freshness facts (effective date, review-by date and
+  days left, with `reviewSoon` inside two weeks) so an answer can say how current its basis is;
 
 Retrieved text is untrusted reference data: results are flagged `dataOnly` and never carry
 instructions. Text that reads like an instruction to the reader ("ignore your instructions") is
@@ -32,6 +39,9 @@ from typing import Any
 
 SUFFIXES = (".txt", ".md")
 STATUSES = ("draft", "approved", "retired")
+CLASSIFICATIONS = ("public", "internal", "confidential", "restricted")
+REVIEW_SOON_DAYS = 14
+LOCALE = re.compile(r"^[A-Za-z]{2,3}(?:-[A-Za-z0-9]{2,8}){0,3}$")
 MAX_BYTES = 256 * 1024
 MAX_SECTIONS = 500
 MAX_RESULTS = 10
@@ -172,7 +182,7 @@ def read_text_file(path: pathlib.Path, *, root: pathlib.Path | None = None) -> s
         raise KnowledgeError("knowledge file must be UTF-8 text") from exc
 
 
-def check_source(text: str, *, filename: str) -> dict[str, Any]:
+def check_source(text: str, *, filename: str, classification: str | None = None) -> dict[str, Any]:
     """The upload parse/test: what would be searchable, and anything the owner should fix."""
     if not text.strip():
         raise KnowledgeError("knowledge file is empty")
@@ -189,6 +199,10 @@ def check_source(text: str, *, filename: str) -> dict[str, Any]:
         warnings.append(f"conflicting values under \"{conflict['topic']}\" ({', '.join(conflict['differences'])}): the owner must say which is right before it is approved")
     if any(instruction_warnings(section["text"]) for section in sections):
         warnings.append("some text reads like instructions to the coworker; knowledge is reference data only and will be treated as such")
+    if classification == "confidential":
+        warnings.append("classified confidential: only a verified team member is answered from it; customers and callers are not, so a public-facing Skill needs another source")
+    elif classification == "restricted":
+        warnings.append("classified restricted: the built-in store does not serve it at all (it has no document-level permissions); connect a provider that does, or lower the classification after review")
     lowered = text.lower()
     for topic, hints in (("hours", ("hours", "open")), ("escalation", ("escalat", "hand off", "human")), ("prices", ("price", "fee", "cost", "$"))):
         if not any(hint in lowered for hint in hints):
@@ -215,14 +229,22 @@ def build_index(name: str, text: str, *, filename: str, spec: Mapping[str, Any] 
         "status": spec.get("status", "draft"),
         "effectiveDate": spec.get("effectiveDate"),
         "reviewBy": spec.get("reviewBy"),
+        "classification": spec.get("classification", "internal"),
+        "locale": spec.get("locale"),
         "audiences": list(spec.get("audiences", [])),
         "sections": sections,
         "df": document_frequency,
     }
 
 
-def availability(index: Mapping[str, Any], *, agent: str | None = None, today: dt.date | None = None) -> str | None:
-    """None when the source may ground answers, else the reason it may not."""
+def availability(
+    index: Mapping[str, Any], *, agent: str | None = None, today: dt.date | None = None, access: str = "public"
+) -> str | None:
+    """None when the source may ground answers, else the reason it may not.
+
+    ``access`` is the asker's standing as the runtime verified it: ``member`` for a mapped team member, anything else (a public
+    caller, or no attributed person at all) is treated as ``public``, so an unknown asker never sees more.
+    """
     if index["status"] != "approved":
         return f"source-{index['status']}"
     effective = index.get("effectiveDate")
@@ -244,6 +266,11 @@ def availability(index: Mapping[str, Any], *, agent: str | None = None, today: d
     audiences = index.get("audiences") or []
     if audiences and agent not in audiences:
         return "source-not-for-this-agent"
+    classification = index.get("classification", "internal")
+    if classification == "restricted":
+        return "source-restricted"
+    if classification == "confidential" and access != "member":
+        return "source-members-only"
     return None
 
 
@@ -252,15 +279,16 @@ def source_state(spec: Mapping[str, Any], *, agent: str | None = None, today: dt
 
     ``usable`` or the reason it is not: ``draft``, ``retired``, ``not-yet-effective``,
     ``effective-date-invalid``, ``stale`` (past its ``reviewBy`` date), ``review-date-invalid``,
-    ``not-for-this-agent`` or ``not-indexed`` (a source type that has
-    no governed, retrievable content here).
+    ``not-for-this-agent``, ``restricted`` (classified so the built-in store may not serve it) or ``not-indexed`` (a source
+    type that has no governed, retrievable content here). A ``confidential`` source is ``usable``: it answers team members.
     """
     if spec.get("type") != "text-file":
         return "not-indexed"
     reason = availability(
         {"status": spec.get("status", "draft"), "effectiveDate": spec.get("effectiveDate"),
-         "reviewBy": spec.get("reviewBy"), "audiences": spec.get("audiences", [])},
-        agent=agent, today=today,
+         "reviewBy": spec.get("reviewBy"), "audiences": spec.get("audiences", []),
+         "classification": spec.get("classification", "internal")},
+        agent=agent, today=today, access="member",
     )
     return "usable" if reason is None else reason.removeprefix("source-")
 
@@ -309,6 +337,23 @@ def _conflict_guidance(result: dict[str, Any], conflicts: list[dict[str, Any]]) 
                               + ": do not choose one; tell the customer you will confirm and escalate to the owner")
 
 
+def freshness(index: Mapping[str, Any], *, today: dt.date | None = None) -> dict[str, Any]:
+    """How current the basis of an answer is: the declared effective date, the review-by date, the days left and whether a review is due soon."""
+    facts: dict[str, Any] = {}
+    if index.get("effectiveDate"):
+        facts["effectiveDate"] = str(index["effectiveDate"])
+    if index.get("reviewBy"):
+        facts["reviewBy"] = str(index["reviewBy"])
+        try:
+            left = (dt.date.fromisoformat(str(index["reviewBy"])) - (today or dt.date.today())).days
+        except ValueError:
+            return facts
+        facts["reviewInDays"] = left
+        if left <= REVIEW_SOON_DAYS:
+            facts["reviewSoon"] = True
+    return facts
+
+
 def search(
     index: Mapping[str, Any],
     query: str,
@@ -316,10 +361,11 @@ def search(
     limit: int = 3,
     agent: str | None = None,
     today: dt.date | None = None,
+    access: str = "public",
 ) -> dict[str, Any]:
     """Rank sections for ``query``; returns the `kb.search` result shape plus availability facts."""
     limit = max(1, min(int(limit), MAX_RESULTS))
-    reason = availability(index, agent=agent, today=today)
+    reason = availability(index, agent=agent, today=today, access=access)
     if reason is not None:
         return {"documents": [], "reason": reason, "dataOnly": True}
     terms = _tokens(query)
@@ -347,10 +393,15 @@ def search(
         }
         for negative, _, section in scored[:limit]
     ]
+    facts = freshness(index, today=today)
     for document in documents:
         warnings = instruction_warnings(document["content"])
         if warnings:
             document["contentWarnings"] = warnings
+        if facts:
+            document["freshness"] = dict(facts)
+        if index.get("locale"):
+            document["locale"] = index["locale"]
     result: dict[str, Any] = {"documents": documents, "dataOnly": True}
     _conflict_guidance(result, find_conflicts(documents))
     if not documents:
@@ -365,8 +416,16 @@ def search_selected(
     source: str | None = None,
     limit: int = 3,
     today: dt.date | None = None,
+    access: str = "public",
+    locale: str | None = None,
 ) -> dict[str, Any]:
-    """`kb.search` over the Tier 0 sources compiled into this client's own desired state."""
+    """`kb.search` over the Tier 0 sources compiled into this client's own desired state.
+
+    ``access`` is the asker's verified standing (``member`` or, for anyone else, ``public``); ``locale`` asks for one language, and
+    a source with no locale label matches every request.
+    """
+    if locale is not None and not (isinstance(locale, str) and LOCALE.match(locale)):
+        raise KnowledgeError("locale must be a language tag such as en or en-SG")
     contents = desired_state.get("knowledgeContent", {})
     agent = desired_state.get("source", {}).get("name")
     selected = {
@@ -384,8 +443,12 @@ def search_selected(
         if record is None:
             reasons[name] = "source-content-missing"
             continue
+        declared = selected[name]["spec"].get("locale")
+        if locale and declared and declared.split("-")[0].lower() != locale.split("-")[0].lower():
+            reasons[name] = "source-other-locale"
+            continue
         index = build_index(name, record["content"], filename=record["source"], spec=selected[name]["spec"])
-        outcome = search(index, query, limit=limit, agent=agent, today=today)
+        outcome = search(index, query, limit=limit, agent=agent, today=today, access=access)
         documents.extend(outcome["documents"])
         if outcome.get("reason") and not outcome["documents"]:
             reasons[name] = outcome["reason"]

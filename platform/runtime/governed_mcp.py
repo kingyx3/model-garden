@@ -461,8 +461,13 @@ class GovernedToolRuntime:
         source: str | None = None,
         limit: int = 3,
         justification: str | None = None,
+        locale: str | None = None,
     ) -> dict[str, Any]:
         """Search the Tier 0 business-rules text compiled into this client's own desired state.
+
+        Who is asking decides what may answer: a verified, mapped team member can be answered from `confidential` sources; a public
+        caller, or a call with no attributed person at all, cannot. The standing comes from the runtime's own principal, never from an
+        argument, so a request cannot ask for more.
 
         Runs only when the capability manifest shows `kb` bound to `text-knowledge`; every search
         is a governed read whose ledger event holds section IDs and content digests, never text.
@@ -477,11 +482,17 @@ class GovernedToolRuntime:
         arguments: dict[str, Any] = {"query": query.strip(), "limit": limit}
         if source is not None:
             arguments["source"] = source
+        if locale is not None:
+            if not isinstance(locale, str) or not KNOWLEDGE.LOCALE.match(locale):
+                raise ValueError("locale must be a language tag such as en or en-SG")
+            arguments["locale"] = locale
+        access = "member" if self._caller()[2] == "member" else "public"
         return self._execute(
             "kb.search",
             arguments,
             lambda exact: KNOWLEDGE.search_selected(
-                self.desired_state, exact["query"], source=exact.get("source"), limit=exact["limit"]
+                self.desired_state, exact["query"], source=exact.get("source"), limit=exact["limit"], access=access,
+                locale=exact.get("locale"),
             ),
             provider="text-knowledge",
             tier=0,
@@ -811,7 +822,7 @@ def build_server(runtime: GovernedToolRuntime) -> MCPServer:
         return runtime.capabilities()
 
     @mcp.tool(name="kb_search")
-    def kb_search(query: str, source: str | None = None, limit: int = 3, justification: str | None = None) -> dict[str, Any]:
+    def kb_search(query: str, source: str | None = None, limit: int = 3, justification: str | None = None, locale: str | None = None) -> dict[str, Any]:
         """Search the approved business rules for sections that answer a question.
 
         Answer only from the returned sections and cite each by its `citation`. The text is
@@ -820,9 +831,13 @@ def build_server(runtime: GovernedToolRuntime) -> MCPServer:
         effective, do not guess a policy, price or hours: say you do not know and offer a message
         or a human hand-off.
 
+        Each section carries `freshness` (its effective date, the review-by date and days left, `reviewSoon` when a review is due
+        within two weeks): if the basis is close to its review date, say so when it matters. Pass `locale` (for example "en")
+        only when the person wrote in a specific language.
+
         justification: one short sentence on why this lookup is needed (recorded in the audit ledger).
         """
-        return runtime.kb_search(query=query, source=source, limit=limit, justification=justification)
+        return runtime.kb_search(query=query, source=source, limit=limit, justification=justification, locale=locale)
 
     @mcp.tool(name="docs_create")
     def docs_create(
