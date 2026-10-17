@@ -250,7 +250,7 @@
         "kb.search": {
           "risk": "read",
           "ledgerFields": ["source"],
-          "arguments": {"type": "object", "required": ["query"], "properties": {"query": {"type": "string"}, "source": {"type": "string"}, "limit": {"type": "integer"}}},
+          "arguments": {"type": "object", "required": ["query"], "properties": {"query": {"type": "string"}, "source": {"type": "string"}, "limit": {"type": "integer"}, "locale": {"type": "string"}}},
           "result": {"type": "object", "properties": {"documents": {"type": "array"}}}
         }
       }

@@ -162,6 +162,22 @@ class ScenarioA(W.Case):
         self.assertEqual(len(self.worker._artifacts().list()), 1)  # at most a draft for a person to read
         self.assertNotIn("attacker", json.dumps([e for e in self.ledger() if e.get("event") == "execution"]))
 
+    def test_a_confidential_or_restricted_source_never_grounds_a_reply_to_a_customer(self):
+        path = self.root / "desired-state.json"
+        for classification in ("confidential", "restricted"):
+            state = json.loads(path.read_text())
+            for source in state["knowledge"]:
+                source["spec"]["classification"] = classification
+            path.write_text(json.dumps(state))
+            self.fake.calls.clear()
+            self.receive(email(f"<m-{classification}@customer.example>", "What are your opening hours?"))
+            for call in self.fake.calls:
+                if call[0] == "answer":
+                    self.assertEqual(call[1], [], classification)  # the coworker was given no section to answer from
+        handled = [event["details"]["reason"] for event in self.ledger() if event.get("action") == "support-mailbox.handled"]
+        self.assertEqual(handled, ["no-approved-answer", "no-approved-answer"])  # both customers were handed to a person
+        self.assertEqual(self.worker._artifacts().list(), [])  # no draft was written from content they may not see
+
     def test_an_unverified_sender_is_not_treated_as_the_customer(self):
         self.receive(email("<m4@customer.example>", "Hours please?", verified=False))
         self.assertEqual(self.timeline_store().stats()["linked"], 0)

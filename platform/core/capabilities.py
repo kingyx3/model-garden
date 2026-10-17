@@ -315,6 +315,11 @@ def remediation_for(dependencies: list[Mapping[str, Any]]) -> str | None:
                     "Review the business knowledge: confirm it is still correct and set a later reviewBy date, "
                     "then recompile"
                 )
+            if any(source.get("state") == "restricted" for source in dependency.get("content", {}).get("sources", [])):
+                return (
+                    "A knowledge source is classified restricted, which the built-in store does not serve: connect a knowledge "
+                    "provider with document-level permissions, or lower the classification after review, then recompile"
+                )
             return (
                 "Approve business knowledge for this coworker: a source with status approved, a current "
                 "effective date and this coworker as audience, then recompile"
