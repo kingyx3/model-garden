@@ -174,6 +174,47 @@ class Case(unittest.TestCase):
         self.assertEqual(self.resolve(agent="researcher", tool="crm.read")["secretRef"], SECRET_B)
         self.assertEqual(second["rotations"], 0)
 
+    def test_rotated_secret_reference_cannot_be_reused_even_after_revocation(self):
+        first = self.grant()
+        retired = SECRET_A
+        fresh = "secret://hubspot/acme-prod/receptionist-v2"
+        self.registry.rotate(first["id"], secret_ref=fresh, by=ADMIN, now=T0 + 1)
+        with self.assertRaisesRegex(Error, "previously issued"):
+            self.grant(connection_id="another", secret_ref=retired)
+        with self.assertRaisesRegex(Error, "already in use"):
+            self.registry.rotate(first["id"], secret_ref=retired, by=ADMIN, now=T0 + 2)
+        self.registry.revoke(first["id"], by=ADMIN, now=T0 + 3)
+        with self.assertRaisesRegex(Error, "previously issued"):
+            self.grant(connection_id="another", secret_ref=retired)
+        with self.assertRaisesRegex(Error, "another coworker"):
+            self.other(secret_ref=retired)
+        self.assertNotIn(retired, json.dumps(self.registry.list()))
+
+    def test_grant_store_refuses_symlinked_files(self):
+        outside = pathlib.Path(self._tmp.name) / "outside"
+        outside.write_text("untouched")
+        self.root.mkdir(mode=0o700)
+        self.registry.path.symlink_to(outside)
+        with self.assertRaises(OSError):
+            self.registry.list()
+        self.assertEqual(outside.read_text(), "untouched")
+        self.registry.path.unlink()
+        lock = self.root / ".acme-prod.grants.lock"
+        lock.symlink_to(outside)
+        with self.assertRaises(OSError):
+            self.grant()
+        self.assertEqual(outside.read_text(), "untouched")
+
+    def test_grant_store_rejects_world_readable_and_oversized_data(self):
+        self.grant()
+        self.registry.path.chmod(0o644)
+        with self.assertRaisesRegex(Error, "private regular"):
+            self.registry.list()
+        self.registry.path.chmod(0o600)
+        self.registry.path.write_bytes(b"x" * 2_000_001)
+        with self.assertRaisesRegex(Error, "size limit"):
+            self.registry.list()
+
     def test_failed_or_expired_grants_refuse_rather_than_fall_back(self):
         first = self.grant(expires_at=T0 + 100)
         self.assertEqual(self.resolve(now=T0 + 99)["grantId"], first["id"])
