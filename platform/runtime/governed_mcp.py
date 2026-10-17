@@ -13,6 +13,8 @@ MVP supported Tools:
 - crm.read / crm.create / crm.log-interaction: Tier 0 built-in contact and interaction log
   (no CRM connected): no merge on an asserted identity, idempotent filing, records returned
   only to verified staff principals; ledgered at tier 0 without personal data
+- docs.create: Tier 0 built-in document store (no file system connected): a Markdown document kept for
+  the requester in the private per-client artifact store, ledgered at tier 0 with its location and digest only
 - handoff_request / handoff_status: Tier 4 human hand-off for actions whose capability is
   unbound or unavailable (or policy marks human-only); platform built-ins, nothing is executed
 """
@@ -52,6 +54,7 @@ HANDOFF = _load_module("model_garden_runtime_handoff", ROOT / "platform" / "core
 KNOWLEDGE = _load_module("model_garden_runtime_knowledge", ROOT / "platform" / "core" / "knowledge.py")
 CONTACTS = _load_module("model_garden_runtime_contacts", ROOT / "platform" / "core" / "contacts.py")
 MEMORY = _load_module("model_garden_runtime_memory", ROOT / "platform" / "core" / "memory.py")
+ARTIFACTS = _load_module("model_garden_runtime_artifacts", ROOT / "platform" / "core" / "artifacts.py")
 POLICY_DEPLOY = _load_module("model_garden_runtime_policy_deploy", ROOT / "platform" / "core" / "policy_deploy.py")
 KNOWLEDGE_DEPLOY = _load_module("model_garden_runtime_knowledge_deploy", ROOT / "platform" / "core" / "knowledge_deploy.py")
 GRANT_READINESS = _load_module("model_garden_runtime_grant_readiness", ROOT / "platform" / "core" / "grant_readiness.py")
@@ -132,6 +135,7 @@ class GovernedToolRuntime:
         self.governance_root = audit_path.parent
         self.handoff_root = approval_root.parent / "handoffs"
         self.memory_root = approval_root.parent / "memory"
+        self.artifact_root = approval_root.parent / "artifacts"
         self.environ = dict(os.environ if environ is None else environ)
         # Default named person for Tier 4 hand-offs; a human-only policy rule names its own.
         self.handoff_assignee = self.environ.get("MODEL_GARDEN_HANDOFF_ASSIGNEE", "").strip() or None
@@ -455,6 +459,36 @@ class GovernedToolRuntime:
             raise PermissionError("Customer record keeping is not connected here; say so and offer a message or a human hand-off")
         return CONTACTS.ContactStore(self.governance_root / "contacts")
 
+    def _require_docs(self) -> "ARTIFACTS.ArtifactStore":
+        """The Tier 0 artifact store, only when the manifest binds `docs` to the built-in provider."""
+        entry = next((item for item in self.capabilities().get("capabilities", []) if item.get("family") == "docs"), None)
+        if entry is None or entry.get("status") != "available" or entry.get("provider") != ARTIFACTS.PROVIDER_ID:
+            raise PermissionError("A built-in document store is not connected here; say so and offer a message or a human hand-off")
+        tenant = self.desired_state.get("source", {}).get("client")
+        if not isinstance(tenant, str) or not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,62}", tenant):
+            raise PermissionError("documents need a compiled, tenant-scoped client slug")
+        return ARTIFACTS.ArtifactStore(
+            self.artifact_root, tenant=tenant,
+            audit=lambda action, by, details: GOVERN.record_operator_action(self.audit_path, action, by, details),
+        )
+
+    def docs_create(self, *, title: str, content: str, justification: str | None = None) -> dict[str, Any]:
+        """Keep a finished document (Markdown) for the requester; returns its location, never a file system path."""
+        store = self._require_docs()
+        agent = self.desired_state.get("agent", {}).get("metadata", {}).get("name")
+        identity = self._caller()[0]
+        return self._execute(
+            "docs.create",
+            {"title": title, "content": content},
+            lambda exact: ARTIFACTS.create_document(
+                store, title=exact["title"], content=exact["content"], agent=agent, requested_by=identity,
+            ),
+            provider=ARTIFACTS.PROVIDER_ID,
+            tier=0,
+            justification=justification,
+            external_object_ref=lambda result: result.get("documentId") if isinstance(result, dict) else None,
+        )
+
     def crm_store(self) -> "CONTACTS.ContactStore":
         """The Tier 0 contact store for the platform's own filing step; refuses unless `crm` is bound to it."""
         return self._require_crm()
@@ -701,6 +735,19 @@ def build_server(runtime: GovernedToolRuntime) -> MCPServer:
         justification: one short sentence on why this lookup is needed (recorded in the audit ledger).
         """
         return runtime.kb_search(query=query, source=source, limit=limit, justification=justification)
+
+    @mcp.tool(name="docs_create")
+    def docs_create(title: str, content: str, justification: str | None = None) -> dict[str, Any]:
+        """Keep a finished document for the person who asked, in this client's own private store.
+
+        title is a short name; content is the document in plain Markdown (no scripts or embedded files).
+        The result gives a `documentId` location: tell the person where it is, not what it contains,
+        and never put customer card or health details in it. Say plainly that a person fetches it from
+        the operator's artifact list; it is not sent anywhere by this call.
+
+        justification: one short sentence on why this document is needed (recorded in the audit ledger).
+        """
+        return runtime.docs_create(title=title, content=content, justification=justification)
 
     @mcp.tool(name="crm_create")
     def crm_create(fields: dict[str, Any], justification: str | None = None) -> dict[str, Any]:

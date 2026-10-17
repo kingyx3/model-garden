@@ -31,6 +31,7 @@ SCHEMAS = {
     "Tool": "tool.schema.json",
     "KnowledgeSource": "knowledge-source.schema.json",
     "Policy": "policy.schema.json",
+    "Schedule": "schedule.schema.json",
 }
 REFERENCE_FIELDS = {"skills": "Skill", "tools": "Tool", "knowledge": "KnowledgeSource", "policies": "Policy"}
 
@@ -110,6 +111,17 @@ def _load_skillsets():
 SKILLSETS = _load_skillsets()
 
 
+def _load_schedules():
+    spec = importlib.util.spec_from_file_location("model_garden_compiler_schedules", ROOT / "platform" / "core" / "schedules.py")
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+    return module
+
+
+SCHEDULES = _load_schedules()
+
+
 def load_validators() -> dict[str, Draft202012Validator]:
     validators: dict[str, Draft202012Validator] = {}
     for kind, filename in SCHEMAS.items():
@@ -174,6 +186,12 @@ def load_workspace(workspace: pathlib.Path, library_roots: tuple[pathlib.Path, .
                 except SKILLSETS.SkillsetError as exc:
                     errors.append(f"{path}: {exc}")
                     continue
+            if kind == "Schedule":
+                try:
+                    SCHEDULES.validate_definition(SCHEDULES.definition_from_resource(document))
+                except SCHEDULES.ScheduleError as exc:
+                    errors.append(f"{path}: {exc}")
+                    continue
             if kind == "Tool":
                 contract_errors = CAPABILITIES.tool_contract_errors(document)
                 errors.extend(f"{path}: {error}" for error in contract_errors)
@@ -194,6 +212,16 @@ def load_workspace(workspace: pathlib.Path, library_roots: tuple[pathlib.Path, .
             source_paths[key] = path
             source_roots[key] = root
 
+    for name, schedule in sorted(resources["Schedule"].items()):
+        spec = schedule["spec"]
+        agent = resources["Agent"].get(spec["agent"])
+        if agent is None:
+            errors.append(f"Schedule {name!r} names Agent {spec['agent']!r}, which this workspace does not define")
+            continue
+        selected = set(agent["spec"].get("tools", []))
+        missing = sorted(set(spec.get("requiredCapabilities", [])) - selected)
+        if missing:
+            errors.append(f"Schedule {name!r} needs Tools Agent {spec['agent']!r} does not select: {', '.join(missing)}")
     if errors:
         raise ValueError("Workspace compilation failed:\n - " + "\n - ".join(errors))
     if not resources["Agent"]:
@@ -418,6 +446,9 @@ def resolve_agent(workspace, agent, resources, source_paths, source_roots, envir
     }
     if resolved["policies"]:
         compiled["policies"] = resolved["policies"]
+    owned_schedules = schedule_definitions(resources, name)
+    if owned_schedules:
+        compiled["schedules"] = owned_schedules
     if knowledge_content:
         compiled["knowledgeContent"] = knowledge_content
     if capabilities is not None:
@@ -457,6 +488,22 @@ def compile_workspace(
         resolve_agent(workspace, agent, resources, source_paths, source_roots, environment_binding)
         for agent in _selected_agents(resources, agent_name)
     ]
+
+
+def schedule_definitions(resources, agent_name: str | None = None) -> list[dict[str, Any]]:
+    """The workspace's ``Schedule`` resources as the definitions the schedule store reconciles (sorted by name)."""
+    return [
+        SCHEDULES.definition_from_resource(resource)
+        for _, resource in sorted(resources["Schedule"].items())
+        if agent_name is None or resource["spec"]["agent"] == agent_name
+    ]
+
+
+def workspace_schedules(workspace: pathlib.Path, agent_name: str | None, library_roots: tuple[pathlib.Path, ...]) -> list[dict[str, Any]]:
+    resources, _, _ = load_workspace(workspace, library_roots)
+    if agent_name is not None and agent_name not in resources["Agent"]:
+        raise ValueError(f"Workspace compilation failed: Agent {agent_name!r} not found")
+    return schedule_definitions(resources, agent_name)
 
 
 def _selected_agents(resources, agent_name: str | None) -> list[dict[str, Any]]:
@@ -653,9 +700,22 @@ def main() -> int:
         action="store_true",
         help="print which Tool actions run automatically, need approval or are denied, per Skill, and exit",
     )
+    parser.add_argument(
+        "--schedules",
+        action="store_true",
+        help="print the workspace's Schedule resources as the JSON definitions the schedule store reconciles, and exit",
+    )
     args = parser.parse_args()
     workspace = pathlib.Path(args.workspace)
     libraries = tuple(pathlib.Path(path) for path in args.library)
+    if args.schedules:
+        try:
+            definitions = workspace_schedules(workspace, args.agent, libraries)
+        except (OSError, ValueError) as exc:
+            print(str(exc), file=sys.stderr)
+            return 1
+        print(json.dumps(definitions, indent=2, sort_keys=True))
+        return 0
     if args.approvals:
         try:
             report = workspace_approvals(workspace, args.agent, libraries)

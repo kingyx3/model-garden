@@ -22,7 +22,7 @@ class IntegrationRegistryTests(unittest.TestCase):
         providers = registry.load_registry()["providers"]
         self.assertGreaterEqual(len(providers), 18)
         self.assertEqual({p["id"] for p in providers if p["status"] == "built-credential-free"},
-                         {"text-knowledge", "built-in-crm"})
+                         {"text-knowledge", "built-in-crm", "built-in-artifacts"})
         self.assertFalse(any(p["status"] == "live" for p in providers))
         self.assertEqual({p["family"] for p in providers},
                          {"calendar", "crm", "mail", "kb", "docs", "files", "tickets", "chat", "code"})

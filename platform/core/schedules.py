@@ -42,6 +42,7 @@ done by ``scheduler.py``; this module is only the store and cron arithmetic.
 from __future__ import annotations
 
 import contextlib
+import copy
 import datetime as dt
 import fcntl
 import hashlib
@@ -191,6 +192,21 @@ def _budget(value: Any) -> dict[str, int]:
             raise ScheduleError(f"budget.{key} must be an integer of at least 1")
         result[key] = amount
     return result
+
+
+def definition_from_resource(resource: Mapping[str, Any]) -> dict[str, Any]:
+    """A ``Schedule`` workspace resource as the definition ``reconcile`` accepts (the resource name is the managed name)."""
+    spec = dict(resource.get("spec") or {})
+    spec.setdefault("requiredCapabilities", [])  # the same shape ``export_desired`` writes, so a round trip is exact
+    return {"name": resource["metadata"]["name"], **spec}
+
+
+def validate_definition(definition: Any) -> dict[str, Any]:
+    """The checks a stored schedule gets, without any store: unknown keys, name, owner, budget, cron (and its interval) or event."""
+    fields = ScheduleStore._normalised(definition)
+    if fields.get("cron") and next_fire(fields["cron"], int(dt.datetime.now(dt.timezone.utc).timestamp())) is None:
+        raise ScheduleError("this cron expression never fires")
+    return fields
 
 
 def goal_digest(goal: str) -> str:
@@ -429,8 +445,17 @@ class ScheduleStore:
             fields.update(event=definition["event"], maxPerHour=per_hour)
         return fields
 
-    def reconcile(self, definitions: Iterable[Mapping[str, Any]], *, by: str, now: int | None = None) -> dict[str, list[str]]:
-        """Make the managed schedules match ``definitions``; nothing is applied unless every definition is valid."""
+    def plan(self, definitions: Iterable[Mapping[str, Any]], *, now: int | None = None) -> dict[str, list[str]]:
+        """What :meth:`reconcile` would do with ``definitions``, with nothing written, ledgered or changed."""
+        return self.reconcile(definitions, by="plan:dry-run", now=now, dry_run=True)
+
+    def reconcile(
+        self, definitions: Iterable[Mapping[str, Any]], *, by: str, now: int | None = None, dry_run: bool = False
+    ) -> dict[str, list[str]]:
+        """Make the managed schedules match ``definitions``; nothing is applied unless every definition is valid.
+
+        With ``dry_run`` the same checks run against a copy and the report says what would happen; the store is not touched.
+        """
         who = _principal(by, "by")
         stamp = int(dt.datetime.now(dt.timezone.utc).timestamp()) if now is None else now
         wanted: dict[str, dict[str, Any]] = {}
@@ -445,7 +470,7 @@ class ScheduleStore:
         changes: list[tuple[str, dict[str, Any]]] = []
         compared = ("owner", "agent", "goal", "budget", "requiredCapabilities", "cron", "event", "maxPerHour")
         with self._locked() as state:
-            schedules = state["schedules"]
+            schedules = copy.deepcopy(state["schedules"]) if dry_run else state["schedules"]
             managed = {item["managedBy"]: item for item in schedules.values() if item.get("managedBy")}
             for name, fields in sorted(wanted.items()):
                 entry = managed.get(name)
@@ -494,8 +519,9 @@ class ScheduleStore:
                     entry["state"], entry["pausedReason"] = "paused", "removed-from-workspace"
                     report["retired"].append(name)
                     changes.append(("schedule.retire", dict(entry)))
-        for action, entry in changes:
-            self._record(action, who, {**self._details(entry), "managedBy": entry.get("managedBy")})
+        if not dry_run:
+            for action, entry in changes:
+                self._record(action, who, {**self._details(entry), "managedBy": entry.get("managedBy")})
         return report
 
     def export_desired(self) -> list[dict[str, Any]]:
