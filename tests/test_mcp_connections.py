@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import importlib.util
+import contextlib
+import io
 import json
 import pathlib
 import sys
@@ -21,6 +23,7 @@ def load(name, relative):
 
 
 connections = load("mcp_connections_under_test", "platform/core/mcp_connections.py")
+operator = load("mcp_operator_under_test", "scripts/runtime-mcp-connections.py")
 mcp = load("mcp_approvals_for_connection_tests", "platform/core/mcp_passthrough.py")
 grants_module = load("mcp_grants_for_connection_tests", "platform/core/provider_grants.py")
 NOW = 1_800_000_000
@@ -170,6 +173,129 @@ class ConnectionTests(unittest.TestCase):
             self.store.resolve("crm-main", agent="receptionist")
         self.activate()
         self.assertEqual(self.store.resolve("crm-main", agent="receptionist")["declaration"]["url"], replacement["url"])
+
+    def test_owner_cannot_self_approve_the_connection(self):
+        with self.assertRaisesRegex(connections.ConnectionRefused, "separate"):
+            self.activate(by="owner@acme.example")
+        self.assertFalse(self.store.list_public(agent="receptionist")[0]["active"])
+
+    def test_disable_during_schema_review_cannot_reactivate(self):
+        original = self.approvals.status
+        tripped = [False]
+
+        def status(server, tool):
+            if not tripped[0]:
+                tripped[0] = True
+                self.store.disable("crm-main", agent="receptionist", by="owner@acme.example")
+            return original(server, tool)
+
+        self.approvals.status = status
+        with self.assertRaisesRegex(connections.ConnectionRefused, "changed during review"):
+            self.activate()
+        self.assertFalse(self.store.list_public(agent="receptionist")[0]["active"])
+        with self.assertRaises(connections.ConnectionRefused):
+            self.store.resolve("crm-main", agent="receptionist")
+
+    def test_same_digest_replacement_during_review_cannot_approve_stale_snapshot(self):
+        original = self.approvals.status
+        tripped = [False]
+
+        def status(server, tool):
+            if not tripped[0]:
+                tripped[0] = True
+                # Identical manifest hashes must not defeat state-transition fencing.
+                self.stage(replace=True)
+            return original(server, tool)
+
+        self.approvals.status = status
+        with self.assertRaisesRegex(connections.ConnectionRefused, "changed during review"):
+            self.activate()
+        self.assertFalse(self.store.list_public(agent="receptionist")[0]["active"])
+
+    def test_grant_revoked_after_review_is_refused_at_commit(self):
+        original = self.approvals.status
+        tripped = [False]
+
+        def status(server, tool):
+            if not tripped[0]:
+                tripped[0] = True
+                self.grants.revoke(self.grant["id"], by="operator@acme.example", now=NOW + 2)
+            return original(server, tool)
+
+        self.approvals.status = status
+        with self.assertRaises(PermissionError):
+            self.activate()
+        self.assertFalse(self.store.list_public(agent="receptionist")[0]["active"])
+
+    def test_double_activation_must_be_replaced_and_reconsented(self):
+        self.activate()
+        first = self.store.resolve("crm-main", agent="receptionist")
+        with self.assertRaisesRegex(connections.ConnectionRefused, "already active"):
+            self.activate()
+        self.assertEqual(self.store.resolve("crm-main", agent="receptionist")["activationId"], first["activationId"])
+        self.store.disable("crm-main", agent="receptionist", by="owner@acme.example")
+        with self.assertRaises(connections.ConnectionRefused):
+            self.store.resolve("crm-main", agent="receptionist")
+        self.activate()
+        second = self.store.resolve("crm-main", agent="receptionist")
+        self.assertNotEqual(first["activationId"], second["activationId"])
+
+    def test_activation_succeeds_with_valid_grants_and_revision_fence(self):
+        self.assertFalse(self.store.list_public(agent="receptionist")[0]["active"])
+        self.activate()
+        record = self.store.resolve("crm-main", agent="receptionist")
+        self.assertGreaterEqual(record["generation"], 2)
+        self.assertNotIn("secret://", json.dumps(self.store.list_public(agent="receptionist")))
+
+    def test_operator_cli_stage_status_and_disable_are_scoped_and_ledgered(self):
+        manifest = self.root / "declaration.json"
+        manifest.write_text(json.dumps(SERVER))
+        data_root = self.root / "operator-root"
+        def call(*arguments):
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                result = operator.main([str(data_root), "--tenant", "acme-prod", *arguments])
+            return result, output.getvalue()
+        code, staged = call("stage", "--agent", "receptionist", "--id", "crm-main",
+                            "--file", str(manifest), "--actor", "operator@acme.example")
+        self.assertEqual(code, 0)
+        self.assertFalse(json.loads(staged)["active"])
+        self.assertNotIn("secret://", staged)
+        code, status = call("status", "--agent", "receptionist")
+        self.assertEqual(code, 0)
+        self.assertEqual(len(json.loads(status)["connections"]), 1)
+        self.assertNotIn("secret://", status)
+        code, disabled = call("disable", "--agent", "receptionist", "--id", "crm-main",
+                              "--actor", "owner@acme.example")
+        self.assertEqual(code, 0)
+        self.assertFalse(json.loads(disabled)["active"])
+        ledger = (data_root / "audit.jsonl").read_text()
+        self.assertIn("mcp.connection-stage", ledger)
+        self.assertIn("mcp.connection-disable", ledger)
+        self.assertNotIn("secret://", ledger)
+        self.assertNotIn("actual-token", ledger)
+
+    def test_operator_cli_rejects_secret_values_and_symlink_manifests(self):
+        root = self.root / "cli-root"
+        filename = self.root / "bad.json"
+        wrong = {**SERVER, "credentialRef": "Bearer actual-token"}
+        filename.write_text(json.dumps(wrong))
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            result = operator.main([str(root), "--tenant", "acme-prod", "stage", "--agent", "receptionist",
+                                    "--id", "crm-main", "--file", str(filename),
+                                    "--actor", "owner@acme.example"])
+        self.assertEqual(result, 2)
+        self.assertNotIn("actual-token", stderr.getvalue())
+        self.assertFalse((root / "mcp-connections" / "acme-prod.mcp-connections.json").exists())
+        filename.write_text(json.dumps(SERVER))
+        link = self.root / "manifest-symlink.json"
+        link.symlink_to(filename)
+        with contextlib.redirect_stderr(io.StringIO()):
+            result = operator.main([str(root), "--tenant", "acme-prod", "stage", "--agent", "receptionist",
+                                    "--id", "crm-main", "--file", str(link),
+                                    "--actor", "owner@acme.example"])
+        self.assertEqual(result, 2)
 
     def test_unknown_portable_tool_and_risk_or_credential_injection_are_denied(self):
         wrong = dict(SERVER)
