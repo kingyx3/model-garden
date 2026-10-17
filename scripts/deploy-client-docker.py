@@ -480,7 +480,8 @@ def _gateway_settings(binding: dict[str, Any]) -> tuple[dict[str, Any] | None, d
         required = set()
     slack = gateway.get("slack")
     if slack is not None:
-        config["slack"] = {"botUserId": slack.get("bot_user_id"), "allowedChannels": slack.get("allowed_channels") or []}
+        config["slack"] = {"botUserId": slack.get("bot_user_id"), "allowedChannels": slack.get("allowed_channels") or [],
+                           **({"uploadFiles": True} if slack.get("upload_files") is True else {})}
         required |= {"MODEL_GARDEN_SLACK_SIGNING_SECRET", "MODEL_GARDEN_SLACK_BOT_TOKEN"}
     teams = gateway.get("teams")
     if teams is not None:
