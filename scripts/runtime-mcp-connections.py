@@ -29,6 +29,7 @@ def _load(name, path):
 
 
 CONNECTIONS = _load("modelgarden_mcp_operator_connections", ROOT / "platform/core/mcp_connections.py")
+GRANTS = _load("modelgarden_mcp_operator_grants", ROOT / "platform/core/provider_grants.py")
 GOVERN = _load("modelgarden_mcp_operator_governance", ROOT / "scripts/govern-action.py")
 
 
@@ -49,6 +50,7 @@ def main(argv: list[str] | None = None) -> int:
     sub = parser.add_subparsers(dest="command", required=True)
     status = sub.add_parser("status", help="list non-secret connection status for this coworker")
     status.add_argument("--agent", required=True)
+    status.add_argument("--check-grants", action="store_true", help="redacted per-Tool readiness; no network test or live assertion")
     stage = sub.add_parser("stage", help="record reviewed manifest as inactive; never makes a network connection")
     stage.add_argument("--agent", required=True)
     stage.add_argument("--id", required=True, dest="connection_id")
@@ -69,7 +71,11 @@ def main(argv: list[str] | None = None) -> int:
             ),
         )
         if args.command == "status":
-            outcome = {"connections": store.list_public(agent=args.agent)}
+            if args.check_grants:
+                registry = GRANTS.GrantRegistry(args.store / "provider-grants", tenant=args.tenant)
+                outcome = {"connections": store.list_readiness(agent=args.agent, grants=registry, now=int(time.time()))}
+            else:
+                outcome = {"connections": store.list_public(agent=args.agent)}
         elif args.command == "stage":
             declaration = _declaration(args.declaration_file)
             outcome = store.stage(args.connection_id, agent=args.agent, declaration=declaration,
