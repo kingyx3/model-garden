@@ -4,6 +4,8 @@
   ledger-export.py export --ledger audit.jsonl --state export-state.json --sink-dir /mnt/ledger-sink
   ledger-export.py export --ledger audit.jsonl --state export-state.json --webhook https://siem.example/ingest --token-env SIEM_TOKEN
   ledger-export.py verify --ledger audit.jsonl --sink-dir /mnt/ledger-sink
+  ledger-export.py export --ledger audit.jsonl --state export-state.json --gcs-bucket my-locked-bucket --gcs-impersonate mg-exp-1234abcd@proj.iam.gserviceaccount.com
+  ledger-export.py verify --ledger audit.jsonl --gcs-bucket my-locked-bucket
   ledger-export.py verify ... --max-lag-events 100 --max-head-age-seconds 3600
 
 `verify` exits non-zero and prints ``ALERT:`` lines for gaps in the exported sequence, a local
@@ -13,7 +15,7 @@ the local ledger is too far ahead of the export, or events are waiting and the n
 manifest is older than the limit. An idle, fully exported ledger never trips either.
 Run `export` on a schedule under an identity that is separate from the runtime and deployment
 identities; wiring the non-zero exit into monitoring is deployment-specific. A webhook sink is
-write-only, so `verify` needs a readable directory sink.
+write-only, so `verify` needs a readable directory or GCS sink.
 """
 from __future__ import annotations
 
@@ -40,9 +42,19 @@ def _load_export():
 EXPORT = _load_export()
 
 
+def build_gcs_sink(args: argparse.Namespace):
+    """A GCS bucket sink using the VM's identity, or a separate export identity it is allowed to impersonate."""
+    token = EXPORT.metadata_token()
+    if args.gcs_impersonate:
+        token = EXPORT.impersonated_token(args.gcs_impersonate, token, scope="https://www.googleapis.com/auth/devstorage.read_write")
+    return EXPORT.GcsSink(args.gcs_bucket, token, prefix=args.gcs_prefix or "")
+
+
 def build_sink(args: argparse.Namespace):
     if args.sink_dir:
         return EXPORT.DirectorySink(pathlib.Path(args.sink_dir))
+    if args.gcs_bucket:
+        return build_gcs_sink(args)
     token = os.environ.get(args.token_env) if args.token_env else None
     if args.token_env and not token:
         raise ValueError(f"environment variable {args.token_env} is not set")
@@ -58,11 +70,18 @@ def main(argv: list[str] | None = None) -> int:
     target = export.add_mutually_exclusive_group(required=True)
     target.add_argument("--sink-dir", help="append-only directory sink")
     target.add_argument("--webhook", help="https collector URL")
+    target.add_argument("--gcs-bucket", help="retention-locked Google Cloud Storage bucket (create-only writes)")
+    export.add_argument("--gcs-impersonate", help="export service account email to impersonate for GCS writes")
+    export.add_argument("--gcs-prefix", help="optional object prefix inside the bucket")
     export.add_argument("--token-env", help="environment variable holding a bearer token for the webhook")
     export.add_argument("--batch-size", type=int, default=EXPORT.DEFAULT_BATCH)
     verify = sub.add_parser("verify", help="compare a directory sink with the local ledger")
     verify.add_argument("--ledger", type=pathlib.Path, required=True)
-    verify.add_argument("--sink-dir", required=True)
+    where = verify.add_mutually_exclusive_group(required=True)
+    where.add_argument("--sink-dir")
+    where.add_argument("--gcs-bucket", help="verify a GCS bucket sink (run as the separate verifier identity)")
+    verify.add_argument("--gcs-impersonate", help="verifier service account email to impersonate for GCS reads")
+    verify.add_argument("--gcs-prefix", help="optional object prefix inside the bucket")
     verify.add_argument("--max-lag-events", type=int, help="alert when the local ledger is more than this many events ahead of the export")
     verify.add_argument("--max-head-age-seconds", type=int, help="alert when events are waiting and the newest head manifest is older than this")
     args = parser.parse_args(argv)
@@ -73,7 +92,7 @@ def main(argv: list[str] | None = None) -> int:
             print(json.dumps(summary, sort_keys=True))
             return 0
         report = EXPORT.verify_export(
-            args.ledger, EXPORT.DirectorySink(pathlib.Path(args.sink_dir)),
+            args.ledger, EXPORT.DirectorySink(pathlib.Path(args.sink_dir)) if args.sink_dir else build_gcs_sink(args),
             max_lag_events=args.max_lag_events, max_head_age_seconds=args.max_head_age_seconds,
         )
     except EXPORT.LedgerTruncated as exc:

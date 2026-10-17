@@ -213,6 +213,18 @@ class DeployClientDockerTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "upstream"):
                     deployer.render_bundle(profile, self._binding(root, {"upstream": bad}), root / f"bad-{len(str(bad))}", "acme-dev")
 
+    def test_worker_ledger_export_is_rendered_as_non_secret_settings_and_validated(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            profile = self._profile(root, tools=("kb.search",))
+            export = {"gcs_bucket": "acme-ledger-export", "impersonate_service_account": "mg-exp-1234abcd@acme-proj.iam.gserviceaccount.com", "prefix": "prod"}
+            worker = {"enabled": True, "coworker_api_key_ref": "secret://coworker-api/dev", "ledger_export": export}
+            deployer.render_bundle(profile, self._binding(root, {"worker": worker}), root / "bundle", "acme-dev")
+            config = json.loads((root / "bundle" / "profile" / ".modelgarden" / "worker.json").read_text(encoding="utf-8"))
+            self.assertEqual(config["export"], {"gcsBucket": "acme-ledger-export", "impersonate": export["impersonate_service_account"], "prefix": "prod"})
+            with self.assertRaisesRegex(ValueError, "ledger_export"):
+                deployer.render_bundle(profile, self._binding(root, {"worker": {**worker, "ledger_export": {"token": "x"}}}), root / "bad", "acme-dev")
+
     def test_worker_is_off_unless_enabled_and_rejects_unknown_settings(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = pathlib.Path(tmp)

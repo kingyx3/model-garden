@@ -67,6 +67,7 @@ RUNTIME_SOURCE_PATHS = (
     pathlib.Path("platform/core/crm_sync.py"),
     pathlib.Path("platform/core/artifacts.py"),
     pathlib.Path("platform/core/builtin_files.py"),
+    pathlib.Path("platform/core/ledger_export.py"),
     pathlib.Path("platform/core/connection_notices.py"),
     pathlib.Path("platform/core/notice_delivery.py"),
     pathlib.Path("platform/core/crm_filing.py"),
@@ -302,7 +303,7 @@ def _worker_settings(binding: dict[str, Any]) -> tuple[dict[str, Any] | None, st
         raise ValueError("Docker target failed: EnvironmentBinding worker must be an object")
     if worker.get("enabled") is not True:
         return None, None
-    allowed = {"enabled", "coworker_api_key_ref", "people", "escalate_to", "owners", "mailbox", "intervals", "artifact_retention_days"}
+    allowed = {"enabled", "coworker_api_key_ref", "people", "escalate_to", "owners", "mailbox", "intervals", "artifact_retention_days", "ledger_export"}
     unknown = sorted(set(worker) - allowed)
     if unknown:
         raise ValueError(f"Docker target failed: unknown worker settings: {', '.join(unknown)}")
@@ -320,6 +321,15 @@ def _worker_settings(binding: dict[str, Any]) -> tuple[dict[str, Any] | None, st
         config["intervals"] = worker["intervals"]
     if worker.get("artifact_retention_days") is not None:
         config["artifactRetentionDays"] = worker["artifact_retention_days"]
+    export = worker.get("ledger_export")
+    if export is not None:
+        if not isinstance(export, dict) or set(export) - {"gcs_bucket", "impersonate_service_account", "prefix"} or not export.get("gcs_bucket"):
+            raise ValueError("Docker target failed: worker.ledger_export needs gcs_bucket and may add impersonate_service_account and prefix")
+        config["export"] = {"gcsBucket": export["gcs_bucket"]}
+        if export.get("impersonate_service_account"):
+            config["export"]["impersonate"] = export["impersonate_service_account"]
+        if export.get("prefix"):
+            config["export"]["prefix"] = export["prefix"]
     mailbox = worker.get("mailbox")
     if mailbox is not None:
         if not isinstance(mailbox, dict):

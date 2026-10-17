@@ -147,6 +147,19 @@ resource "google_project_iam_member" "deployer_roles" {
   member  = "serviceAccount:${google_service_account.deployer.email}"
 }
 
+# Only for clients that enable the retention-locked ledger export in docker-host/gcp: the deployer must be able to create the bucket
+# and the separate export identity. Off by default so the deployer keeps its smaller role set.
+resource "google_project_iam_member" "deployer_ledger_export_roles" {
+  for_each = var.enable_ledger_export ? toset([
+    "roles/storage.admin",
+    "roles/iam.serviceAccountAdmin",
+  ]) : toset([])
+
+  project = var.project_id
+  role    = each.value
+  member  = "serviceAccount:${google_service_account.deployer.email}"
+}
+
 resource "google_project_iam_member" "runtime_roles" {
   for_each = toset([
     "roles/logging.logWriter",
@@ -168,6 +181,12 @@ resource "google_storage_bucket_iam_member" "deployer_bucket_metadata" {
   bucket = google_storage_bucket.terraform_state.name
   role   = "roles/storage.legacyBucketReader"
   member = "serviceAccount:${google_service_account.deployer.email}"
+}
+
+variable "enable_ledger_export" {
+  type        = bool
+  description = "Let the deployment identity create the retention-locked ledger export bucket and its separate export identity."
+  default     = false
 }
 
 variable "project_id" {

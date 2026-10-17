@@ -104,7 +104,10 @@ jobs:
             -var="platform_version=${MODEL_GARDEN_VERSION}" \
             -var="runtime_service_account=${{ vars.GCP_RUNTIME_SERVICE_ACCOUNT }}" \
             -var="infrastructure_owner=${{ vars.MODEL_GARDEN_INFRA_OWNERSHIP }}" \
-            -var="deletion_protection=${deletion_protection}"
+            -var="deletion_protection=${deletion_protection}" \
+            -var="ledger_export_enabled=${{ vars.MODEL_GARDEN_LEDGER_EXPORT || 'false' }}" \
+            -var="export_retention_days=${{ vars.MODEL_GARDEN_EXPORT_RETENTION_DAYS || '365' }}" \
+            -var="export_lock_retention=${{ vars.MODEL_GARDEN_EXPORT_LOCK_RETENTION || 'false' }}"
           echo "instance=$(terraform -chdir="$module" output -raw instance_name)" >> "$GITHUB_OUTPUT"
           echo "zone=$(terraform -chdir="$module" output -raw zone)" >> "$GITHUB_OUTPUT"
 
