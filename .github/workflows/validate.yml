@@ -3,7 +3,6 @@ name: Validate
 on:
   push:
     branches: [main]
-    tags: ['v*']
   pull_request:
 
 permissions:
@@ -40,10 +39,6 @@ jobs:
           if [[ "$GITHUB_EVENT_NAME" == "pull_request" ]]; then
             echo "${tag} is already published. Bump VERSION before merging another change so client lockfiles never point at stale code." >&2
             exit 1
-          fi
-          if [[ "$GITHUB_REF" == "refs/tags/${tag}" && "$remote" == "$GITHUB_SHA" ]]; then
-            echo "Tag ${tag} matches this revision."
-            exit 0
           fi
           if [[ "$GITHUB_REF" == "refs/heads/main" && "$remote" == "$GITHUB_SHA" ]]; then
             echo "Main already matches published ${tag}."
@@ -202,27 +197,4 @@ jobs:
             echo "Release ${tag} already exists."
           else
             gh release create "$tag" --verify-tag --generate-notes --title "Model Garden ${tag}"
-          fi
-
-  release:
-    if: startsWith(github.ref, 'refs/tags/v')
-    needs: [version-contract, current-terraform, contracts-and-runtime, hermes-compatibility]
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    permissions:
-      contents: write
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-        with:
-          persist-credentials: false
-      - name: Verify tag matches VERSION
-        run: python3 scripts/validate-release-tag.py "$GITHUB_REF_NAME"
-      - name: Publish immutable GitHub Release
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
-            echo "Release $GITHUB_REF_NAME already exists."
-          else
-            gh release create "$GITHUB_REF_NAME" --verify-tag --generate-notes --title "Model Garden $GITHUB_REF_NAME"
           fi
