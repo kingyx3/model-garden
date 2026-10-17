@@ -180,16 +180,16 @@ var S=window.sessionStorage,$=function(i){return document.getElementById(i)},p={
 location.hash.slice(1).split('&').forEach(function(kv){var i=kv.indexOf('=');if(i>0)p[kv.slice(0,i)]=decodeURIComponent(kv.slice(i+1))});
 history.replaceState(null,'','/connections/enroll');
 if(p.enroll)S.setItem('mg-enroll',p.enroll);
-var token=S.getItem('mg-enroll');
+var link=S.getItem('mg-enroll');
 function show(id){$('signin').hidden=id!=='signin';$('enter').hidden=id!=='enter'}
 function post(path,body,session){var h={'Content-Type':'application/json'};if(session)h.Authorization='Bearer '+session;
 return fetch(path,{method:'POST',headers:h,body:JSON.stringify(body)})}
 function ready(){show(S.getItem('mg-session')?'enter':'signin')}
-if(!token){$('note').textContent='Open the link exactly as it was sent to you.';return}
-$('login').onsubmit=function(e){e.preventDefault();post('/channels/web/login',{address:$('address').value,enroll:token}).then(function(){
+if(!link){$('note').textContent='Open the link exactly as it was sent to you.';return}
+$('login').onsubmit=function(e){e.preventDefault();post('/channels/web/login',{address:$('address').value,enroll:link}).then(function(){
 $('note').textContent='If that address is allowed, a sign-in link is on its way.'})};
 $('secret').onsubmit=function(e){e.preventDefault();var v=$('value').value;$('value').value='';
-post('/connections/enroll',{token:token,value:v},S.getItem('mg-session')).then(function(r){return r.json().then(function(j){return [r.status,j]})})
+post('/connections/enroll',{token:link,value:v},S.getItem('mg-session')).then(function(r){return r.json().then(function(j){return [r.status,j]})})
 .then(function(x){if(x[0]===200){S.removeItem('mg-enroll');show('');$('note').textContent='Saved: '+x[1].masked+'. You can close this page.'}
 else if(x[0]===401){S.removeItem('mg-session');show('signin');$('note').textContent=x[1].error}
 else{$('note').textContent=(x[1].error||'That did not work.')+' Ask for a new link if this one has expired or was used.'}})};
