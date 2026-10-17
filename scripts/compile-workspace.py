@@ -394,9 +394,14 @@ def resolve_agent(workspace, agent, resources, source_paths, source_roots, envir
     except ValueError as exc:
         errors.append(str(exc))
         trusted_owners = None
+    try:
+        owner_keys = POLICY.owner_keys_from_binding(environment_binding)
+    except ValueError as exc:
+        errors.append(str(exc))
+        owner_keys = None
     errors.extend(
         f"Agent {name!r}: {error}"
-        for error in POLICY.relaxation_errors(resolved["policies"], resolved["tools"], trusted_owners)
+        for error in POLICY.relaxation_errors(resolved["policies"], resolved["tools"], trusted_owners, owner_keys)
     )
     errors.extend(f"Agent {name!r}: {error}" for error in KNOWLEDGE_DEPLOY.approval_owner_errors(resolved["knowledge"], trusted_owners))
     declarations = CAPABILITIES.collect_declarations(agent, resolved["skills"])

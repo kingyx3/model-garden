@@ -25,6 +25,8 @@ floor. This module owns no I/O and no credentials.
 
 from __future__ import annotations
 
+import base64
+import binascii
 import fnmatch
 import hashlib
 import json
@@ -71,6 +73,82 @@ def signoff_valid(rule: Mapping[str, Any]) -> bool:
         and bool(signoff["owner"].strip())
         and signoff.get("ruleDigest") == rule_digest(rule)
     )
+
+
+SIGNATURE_CONTEXT = b"model-garden-policy-signoff/1\n"
+
+
+def _ed25519():
+    from cryptography.hazmat.primitives.asymmetric import ed25519  # imported here so a deployment without signing never needs it
+
+    return ed25519
+
+
+def _signed_message(owner: str, digest: str) -> bytes:
+    return SIGNATURE_CONTEXT + owner.strip().lower().encode("utf-8") + b"\n" + digest.encode("ascii")
+
+
+def generate_owner_key() -> dict[str, str]:
+    """A new owner key pair as base64 raw bytes. The private half stays with the owner; only the public half is configured."""
+    from cryptography.hazmat.primitives import serialization
+
+    private = _ed25519().Ed25519PrivateKey.generate()
+    raw = serialization.Encoding.Raw, serialization.PublicFormat.Raw
+    return {
+        "private": base64.b64encode(private.private_bytes(serialization.Encoding.Raw, serialization.PrivateFormat.Raw, serialization.NoEncryption())).decode(),
+        "public": base64.b64encode(private.public_key().public_bytes(*raw)).decode(),
+    }
+
+
+def sign_rule(rule: Mapping[str, Any], owner: str, private_key: str) -> dict[str, Any]:
+    """The rule with the owner's sign-off: their name, the exact content digest and an Ed25519 signature over both."""
+    digest = rule_digest(rule)
+    try:
+        key = _ed25519().Ed25519PrivateKey.from_private_bytes(base64.b64decode(private_key, validate=True))
+    except (ValueError, binascii.Error):
+        raise ValueError("the owner private key must be a base64 Ed25519 key") from None
+    signature = base64.b64encode(key.sign(_signed_message(owner, digest))).decode()
+    return {**{k: v for k, v in rule.items() if k != "signoff"}, "signoff": {"owner": owner, "ruleDigest": digest, "signature": signature}}
+
+
+def signature_valid(rule: Mapping[str, Any], public_key: str) -> bool:
+    """True only when the rule's sign-off carries a signature by this public key over the owner and the rule's exact content."""
+    signoff = rule.get("signoff")
+    if not signoff_valid(rule) or not isinstance(signoff.get("signature"), str):
+        return False
+    try:
+        key = _ed25519().Ed25519PublicKey.from_public_bytes(base64.b64decode(public_key, validate=True))
+        key.verify(base64.b64decode(signoff["signature"], validate=True), _signed_message(signoff["owner"], rule_digest(rule)))
+    except Exception:  # noqa: BLE001 - any failure to verify is a refusal
+        return False
+    return True
+
+
+def owner_keys_from_binding(binding: Mapping[str, Any] | None) -> dict[str, str] | None:
+    """The environment's owner public keys (``governance.ownerKeys``: identity to base64 Ed25519 key), or ``None`` when it names none.
+
+    When present, a relaxing rule must be signed with the named owner's key, so a name typed into a client-editable workspace is no
+    longer enough. The keys are public; the private halves never enter the workspace or the deployment.
+    """
+    if not isinstance(binding, Mapping):
+        return None
+    spec = binding.get("spec", binding) if binding.get("kind") == "EnvironmentBinding" else binding
+    governance = spec.get("governance") if isinstance(spec, Mapping) else None
+    keys = governance.get("ownerKeys") if isinstance(governance, Mapping) else None
+    if keys is None:
+        return None
+    if not isinstance(keys, Mapping):
+        raise ValueError("EnvironmentBinding governance.ownerKeys must map each owner identity to a base64 Ed25519 public key")
+    normal: dict[str, str] = {}
+    for identity, value in keys.items():
+        try:
+            valid = isinstance(identity, str) and identity.strip() and isinstance(value, str) and len(base64.b64decode(value, validate=True)) == 32
+        except (ValueError, binascii.Error):
+            valid = False
+        if not valid:
+            raise ValueError("EnvironmentBinding governance.ownerKeys must map each owner identity to a base64 Ed25519 public key")
+        normal[identity.strip().lower()] = value
+    return normal
 
 
 def _scalar(value: Any) -> bool:
@@ -225,6 +303,7 @@ def relaxation_errors(
     policies: Iterable[Mapping[str, Any]] | None,
     tools: Iterable[Mapping[str, Any]],
     trusted_owners: Iterable[str] | None = None,
+    owner_keys: Mapping[str, str] | None = None,
 ) -> list[str]:
     """Deploy-time checks: rule ids are unique, and every approval-relaxing rule is signed.
 
@@ -234,7 +313,8 @@ def relaxation_errors(
 
     When ``trusted_owners`` is given (the environment's ``governance.owners``), the sign-off must also
     name one of them. The digest proves the rule was not edited after signing, and this list narrows who
-    may claim to be the owner; neither authenticates the signer's identity.
+    may claim to be the owner; neither authenticates the signer's identity. When ``owner_keys`` is given
+    (``governance.ownerKeys``), the sign-off must also carry an Ed25519 signature by that owner's key, which does.
     """
     trusted = None if trusted_owners is None else {item.strip().lower() for item in trusted_owners}
     errors: list[str] = []
@@ -282,6 +362,13 @@ def relaxation_errors(
                 f"Policy rule {rule_id!r} is signed by {rule['signoff']['owner'].strip()!r}, who is not a named "
                 "owner of this environment (governance.owners in the EnvironmentBinding)"
             )
+        elif relaxes and owner_keys is not None:
+            owner = rule["signoff"]["owner"].strip().lower()
+            if owner not in owner_keys or not signature_valid(rule, owner_keys[owner]):
+                errors.append(
+                    f"Policy rule {rule_id!r} needs signoff.signature, made with the key governance.ownerKeys lists for "
+                    f"{rule['signoff']['owner'].strip()!r} over the rule's current content (sign it with scripts/policy-signoff.py)"
+                )
     return errors
 
 
