@@ -95,13 +95,14 @@ With no policy, Agent and Tool settings behave exactly as before (plus the `priv
   actions: [mail.send]
   conditions:
     arguments: {category: [faq]}   # every named Tool argument must be present and equal to a listed value
-    maxPerDay: 20                  # applies only while fewer than 20 successful executions of the matched Tool are in today's (UTC) local ledger
+    maxPerDay: 20                  # applies only while fewer than 20 successful executions of the matched Tool by this Agent are in today's (UTC) local ledger
+    maxPerPrincipalPerDay: 3       # and only while the requesting person has fewer than 3 of them today, so one caller cannot use up everyone's allowance
   signoff: {owner: owner@client.example, ruleDigest: <sha256>}
 ```
 
-When a condition is unmet, or cannot be checked (a missing or non-scalar argument, no readable ledger), the rule does not apply and the stricter default stands, so a limited rule reached its limit shows `policy-limit-reached` with the rule ID in the ledger and the call needs approval. Values are compared by type (`1` does not match `true`). The conditions are part of the rule content, so editing them invalidates the owner's sign-off until it is re-signed. `--approvals` shows such a Tool as `conditional`. Counts come from the sidecar's local chained ledger; they are not a distributed rate limiter (concurrent calls can overshoot by the number in flight) and a client who deletes the ledger resets them, so use `deny`/`human-only` for hard limits.
+When a condition is unmet, or cannot be checked (a missing or non-scalar argument, no readable ledger), the rule does not apply and the stricter default stands, so a limited rule reached its limit shows `policy-limit-reached` with the rule ID in the ledger and the call needs approval. Values are compared by type (`1` does not match `true`). The conditions are part of the rule content, so editing them invalidates the owner's sign-off until it is re-signed. `--approvals` shows such a Tool as `conditional`. `maxPerDay` counts only this Agent's executions (a shared ledger no longer lets another Agent ration this one; events that name no Agent still count). `maxPerPrincipalPerDay` counts the requester's own executions and fails closed when the call names no requester, so an unattributed call never gets a per-person rule. A new public sender identity starts with a fresh count, so keep `maxPerDay` as the backstop for public rules; a public sender past their allowance falls back to the principal floor and is refused rather than queued. Counts come from the sidecar's local chained ledger; they are not a distributed rate limiter (concurrent calls can overshoot by the number in flight) and a client who deletes the ledger resets them, so use `deny`/`human-only` for hard limits.
 
-Not yet supported: classification of free-text content (for example deciding that a message *is* an FAQ), per-principal counters, verifying that the named owner really signed (a sign-off proves content integrity, not identity), and consultant/owner role separation beyond the sign-off above.
+Not yet supported: classification of free-text content (for example deciding that a message *is* an FAQ), verifying that the named owner really signed (a sign-off proves content integrity, not identity), and consultant/owner role separation beyond the sign-off above.
 
 ## Delegation between Agents (task envelopes)
 

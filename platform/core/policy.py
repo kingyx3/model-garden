@@ -14,10 +14,10 @@ deliberately small and fail-closed:
 - an `allow` rule applies to member principals unless it names ``public`` explicitly, and a
   public principal can reach at most one signed, named ``write`` Tool;
 - ``privileged`` Tools are never auto-approved and never reachable by a public principal;
-- an `allow` rule may carry bounded ``conditions`` (an argument allow-list and a per-day usage
-  limit). Conditions only narrow a loosening rule: when one is unmet, or cannot be checked,
-  the rule simply does not apply and the stricter default stands. They are part of the rule's
-  content, so the owner's sign-off digest binds them too.
+- an `allow` rule may carry bounded ``conditions`` (an argument allow-list, a per-day usage
+  limit for the Tool and a per-day limit for each requester). Conditions only narrow a loosening
+  rule: when one is unmet, or cannot be checked, the rule simply does not apply and the stricter
+  default stands. They are part of the rule's content, so the owner's sign-off digest binds them too.
 
 With no Policy the result is exactly the previous Agent/Tool behaviour, plus the privileged
 floor. This module owns no I/O and no credentials.
@@ -159,11 +159,14 @@ def conditions_status(
     rule: Mapping[str, Any],
     arguments: Mapping[str, Any] | None,
     usage_today: int | None,
+    usage_by_principal: int | None = None,
 ) -> str | None:
     """None when a rule's bounded conditions hold, else why the rule does not apply.
 
     Fails closed: an argument the call did not supply, a non-scalar value, or a usage count the
-    caller could not provide all make the condition unmet.
+    caller could not provide all make the condition unmet. ``maxPerDay`` bounds the Tool's
+    executions for everyone; ``maxPerPrincipalPerDay`` bounds each requester's own, so one person
+    (or one public sender) cannot use up the allowance the others rely on. Both must hold.
     """
     conditions = rule.get("conditions")
     if not isinstance(conditions, Mapping):
@@ -178,6 +181,9 @@ def conditions_status(
     limit = conditions.get("maxPerDay")
     if limit is not None and (usage_today is None or usage_today >= limit):
         return "usage-limit"
+    per_principal = conditions.get("maxPerPrincipalPerDay")
+    if per_principal is not None and (usage_by_principal is None or usage_by_principal >= per_principal):
+        return "principal-usage-limit"
     return None
 
 
@@ -223,11 +229,13 @@ def evaluate(
     tool_requires_approval: bool = False,
     arguments: Mapping[str, Any] | None = None,
     usage_today: int | None = None,
+    usage_by_principal: int | None = None,
 ) -> dict[str, Any]:
     """Return ``{"decision", "reason", "ruleId"}`` for one already-selected Tool call.
 
-    ``arguments`` and ``usage_today`` (successful executions of this Tool so far today, UTC) feed
-    the bounded conditions of `allow` rules; omit them and conditional rules do not apply.
+    ``arguments``, ``usage_today`` (successful executions of this Tool so far today, UTC) and
+    ``usage_by_principal`` (those the requesting identity made) feed the bounded conditions of
+    `allow` rules; omit them and conditional rules do not apply.
     """
     who = principal or MEMBER
     matched = []
@@ -236,9 +244,11 @@ def evaluate(
         if not _matches(rule, tool_name=tool_name, classification=classification, channel=channel, principal=who):
             continue
         if rule["effect"] == "allow":
-            unmet = conditions_status(rule, arguments, usage_today)
+            unmet = conditions_status(rule, arguments, usage_today, usage_by_principal)
             if unmet is not None:
-                if unmet == "usage-limit" and usage_today is not None and limited is None:
+                # Only a count that was actually proven and reached its limit is reported as "limit reached".
+                proven = usage_today if unmet == "usage-limit" else usage_by_principal
+                if unmet in ("usage-limit", "principal-usage-limit") and proven is not None and limited is None:
                     limited = rule
                 continue
         matched.append(rule)

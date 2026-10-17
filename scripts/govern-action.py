@@ -254,8 +254,18 @@ def build_action_request(
     return {**material, "requestId": request_id}
 
 
-def count_executions_today(audit_path: pathlib.Path | None, tool_name: str, *, now: dt.datetime | None = None) -> int | None:
+def count_executions_today(
+    audit_path: pathlib.Path | None,
+    tool_name: str,
+    *,
+    now: dt.datetime | None = None,
+    agent: str | None = None,
+    initiating_user: str | None = None,
+) -> int | None:
     """Successful executions of a Tool so far today (UTC) in the local ledger.
+
+    With ``agent`` only that Agent's executions count (an event that names no Agent is counted, which can only make a limit
+    stricter), so one Agent's use never rations another's. With ``initiating_user`` only that requester's executions count.
 
     ``None`` means the count is unavailable (no ledger, or it cannot be read), which a
     usage-limited allow rule treats as "limit not proven" and therefore does not apply.
@@ -279,6 +289,8 @@ def count_executions_today(audit_path: pathlib.Path | None, tool_name: str, *, n
                     and event.get("outcome") == "succeeded"
                     and event.get("tool") == tool_name
                     and str(event.get("timestamp", "")).startswith(today)
+                    and (agent is None or event.get("agent") in (None, agent))
+                    and (initiating_user is None or event.get("initiatingUser") == initiating_user)
                 ):
                     count += 1
     except OSError:
@@ -310,14 +322,19 @@ def authorize_action(
         raise ValueError("Governed action failed: principal_access must be member or public")
 
     agent_spec = desired_state.get("agent", {}).get("spec", {})
-    limited = any(
-        isinstance(rule.get("conditions"), dict) and "maxPerDay" in rule["conditions"]
-        for rule in POLICY.rules_of(desired_state.get("policies"))
-    )
+    conditions = [rule["conditions"] for rule in POLICY.rules_of(desired_state.get("policies")) if isinstance(rule.get("conditions"), dict)]
+    limited = any("maxPerDay" in item for item in conditions)
+    limited_per_person = any("maxPerPrincipalPerDay" in item for item in conditions)
+    agent_name = _agent_name(desired_state)
     outcome = POLICY.evaluate(
         desired_state.get("policies"),
         arguments=arguments,
-        usage_today=count_executions_today(audit_path, tool_name) if limited else None,
+        usage_today=count_executions_today(audit_path, tool_name, agent=agent_name) if limited else None,
+        # Unattributed requesters have no count of their own, so a per-person limit is not proven and the rule does not apply.
+        usage_by_principal=(
+            count_executions_today(audit_path, tool_name, agent=agent_name, initiating_user=initiating_user)
+            if limited_per_person and initiating_user else None
+        ),
         tool_name=tool_name,
         risk=tool.get("spec", {}).get("risk"),
         classification=agent_spec.get("security", {}).get("dataClassification"),
