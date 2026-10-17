@@ -145,8 +145,8 @@
         },
         "docs.create": {
           "risk": "write",
-          "ledgerFields": ["title"],
-          "arguments": {"type": "object", "required": ["title", "content"], "properties": {"title": {"type": "string"}, "content": {"type": "string"}}},
+          "ledgerFields": ["title", "format"],
+          "arguments": {"type": "object", "required": ["title"], "properties": {"title": {"type": "string"}, "content": {"type": "string"}, "format": {"enum": ["markdown", "docx", "xlsx", "pptx", "pdf", "csv"]}, "structure": {"type": "object"}, "sources": {"type": "array", "items": {"type": "string"}}}},
           "result": {"type": "object", "required": ["documentId"], "properties": {"documentId": {"type": "string"}}}
         },
         "docs.update": {
