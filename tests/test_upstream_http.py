@@ -231,7 +231,7 @@ class SecretAndInstallTests(unittest.TestCase):
         self.assertIsNone(http.install({}))
         self.assertIsNone(http.install({"MODEL_GARDEN_UPSTREAM_MCP": "yes"}))
         installed = http.install({"MODEL_GARDEN_UPSTREAM_MCP": "enabled"})
-        self.assertEqual(set(installed), {"upstream_transport", "upstream_dns_resolver", "upstream_secret_resolver"})
+        self.assertEqual(set(installed), {"upstream_transport", "upstream_rest_transport", "upstream_dns_resolver", "upstream_secret_resolver"})
 
 
 class SidecarExposureTests(unittest.TestCase):

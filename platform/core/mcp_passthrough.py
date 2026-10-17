@@ -22,6 +22,9 @@ Hermes still sees only the sidecar's own Tools.
   poisoned tool is introduced) the tool is hidden and calls fail closed until it is approved again.
 - **Risk drives approval.** Anything but ``read`` is defined with ``approvalRequired: true``; the client's signed
   policy can relax that for named tools, exactly as for native Tools.
+- **A client's own REST API.** A declaration may carry ``api``, a ``custom_api`` definition, served by the sidecar's REST transport
+  instead of an MCP client. It must agree with the declaration exactly (name, base URL, credential reference, operations and their
+  risk), so everything above (pins, review, grants, activation) applies to it unchanged.
 - **Ledger.** ``ledger_fields`` gives ``tier: 2``, the upstream server identity and tool name (never arguments or
   results), for the sidecar's existing ledger context.
 """
@@ -83,6 +86,17 @@ def _review():
     return sys.modules[name]
 
 
+def _custom_api():
+    name = "model_garden_mcp_custom_api"
+    if name not in sys.modules:
+        spec = importlib.util.spec_from_file_location(name, pathlib.Path(__file__).with_name("custom_api.py"))
+        module = importlib.util.module_from_spec(spec)
+        assert spec.loader is not None
+        sys.modules[name] = module
+        spec.loader.exec_module(module)
+    return sys.modules[name]
+
+
 def fingerprint(tool: Mapping[str, Any]) -> str:
     """A stable digest of what the model would be shown and what the call accepts."""
     material = {"name": tool.get("name"), "description": tool.get("description", ""), "inputSchema": tool.get("inputSchema", {})}
@@ -93,7 +107,7 @@ def validate_server(declaration: Any) -> dict[str, Any]:
     """The normalised declaration, or ``McpDeclarationError``."""
     if not isinstance(declaration, Mapping):
         raise McpDeclarationError("an MCP server declaration is an object")
-    unknown = sorted(set(declaration) - {"name", "url", "credentialRef", "tools", "owner"})
+    unknown = sorted(set(declaration) - {"name", "url", "credentialRef", "tools", "owner", "api"})
     if unknown:
         raise McpDeclarationError("unsupported keys: " + ", ".join(unknown))
     name = declaration.get("name")
@@ -137,7 +151,33 @@ def validate_server(declaration: Any) -> dict[str, Any]:
             raise McpDeclarationError(f"{upstream} and {exposed[exposed_name]} would both be exposed as {exposed_name}")
         exposed[exposed_name] = upstream
         normal[upstream] = {"tool": exposed_name, "risk": risk, **({"capability": capability} if capability else {})}
-    return {"name": name, "url": url, "credentialRef": reference, "tools": normal, **({"owner": owner} if owner else {})}
+    api = _api_definition(declaration, name=name, url=url, reference=reference, tools=normal) if "api" in declaration else None
+    return {"name": name, "url": url, "credentialRef": reference, "tools": normal, **({"owner": owner} if owner else {}), **({"api": api} if api else {})}
+
+
+def _api_definition(declaration: Mapping[str, Any], *, name: str, url: str, reference: str, tools: Mapping[str, Mapping[str, Any]]) -> dict[str, Any]:
+    """A client's own REST API (``custom_api``) served through this declaration: it must agree with it on every point.
+
+    The definition's name is the server name (so schema approvals are keyed alike), its base URL is the declared URL (so the
+    address qualified and pinned is the one requests go to), it authenticates with the declared credential reference, and the
+    allow-list is exactly its operations at exactly their risk. Anything else is refused rather than reconciled.
+    """
+    try:
+        api = _custom_api().validate_definition(declaration["api"])
+    except ValueError as exc:
+        raise McpDeclarationError(f"api: {exc}") from exc
+    if api["name"] != name:
+        raise McpDeclarationError("api: the API definition's name must be the server name")
+    if api["baseUrl"] != url:
+        raise McpDeclarationError("api: url must be the API definition's base URL exactly")
+    if api["auth"]["type"] == "none" or api["auth"].get("credentialRef") != reference:
+        raise McpDeclarationError("api: the API must authenticate with the declared credential reference")
+    if set(tools) != set(api["operations"]):
+        raise McpDeclarationError("api: allow exactly the API definition's operations")
+    for op_id, entry in tools.items():
+        if entry["risk"] != api["operations"][op_id]["risk"]:
+            raise McpDeclarationError(f"{op_id}: risk must be the API operation's risk ({api['operations'][op_id]['risk']})")
+    return api
 
 
 class SchemaApprovals:
