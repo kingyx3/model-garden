@@ -62,7 +62,7 @@ The same module can file an email once an adapter exists: a sender verified by t
 
 ## Email
 
-`platform/channels/email_channel.py` holds the parts of the email surface that decide who is writing and whether an approval is genuine; it opens no network connection, and no mail provider, SMTP listener, DNS or MX setup or hosted web chat is built (#84, #109 remain open); the credential-free intake spool for a client's own inbound address is below.
+`platform/channels/email_channel.py` holds the parts of the email surface that decide who is writing and whether an approval is genuine; it opens no network connection. The channel gateway (`platform/runtime/gateway.py`) now serves the hosted web chat, the Slack and Teams endpoints, the approval-link page and an SMTP listener into the spool (`smtp_intake.py`); the mail provider, DNS and MX setup and live proof with real providers remain open (#84, #109); the credential-free intake spool for a client's own inbound address is below.
 
 - **Sender verification.** A sender is verified only by the receiving server's own `Authentication-Results` header: it must carry the deployment's trusted `authserv-id`, there must be exactly one such header, and it must say `dmarc=pass` for the same domain as the single `From` address. Headers from any other server, a missing or ambiguous result, a second `From`, or a DMARC pass for another domain all yield an `unverified:` sender that can never match a directory entry, so it is public and read-only. The mail server must remove inbound headers that already carry its own `authserv-id`. Mapped senders are listed in `channels.directory.email` keyed by lowercase address. Nothing in the message text changes identity.
 - **Threading.** `reply_headers` keeps `In-Reply-To`, `References` and `Re:` so replies stay in the sender's thread and strips header injection.
@@ -106,7 +106,7 @@ The same module can file an email once an adapter exists: a sender verified by t
 
 ## Built-in web chat
 
-`platform/channels/web_chat.py` is the authentication core and adapter for the built-in web chat (#84); the hosted page, HTTP server and delivery of sign-in email are not built.
+`platform/channels/web_chat.py` is the authentication core and adapter for the built-in web chat (#84); the hosted page, HTTP server and sign-in email are in the channel gateway (`platform/runtime/gateway.py`), which is not live-proven.
 
 - **Magic-link sign-in.** A sign-in token is issued only for an address on the client's allow-list (`issue_login` returns `None` for anyone else, so the page never reveals who is listed), expires in 15 minutes by default and works once; spending it returns a session token.
 - **Scoped sessions.** Sessions are signed under a different label from sign-in links, expire (8 hours by default, at most 24), name the `client-environment` scope they were issued for, and are revoked by removing the address from the allow-list. A token from another client, environment or key is refused.

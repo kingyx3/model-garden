@@ -44,6 +44,11 @@ RUNTIME_SOURCE_PATHS = (
     pathlib.Path("platform/runtime/governed_mcp.py"),
     pathlib.Path("platform/runtime/worker.py"),
     pathlib.Path("platform/runtime/coworker_client.py"),
+    pathlib.Path("platform/runtime/gateway.py"),
+    pathlib.Path("platform/channels/ingress.py"),
+    pathlib.Path("platform/channels/transports.py"),
+    pathlib.Path("platform/channels/smtp_intake.py"),
+    pathlib.Path("platform/core/schedule_commands.py"),
     pathlib.Path("platform/core/capabilities.py"),
     pathlib.Path("platform/core/policy.py"),
     pathlib.Path("platform/core/policy_deploy.py"),
@@ -325,6 +330,98 @@ def _worker_settings(binding: dict[str, Any]) -> tuple[dict[str, Any] | None, st
     return config, key_ref
 
 
+GATEWAY_CONFIG_PATH = pathlib.Path(".modelgarden") / "gateway.json"
+GATEWAY_HTTP_PORT = 8080
+GATEWAY_SMTP_PORT = 2525
+GATEWAY_SECRET_ENV = {
+    "slack_signing_secret_ref": "MODEL_GARDEN_SLACK_SIGNING_SECRET",
+    "slack_bot_token_ref": "MODEL_GARDEN_SLACK_BOT_TOKEN",
+    "teams_app_secret_ref": "MODEL_GARDEN_TEAMS_APP_SECRET",
+    "webchat_key_ref": "MODEL_GARDEN_WEBCHAT_KEY",
+    "approval_link_key_ref": "MODEL_GARDEN_APPROVAL_LINK_KEY",
+    "smtp_password_ref": "MODEL_GARDEN_SMTP_PASSWORD",
+}
+
+
+def _gateway_settings(binding: dict[str, Any]) -> tuple[dict[str, Any] | None, dict[str, str], dict[str, str]]:
+    """``EnvironmentBinding.spec.gateway`` as the non-secret gateway configuration.
+
+    Returns ``(config, secret_env, deploy)``: the configuration rendered into the bundle, a map from environment variable to the
+    ``secret://`` reference injected at apply time, and the publish settings. The gateway (``platform/runtime/gateway.py``) is the
+    HTTP and SMTP front door for web chat, Slack, Teams and the support mailbox. It is opt-in: without ``gateway.enabled: true``
+    the bundle is unchanged. Ports are published on loopback unless ``bind`` says otherwise, so a TLS reverse proxy is the only
+    public listener by default.
+    """
+    spec = binding.get("spec", {})
+    gateway = spec.get("gateway")
+    if gateway is None or (isinstance(gateway, dict) and gateway.get("enabled") is not True):
+        return None, {}, {}
+    if not isinstance(gateway, dict):
+        raise ValueError("Docker target failed: EnvironmentBinding gateway must be an object")
+    allowed = {"enabled", "public_origin", "agent", "directory", "people", "escalate_to", "web", "slack", "teams", "approvals", "mailbox",
+               "coworker_api_key_ref", "secrets", "smtp_user", "bind", "smtp_bind"}
+    unknown = sorted(set(gateway) - allowed)
+    if unknown:
+        raise ValueError(f"Docker target failed: unknown gateway settings: {', '.join(unknown)}")
+    secrets = gateway.get("secrets") or {}
+    if not isinstance(secrets, dict) or set(secrets) - set(GATEWAY_SECRET_ENV):
+        raise ValueError(f"Docker target failed: gateway.secrets holds only: {', '.join(sorted(GATEWAY_SECRET_ENV))}")
+    secret_env: dict[str, str] = {}
+    for name, ref in secrets.items():
+        if not isinstance(ref, str) or not ref.startswith("secret://") or len(ref) <= len("secret://"):
+            raise ValueError(f"Docker target failed: gateway.secrets.{name} must be a secret:// reference")
+        secret_env[GATEWAY_SECRET_ENV[name]] = ref
+    key_ref = gateway.get("coworker_api_key_ref")
+    if key_ref is not None:
+        if not isinstance(key_ref, str) or not key_ref.startswith("secret://") or len(key_ref) <= len("secret://"):
+            raise ValueError("Docker target failed: gateway.coworker_api_key_ref must be a secret:// reference")
+        secret_env["MODEL_GARDEN_COWORKER_API_KEY"] = key_ref
+    for name in ("bind", "smtp_bind"):
+        value = gateway.get(name, "127.0.0.1")
+        if not isinstance(value, str) or not re.fullmatch(r"(\d{1,3}\.){3}\d{1,3}", value):
+            raise ValueError(f"Docker target failed: gateway.{name} must be an IPv4 address")
+    config: dict[str, Any] = {
+        "publicOrigin": gateway.get("public_origin"), "directory": gateway.get("directory") or {}, "people": gateway.get("people") or {},
+    }
+    for source, target in (("escalate_to", "escalateTo"), ("agent", "agent")):
+        if gateway.get(source):
+            config[target] = gateway[source]
+    web = gateway.get("web")
+    if web is not None:
+        mail = (web or {}).get("mail") or {}
+        config["web"] = {"allowedAddresses": web.get("allowed_addresses"), "mail": {"from": mail.get("from"), "host": mail.get("host"), **({"port": mail["port"]} if "port" in mail else {})}}
+        required = {"MODEL_GARDEN_WEBCHAT_KEY"}
+    else:
+        required = set()
+    slack = gateway.get("slack")
+    if slack is not None:
+        config["slack"] = {"botUserId": slack.get("bot_user_id"), "allowedChannels": slack.get("allowed_channels") or []}
+        required |= {"MODEL_GARDEN_SLACK_SIGNING_SECRET", "MODEL_GARDEN_SLACK_BOT_TOKEN"}
+    teams = gateway.get("teams")
+    if teams is not None:
+        config["teams"] = {"appId": teams.get("app_id"), "tenants": teams.get("tenants"), "allowedConversations": teams.get("allowed_conversations") or []}
+        required |= {"MODEL_GARDEN_TEAMS_APP_SECRET"}
+    approvals = gateway.get("approvals")
+    if approvals is not None:
+        config["approvals"] = {"emailLinks": bool(approvals.get("email_links")), "notify": approvals.get("notify") or []}
+        if approvals.get("email_links"):
+            required |= {"MODEL_GARDEN_APPROVAL_LINK_KEY"}
+    mailbox = gateway.get("mailbox")
+    if mailbox is not None:
+        config["mailbox"] = {"addresses": mailbox.get("addresses"), "hostname": mailbox.get("hostname", "mail"), "trustedRelays": mailbox.get("trusted_relays") or []}
+    if key_ref:
+        config["coworker"] = {"url": f"http://coworker-api:{COWORKER_API_PORT}/v1"}
+    missing = sorted(required - set(secret_env))
+    if missing:
+        raise ValueError(f"Docker target failed: gateway needs secrets for its channels: {', '.join(missing)}")
+    if not any(key in config for key in ("web", "slack", "teams", "mailbox")):
+        raise ValueError("Docker target failed: gateway needs at least one of web, slack, teams or mailbox")
+    deploy = {"bind": gateway.get("bind", "127.0.0.1"), "smtp_bind": gateway.get("smtp_bind", "127.0.0.1")}
+    if gateway.get("smtp_user"):
+        deploy["smtp_user"] = str(gateway["smtp_user"])
+    return config, secret_env, deploy
+
+
 def _entrypoint() -> str:
     return """#!/bin/sh
 set -eu
@@ -386,6 +483,7 @@ def _compose(
     built_in_tools: bool = False,
     worker: bool = False,
     coworker_api: bool = False,
+    gateway: tuple[dict[str, Any], dict[str, str], dict[str, str]] | None = None,
 ) -> str:
     provider_env = PROVIDER_ENV[provider]
     hermes: dict[str, Any] = {
@@ -475,6 +573,42 @@ def _compose(
             **({"depends_on": depends} if depends else {}),
         }
         volumes["governance-data"] = {}
+    if gateway is not None:
+        config, secret_env, deploy = gateway
+        environment = {
+            "MODEL_GARDEN_DESIRED_STATE": "/opt/profile-seed/.modelgarden/desired-state.json",
+            "MODEL_GARDEN_DATA_ROOT": "/opt/data/.modelgarden",
+            "MODEL_GARDEN_GATEWAY_CONFIG": f"/opt/profile-seed/{GATEWAY_CONFIG_PATH.as_posix()}",
+            "MODEL_GARDEN_CAPABILITY_MANIFEST": f"/opt/profile-seed/{MANIFEST_PATH.as_posix()}",
+            **{name: f"${{{name}:?{name} is required}}" for name in sorted(secret_env)},
+            **({"MODEL_GARDEN_SMTP_USER": deploy["smtp_user"]} if "smtp_user" in deploy else {}),
+        }
+        ports = []
+        if any(key in config for key in ("web", "slack", "teams")) or config.get("approvals", {}).get("emailLinks"):
+            ports.append(f"{deploy['bind']}:{GATEWAY_HTTP_PORT}:{GATEWAY_HTTP_PORT}")
+        if "mailbox" in config:
+            ports.append(f"{deploy['smtp_bind']}:{GATEWAY_SMTP_PORT}:{GATEWAY_SMTP_PORT}")
+        depends = {}
+        if built_in_tools:
+            depends["governed-tools"] = {"condition": "service_healthy"}
+        if coworker_api:
+            depends["coworker-api"] = {"condition": "service_healthy"}
+        services["channel-gateway"] = {
+            "image": f"model-garden-{project_name}:current",
+            "restart": "unless-stopped",
+            "entrypoint": ["python", "/opt/model-garden-platform/platform/runtime/gateway.py"],
+            "environment": environment,
+            "volumes": ["governance-data:/opt/data"],
+            "ports": ports,
+            "healthcheck": {
+                "test": ["CMD", "python", "/opt/model-garden-platform/platform/runtime/gateway.py", "--health"],
+                "interval": "30s", "timeout": "10s", "retries": 6, "start_period": "30s",
+            },
+            **({"depends_on": depends} if depends else {}),
+        }
+        volumes["governance-data"] = {}
+        if worker and "MODEL_GARDEN_SLACK_BOT_TOKEN" in secret_env:  # the worker delivers notices to Slack direct messages
+            services["governed-worker"]["environment"]["MODEL_GARDEN_SLACK_BOT_TOKEN"] = "${MODEL_GARDEN_SLACK_BOT_TOKEN:?MODEL_GARDEN_SLACK_BOT_TOKEN is required}"
     document = {"services": services, "volumes": volumes}
     return yaml.safe_dump(document, sort_keys=False)
 
@@ -542,6 +676,11 @@ def render_bundle(
         raise ValueError("Docker target failed: native Calendar connectors were retired; an approved upstream MCP route is required before deploying Calendar Tools")
     manifest = _capability_manifest(_desired_state(profile_dir), binding)
     worker_config, coworker_key_ref = _worker_settings(binding)
+    gateway = _gateway_settings(binding)
+    if gateway[0] is not None and gateway[1].get("MODEL_GARDEN_COWORKER_API_KEY"):
+        if coworker_key_ref not in (None, gateway[1]["MODEL_GARDEN_COWORKER_API_KEY"]):
+            raise ValueError("Docker target failed: worker and gateway must share one coworker API key reference")
+        coworker_key_ref = gateway[1]["MODEL_GARDEN_COWORKER_API_KEY"]
     read_audit = _read_audit_mode(binding)
     built_in_tools = bool(selected_tools & BUILT_IN_TOOLS)
     lock = _load_hermes_lock(platform_root)
@@ -552,6 +691,8 @@ def render_bundle(
     (bundle_dir / "profile" / MANIFEST_PATH).write_text(manifest_text, encoding="utf-8")
     if worker_config is not None:
         (bundle_dir / "profile" / WORKER_CONFIG_PATH).write_text(json.dumps(worker_config, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    if gateway[0] is not None:
+        (bundle_dir / "profile" / GATEWAY_CONFIG_PATH).write_text(json.dumps(gateway[0], indent=2, sort_keys=True) + "\n", encoding="utf-8")
     _copy_runtime_source(platform_root, bundle_dir / "model-garden-platform")
     normalized_binding = json.dumps(binding, indent=2, sort_keys=True) + "\n"
     (bundle_dir / "environment-binding.json").write_text(normalized_binding, encoding="utf-8")
@@ -559,7 +700,8 @@ def render_bundle(
     (bundle_dir / "Dockerfile").write_text(_dockerfile(lock), encoding="utf-8")
     (bundle_dir / "compose.yaml").write_text(
         _compose(project_name, provider, lock, read_audit=read_audit, built_in_tools=built_in_tools,
-                 worker=worker_config is not None, coworker_api=coworker_key_ref is not None),
+                 worker=worker_config is not None, coworker_api=coworker_key_ref is not None,
+                 gateway=gateway if gateway[0] is not None else None),
         encoding="utf-8",
     )
     metadata = {
@@ -573,6 +715,7 @@ def render_bundle(
         "governedToolService": built_in_tools,
         "runtimeWorker": worker_config is not None,
         "coworkerApi": coworker_key_ref is not None,
+        "channelGateway": gateway[0] is not None,
         "hermes": {"version": lock["version"], "revision": lock["commit"]},
         "bindingSha256": hashlib.sha256(normalized_binding.encode("utf-8")).hexdigest(),
         "capabilityManifestSha256": hashlib.sha256(manifest_text.encode("utf-8")).hexdigest(),
@@ -659,6 +802,9 @@ def apply_bundle(
     _, coworker_key_ref = _worker_settings(binding)
     if coworker_key_ref is not None:
         runtime_env["MODEL_GARDEN_COWORKER_API_KEY"] = resolved[coworker_key_ref]
+    gateway_config, gateway_secrets, _ = _gateway_settings(binding)
+    for name, ref in gateway_secrets.items():
+        runtime_env[name] = resolved[ref]
     # Retired vendor-token environment variables never reach the replacement runtime.
     runtime_env.pop("MODEL_GARDEN_GOOGLE_CALENDAR_TOKEN", None)
     runtime_env.pop("MODEL_GARDEN_MICROSOFT_CALENDAR_TOKEN", None)

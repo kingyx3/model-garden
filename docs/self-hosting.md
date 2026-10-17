@@ -51,6 +51,35 @@ worker:
 
 Customer email answered by the worker is drafted from approved knowledge only and kept as a Tier 0 draft; the mailbox owner is told it is ready and sends it. Inbound mail still reaches the spool through the mail server's pipe (`scripts/runtime-mailbox.py ingest`).
 
+## Channel gateway
+
+`EnvironmentBinding.spec.gateway` (opt-in, `enabled: true`) adds the `channel-gateway` service (`platform/runtime/gateway.py`): the HTTP and SMTP front door where people reach the coworker. It shares the governance volume, asks the coworker through the same private Hermes API as the worker, and holds no model credential.
+
+- `/chat` is the built-in web chat. Sign-in is a magic link whose token is in the URL fragment, so a mail scanner that opens the link spends nothing; `POST /channels/web/login` answers the same for listed and unlisted addresses. The page ships its own script and style under a CSP that allows nothing else.
+- `/channels/slack/events` and `/channels/slack/interactive` verify Slack's signature before reading anything, answer direct messages and allow-listed `@mentions` in thread, keep files shared by mapped people as Tier 0 artifacts, and turn Approve/Reject buttons into decisions by mapped approvers only.
+- `/channels/teams/messages` verifies the Bot Framework token (RS256 against Microsoft's published keys, then issuer, audience, tenant and service URL) and handles messages and Adaptive Card approvals.
+- `/approvals/confirm` is the emailed-approval page: preview on GET, decide only on POST.
+- Hand-off replies (`done <ref>`) and schedule commands (`schedule create ...`) typed in a verified direct conversation are routed to their modules under the channel identity; anything else goes to the coworker with the sender's access level. Pending approvals are announced once as buttons in each `approvals.notify` conversation.
+- With `mailbox`, an SMTP listener (port 2525) feeds the mail spool. It is not a relay (recipients outside the configured addresses get 550), strips any `Authentication-Results` it did not get from a configured `trusted_relays` address, and has no TLS or AUTH: put the client's MTA or a TLS proxy in front.
+
+Ports are published on loopback by default (`bind`, `smtp_bind`); a TLS reverse proxy is the public listener. Secrets are `secret://` references injected at apply time, never rendered into the bundle.
+
+```yaml
+gateway:
+  enabled: true
+  public_origin: https://chat.client.example
+  coworker_api_key_ref: secret://coworker-api/dev      # same key as worker.coworker_api_key_ref
+  secrets: {slack_signing_secret_ref: secret://slack/signing, slack_bot_token_ref: secret://slack/bot, webchat_key_ref: secret://webchat/key}
+  directory: {slack: {T01/U123: {identity: jordan@client.example, roles: [approver]}}}
+  people: {jordan@client.example: {channel: slack, address: D0123, identity: U123}}
+  slack: {bot_user_id: U0BOT0001, allowed_channels: [C0123]}
+  web: {allowed_addresses: [jordan@client.example], mail: {from: chat@client.example, host: smtp.client.example}}
+  approvals: {notify: [{channel: slack, conversation: D0123}]}
+  mailbox: {addresses: [support@client.example], trusted_relays: [10.0.0.5]}
+```
+
+It is not live-proven: no real Slack app, Teams bot, mail provider or browser session has exercised it.
+
 ## Component decisions
 
 | Component | Current status | Default decision | Why |
