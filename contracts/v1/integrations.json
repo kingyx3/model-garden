@@ -100,12 +100,14 @@
       "tier": 0,
       "status": "built-credential-free",
       "tools": [
-        "docs.create"
+        "docs.create",
+        "docs.read"
       ],
       "issue": 77,
       "adapter": "platform/core/artifacts.py",
       "scopeByTool": {
-        "docs.create": []
+        "docs.create": [],
+        "docs.read": []
       }
     },
     {
@@ -290,40 +292,22 @@
     },
     {
       "id": "built-in-files",
-      "name": "Built-in artifact store (files)",
+      "name": "Built-in file store",
       "family": "files",
       "method": "built-in",
       "tier": 0,
-      "status": "in-development",
+      "status": "built-credential-free",
       "tools": [
         "files.search",
         "files.read",
         "files.write"
       ],
-      "issue": 77,
+      "issue": 91,
       "adapter": "platform/core/builtin_files.py",
       "scopeByTool": {
         "files.search": [],
         "files.read": [],
         "files.write": []
-      }
-    },
-    {
-      "id": "built-in-docs",
-      "name": "Built-in artifact store (documents)",
-      "family": "docs",
-      "method": "built-in",
-      "tier": 0,
-      "status": "in-development",
-      "tools": [
-        "docs.read",
-        "docs.create"
-      ],
-      "issue": 77,
-      "adapter": "platform/core/builtin_files.py",
-      "scopeByTool": {
-        "docs.read": [],
-        "docs.create": []
       }
     }
   ]

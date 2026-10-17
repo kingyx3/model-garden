@@ -2,8 +2,7 @@
 
 A client with no Drive or SharePoint still needs ``docs.create`` to land somewhere and the coworker to find what it made
 (#91, #77). This maps the portable ``files.search``, ``files.read``, ``files.write``, ``docs.create`` and ``docs.read``
-Tools onto the Tier 0 artifact store (``artifacts.py``). It is credential-free and **not yet served by the governed
-sidecar**.
+Tools onto the Tier 0 artifact store (``artifacts.py``). It is credential-free and served by the governed sidecar.
 
 - **The acting person is bound by the caller.** Executors are built for one verified requester, taken from the governed
   boundary's principal context, never from a model argument. A requester searches, reads and writes only their own
@@ -24,6 +23,7 @@ import importlib.util
 from collections.abc import Callable, Mapping
 from typing import Any
 
+PROVIDER_ID = "built-in-files"
 MAX_TEXT = 200_000
 MAX_READ_TEXT = 20_000
 MAX_QUERY = 100
@@ -96,18 +96,18 @@ class Tier0Files:
         if args.get("folderId") is not None:
             raise FilesError("the Tier 0 store has no folders; omit folderId")
         entry = self._write(_text(args.get("name"), "name", 120), args.get("content"), now=now)
-        return {"provider": "built-in-artifacts", "fileId": entry["id"], "externalObjectRef": entry["location"], "duplicate": entry["duplicate"]}
+        return {"provider": PROVIDER_ID, "fileId": entry["id"], "externalObjectRef": entry["location"], "duplicate": entry["duplicate"]}
 
     def files_search(self, arguments: dict[str, Any]) -> dict[str, Any]:
         args = _only(arguments, {"query"}, "files.search")
         query = _text(args.get("query"), "query", MAX_QUERY).strip().lower()
         found = [entry for entry in self._store.list(requested_by=self._by) if query in entry["name"].lower()]
         found.sort(key=lambda entry: (entry["createdAt"], entry["id"]), reverse=True)
-        return {"provider": "built-in-artifacts", "files": [self._shape(entry) for entry in found[:MAX_RESULTS]]}
+        return {"provider": PROVIDER_ID, "files": [self._shape(entry) for entry in found[:MAX_RESULTS]]}
 
     def files_read(self, arguments: dict[str, Any], *, now: int | None = None) -> dict[str, Any]:
         args = _only(arguments, {"fileId"}, "files.read")
-        return {"provider": "built-in-artifacts", "file": self._read(args.get("fileId"), now)}
+        return {"provider": PROVIDER_ID, "file": self._read(args.get("fileId"), now)}
 
     def docs_read(self, arguments: dict[str, Any], *, now: int | None = None) -> dict[str, Any]:
         args = _only(arguments, {"documentId"}, "docs.read")
