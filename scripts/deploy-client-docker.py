@@ -45,6 +45,7 @@ RUNTIME_SOURCE_PATHS = (
     pathlib.Path("platform/runtime/worker.py"),
     pathlib.Path("platform/runtime/coworker_client.py"),
     pathlib.Path("platform/runtime/gateway.py"),
+    pathlib.Path("platform/runtime/upstream_http.py"),
     pathlib.Path("platform/channels/ingress.py"),
     pathlib.Path("platform/channels/transports.py"),
     pathlib.Path("platform/channels/smtp_intake.py"),
@@ -330,6 +331,40 @@ def _worker_settings(binding: dict[str, Any]) -> tuple[dict[str, Any] | None, st
     return config, key_ref
 
 
+def _upstream_settings(binding: dict[str, Any]) -> list[str] | None:
+    """``EnvironmentBinding.spec.upstream.mcp`` (opt-in): the ``secret://`` references the governed sidecar may resolve for approved upstream MCP.
+
+    Returns ``None`` when upstream MCP is not enabled (the sidecar then refuses every upstream call). Each reference becomes one
+    environment variable on the governed sidecar alone (``upstream_http.secret_env_name``); the Hermes process never receives it.
+    Enabling this installs a transport, it does not approve or activate any connection: that still needs the owner's consent, a
+    separate operator, reviewed fingerprints and the coworker's own grant.
+    """
+    upstream = binding.get("spec", {}).get("upstream")
+    if upstream is None:
+        return None
+    if not isinstance(upstream, dict) or set(upstream) - {"mcp"}:
+        raise ValueError("Docker target failed: EnvironmentBinding upstream holds only mcp")
+    mcp = upstream["mcp"]
+    if not isinstance(mcp, dict) or set(mcp) - {"enabled", "secret_refs"}:
+        raise ValueError("Docker target failed: upstream.mcp holds only enabled and secret_refs")
+    if mcp.get("enabled") is not True:
+        return None
+    refs = mcp.get("secret_refs")
+    if not isinstance(refs, list) or not refs or len(refs) > 50 or not all(
+        isinstance(item, str) and item.startswith("secret://") and len(item) > len("secret://") for item in refs
+    ):
+        raise ValueError("Docker target failed: upstream.mcp.secret_refs must list secret:// references")
+    return sorted(set(refs))
+
+
+def _upstream_env(refs: list[str]) -> dict[str, str]:
+    spec = importlib.util.spec_from_file_location("model_garden_deploy_upstream_http", ROOT / "platform" / "runtime" / "upstream_http.py")
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+    return {module.secret_env_name(ref): ref for ref in refs}
+
+
 GATEWAY_CONFIG_PATH = pathlib.Path(".modelgarden") / "gateway.json"
 GATEWAY_HTTP_PORT = 8080
 GATEWAY_SMTP_PORT = 2525
@@ -484,6 +519,7 @@ def _compose(
     worker: bool = False,
     coworker_api: bool = False,
     gateway: tuple[dict[str, Any], dict[str, str], dict[str, str]] | None = None,
+    upstream_refs: list[str] | None = None,
 ) -> str:
     provider_env = PROVIDER_ENV[provider]
     hermes: dict[str, Any] = {
@@ -519,6 +555,9 @@ def _compose(
                 "MODEL_GARDEN_DEPLOYED_BY": "${MODEL_GARDEN_DEPLOYED_BY:-}",
                 "MODEL_GARDEN_CAPABILITY_MANIFEST": f"/opt/profile-seed/{MANIFEST_PATH.as_posix()}",
                 **({"MODEL_GARDEN_READ_AUDIT": read_audit} if read_audit else {}),
+                **({"MODEL_GARDEN_UPSTREAM_MCP": "enabled",
+                    **{name: f"${{{name}:?{name} is required}}" for name in sorted(_upstream_env(upstream_refs))}}
+                   if upstream_refs else {}),
             },
             "volumes": ["governance-data:/opt/data"],
             "healthcheck": _healthcheck(9120),
@@ -682,7 +721,8 @@ def render_bundle(
             raise ValueError("Docker target failed: worker and gateway must share one coworker API key reference")
         coworker_key_ref = gateway[1]["MODEL_GARDEN_COWORKER_API_KEY"]
     read_audit = _read_audit_mode(binding)
-    built_in_tools = bool(selected_tools & BUILT_IN_TOOLS)
+    upstream_refs = _upstream_settings(binding)
+    built_in_tools = bool(selected_tools & BUILT_IN_TOOLS) or upstream_refs is not None
     lock = _load_hermes_lock(platform_root)
 
     bundle_dir.mkdir(parents=True, exist_ok=True)
@@ -701,7 +741,7 @@ def render_bundle(
     (bundle_dir / "compose.yaml").write_text(
         _compose(project_name, provider, lock, read_audit=read_audit, built_in_tools=built_in_tools,
                  worker=worker_config is not None, coworker_api=coworker_key_ref is not None,
-                 gateway=gateway if gateway[0] is not None else None),
+                 gateway=gateway if gateway[0] is not None else None, upstream_refs=upstream_refs),
         encoding="utf-8",
     )
     metadata = {
@@ -716,6 +756,7 @@ def render_bundle(
         "runtimeWorker": worker_config is not None,
         "coworkerApi": coworker_key_ref is not None,
         "channelGateway": gateway[0] is not None,
+        "upstreamMcp": upstream_refs is not None,
         "hermes": {"version": lock["version"], "revision": lock["commit"]},
         "bindingSha256": hashlib.sha256(normalized_binding.encode("utf-8")).hexdigest(),
         "capabilityManifestSha256": hashlib.sha256(manifest_text.encode("utf-8")).hexdigest(),
@@ -802,6 +843,8 @@ def apply_bundle(
     _, coworker_key_ref = _worker_settings(binding)
     if coworker_key_ref is not None:
         runtime_env["MODEL_GARDEN_COWORKER_API_KEY"] = resolved[coworker_key_ref]
+    for name, ref in _upstream_env(_upstream_settings(binding) or []).items():
+        runtime_env[name] = resolved[ref]
     gateway_config, gateway_secrets, _ = _gateway_settings(binding)
     for name, ref in gateway_secrets.items():
         runtime_env[name] = resolved[ref]
