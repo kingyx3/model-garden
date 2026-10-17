@@ -191,6 +191,28 @@ class DeployClientDockerTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "secret://"):
                 deployer.render_bundle(profile, self._binding(root, {"gateway": {**slack, "secrets": {"slack_bot_token_ref": "plain"}}}), root / "d", "acme-dev")
 
+    def test_upstream_mcp_is_opt_in_and_injects_each_secret_into_the_sidecar_only(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            profile = self._profile(root)
+            refs = ["secret://hubspot/receptionist", "secret://hubspot/other"]
+            binding = self._binding(root, {"upstream": {"mcp": {"enabled": True, "secret_refs": refs}}})
+            metadata = deployer.render_bundle(profile, binding, root / "bundle", "acme-dev")
+            compose = yaml.safe_load((root / "bundle" / "compose.yaml").read_text(encoding="utf-8"))
+            self.assertTrue(metadata["upstreamMcp"] and metadata["governedToolService"])
+            sidecar = compose["services"]["governed-tools"]["environment"]
+            self.assertEqual(sidecar["MODEL_GARDEN_UPSTREAM_MCP"], "enabled")
+            secrets = [name for name in sidecar if name.startswith("MODEL_GARDEN_SECRET_")]
+            self.assertEqual(len(secrets), 2)
+            self.assertNotIn("MODEL_GARDEN_SECRET_", json.dumps(compose["services"]["hermes"]))
+            self.assertNotIn("hubspot", (root / "bundle" / "compose.yaml").read_text(encoding="utf-8"))
+            self.assertTrue((root / "bundle" / "model-garden-platform" / "platform" / "runtime" / "upstream_http.py").is_file())
+            plain = deployer.render_bundle(profile, self._binding(root, {"upstream": {"mcp": {"enabled": False}}}), root / "plain", "acme-dev")
+            self.assertFalse(plain["upstreamMcp"])
+            for bad in ({"mcp": {"enabled": True}}, {"mcp": {"enabled": True, "secret_refs": ["plain"]}}, {"http": {}}):
+                with self.assertRaisesRegex(ValueError, "upstream"):
+                    deployer.render_bundle(profile, self._binding(root, {"upstream": bad}), root / f"bad-{len(str(bad))}", "acme-dev")
+
     def test_worker_is_off_unless_enabled_and_rejects_unknown_settings(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = pathlib.Path(tmp)
