@@ -10,10 +10,12 @@ from __future__ import annotations
 import argparse
 import datetime
 import importlib.util
+import json
 import pathlib
 import shutil
 import tempfile
 import sys
+import time
 
 import yaml
 
@@ -208,8 +210,23 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("workspace", nargs="?", default=str(ROOT / "examples" / "workspace"))
     parser.add_argument("--suite", default=str(ROOT / "evals" / "receptionist" / "scenarios.yaml"))
+    parser.add_argument(
+        "--evidence", type=pathlib.Path,
+        help="also write the run's evidence (suite, result and the version and digest of every knowledge source evaluated) for "
+             "scripts/knowledge-promotion.py; written whether the run passed or failed",
+    )
     args = parser.parse_args()
     failures = evaluate(pathlib.Path(args.workspace), pathlib.Path(args.suite))
+    if args.evidence:
+        compiler = _load_module("eval_evidence_compile", ROOT / "scripts" / "compile-workspace.py")
+        promotion = _load_module("eval_evidence_promotion", ROOT / "platform" / "core" / "knowledge_promotion.py")
+        try:
+            desired = compiler.compile_workspace(pathlib.Path(args.workspace), "receptionist", environment_binding=EVAL_BINDING)[0]
+            evidence = promotion.build_evidence(desired, suite="receptionist", passed=not failures, failures=len(failures), now=int(time.time()))
+        except (OSError, ValueError) as exc:
+            print(f"FAIL: cannot compile the workspace to record evidence: {exc}", file=sys.stderr)
+            return 1
+        args.evidence.write_text(json.dumps(evidence, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     if failures:
         for failure in failures:
             print(f"FAIL: {failure}", file=sys.stderr)
