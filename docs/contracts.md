@@ -241,7 +241,7 @@ Open: an MCP client in the sidecar with the credential stored there, binding dec
 
 The independent endpoint/operation validation groundwork merged from #165 is preserved: `platform/core/endpoint_guard.py` rejects private, local, metadata and malformed HTTPS destinations and requires DNS answer validation/pinning; `platform/core/mcp_tool_review.py` blocks obvious tool-description/schema poisoning prior to operator approval; `platform/core/custom_api.py` defines explicit, versioned OpenAPI/REST operations with path/body bounds, method-derived risk and schema review. `mcp_passthrough.py` integrates endpoint and metadata checks into approval/exposure. These are **platform governance contracts** and intentionally contain **no customer-vendor HTTP client, arbitrary URL requester or runtime integration executor**. They support externally maintained MCP and client-owned APIs without resurrecting bespoke SaaS adapters. Execution now goes through the governed sidecar (next section); live tenant evidence remains open.
 
-### A client's own REST API through the governed sidecar (v0.8.30)
+### A client's own REST API through the governed sidecar (v0.8.31)
 
 A customer-defined REST API (#159, #89) now runs through exactly the same governed path as an upstream MCP server, with no new store, approval or grant mechanism and no general HTTP Tool.
 
