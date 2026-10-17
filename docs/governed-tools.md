@@ -232,3 +232,15 @@ A shared consumption pool is only a commercial/accounting grouping. It never wea
 Credential-free tests cover capability resolution and the manifest, ledger v3 bounds and redaction, read-event digests, channel principal mapping, Tool selection, MCP materialization, governance, versioned action audit, audit-chain tamper detection, approval identity, single-use approval behavior, bounded cost-attribution context, governance-volume isolation, Calendar connector behavior and Docker credential isolation. Metering tests cover canonical client/Agent/environment/provider attribution, shared-pool/subscription dimensions and rejection of obvious sensitive billing properties.
 
 A real approved upstream Google/Microsoft calendar end-to-end booking with separate coworker authorization, external audit export/retention where required, and production reconciliation from provider usage -> Lago -> customer subscription remain live acceptance gates and must not be claimed complete until exercised in a deployed client environment.
+
+## MCP connection readiness and upstream receipts (v0.8.12)
+
+Tenant operators can inspect **non-secret, per-coworker** upstream readiness without making a network request:
+
+```sh
+python3 scripts/runtime-mcp-connections.py /opt/data/.modelgarden --tenant acme-prod status --agent receptionist --check-grants
+```
+
+The report shows declared portable Tools, their risk and whether that coworker's **own** active grant covers each operation; private server URLs, grant secret refs, acting identities and activation tokens are omitted. States distinguish `inactive`, `review-required`, `grant-unavailable` and `configured-awaiting-upstream-proof`. The last state is **not** a claim that the provider is connected or safe to mark live: reviewed TLS-pinned upstream transport, consent custody and tenant verification remain separate gates (#87, #86, #159).
+
+The MCP execution seam now treats a protocol `isError: true` result as a failed execution, retaining the existing redacted failure ledger path rather than reporting a successful side effect. Only short, opaque, structurally constrained external object references may be copied into the audit ledger; provider prose, queries and arbitrary object fields never become `externalObjectRef`. These are provider-neutral safety rules and add no native SaaS connectors.
