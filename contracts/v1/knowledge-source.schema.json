@@ -15,20 +15,21 @@
       "required": ["type", "classification"],
       "properties": {
         "type": {"enum": ["repository", "sharepoint", "drive", "database", "url", "vector-index", "text-file"]},
-        "classification": {"enum": ["public", "internal", "confidential", "restricted"]},
+        "classification": {"enum": ["public", "internal", "confidential", "restricted"], "description": "Who may be answered from this source. For a text-file: public and internal ground any answer; confidential grounds only a verified team member (never a customer or caller); restricted is not served by the built-in store at all because it has no document-level permissions."},
         "reference": {"type": "string"},
         "file": {"type": "string", "minLength": 1, "description": "text-file only: path, relative to this resource, of the `.txt` or `.md` business-rules file."},
         "status": {"enum": ["draft", "approved", "retired"], "description": "text-file only: only `approved` content can ground answers; absent means draft."},
         "version": {"type": "string", "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$", "description": "text-file only: version of the rules, cited with answers."},
         "effectiveDate": {"type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$", "description": "text-file only: the content is not used before this date."},
         "reviewBy": {"type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$", "description": "text-file only: the last day the content may ground answers. After it the source is stale and is not used until the owner reviews it and sets a later date. Omitted means it never goes stale."},
+        "locale": {"type": "string", "pattern": "^[A-Za-z]{2,3}(-[A-Za-z0-9]{2,8}){0,3}$", "description": "text-file only: the language of the content, such as en or en-SG. A kb.search that asks for one language skips sources labelled with another; an unlabelled source matches every request."},
         "audiences": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}, "uniqueItems": true, "description": "text-file only: Agents allowed to ground answers on this source; omitted means every Agent that selects it."}
       },
       "allOf": [
         {
           "if": {"properties": {"type": {"const": "text-file"}}, "required": ["type"]},
           "then": {"required": ["file"]},
-          "else": {"not": {"anyOf": [{"required": ["file"]}, {"required": ["status"]}, {"required": ["version"]}, {"required": ["effectiveDate"]}, {"required": ["reviewBy"]}, {"required": ["audiences"]}]}}
+          "else": {"not": {"anyOf": [{"required": ["file"]}, {"required": ["status"]}, {"required": ["version"]}, {"required": ["effectiveDate"]}, {"required": ["reviewBy"]}, {"required": ["locale"]}, {"required": ["audiences"]}]}}
         }
       ]
     }
