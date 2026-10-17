@@ -29,6 +29,16 @@ secret must already be provisioned in the approved tenant vault. Every change is
 ledgered; ``grants list`` and create/rotate/health outputs are redacted by the store.
 After revocation a new grant for the same coworker/connection requires a NEW
 secret reference: the revoked one is never silently reused.
+
+``credential open|status|revoke`` manage owner-entered credentials (#159, #86). ``open`` starts a single-use,
+expiring enrollment for one coworker's connection and prints the link to send to the named owner; only that
+owner, signed in to the gateway, can submit on it, and the value goes straight to the sealed vault (never to
+this command, the ledger or chat). It also prints the stable ``secret://`` reference to put in the grant and
+the connection declaration; rotating later is another ``open`` and needs no restaging. ``revoke`` deletes the
+credential from the vault.
+
+  runtime-connection.py /opt/data/.modelgarden credential open --agent receptionist --connection orders-api \
+      --kind bearer --owner owner@client.example --actor jordan@client.example --origin https://chat.client.example
 """
 from __future__ import annotations
 
@@ -66,6 +76,8 @@ CAPABILITIES = _load("model_garden_connection_capabilities", ROOT / "platform" /
 GOVERN = _load("model_garden_connection_govern", ROOT / "scripts" / "govern-action.py")
 GRANTS = _load("model_garden_connection_grants", ROOT / "platform" / "core" / "provider_grants.py")
 READINESS = _load("model_garden_connection_grant_readiness", ROOT / "platform" / "core" / "grant_readiness.py")
+ENROLLMENT = _load("model_garden_connection_enrollment", ROOT / "platform" / "core" / "secret_enrollment.py")
+VAULT = _load("model_garden_connection_vault", ROOT / "platform" / "core" / "sealed_vault.py")
 
 
 def external_families(manifest: dict) -> list[str]:
@@ -156,7 +168,21 @@ def main(argv: list[str] | None = None) -> int:
     grant_health.add_argument("grant_id")
     grant_health.add_argument("health", choices=GRANTS.HEALTH)
     grant_health.add_argument("--actor", required=True)
-    for each in (off, grant_list, grant_revoke, grant_create, grant_rotate, grant_health):
+    credential = sub.add_parser("credential", help="owner-entered credentials: open an enrollment link, show status, revoke")
+    credential_sub = credential.add_subparsers(dest="credential_command", required=True)
+    credential_open = credential_sub.add_parser("open", help="start a single-use enrollment and print the owner's link")
+    credential_open.add_argument("--kind", choices=ENROLLMENT.KINDS, required=True)
+    credential_open.add_argument("--owner", required=True, help="the client owner who will enter the value (they must sign in as this address)")
+    credential_open.add_argument("--origin", required=True, help="the gateway's public https origin")
+    credential_open.add_argument("--minutes", type=int, default=15, help="how long the link works (1 to 60)")
+    credential_status = credential_sub.add_parser("status", help="whether a credential is set (masked, never the value)")
+    credential_revoke = credential_sub.add_parser("revoke", help="delete the credential from the vault")
+    for each in (credential_open, credential_status, credential_revoke):
+        each.add_argument("--agent", required=True)
+        each.add_argument("--connection", required=True)
+    for each in (credential_open, credential_revoke):
+        each.add_argument("--actor", required=True, help="the named person doing this")
+    for each in (off, grant_list, grant_revoke, grant_create, grant_rotate, grant_health, credential_open, credential_status, credential_revoke):
         each.add_argument("--manifest", type=pathlib.Path, help="capability manifest (default: MODEL_GARDEN_CAPABILITY_MANIFEST)")
         each.add_argument("--tenant", help="grant registry tenant <client>-<environment> (default: from the manifest)")
     args = parser.parse_args(argv)
@@ -174,6 +200,37 @@ def main(argv: list[str] | None = None) -> int:
                 details["reason"] = args.reason[:200]
             GOVERN.record_operator_action(audit_path, "connection.set", args.actor, details)
             print(json.dumps(record, indent=2, sort_keys=True))
+            return 0
+        if args.command == "credential":
+            manifest = _manifest(args, required=False)
+            tenant = args.tenant or READINESS.tenant_of(manifest)
+            if not tenant:
+                raise ValueError("cannot tell which environment this is for; pass --tenant <client>-<environment> or --manifest")
+            store = ENROLLMENT.EnrollmentStore(
+                args.store / "secret-enrollments", tenant=tenant, vault=VAULT.SealedVault(args.store / "vault"),
+                audit=lambda action, by, details: GOVERN.record_operator_action(audit_path, action, by, details),
+            )
+            now = int(time.time())
+            if args.credential_command == "open":
+                if not args.origin.startswith("https://") or args.origin.count("/") != 2:
+                    raise ValueError("--origin must be the gateway's https origin, such as https://chat.client.example")
+                if not 1 <= args.minutes <= 60:
+                    raise ValueError("--minutes must be 1 to 60")
+                opened = store.create(agent=args.agent, connection_id=args.connection, kind=args.kind, owner=args.owner,
+                                      requested_by=args.actor, now=now, ttl_seconds=args.minutes * 60)
+                print(json.dumps({
+                    "enrollmentId": opened["enrollmentId"], "expiresAt": opened["expiresAt"], "owner": args.owner,
+                    "link": f"{args.origin}/connections/enroll#enroll={opened['token']}",
+                    "secretRef": f"secret://{tenant}/{args.agent}/{args.connection}",
+                    "next": "Send the link to the owner only. Use secretRef in the coworker's grant and the connection declaration.",
+                }, indent=2, sort_keys=True))
+                return 0
+            if args.credential_command == "status":
+                state = store.status(args.agent, args.connection, now=now)
+                state.pop("ref", None)
+                print(json.dumps(state, indent=2, sort_keys=True))
+                return 0
+            print(json.dumps(store.revoke(args.agent, args.connection, by=args.actor, now=now), indent=2, sort_keys=True))
             return 0
         if args.command == "grants":
             manifest = _manifest(args, required=False)
@@ -238,7 +295,7 @@ def main(argv: list[str] | None = None) -> int:
             "manualSteps": list(OFFBOARDING_CHECKLIST),
         }, indent=2, sort_keys=True))
         return 0
-    except (OSError, ValueError, json.JSONDecodeError) as exc:
+    except (OSError, ValueError, json.JSONDecodeError, ENROLLMENT.EnrollmentError, VAULT.VaultError) as exc:
         print(f"Runtime connection failed: {exc}", file=sys.stderr)
         return 1
 

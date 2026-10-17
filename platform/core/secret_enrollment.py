@@ -5,7 +5,8 @@ into a prompt, a Skill file or an issue. This is the credential-free core of tha
 **enrollment** for one coworker's connection, the owner receives a link containing a single-use token, and the owner submits the
 value through whatever page or command the deployment serves. The value goes straight to an injected ``vault`` (``put`` and
 ``delete`` only; this module can never read a secret back) and what remains is a ``secret://`` *reference*, a version number and
-a masked status. No real vault, page or link transport is included here and it is not wired to anything.
+a masked status. The gateway serves the page (``/connections/enroll``), ``runtime-connection.py credential`` opens links, and
+``sealed_vault.SealedVault`` is the vault the deployment injects.
 
 - **Single use, short life, owner only.** A token lives at most an hour (default 15 minutes), works once, is stored only as a
   SHA-256 digest, and is bound to one tenant, coworker and connection. Only the named owner can submit (the channel's verified

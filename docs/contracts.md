@@ -246,7 +246,7 @@ A customer-defined REST API (#159, #89) now runs through exactly the same govern
 - **Same execution.** `mcp_executor.invoke` re-resolves grant and activation, qualifies and pins the base URL's address, validates arguments against the approved schema and rechecks just before sending. The transport is `upstream_http.RestApiSession`: it lists only the definition's operations and sends only the request `custom_api.build_request` builds for one approved operation to the pinned address, with the credential as a bearer token, a named API-key header or basic auth. Redirects, 401/403, 429 and 5xx are errors; another 4xx is an operation failure; a non-JSON or oversized reply is refused; nothing upstream is echoed and an opaque `id` becomes the external receipt.
 - **Installed with upstream MCP.** `MODEL_GARDEN_UPSTREAM_MCP=enabled` installs the REST transport next to the MCP one; without it, or in a runtime built without it, an `api` connection is neither offered nor callable.
 
-Still open: a client-facing page for adding and reviewing an API (operator-staged today), and live evidence against a real client API.
+Owner-entered credentials for these connections go through a single-use enrollment link to a sealed vault only the sidecar can open ([secrets](secrets.md#owner-entered-credentials-sealed-vault)). Still open: a client-facing page for adding and reviewing the API definition itself (operator-staged today), and live evidence against a real client API.
 
 ### Upstream routing, one-time secret entry and public candidates
 

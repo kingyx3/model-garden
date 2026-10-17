@@ -18,7 +18,9 @@ three (plus the REST variant of the transport for a client's own API). It is ins
   definition: it lists only the declared operations and sends only the request ``custom_api.build_request`` builds for an approved one,
   with the same pinning, no-redirect and size rules. A 4xx other than 401/403 is an operation failure; nothing upstream is echoed.
 - **Secrets by reference.** ``EnvSecretResolver`` maps a ``secret://`` reference to an environment variable the deployment injected into
-  this service alone (``MODEL_GARDEN_SECRET_<digest>``). The Hermes process has no such variable.
+  this service alone (``MODEL_GARDEN_SECRET_<digest>``). The Hermes process has no such variable. When the deployment also injects
+  ``MODEL_GARDEN_VAULT_PRIVATE_KEY``, a credential the client owner entered through an enrollment link is read from the sealed vault
+  (``sealed_vault.SealedResolver``) first; a vault entry that does not open is unavailable, never a fallback.
 """
 from __future__ import annotations
 
@@ -62,6 +64,44 @@ class EnvSecretResolver:
         if not value:
             raise UpstreamTransportError("credential unavailable")
         return value
+
+
+class VaultThenEnvResolver:
+    """An owner-enrolled credential from the sealed vault when there is one, else the deploy-time injected variable."""
+
+    def __init__(self, vault: Callable[[str], str] | Any, environ: Mapping[str, str]) -> None:
+        self._vault, self._env = vault, EnvSecretResolver(environ)
+
+    def __call__(self, reference: str) -> str:
+        if self._vault.has(reference):
+            try:
+                return self._vault(reference)
+            except Exception:  # noqa: BLE001 - a vault entry that does not open is unavailable, never a fallback
+                raise UpstreamTransportError("credential unavailable") from None
+        return self._env(reference)
+
+
+def _sealed_vault():
+    name = "model_garden_upstream_sealed_vault"
+    if name not in sys.modules:
+        spec = importlib.util.spec_from_file_location(name, pathlib.Path(__file__).resolve().parents[1] / "core" / "sealed_vault.py")
+        module = importlib.util.module_from_spec(spec)
+        assert spec.loader is not None
+        sys.modules[name] = module
+        spec.loader.exec_module(module)
+    return sys.modules[name]
+
+
+DEFAULT_VAULT_ROOT = "/opt/data/.modelgarden/vault"
+
+
+def secret_resolver(environ: Mapping[str, str]) -> Callable[[str], str]:
+    """The sidecar's secret lookup: the sealed vault (if its private key was injected) first, then injected variables."""
+    private = environ.get("MODEL_GARDEN_VAULT_PRIVATE_KEY", "").strip()
+    if not private:
+        return EnvSecretResolver(environ)
+    vault = _sealed_vault().SealedResolver(pathlib.Path(environ.get("MODEL_GARDEN_VAULT_ROOT") or DEFAULT_VAULT_ROOT), private_key=private)
+    return VaultThenEnvResolver(vault, environ)
 
 
 def system_dns_resolver(host: str) -> list[str]:
@@ -331,4 +371,4 @@ def install(environ: Mapping[str, str]) -> dict[str, Any] | None:
     if environ.get("MODEL_GARDEN_UPSTREAM_MCP", "").strip().lower() != "enabled":
         return None
     return {"upstream_transport": transport_factory, "upstream_rest_transport": rest_transport_factory,
-            "upstream_dns_resolver": system_dns_resolver, "upstream_secret_resolver": EnvSecretResolver(environ)}
+            "upstream_dns_resolver": system_dns_resolver, "upstream_secret_resolver": secret_resolver(environ)}
