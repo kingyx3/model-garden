@@ -67,8 +67,10 @@ class LookupTests(unittest.TestCase):
         with self.assertRaisesRegex(lookup.RegistryLookupError, "invalid-pagination"):
             lookup.discover("crm", fetch_page=fake, now=NOW)
         self.assertEqual(len(seen), 2)
+        counter = [0]
         def many(url):
-            return page([entry()], cursor="cursor" + str(len(seen)))
+            counter[0] += 1
+            return page([entry()], cursor="cursor" + str(counter[0]))
         result = lookup.discover("crm", fetch_page=many, max_pages=2, now=NOW)
         self.assertTrue(result["truncated"])
         self.assertEqual(result["pages"], 2)
