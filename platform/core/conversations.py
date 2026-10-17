@@ -295,6 +295,48 @@ class ConversationStore:
         self._record("conversation.link", by, {"conversationId": item["conversationId"], "customerId": customer_id, "confidence": "confirmed"})
         return {"conversationId": item["conversationId"], "customerId": customer_id}
 
+    def link(self, conversation_id: str, customer_id: str, *, by: str, now: int) -> dict[str, Any]:
+        """A named person attaches a conversation to a customer directly, for one the review queue never held.
+
+        A call whose transcript carries no number has no evidence to propose a match from, so without this it could never join a
+        customer's history. It is a decision, not evidence: it is recorded as ``confirmed-by:<person>`` and ledgered, any open
+        review item for the conversation is closed, and a conversation already linked to a *different* customer is refused
+        (``unlink`` it first) so a person cannot silently re-point it.
+        """
+        _check(by, _NAME, "by must be a named person")
+        _check(customer_id, _EXTERNAL, "customer id must be a short identifier")
+        with self._locked() as state:
+            self._conversation(state, conversation_id)
+            existing = state["links"].get(conversation_id)
+            if existing is not None and existing["customerId"] != customer_id:
+                raise ConversationError("the conversation is already linked to a different customer; unlink it first")
+            for review_id in [key for key, item in state["review"].items() if item["conversationId"] == conversation_id]:
+                del state["review"][review_id]
+            state["links"][conversation_id] = {"customerId": customer_id, "confidence": f"confirmed-by:{by}", "evidence": [], "linkedAt": now}
+        self._record("conversation.link", by, {"conversationId": conversation_id, "customerId": customer_id, "confidence": "confirmed"})
+        return {"conversationId": conversation_id, "customerId": customer_id}
+
+    def unlink(self, conversation_id: str, *, by: str) -> None:
+        """Take a conversation off a customer's timeline (a wrong match); the conversation itself stays."""
+        _check(by, _NAME, "by must be a named person")
+        with self._locked() as state:
+            self._conversation(state, conversation_id)
+            link = state["links"].pop(conversation_id, None)
+        if link is None:
+            raise ConversationError("the conversation is not linked to a customer")
+        self._record("conversation.unlink", by, {"conversationId": conversation_id, "customerId": link["customerId"]})
+
+    def list_conversations(self, *, unlinked_only: bool = False) -> list[dict[str, Any]]:
+        """Conversations oldest first, as ids, channel, start time, size and link state; never evidence, text or references."""
+        with self._locked() as state:
+            rows = [
+                {"id": item["id"], "channel": item["channel"], "startedAt": item["startedAt"], "interactions": len(item["interactions"]),
+                 "linked": item["id"] in state["links"], **({"customerId": state["links"][item["id"]]["customerId"]} if item["id"] in state["links"] else {})}
+                for item in state["conversations"].values()
+            ]
+        rows = [row for row in rows if not (unlinked_only and row["linked"])]
+        return sorted(rows, key=lambda row: (row["startedAt"], row["id"]))
+
     def dismiss(self, review_id: str, *, by: str) -> None:
         _check(by, _NAME, "by must be a named person")
         with self._locked() as state:

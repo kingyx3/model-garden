@@ -10,6 +10,10 @@ model summary when the record has one, never the transcript text. Every filing i
 identity `runtime:conversation-filing`. Re-running is safe: a reference already filed anywhere is skipped.
 A person then assigns unmatched records with `client-operator.py contacts review|assign`.
 
+Each call is also put on the cross-channel conversation timeline (`platform/core/conversations.py`) by reference only, so a later
+email from the same verified sender can join the same customer's history; see `client-operator.py conversations`. That is
+best-effort and never changes how a call was filed.
+
 The same input may also hold the worker's lifecycle events: each `TranscriptWriteFailed` (a call whose transcript
 could not be stored) is ledgered once as `transcript.write-failed` with the error type and time only.
 """
@@ -20,6 +24,7 @@ import importlib.util
 import json
 import os
 import pathlib
+import re
 import sys
 import tempfile
 
@@ -36,6 +41,44 @@ def _load(name: str, path: pathlib.Path):
     return module
 
 
+class _CountingRecorder:
+    """The conversation recorder, counting what it put on the timeline so the command can report it (never the content).
+
+    With no recorder (no compiled client to scope the timeline to) every call is counted as skipped and filing is unaffected.
+    """
+
+    def __init__(self, recorder) -> None:
+        self._recorder = recorder
+        self.counts = {"recorded": 0, "failed": 0, "skipped": 0}
+
+    def record_call(self, record, **kwargs):
+        if self._recorder is None:
+            self.counts["skipped"] += 1
+            return {"state": "skipped"}
+        try:
+            outcome = self._recorder.record_call(record, **kwargs)
+        except Exception:
+            self.counts["failed"] += 1
+            raise
+        self.counts["recorded" if outcome.get("state") == "recorded" else "skipped"] += 1
+        return outcome
+
+
+def _recorder(runtime_module, runtime, crm_store, args) -> _CountingRecorder:
+    module = _load("runtime_file_calls_recorder", ROOT / "platform" / "channels" / "conversation_recorder.py")
+    client = runtime.desired_state.get("source", {}).get("client")
+    tenant = re.sub(r"[^a-z0-9-]+", "-", str(client or "").lower()).strip("-")[:63] or "default"  # as the worker names it
+    agent = runtime.desired_state.get("agent", {}).get("metadata", {}).get("name")
+    try:
+        store = module._conversations().ConversationStore(
+            args.conversations_root, tenant=tenant,
+            audit=lambda action, by, details: runtime_module.GOVERN.record_operator_action(args.audit_path, action, by, details),
+        )
+    except ValueError:  # no tenant slug to scope the timeline to: record nothing rather than guess one
+        return _CountingRecorder(None)
+    return _CountingRecorder(module.ConversationRecorder(store, agent=agent, directory=module.contacts_directory(crm_store)))
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--transcripts", required=True, help="transcripts JSONL path, or - for standard input")
@@ -45,6 +88,8 @@ def main(argv: list[str] | None = None) -> int:
         os.environ.get("MODEL_GARDEN_AUDIT_PATH", "/opt/data/.modelgarden/audit.jsonl")))
     parser.add_argument("--approval-root", type=pathlib.Path, default=pathlib.Path(
         os.environ.get("MODEL_GARDEN_APPROVAL_ROOT", "/opt/data/.modelgarden/approvals")))
+    parser.add_argument("--conversations-root", type=pathlib.Path, default=pathlib.Path(
+        os.environ.get("MODEL_GARDEN_CONVERSATIONS_ROOT", "/opt/data/.modelgarden/conversations")))
     args = parser.parse_args(argv)
     try:
         runtime_module = _load("runtime_file_calls_governed_mcp", ROOT / "platform" / "runtime" / "governed_mcp.py")
@@ -54,6 +99,7 @@ def main(argv: list[str] | None = None) -> int:
             environ={**os.environ, "MODEL_GARDEN_INITIATING_IDENTITY": FILING_IDENTITY},
         )
         store = runtime.crm_store()
+        recorder = _recorder(runtime_module, runtime, store, args)
         if args.transcripts == "-":
             with tempfile.NamedTemporaryFile("w", encoding="utf-8", suffix=".jsonl") as handle:
                 handle.write(sys.stdin.read())
@@ -64,14 +110,14 @@ def main(argv: list[str] | None = None) -> int:
             records = filing.read_call_transcripts(pathlib.Path(args.transcripts))
             write_failures = filing.read_transcript_failures(pathlib.Path(args.transcripts))
         failures: list[str] = []
-        totals = filing.file_call_transcripts(runtime, store, records, log=failures.append)
+        totals = filing.file_call_transcripts(runtime, store, records, log=failures.append, recorder=recorder)
         ledgered = filing.ledger_transcript_failures(runtime_module.GOVERN, args.audit_path, write_failures)
     except (OSError, ValueError, PermissionError, json.JSONDecodeError) as exc:
         print(f"Runtime file-calls failed: {exc}", file=sys.stderr)
         return 1
     for failure in failures:
         print(f"failed to file {failure}", file=sys.stderr)
-    print(json.dumps({"records": len(records), **totals, "writeFailures": ledgered}, sort_keys=True))
+    print(json.dumps({"records": len(records), **totals, "writeFailures": ledgered, "timeline": recorder.counts}, sort_keys=True))
     return 1 if totals["failed"] else 0
 
 
