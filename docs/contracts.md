@@ -136,7 +136,7 @@ Open: the runtime-native handoff or A2A decision, a multi-Agent runtime that cal
 
 ### Running scheduled and triggered tasks
 
-`platform/core/scheduler.py` makes each firing a task. It is credential-free and calls no provider (the coworker is an injected `runner`), and it is **not wired** to the sidecar, a clock or an event source: a deployment calls `run_due` on a timer and `run_event` when something arrives.
+`platform/core/scheduler.py` makes each firing a task. It is credential-free and calls no provider (the coworker is an injected `runner`), and the runtime worker (`platform/runtime/worker.py`, see [self-hosting](self-hosting.md#runtime-worker)) calls `run_due` and `resume_waiting` on its clock with the coworker as the runner; `run_event` is called when something arrives.
 
 - **A task with a timeline.** A run is `<schedule id>:run-<n>`; it writes `task.start` and `task.finish` ledger events (identifiers, the goal's digest, budget, spend and outcome; never the goal, an event body or an error message) plus the human-step events below, and `timeline` reads one task's events back in order. Authority is built with `run_envelope` from the owner's *current* permissions, so an owner who lost a permission stops the run (`authority-refused`). An event reaches the runner only as its kind and a digest of its reference: it is data, never authority.
 - **At most once.** The slot or event is claimed before the run starts, so two schedulers never run the same one and a restart never repeats it. A process that dies mid-run leaves the run `running` in the store (visible, not silently retried): a repeated side effect is worse than a late run. Events the coworker itself produced (`self_originated`) never trigger.
@@ -270,7 +270,7 @@ See #157 (upstream candidate selection), #158 (execution), #159 (customer-define
 
 ## Owner notices for connections and provider grants
 
-`platform/core/connection_notices.py` works out who should be told when a connection or a per-coworker provider grant needs a person (#86). It sends nothing: a deployment delivers each notice through a channel or the inbox and then records it, as with hand-off notices. It is credential-free, not wired into the sidecar or a channel, and no owner delivery exists yet.
+`platform/core/connection_notices.py` works out who should be told when a connection or a per-coworker provider grant needs a person (#86). It sends nothing: a deployment delivers each notice through a channel or the inbox and then records it, as with hand-off notices. It is credential-free; the runtime worker delivers its notices through `notice_delivery.py`.
 
 - **Conditions.** A capability connection that is `degraded`, `failed` or `revoked`, and a grant (#129) that is revoked, failed, degraded, expired or expiring within a warning window (default 7 days).
 - **Who.** The connection's named `owner` from the EnvironmentBinding, or the grant's owner; with none, the escalation contact; with neither, the notice is still returned with `to: null` and `unowned: true`, so it cannot be silently dropped.
@@ -280,7 +280,7 @@ See #157 (upstream candidate selection), #158 (execution), #159 (customer-define
 
 ### Delivering notices to the named person's channel
 
-`platform/core/notice_delivery.py` is the credential-free runner between these notices (and the Tier 4 hand-off notices, which carry human task steps) and a channel (#88, #97, #86). A small people directory maps a named person to one channel and one address (for a chat channel, the id of the conversation with that person; the directory refuses credentials and unknown keys). Each channel is an injected `send(address, text)`; `adapter_sender` wraps a channel adapter's `send_reply`. It holds no credential and is **not wired into the sidecar or a scheduler**; no real channel delivery has live proof.
+`platform/core/notice_delivery.py` is the credential-free runner between these notices (and the Tier 4 hand-off notices, which carry human task steps) and a channel (#88, #97, #86). A small people directory maps a named person to one channel and one address (for a chat channel, the id of the conversation with that person; the directory refuses credentials and unknown keys). Each channel is an injected `send(address, text)`; `adapter_sender` wraps a channel adapter's `send_reply`. It holds no credential; the runtime worker runs it on its clock.
 
 - **The person's channel.** A person with no directory entry, or a channel with no registered sender, is reported `no-channel` and the notice stays due; `inbox` counts as a channel only when the person's entry says so, so a notice is never marked delivered because it was merely visible.
 - **At least once.** Delivery is recorded after the send succeeds. A failed send records only the error type, leaves the notice due and does not stop the rest of the batch; a send whose recording then fails is reported `unmarked` and sent again next run rather than lost.

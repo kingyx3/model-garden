@@ -11,7 +11,7 @@ schedule someone created from chat is never touched. Each change is a chained le
 holding identifiers and a digest of the goal, never the goal. Definitions come from `--definitions` (the JSON
 `compile-workspace.py --schedules` prints) or from the `schedules` of the compiled desired state, which is how the sidecar's own
 deployment carries them; with neither, the compiled desired state at `MODEL_GARDEN_DESIRED_STATE` is read. Nothing here runs a
-schedule: a scheduler has to be wired to a clock (`platform/core/scheduler.py`) and none is shipped.
+schedule: the runtime worker (`platform/runtime/worker.py`) applies the compiled definitions on start and runs them on its clock.
 """
 from __future__ import annotations
 

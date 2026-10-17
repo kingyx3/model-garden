@@ -1,8 +1,9 @@
 """Run scheduled and event-triggered coworker tasks as tasks with a ledger timeline, a budget and an owner who is told.
 
 ``schedules.py`` stores who asked for what and when; this module is the runner that makes a firing a *task* (#99, #96, #97).
-It is credential-free and calls no provider: the coworker itself is an injected ``runner``. It is **not wired** to the
-sidecar, a clock or an event source; a deployment calls ``run_due`` on a timer and ``run_event`` when something arrives.
+It is credential-free and calls no provider: the coworker itself is an injected ``runner``. The runtime worker
+(``platform/runtime/worker.py``) calls ``run_due`` and ``resume_waiting`` on its clock with the coworker (the Hermes API server) as the
+runner; a caller calls ``run_event`` when something arrives.
 
 - **A run is a task with its own timeline.** Each firing gets a task id (``<schedule id>:run-<n>``) and writes ``task.start``
   and ``task.finish`` ledger events (identifiers, digests and counts; never the goal, an event body or an error message), plus
@@ -27,8 +28,7 @@ sidecar, a clock or an event source; a deployment calls ``run_due`` on a timer a
   authority); a decline or timeout follows the configured fallback (``fail``, ``skip`` or ``escalate`` once to a named
   person). The person's answer and any timeout are ledgered in the task's timeline.
 
-Not done: channel delivery of notices and of the human step beyond the built-in inbox, creating and listing schedules from
-chat, schedules as exportable workspace desired state, a real event source and live evidence.
+Owner notices are queued by the worker and delivered through the owner's own channel (``notice_delivery.py``).
 """
 from __future__ import annotations
 

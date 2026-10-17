@@ -4,8 +4,8 @@
 (#88, #97, #86). This is the credential-free runner that sits between them and a channel: it asks each source for its due
 notices, looks the recipient up in a small people directory, sends through the channel registered for that person and only then
 records the delivery. It holds no credential and imports no provider; each channel is an injected ``send(address, text) -> ref``
-(for example a Slack or Teams adapter's ``send_reply`` wrapped with :func:`adapter_sender`). It is **not wired into the sidecar
-or a scheduler**, and no real channel delivery has had live proof.
+(for example a Slack or Teams adapter's ``send_reply`` wrapped with :func:`adapter_sender`). The runtime worker
+(``platform/runtime/worker.py``) runs it on its clock for hand-off, connection, grant, schedule and mailbox notices.
 
 - **The person's channel, not ours.** The directory maps a named person to one channel and one address (for a chat channel, the
   id of the conversation with that person). A person with no entry, or a channel with no registered sender, is reported as

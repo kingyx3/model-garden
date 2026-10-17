@@ -3,8 +3,8 @@
 Today a failed or revoked connection is enforced at the governed boundary and shown in the inbox, but nothing tells the
 named owner (#86, #77). This module works out *who should be told what, and when*, so a channel or the inbox can deliver
 it. It sends nothing itself: a deployment delivers each notice and then records that it did, exactly like hand-off
-notices (``handoff.due_notices`` / ``mark_notified``). It is credential-free, **not wired into the sidecar or a channel**,
-and owner delivery through a real channel is not implemented.
+notices (``handoff.due_notices`` / ``mark_notified``). It is credential-free; the runtime worker (``platform/runtime/worker.py``)
+delivers its notices through ``notice_delivery.py`` to the owner's channel.
 
 - **Conditions.** A capability connection that is ``degraded``, ``failed`` or ``revoked`` (``capabilities.read_connection_
   health``), and a per-coworker provider grant (``provider_grants.py``, #129) that is revoked, failed, degraded, expired or

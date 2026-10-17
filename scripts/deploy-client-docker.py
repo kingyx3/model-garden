@@ -42,6 +42,8 @@ BUILT_IN_TOOLS = {"kb.search", "crm.read", "crm.create", "crm.log-interaction", 
 RUNTIME_SOURCE_PATHS = (
     pathlib.Path("requirements-runtime.txt"),
     pathlib.Path("platform/runtime/governed_mcp.py"),
+    pathlib.Path("platform/runtime/worker.py"),
+    pathlib.Path("platform/runtime/coworker_client.py"),
     pathlib.Path("platform/core/capabilities.py"),
     pathlib.Path("platform/core/policy.py"),
     pathlib.Path("platform/core/policy_deploy.py"),
@@ -100,6 +102,8 @@ RUNTIME_SOURCE_PATHS = (
     pathlib.Path("VERSION"),
 )
 MANIFEST_PATH = pathlib.Path(".modelgarden") / "capability-manifest.json"
+WORKER_CONFIG_PATH = pathlib.Path(".modelgarden") / "worker.json"
+COWORKER_API_PORT = 8642
 READ_AUDIT = re.compile(r"^(?:full|aggregate|sampled:[1-9][0-9]{0,5})$")
 
 
@@ -276,6 +280,51 @@ def resolve_secrets(binding: dict[str, Any], encoded: str | None) -> dict[str, s
     return resolved
 
 
+def _worker_settings(binding: dict[str, Any]) -> tuple[dict[str, Any] | None, str | None]:
+    """``EnvironmentBinding.spec.worker`` as the non-secret worker configuration, plus the coworker API key reference.
+
+    The worker (``platform/runtime/worker.py``) runs schedules, drains the built-in inbound mailbox and delivers notices. It is
+    opt-in: without ``worker.enabled: true`` the bundle is unchanged. The only secret is the Hermes API server key, given as a
+    ``secret://`` reference and injected at apply time; everything rendered into the bundle is non-secret.
+    """
+    spec = binding.get("spec", {})
+    worker = spec.get("worker")
+    if worker is None:
+        return None, None
+    if not isinstance(worker, dict):
+        raise ValueError("Docker target failed: EnvironmentBinding worker must be an object")
+    if worker.get("enabled") is not True:
+        return None, None
+    allowed = {"enabled", "coworker_api_key_ref", "people", "escalate_to", "owners", "mailbox", "intervals", "artifact_retention_days"}
+    unknown = sorted(set(worker) - allowed)
+    if unknown:
+        raise ValueError(f"Docker target failed: unknown worker settings: {', '.join(unknown)}")
+    key_ref = worker.get("coworker_api_key_ref")
+    if key_ref is not None and (not isinstance(key_ref, str) or not key_ref.startswith("secret://") or len(key_ref) <= len("secret://")):
+        raise ValueError("Docker target failed: worker.coworker_api_key_ref must be a secret:// reference")
+    config: dict[str, Any] = {
+        "people": worker.get("people") or {},
+        "owners": worker.get("owners") or {},
+        "connectors": spec.get("connectors") or {},
+    }
+    if worker.get("escalate_to"):
+        config["escalateTo"] = worker["escalate_to"]
+    if worker.get("intervals"):
+        config["intervals"] = worker["intervals"]
+    if worker.get("artifact_retention_days") is not None:
+        config["artifactRetentionDays"] = worker["artifact_retention_days"]
+    mailbox = worker.get("mailbox")
+    if mailbox is not None:
+        if not isinstance(mailbox, dict):
+            raise ValueError("Docker target failed: worker.mailbox must be an object")
+        config["mailbox"] = {
+            "addresses": mailbox.get("addresses"), "trustedAuthservId": mailbox.get("trusted_authserv_id"), "owner": mailbox.get("owner"),
+        }
+    if key_ref:
+        config["coworker"] = {"url": f"http://coworker-api:{COWORKER_API_PORT}/v1"}
+    return config, key_ref
+
+
 def _entrypoint() -> str:
     return """#!/bin/sh
 set -eu
@@ -335,6 +384,8 @@ def _compose(
     *,
     read_audit: str | None = None,
     built_in_tools: bool = False,
+    worker: bool = False,
+    coworker_api: bool = False,
 ) -> str:
     provider_env = PROVIDER_ENV[provider]
     hermes: dict[str, Any] = {
@@ -376,6 +427,54 @@ def _compose(
         }
         volumes["governance-data"] = {}
         hermes["depends_on"] = {"governed-tools": {"condition": "service_healthy"}}
+    if coworker_api:
+        # A second Hermes process serving only the OpenAI-compatible API server on the private Compose network, so the
+        # worker can ask the coworker to carry out a scheduled task or answer an email. It has its own state volume.
+        services["coworker-api"] = {
+            "image": f"model-garden-{project_name}:current",
+            "restart": "unless-stopped",
+            "command": ["hermes", "gateway", "run"],
+            "environment": {
+                "HERMES_HOME": "/opt/data",
+                provider_env: "${MODEL_GARDEN_MODEL_CREDENTIAL:?MODEL_GARDEN_MODEL_CREDENTIAL is required}",
+                "API_SERVER_ENABLED": "true",
+                "API_SERVER_HOST": "0.0.0.0",
+                "API_SERVER_PORT": str(COWORKER_API_PORT),
+                "API_SERVER_KEY": "${MODEL_GARDEN_COWORKER_API_KEY:?MODEL_GARDEN_COWORKER_API_KEY is required}",
+            },
+            "volumes": ["coworker-data:/opt/data"],
+            "healthcheck": _healthcheck(COWORKER_API_PORT),
+            **({"depends_on": {"governed-tools": {"condition": "service_healthy"}}} if built_in_tools else {}),
+        }
+        volumes["coworker-data"] = {}
+    if worker:
+        environment = {
+            "MODEL_GARDEN_DESIRED_STATE": "/opt/profile-seed/.modelgarden/desired-state.json",
+            "MODEL_GARDEN_DATA_ROOT": "/opt/data/.modelgarden",
+            "MODEL_GARDEN_WORKER_CONFIG": f"/opt/profile-seed/{WORKER_CONFIG_PATH.as_posix()}",
+            "MODEL_GARDEN_CAPABILITY_MANIFEST": f"/opt/profile-seed/{MANIFEST_PATH.as_posix()}",
+            "MODEL_GARDEN_DEPLOYED_BY": "${MODEL_GARDEN_DEPLOYED_BY:-}",
+        }
+        if coworker_api:
+            environment["MODEL_GARDEN_COWORKER_API_KEY"] = "${MODEL_GARDEN_COWORKER_API_KEY:?MODEL_GARDEN_COWORKER_API_KEY is required}"
+        depends = {}
+        if built_in_tools:
+            depends["governed-tools"] = {"condition": "service_healthy"}
+        if coworker_api:
+            depends["coworker-api"] = {"condition": "service_healthy"}
+        services["governed-worker"] = {
+            "image": f"model-garden-{project_name}:current",
+            "restart": "unless-stopped",
+            "entrypoint": ["python", "/opt/model-garden-platform/platform/runtime/worker.py"],
+            "environment": environment,
+            "volumes": ["governance-data:/opt/data"],
+            "healthcheck": {
+                "test": ["CMD", "python", "/opt/model-garden-platform/platform/runtime/worker.py", "--health"],
+                "interval": "30s", "timeout": "10s", "retries": 6, "start_period": "60s",
+            },
+            **({"depends_on": depends} if depends else {}),
+        }
+        volumes["governance-data"] = {}
     document = {"services": services, "volumes": volumes}
     return yaml.safe_dump(document, sort_keys=False)
 
@@ -442,6 +541,7 @@ def render_bundle(
     if selected_tools & CALENDAR_TOOLS:
         raise ValueError("Docker target failed: native Calendar connectors were retired; an approved upstream MCP route is required before deploying Calendar Tools")
     manifest = _capability_manifest(_desired_state(profile_dir), binding)
+    worker_config, coworker_key_ref = _worker_settings(binding)
     read_audit = _read_audit_mode(binding)
     built_in_tools = bool(selected_tools & BUILT_IN_TOOLS)
     lock = _load_hermes_lock(platform_root)
@@ -450,13 +550,16 @@ def render_bundle(
     shutil.copytree(profile_dir, bundle_dir / "profile")
     manifest_text = json.dumps(manifest, indent=2, sort_keys=True) + "\n"
     (bundle_dir / "profile" / MANIFEST_PATH).write_text(manifest_text, encoding="utf-8")
+    if worker_config is not None:
+        (bundle_dir / "profile" / WORKER_CONFIG_PATH).write_text(json.dumps(worker_config, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     _copy_runtime_source(platform_root, bundle_dir / "model-garden-platform")
     normalized_binding = json.dumps(binding, indent=2, sort_keys=True) + "\n"
     (bundle_dir / "environment-binding.json").write_text(normalized_binding, encoding="utf-8")
     (bundle_dir / "entrypoint.sh").write_text(_entrypoint(), encoding="utf-8")
     (bundle_dir / "Dockerfile").write_text(_dockerfile(lock), encoding="utf-8")
     (bundle_dir / "compose.yaml").write_text(
-        _compose(project_name, provider, lock, read_audit=read_audit, built_in_tools=built_in_tools),
+        _compose(project_name, provider, lock, read_audit=read_audit, built_in_tools=built_in_tools,
+                 worker=worker_config is not None, coworker_api=coworker_key_ref is not None),
         encoding="utf-8",
     )
     metadata = {
@@ -468,6 +571,8 @@ def render_bundle(
         "modelCredentialRef": credential_ref,
         "selectedTools": sorted(selected_tools),
         "governedToolService": built_in_tools,
+        "runtimeWorker": worker_config is not None,
+        "coworkerApi": coworker_key_ref is not None,
         "hermes": {"version": lock["version"], "revision": lock["commit"]},
         "bindingSha256": hashlib.sha256(normalized_binding.encode("utf-8")).hexdigest(),
         "capabilityManifestSha256": hashlib.sha256(manifest_text.encode("utf-8")).hexdigest(),
@@ -551,6 +656,9 @@ def apply_bundle(
     runtime_env = os.environ.copy()
     runtime_env.pop("MODEL_GARDEN_RUNTIME_SECRETS_JSON", None)
     runtime_env["MODEL_GARDEN_MODEL_CREDENTIAL"] = model_secret
+    _, coworker_key_ref = _worker_settings(binding)
+    if coworker_key_ref is not None:
+        runtime_env["MODEL_GARDEN_COWORKER_API_KEY"] = resolved[coworker_key_ref]
     # Retired vendor-token environment variables never reach the replacement runtime.
     runtime_env.pop("MODEL_GARDEN_GOOGLE_CALENDAR_TOKEN", None)
     runtime_env.pop("MODEL_GARDEN_MICROSOFT_CALENDAR_TOKEN", None)

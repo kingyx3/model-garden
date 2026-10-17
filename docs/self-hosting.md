@@ -31,6 +31,26 @@ isolated per-client GCP Docker host
 
 The current GCP reference intentionally does not deploy Kubernetes, a shared control plane, a custom model gateway, LiveKit infrastructure, Lago infrastructure or a portal.
 
+## Runtime worker
+
+`EnvironmentBinding.spec.worker` (opt-in, `enabled: true`) adds two services to the Docker bundle:
+
+- `governed-worker` (`platform/runtime/worker.py`) shares the governance volume with the governed sidecar and is the clock for work nobody prompts: it applies the workspace's `Schedule` definitions on start under `MODEL_GARDEN_DEPLOYED_BY`, runs due schedules and resumes tasks whose human step was answered, drains the built-in inbound mail spool into the support mailbox, delivers hand-off, human-step, connection, grant, schedule and mailbox notices through each person's own channel, and purges expired artifacts and mail. A failing job is ledgered as `worker.job-failed` (job and error type only) and never stops the others; `worker.py --health` is the container health check and `--once` runs one pass for an operator.
+- `coworker-api`, present when `coworker_api_key_ref` is set, is a second Hermes process (`hermes gateway run`) serving only its OpenAI-compatible API server on the private Compose network with `API_SERVER_KEY`. The worker asks the coworker through it (`platform/runtime/coworker_client.py`) and never holds a model credential; the client refuses any non-private URL.
+
+```yaml
+worker:
+  enabled: true
+  coworker_api_key_ref: secret://coworker-api/dev     # API_SERVER_KEY for the private coworker API
+  owners: {jordan@client.example: ["*"]}               # whose schedules may use which Tools; absent means none
+  people: {jordan@client.example: {channel: slack, address: D0123}}  # where each named person is told things
+  escalate_to: ops@client.example
+  mailbox: {addresses: [support@client.example], trusted_authserv_id: mx.client.example, owner: jordan@client.example}
+  intervals: {scheduler: 60, mailbox: 30, notices: 60, retention: 3600}
+```
+
+Customer email answered by the worker is drafted from approved knowledge only and kept as a Tier 0 draft; the mailbox owner is told it is ready and sends it. Inbound mail still reaches the spool through the mail server's pipe (`scripts/runtime-mailbox.py ingest`).
+
 ## Component decisions
 
 | Component | Current status | Default decision | Why |

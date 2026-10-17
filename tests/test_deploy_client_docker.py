@@ -115,6 +115,50 @@ class DeployClientDockerTests(unittest.TestCase):
             )
             self.assertNotIn("super-secret-value", all_text)
 
+    def test_opt_in_worker_renders_a_worker_and_private_coworker_api_without_secrets(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            profile = self._profile(root, tools=("kb.search",))
+            worker = {
+                "enabled": True, "coworker_api_key_ref": "secret://coworker-api/dev",
+                "people": {"jordan@acme.example": {"channel": "inbox"}}, "owners": {"jordan@acme.example": ["*"]},
+                "mailbox": {"addresses": ["support@acme.example"], "trusted_authserv_id": "mx.acme.example", "owner": "jordan@acme.example"},
+            }
+            binding = self._binding(root, {"worker": worker})
+            metadata = deployer.render_bundle(profile, binding, root / "bundle", "acme-dev")
+            compose = yaml.safe_load((root / "bundle" / "compose.yaml").read_text(encoding="utf-8"))
+            self.assertTrue(metadata["runtimeWorker"] and metadata["coworkerApi"])
+            service = compose["services"]["governed-worker"]
+            self.assertEqual(service["volumes"], ["governance-data:/opt/data"])
+            self.assertIn("worker.py", " ".join(service["entrypoint"]))
+            self.assertEqual(service["depends_on"]["governed-tools"]["condition"], "service_healthy")
+            api = compose["services"]["coworker-api"]
+            self.assertEqual(api["command"], ["hermes", "gateway", "run"])
+            self.assertNotIn("ports", api)
+            self.assertEqual(api["volumes"], ["coworker-data:/opt/data"])
+            self.assertTrue(api["environment"]["API_SERVER_KEY"].startswith("${MODEL_GARDEN_COWORKER_API_KEY:?"))
+            config = json.loads((root / "bundle" / "profile" / ".modelgarden" / "worker.json").read_text(encoding="utf-8"))
+            self.assertEqual(config["coworker"], {"url": "http://coworker-api:8642/v1"})
+            self.assertEqual(config["mailbox"]["trustedAuthservId"], "mx.acme.example")
+            self.assertNotIn("secret://", json.dumps(config))
+            self.assertEqual(
+                deployer.resolve_secrets(json.loads(binding.read_text()), json.dumps({
+                    "secret://model/dev": "m", "secret://coworker-api/dev": "k" * 32,
+                }))["secret://coworker-api/dev"], "k" * 32,
+            )
+
+    def test_worker_is_off_unless_enabled_and_rejects_unknown_settings(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            profile = self._profile(root)
+            deployer.render_bundle(profile, self._binding(root, {"worker": {"enabled": False}}), root / "a", "acme-dev")
+            compose = yaml.safe_load((root / "a" / "compose.yaml").read_text(encoding="utf-8"))
+            self.assertNotIn("governed-worker", compose["services"])
+            with self.assertRaisesRegex(ValueError, "unknown worker settings"):
+                deployer.render_bundle(profile, self._binding(root, {"worker": {"enabled": True, "api_key": "x"}}), root / "b", "acme-dev")
+            with self.assertRaisesRegex(ValueError, "secret://"):
+                deployer.render_bundle(profile, self._binding(root, {"worker": {"enabled": True, "coworker_api_key_ref": "plain"}}), root / "c", "acme-dev")
+
     def test_secret_resolution_requires_exact_reference_set(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = pathlib.Path(tmp)
