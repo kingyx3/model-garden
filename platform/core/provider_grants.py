@@ -167,8 +167,10 @@ class GrantRegistry:
             if len(grants) >= MAX_GRANTS:
                 raise GrantError("the grant registry is full")
             for other in grants.values():
-                if other["agent"] == agent and other["connectionId"] == connection_id:
+                if other["agent"] == agent and other["connectionId"] == connection_id and not other.get("revokedAt"):
                     raise GrantError("this coworker already has a grant on that connection; rotate or revoke it instead")
+                if other["agent"] == agent and other["secretRef"] == secret_ref:
+                    raise GrantError("a previously issued secret reference cannot be reused after revocation; provision a fresh one")
                 if other["agent"] != agent and other["secretRef"] == secret_ref:
                     raise GrantError("that secret reference already belongs to another coworker; each coworker needs its own credential")
                 if other["agent"] != agent and other["provider"] == provider and other["actingIdentity"] == acting_identity:
