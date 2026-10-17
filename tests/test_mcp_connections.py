@@ -171,6 +171,79 @@ class ConnectionTests(unittest.TestCase):
         self.activate()
         self.assertEqual(self.store.resolve("crm-main", agent="receptionist")["declaration"]["url"], replacement["url"])
 
+    def test_owner_cannot_self_approve_the_connection(self):
+        with self.assertRaisesRegex(connections.ConnectionRefused, "separate"):
+            self.activate(by="owner@acme.example")
+        self.assertFalse(self.store.list_public(agent="receptionist")[0]["active"])
+
+    def test_disable_during_schema_review_cannot_reactivate(self):
+        original = self.approvals.status
+        tripped = [False]
+
+        def status(server, tool):
+            if not tripped[0]:
+                tripped[0] = True
+                self.store.disable("crm-main", agent="receptionist", by="owner@acme.example")
+            return original(server, tool)
+
+        self.approvals.status = status
+        with self.assertRaisesRegex(connections.ConnectionRefused, "changed during review"):
+            self.activate()
+        self.assertFalse(self.store.list_public(agent="receptionist")[0]["active"])
+        with self.assertRaises(connections.ConnectionRefused):
+            self.store.resolve("crm-main", agent="receptionist")
+
+    def test_same_digest_replacement_during_review_cannot_approve_stale_snapshot(self):
+        original = self.approvals.status
+        tripped = [False]
+
+        def status(server, tool):
+            if not tripped[0]:
+                tripped[0] = True
+                # Identical manifest hashes must not defeat state-transition fencing.
+                self.stage(replace=True)
+            return original(server, tool)
+
+        self.approvals.status = status
+        with self.assertRaisesRegex(connections.ConnectionRefused, "changed during review"):
+            self.activate()
+        self.assertFalse(self.store.list_public(agent="receptionist")[0]["active"])
+
+    def test_grant_revoked_after_review_is_refused_at_commit(self):
+        original = self.approvals.status
+        tripped = [False]
+
+        def status(server, tool):
+            if not tripped[0]:
+                tripped[0] = True
+                self.grants.revoke(self.grant["id"], by="operator@acme.example", now=NOW + 2)
+            return original(server, tool)
+
+        self.approvals.status = status
+        with self.assertRaises(PermissionError):
+            self.activate()
+        self.assertFalse(self.store.list_public(agent="receptionist")[0]["active"])
+
+    def test_double_activation_must_be_replaced_and_reconsented(self):
+        self.activate()
+        first = self.store.resolve("crm-main", agent="receptionist")
+        with self.assertRaisesRegex(connections.ConnectionRefused, "already active"):
+            self.activate()
+        self.assertEqual(self.store.resolve("crm-main", agent="receptionist")["activationId"], first["activationId"])
+        self.store.disable("crm-main", agent="receptionist", by="owner@acme.example")
+        with self.assertRaises(connections.ConnectionRefused):
+            self.store.resolve("crm-main", agent="receptionist")
+        self.activate()
+        second = self.store.resolve("crm-main", agent="receptionist")
+        self.assertNotEqual(first["activationId"], second["activationId"])
+
+    def test_activation_succeeds_with_valid_grants_and_revision_fence(self):
+        self.assertFalse(self.store.list_public(agent="receptionist")[0]["active"])
+        self.activate()
+        record = self.store.resolve("crm-main", agent="receptionist")
+        self.assertGreaterEqual(record["generation"], 2)
+        self.assertNotIn("secret://", json.dumps(self.store.list_public(agent="receptionist")))
+
     def test_unknown_portable_tool_and_risk_or_credential_injection_are_denied(self):
         wrong = dict(SERVER)
         wrong["tools"] = {"raw_shell": {"risk": "privileged"}}
