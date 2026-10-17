@@ -108,6 +108,25 @@ There is no permanent self-hosted GitHub runner requirement in this path.
 
 Terraform does not own client business definitions, Skills, model/provider runtime secrets, OAuth grants, or telephony business configuration.
 
+## Host rebuild inputs
+
+By default the Docker host boots from the newest `debian-12` image and installs the newest Docker engine, containerd, buildx and compose packages the repository offers when Terraform runs. A replacement host can therefore differ from the one it replaces, and a newer image family would replace the VM. For a regulated or high-assurance client, pin the inputs (#46):
+
+- `MODEL_GARDEN_HOST_IMAGE` (a GitHub repository variable, passed as `host_image`): an approved immutable image name such as `debian-12-bookworm-v20260101`, from `host_image_project` (default `debian-cloud`). Empty keeps the family.
+- `MODEL_GARDEN_DOCKER_PACKAGE_VERSIONS` (passed as `docker_package_versions`): a JSON map from `docker-ce`, `docker-ce-cli`, `containerd.io`, `docker-buildx-plugin` and `docker-compose-plugin` to exact apt versions, for example `{"docker-ce":"5:27.3.1-1~debian.12~bookworm"}`. A package left out installs the newest available.
+
+Each deployment records what the host was built from: the `model-garden-host-bom` instance metadata, the `host_bom` Terraform output and the deploy job's summary (the image name, numeric id and whether it was pinned, plus the version of each Docker package, empty when unpinned). To check a running host against it:
+
+```bash
+terraform -chdir=infra/docker-host/gcp output -json host_bom > host-bom.json
+# on the host (or capture the same output over IAP SSH and pass --dpkg / --os-release):
+python3 scripts/host-bom.py collect --image-id "$(gcloud compute disks describe DISK --zone ZONE --format='value(sourceImageId)')" > observed.json
+python3 scripts/host-bom.py verify --bom host-bom.json --observed observed.json --require-pinned
+python3 scripts/host-bom.py evidence --bom host-bom.json --observed observed.json --commit "$GITHUB_SHA" > host-bom-evidence.json
+```
+
+`verify` fails on any pinned input that differs and, with `--require-pinned`, on any that was left unpinned; `evidence` writes the approved inputs, what was observed and the result with a SHA-256 for the release evidence pack. Updating the pinned versions is a deliberate release change, not a permanent freeze. This shows a host consumed the approved versions; it is not bit-for-bit reproducibility or supply-chain certification, and the repository has not yet rebuilt a fresh production-shaped host from recorded inputs and passed the live acceptance path (the assurance registry lists `host_reproducibility` as live-proof pending).
+
 ## Current scope
 
 GCP is the first production-shaped implementation of this contract. AWS/Azure should use the same external contract—one temporary bootstrap credential, remote state, GitHub OIDC/federation, an isolated Docker host and cloud-native remote execution—only when a client or Model Garden deployment actually requires those providers. Do not reintroduce Kubernetes merely to make the clouds look symmetrical.

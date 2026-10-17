@@ -99,6 +99,14 @@ manual_evidence:
     owner: Model Garden business/security owner
     review_interval_days: 365
     expected_evidence: Current in-scope certificate and surveillance/audit evidence.
+  host_reproducibility:
+    owner: Model Garden operator
+    review_interval_days: 90
+    expected_evidence: A replacement production-shaped host rebuilt from the recorded approved image and Docker package versions, the scripts/host-bom.py evidence record showing it consumed them, and the live acceptance run.
+  repository_governance:
+    owner: Model Garden security owner
+    review_interval_days: 90
+    expected_evidence: The exported main ruleset checked with scripts/repo-governance-check.py, repository audit-log records of ruleset and bypass changes, and the named operating limitation while no second qualified maintainer exists.
   cyber_insurance:
     owner: Model Garden business owner
     review_interval_days: 365

@@ -95,7 +95,10 @@ jobs:
           if [[ "$MODEL_GARDEN_ENVIRONMENT" == "prod" ]]; then
             deletion_protection=true
           fi
+          # Approved host inputs are optional: unset, the host resolves the newest Debian 12 image and Docker packages at rebuild time.
+          export TF_VAR_docker_package_versions='${{ vars.MODEL_GARDEN_DOCKER_PACKAGE_VERSIONS || '{}' }}'
           terraform -chdir="$module" apply -auto-approve -input=false \
+            -var="host_image=${{ vars.MODEL_GARDEN_HOST_IMAGE || '' }}" \
             -var="project_id=${{ vars.GCP_PROJECT_ID }}" \
             -var="region=${{ vars.GCP_REGION }}" \
             -var="zone=${{ vars.GCP_ZONE }}" \
@@ -108,6 +111,12 @@ jobs:
             -var="ledger_export_enabled=${{ vars.MODEL_GARDEN_LEDGER_EXPORT || 'false' }}" \
             -var="export_retention_days=${{ vars.MODEL_GARDEN_EXPORT_RETENTION_DAYS || '365' }}" \
             -var="export_lock_retention=${{ vars.MODEL_GARDEN_EXPORT_LOCK_RETENTION || 'false' }}"
+          {
+            echo '### Docker host inputs (host BOM)'
+            echo '```json'
+            terraform -chdir="$module" output -json host_bom
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
           echo "instance=$(terraform -chdir="$module" output -raw instance_name)" >> "$GITHUB_OUTPUT"
           echo "zone=$(terraform -chdir="$module" output -raw zone)" >> "$GITHUB_OUTPUT"
 

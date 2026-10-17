@@ -27,6 +27,23 @@ locals {
     managed_by       = "terraform"
     infra_owner      = var.infrastructure_owner
   }
+  # The Docker engine packages the host installs. An approved version pins that package exactly; any package left out resolves to the
+  # newest the Docker repository offers at bootstrap time, which `host_bom` then reports as unpinned.
+  docker_packages = ["docker-ce", "docker-ce-cli", "containerd.io", "docker-buildx-plugin", "docker-compose-plugin"]
+  docker_install = join(" ", [
+    for name in local.docker_packages :
+    lookup(var.docker_package_versions, name, "") == "" ? name : "${name}=${var.docker_package_versions[name]}"
+  ])
+  host_bom = {
+    schemaVersion = 1
+    image = {
+      name     = data.google_compute_image.debian.name
+      id       = data.google_compute_image.debian.image_id
+      selfLink = data.google_compute_image.debian.self_link
+      pinned   = var.host_image != ""
+    }
+    docker = { for name in local.docker_packages : name => lookup(var.docker_package_versions, name, "") }
+  }
   startup_script = <<-EOT
     #!/bin/bash
     set -euo pipefail
@@ -39,7 +56,7 @@ locals {
     . /etc/os-release
     echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/debian $VERSION_CODENAME stable" > /etc/apt/sources.list.d/docker.list
     apt-get update
-    apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+    apt-get install -y ${local.docker_install}
     systemctl enable --now docker
     mkdir -p /opt/model-garden
     chmod 0755 /opt/model-garden
@@ -48,9 +65,12 @@ locals {
   EOT
 }
 
+# With `host_image` empty (the default) the boot image is the newest debian-12 image at the time Terraform runs, so a replacement host
+# can differ from the one it replaces. Naming an approved image makes the rebuild input explicit and recordable.
 data "google_compute_image" "debian" {
-  family  = "debian-12"
-  project = "debian-cloud"
+  family  = var.host_image == "" ? "debian-12" : null
+  name    = var.host_image == "" ? null : var.host_image
+  project = var.host_image_project
 }
 
 resource "google_compute_network" "main" {
@@ -132,6 +152,7 @@ resource "google_compute_instance" "runtime" {
     block-project-ssh-keys   = "TRUE"
     model-garden-client      = var.client_slug
     model-garden-environment = var.environment
+    model-garden-host-bom    = jsonencode(local.host_bom)
   }
 
   metadata_startup_script = local.startup_script
@@ -238,10 +259,43 @@ variable "subnet_cidr" {
   default     = "10.70.0.0/24"
 }
 
+variable "host_image" {
+  type        = string
+  description = "Approved immutable boot image name (for example debian-12-bookworm-v20260101). Empty keeps the debian-12 family, which resolves to whatever is newest at rebuild time."
+  default     = ""
+
+  validation {
+    condition     = var.host_image == "" || can(regex("^[a-z]([-a-z0-9]{0,61}[a-z0-9])?$", var.host_image))
+    error_message = "host_image must be an image name (lowercase letters, digits and hyphens), not a family or a URL."
+  }
+}
+
+variable "host_image_project" {
+  type        = string
+  description = "Project that publishes host_image or the debian-12 family."
+  default     = "debian-cloud"
+}
+
+variable "docker_package_versions" {
+  type        = map(string)
+  description = "Exact versions for docker-ce, docker-ce-cli, containerd.io, docker-buildx-plugin and docker-compose-plugin (as apt reports them). Packages left out install the newest available."
+  default     = {}
+
+  validation {
+    condition     = alltrue([for name, version in var.docker_package_versions : contains(["docker-ce", "docker-ce-cli", "containerd.io", "docker-buildx-plugin", "docker-compose-plugin"], name) && can(regex("^[0-9][A-Za-z0-9.+~:-]{0,63}$", version))])
+    error_message = "docker_package_versions may only name the five Docker packages, each with an apt version such as 5:27.3.1-1~debian.12~bookworm."
+  }
+}
+
 variable "deletion_protection" {
   type        = bool
   description = "Protect the VM from accidental Terraform deletion; required for prod."
   default     = false
+}
+
+output "host_bom" {
+  description = "The approved inputs this host was built from: the boot image and the Docker package versions. Verify a running host against it with scripts/host-bom.py."
+  value       = local.host_bom
 }
 
 output "instance_name" {
