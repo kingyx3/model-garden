@@ -147,6 +147,50 @@ class DeployClientDockerTests(unittest.TestCase):
                 }))["secret://coworker-api/dev"], "k" * 32,
             )
 
+    def test_opt_in_gateway_publishes_on_loopback_and_keeps_secrets_out_of_the_bundle(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            profile = self._profile(root, tools=("kb.search",))
+            gateway = {
+                "enabled": True, "public_origin": "https://chat.acme.example", "coworker_api_key_ref": "secret://coworker-api/dev",
+                "secrets": {"slack_signing_secret_ref": "secret://slack/signing", "slack_bot_token_ref": "secret://slack/bot",
+                            "webchat_key_ref": "secret://webchat/key"},
+                "directory": {"slack": {"T01/U01": {"identity": "alice@acme.example", "roles": ["approver"]}}},
+                "slack": {"bot_user_id": "U0BOT0001"},
+                "web": {"allowed_addresses": ["alice@acme.example"], "mail": {"from": "chat@acme.example", "host": "smtp.acme.example"}},
+                "mailbox": {"addresses": ["support@acme.example"]},
+            }
+            worker = {"enabled": True, "coworker_api_key_ref": "secret://coworker-api/dev"}
+            binding = self._binding(root, {"gateway": gateway, "worker": worker})
+            metadata = deployer.render_bundle(profile, binding, root / "bundle", "acme-dev")
+            compose = yaml.safe_load((root / "bundle" / "compose.yaml").read_text(encoding="utf-8"))
+            self.assertTrue(metadata["channelGateway"])
+            service = compose["services"]["channel-gateway"]
+            self.assertEqual(service["ports"], ["127.0.0.1:8080:8080", "127.0.0.1:2525:2525"])
+            self.assertIn("gateway.py", " ".join(service["entrypoint"]))
+            self.assertTrue(service["environment"]["MODEL_GARDEN_SLACK_BOT_TOKEN"].startswith("${MODEL_GARDEN_SLACK_BOT_TOKEN:?"))
+            self.assertIn("MODEL_GARDEN_SLACK_BOT_TOKEN", compose["services"]["governed-worker"]["environment"])
+            config = json.loads((root / "bundle" / "profile" / ".modelgarden" / "gateway.json").read_text(encoding="utf-8"))
+            self.assertEqual(config["slack"]["botUserId"], "U0BOT0001")
+            self.assertEqual(config["coworker"], {"url": "http://coworker-api:8642/v1"})
+            self.assertNotIn("secret://", json.dumps(config))
+            self.assertTrue((root / "bundle" / "model-garden-platform" / "platform" / "channels" / "ingress.py").is_file())
+            self.assertTrue((root / "bundle" / "model-garden-platform" / "platform" / "core" / "schedule_commands.py").is_file())
+
+    def test_gateway_rejects_missing_secrets_unknown_settings_and_public_binds_that_are_not_addresses(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            profile = self._profile(root)
+            slack = {"enabled": True, "slack": {"bot_user_id": "U0BOT0001"}}
+            with self.assertRaisesRegex(ValueError, "needs secrets"):
+                deployer.render_bundle(profile, self._binding(root, {"gateway": slack}), root / "a", "acme-dev")
+            with self.assertRaisesRegex(ValueError, "unknown gateway settings"):
+                deployer.render_bundle(profile, self._binding(root, {"gateway": {**slack, "token": "x"}}), root / "b", "acme-dev")
+            with self.assertRaisesRegex(ValueError, "IPv4"):
+                deployer.render_bundle(profile, self._binding(root, {"gateway": {**slack, "bind": "all"}}), root / "c", "acme-dev")
+            with self.assertRaisesRegex(ValueError, "secret://"):
+                deployer.render_bundle(profile, self._binding(root, {"gateway": {**slack, "secrets": {"slack_bot_token_ref": "plain"}}}), root / "d", "acme-dev")
+
     def test_worker_is_off_unless_enabled_and_rejects_unknown_settings(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = pathlib.Path(tmp)

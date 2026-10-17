@@ -1,7 +1,6 @@
 """Built-in web chat authentication and adapter on the shared channel contract.
 
-The hosted page, HTTP server and delivery of the sign-in email are deployment concerns and are not built
-here. This module is the part that decides *who is typing*:
+The hosted page, HTTP server and sign-in email are in the channel gateway (``platform/runtime/gateway.py``). This module is the part that decides *who is typing*:
 
 - **Magic-link sign-in, no passwords.** A sign-in link can be issued only for an address on the client's
   allow-list (``issue_login`` returns ``None`` for anyone else, so the page can say the same thing in both

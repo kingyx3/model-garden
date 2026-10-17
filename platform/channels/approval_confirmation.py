@@ -4,8 +4,7 @@
 approver address. Mail scanners, link previewers and some clients fetch every link in a message, so a link that acts on a GET would
 be spent, or worse approve, before the person ever reads it. This is the request handler for the page behind the link. It is a pure
 function from an HTTP-shaped request to an HTTP-shaped response: it opens no socket, serves nothing, sends no mail and holds no
-credential beyond the ``ApprovalLinks`` it is given. The deployment's web server, once there is one, calls ``handle``. It is **not
-wired into a server or a mail provider**, and no real approval email has had live proof.
+credential beyond the ``ApprovalLinks`` it is given. The channel gateway (``platform/runtime/gateway.py``) serves it at ``/approvals/confirm`` and calls ``handle``. It is served by the gateway but **not live-proven**: no real approval email has been sent through it.
 
 - **GET never decides.** A GET verifies the token without spending it (``ApprovalLinks.peek``) and shows what would be decided and
   who is deciding, with one button. Fetching the link any number of times changes nothing.

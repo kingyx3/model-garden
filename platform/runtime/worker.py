@@ -75,6 +75,7 @@ def _module(key: str):
         "text": "platform/channels/text_channel.py",
         "coworker": "platform/runtime/coworker_client.py",
         "sidecar": "platform/runtime/governed_mcp.py",
+        "transports": "platform/channels/transports.py",
     }
     return _load(f"model_garden_worker_{key}", paths[key])
 
@@ -416,7 +417,10 @@ def build(args: argparse.Namespace, environ: Mapping[str, str]) -> Worker:
     if settings:
         key = environ.get("MODEL_GARDEN_COWORKER_API_KEY", "")
         coworker = _module("coworker").CoworkerClient(settings["url"], key, model=settings.get("model", "hermes-agent"))
-    return Worker(args.desired_state, args.data_root, config, coworker=coworker)
+    senders: dict[str, Any] = {}
+    if environ.get("MODEL_GARDEN_SLACK_BOT_TOKEN"):  # notices to a person's Slack direct-message channel (see the channel gateway)
+        senders["slack"] = _module("transports").SlackTransport(environ["MODEL_GARDEN_SLACK_BOT_TOKEN"]).send_text
+    return Worker(args.desired_state, args.data_root, config, coworker=coworker, senders=senders)
 
 
 def main(argv: list[str] | None = None) -> int:

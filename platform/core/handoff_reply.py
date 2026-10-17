@@ -4,8 +4,8 @@ The hand-off store, the notices and the delivery runner already get a request to
 What was missing is the way back: the person says ``done`` or ``declined`` where they were told, and that answer
 closes the record under *their* identity instead of an identity an operator typed. This module is that return path. It
 holds no credential, imports no provider and sends nothing; the channel adapter hands it a message the adapter has
-already authenticated, and the caller sends back the one-line ``reply`` it returns. It is **not wired into the sidecar
-or a channel adapter**, and no real channel reply has had live proof.
+already authenticated, and the caller sends back the one-line ``reply`` it returns. The channel gateway (``channels/ingress.py``) routes a verified direct message to it; **no real channel
+reply has had live proof**.
 
 A reply is one line: ``done <ref>``, ``declined <ref> [note]`` or ``seen <ref>`` where ``<ref>`` is the reference printed
 in the notice (at least 8 characters of the hand-off id).

@@ -3,7 +3,8 @@
 A person who asked "send me a pipeline summary every Monday" should be able to see, stop and remove that without an operator.
 This is the credential-free command layer on top of ``schedules.ScheduleStore``. It parses one narrow, explicit syntax and
 returns the plain-text reply for the channel; anything that is not one of these commands returns ``None`` so the message
-goes to the coworker as usual. It is **not wired to a channel or the sidecar**, and there is no natural-language parsing.
+goes to the coworker as usual. The channel gateway (``channels/ingress.py``) routes a verified message to it for a mapped person; there is no natural-language parsing and
+no real channel has had live proof.
 
     schedules                                  list your schedules
     schedule create <cron> | <budget> | <goal>
