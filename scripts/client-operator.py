@@ -524,6 +524,61 @@ def runtime_artifacts(
     return 0
 
 
+CONVERSATION_COMMANDS = {"stats", "review", "timeline", "confirm", "dismiss", "erase", "purge"}
+CONVERSATION_ID = re.compile(r"^cv-[0-9a-f]{20}$")
+REVIEW_ID = re.compile(r"^rv-[0-9a-f]{16}$")
+CUSTOMER_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:@/+-]{0,127}$")
+
+
+def runtime_conversations(
+    project_name: str,
+    command: str,
+    *,
+    target: str | None = None,
+    conversation: str | None = None,
+    customer: str | None = None,
+    older_than_days: int | None = None,
+    by: str | None = None,
+) -> int:
+    """Show or manage the cross-channel conversation timeline (references only); changes are ledgered under the named person."""
+    if command not in CONVERSATION_COMMANDS:
+        raise ValueError("conversations command must be one of " + ", ".join(sorted(CONVERSATION_COMMANDS)))
+    if conversation is not None and not CONVERSATION_ID.fullmatch(conversation):
+        raise ValueError("--conversation must look like cv-0123456789abcdef0123")
+    if customer is not None and not CUSTOMER_ID.fullmatch(customer):
+        raise ValueError("--customer must be a short customer id")
+    if command in {"confirm", "dismiss"} and not (isinstance(target, str) and REVIEW_ID.fullmatch(target)):
+        raise ValueError("a review id like rv-0123456789abcdef is required")
+    if command in {"confirm", "dismiss", "erase", "purge"} and not (isinstance(by, str) and ARTIFACT_PERSON.fullmatch(by.strip())):
+        raise ValueError("--by must name the person deciding")
+    if command == "timeline" and (conversation is None) == (customer is None):
+        raise ValueError("timeline needs exactly one of --conversation or --customer")
+    if command == "erase" and (conversation is None) == (customer is None):
+        raise ValueError("erase needs exactly one of --conversation or --customer")
+    if command == "confirm" and customer is None:
+        raise ValueError("confirm needs --customer")
+    if command == "purge" and not (isinstance(older_than_days, int) and 1 <= older_than_days <= 3650):
+        raise ValueError("--older-than-days is between 1 and 3650")
+    container = _governed_tool_container(project_name)
+    inner = ["python", "/opt/model-garden-platform/scripts/runtime-conversations.py", "/opt/data/.modelgarden/conversations", command]
+    if command in {"confirm", "dismiss"}:
+        inner.append(target)
+    if conversation:
+        inner.extend(["--conversation", conversation])
+    if customer:
+        inner.extend(["--customer", customer])
+    if command == "purge":
+        inner.extend(["--older-than-days", str(older_than_days)])
+    if command in {"confirm", "dismiss", "erase", "purge"}:
+        inner.extend(["--by", by.strip()])
+    result = _run(["docker", "exec", container, *inner])
+    if result.returncode != 0:
+        raise ValueError(result.stderr.strip() or result.stdout.strip() or "runtime conversations command failed")
+    if result.stdout:
+        print(result.stdout.strip())
+    return 0
+
+
 NOTICE_KINDS = ("assigned", "reminder", "escalation")
 CHANNEL_NAME = re.compile(r"^[a-z][a-z0-9-]{0,31}$")
 
@@ -842,6 +897,16 @@ def main() -> int:
     artifacts.add_argument("--project-name", required=True)
     artifacts.add_argument("--by", help="the named administrator for delete")
     artifacts.add_argument("--requested-by", help="list only what this person asked for")
+    conversations = sub.add_parser(
+        "conversations", help="show or manage the cross-channel conversation timeline: review queue, timelines, erasure (references only; run on the client host)"
+    )
+    conversations.add_argument("action", choices=sorted(CONVERSATION_COMMANDS))
+    conversations.add_argument("target", nargs="?", help="the review id (rv-...) for confirm or dismiss")
+    conversations.add_argument("--project-name", required=True)
+    conversations.add_argument("--conversation", help="a conversation id (cv-...)")
+    conversations.add_argument("--customer", help="a customer id")
+    conversations.add_argument("--older-than-days", type=int, help="retention: remove conversations older than this")
+    conversations.add_argument("--by", help="the named person deciding, for confirm, dismiss, erase and purge")
     inbox = sub.add_parser("inbox", help="show everything waiting for a person: approvals, hand-offs, records to review")
     inbox.add_argument("--project-name", required=True)
     inbox.add_argument("--json", action="store_true")
@@ -1017,6 +1082,11 @@ def main() -> int:
             )
         if args.command == "memory":
             return runtime_memory(args.project_name, args.action, scopes=tuple(args.scope), memory_id=args.memory_id, by=args.by)
+        if args.command == "conversations":
+            return runtime_conversations(
+                args.project_name, args.action, target=args.target, conversation=args.conversation, customer=args.customer,
+                older_than_days=args.older_than_days, by=args.by,
+            )
         if args.command == "artifacts":
             return runtime_artifacts(args.project_name, args.action, artifact_id=args.artifact_id, by=args.by, requested_by=args.requested_by)
         if args.command == "inbox":
