@@ -20,6 +20,7 @@ SCHEMAS = {
     "Tool": "tool.schema.json",
     "KnowledgeSource": "knowledge-source.schema.json",
     "Policy": "policy.schema.json",
+    "Schedule": "schedule.schema.json",
 }
 
 

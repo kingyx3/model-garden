@@ -2,8 +2,8 @@
 
 When a coworker produces a report or spreadsheet and the client has no Drive or SharePoint bound, the file has to
 land somewhere a person can fetch it, and the work has to be accountable (#77, #101). This is that place. It is a
-credential-free store with tests; it is **not yet behind** ``docs.create``/``files.*`` on the governed sidecar,
-and it does not deliver a link into a channel.
+credential-free store with tests. ``docs.create`` is served from it on the governed sidecar when ``docs`` is bound to the
+built-in provider (``create_document``, below); ``files.*`` is not, and it does not deliver a link into a channel.
 
 - **One tenant per directory.** Files and the index live under ``<root>/<tenant>/`` (mode 0700, files 0600). An
   index for another tenant is refused. Names are display labels only: the file on disk is named by the artifact
@@ -32,6 +32,8 @@ from collections.abc import Callable, Iterator, Sequence
 from typing import Any
 
 SCHEMA_VERSION = 1
+PROVIDER_ID = "built-in-artifacts"
+MAX_DOCUMENT_CHARS = 200_000
 MAX_BYTES = 10 * 1024 * 1024
 MAX_ARTIFACTS = 2000
 MAX_SOURCES = 20
@@ -258,3 +260,29 @@ class ArtifactStore:
         for entry in expired:
             self._record("artifact.expire", "runtime:retention", {"artifactId": entry["id"], "sha256": entry["sha256"], "expiresAt": entry["expiresAt"]})
         return {"expired": len(expired)}
+
+
+def create_document(
+    store: "ArtifactStore", *, title: str, content: str, agent: str, requested_by: str, sources: Sequence[str] = (),
+) -> dict[str, Any]:
+    """The Tier 0 body of the portable ``docs.create`` Tool: a Markdown document stored for the requester.
+
+    ``documentId`` is the artifact's ``tier0:<tenant>/<id>`` location, which is what a person (or a channel reply) uses to find
+    it; the same title and text from the same requester return the same document. Plain Markdown only: no active content, and
+    the size is bounded before anything is written. Only identifiers go to the ledger (the store records them), never the text.
+    """
+    if not isinstance(title, str) or not title.strip():
+        raise ArtifactError("a document needs a title")
+    if not isinstance(content, str) or not content.strip():
+        raise ArtifactError("a document needs content")
+    if len(content) > MAX_DOCUMENT_CHARS:
+        raise ArtifactError(f"a document is at most {MAX_DOCUMENT_CHARS} characters")
+    label = _display_name(title.strip() if title.strip().lower().endswith(".md") else title.strip() + ".md")
+    entry = store.put(
+        name=label, content=content.encode("utf-8"), media_type="text/markdown", agent=agent, requested_by=requested_by,
+        sources=sources,
+    )
+    return {
+        "documentId": entry["location"], "artifactId": entry["id"], "name": entry["name"], "bytes": entry["bytes"],
+        "sha256": entry["sha256"], "expiresAt": entry["expiresAt"], "duplicate": bool(entry.get("duplicate")),
+    }

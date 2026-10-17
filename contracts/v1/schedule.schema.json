@@ -1,0 +1,50 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://modelgarden.ai/schemas/v1/schedule.schema.json",
+  "title": "Model Garden Schedule v1",
+  "description": "A workspace-managed scheduled or event-triggered coworker task: exactly one of cron or event, a named owning principal whose authority bounds every run, and a required per-run budget.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["apiVersion", "kind", "metadata", "spec"],
+  "properties": {
+    "apiVersion": {"const": "modelgarden.ai/v1"},
+    "kind": {"const": "Schedule"},
+    "metadata": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name"],
+      "properties": {
+        "name": {"type": "string", "pattern": "^[a-z0-9][a-z0-9-]{0,62}$"},
+        "description": {"type": "string", "maxLength": 500}
+      }
+    },
+    "spec": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["agent", "owner", "goal", "budget"],
+      "properties": {
+        "agent": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"},
+        "owner": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/+-]{0,127}$", "description": "The named principal whose current permissions bound every run; losing a permission stops the next run."},
+        "goal": {"type": "string", "minLength": 1, "maxLength": 500},
+        "cron": {"type": "string", "minLength": 9, "maxLength": 100, "description": "Five fields in UTC; fires closer together than 15 minutes are refused."},
+        "event": {"enum": ["mail.received", "ticket.created", "chat.message"]},
+        "maxPerHour": {"type": "integer", "minimum": 1, "maximum": 60},
+        "budget": {
+          "type": "object",
+          "additionalProperties": false,
+          "minProperties": 1,
+          "properties": {
+            "tokens": {"type": "integer", "minimum": 1},
+            "costCents": {"type": "integer", "minimum": 1},
+            "steps": {"type": "integer", "minimum": 1}
+          }
+        },
+        "requiredCapabilities": {"type": "array", "items": {"type": "string", "minLength": 1}, "uniqueItems": true, "description": "Tool names the run needs; each must be a Tool the Agent selects."}
+      },
+      "oneOf": [
+        {"required": ["cron"], "not": {"required": ["event"]}},
+        {"required": ["event"], "not": {"required": ["cron"]}}
+      ]
+    }
+  }
+}

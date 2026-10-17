@@ -93,6 +93,22 @@
       }
     },
     {
+      "id": "built-in-artifacts",
+      "name": "Built-in document store",
+      "family": "docs",
+      "method": "built-in",
+      "tier": 0,
+      "status": "built-credential-free",
+      "tools": [
+        "docs.create"
+      ],
+      "issue": 77,
+      "adapter": "platform/core/artifacts.py",
+      "scopeByTool": {
+        "docs.create": []
+      }
+    },
+    {
       "id": "gmail",
       "name": "Gmail",
       "family": "mail",

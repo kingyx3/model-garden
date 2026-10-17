@@ -26,6 +26,7 @@ MCP_TOOL_NAMES = {
     "crm.read": "crm_read",
     "crm.create": "crm_create",
     "crm.log-interaction": "crm_log_interaction",
+    "docs.create": "docs_create",
 }
 # Platform built-ins exposed whenever the governed Tool sidecar is present.
 PLATFORM_MCP_TOOLS = ("platform_capabilities", "handoff_request", "handoff_status")
