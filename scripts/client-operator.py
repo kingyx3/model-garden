@@ -700,6 +700,78 @@ def runtime_grants(project_name: str, command: str, *, agent: str | None = None,
     return 0
 
 
+def _audit_module():
+    path = ROOT / "platform" / "core" / "audit_query.py"
+    name = "modelgarden_audit_query"
+    module = sys.modules.get(name)
+    if module is None:
+        spec = importlib.util.spec_from_file_location(name, path)
+        module = importlib.util.module_from_spec(spec)
+        assert spec.loader is not None
+        sys.modules[name] = module
+        spec.loader.exec_module(module)
+    return module
+
+
+def runtime_audit(args: argparse.Namespace) -> int:
+    """Ask the Action Ledger: filtered query, task timeline, policy replay, sandbox dry-run, CSV/JSON export (read-only)."""
+    audit = _audit_module()
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as scratch:
+        if args.ledger is not None:
+            ledger_path = args.ledger
+        else:
+            if not args.project_name:
+                raise ValueError("give --ledger (a ledger or export file) or --project-name (read it from the running client)")
+            container = _governed_tool_container(args.project_name)
+            fetched = _run(["docker", "exec", container, "cat", "/opt/data/.modelgarden/audit.jsonl"])
+            if fetched.returncode != 0:
+                raise ValueError(fetched.stderr.strip() or "cannot read the ledger from the client runtime")
+            ledger_path = pathlib.Path(scratch) / "audit.jsonl"
+            ledger_path.write_text(fetched.stdout, encoding="utf-8")
+        verdict = audit.verify(ledger_path)
+        if not verdict["valid"] and not args.allow_unverified:
+            raise ValueError(f"the ledger chain does not verify ({verdict.get('error')}); fix that first or pass --allow-unverified to look anyway")
+        events = audit.read_ledger(ledger_path)
+        criteria = audit.Filter(
+            agent=args.agent, principal=args.principal, approver=args.approver, capability=args.capability, provider=args.provider,
+            tool=args.tool, event=args.event_type, outcome=args.outcome, since=args.since, until=args.until, task=args.task,
+            correlation=args.correlation, external_object=args.external_object, request=args.request,
+        )
+        scoped = audit.query(events, criteria)
+        mode, columns = args.audit_command, audit.EVENT_COLUMNS
+        if mode == "query":
+            document: Any = {"chain": {k: verdict.get(k) for k in ("valid", "events", "headHash")}, "matched": len(scoped), "events": scoped}
+            rows = audit.event_rows(scoped)
+        elif mode == "timeline":
+            document = audit.timeline(events, task=args.task, correlation=args.correlation)
+            rows = [{key: step.get(key) for key in ("sequence", "timestamp", "event", "outcome", "agent", "tool", "requestId")} for step in document["steps"]]
+            columns = ("sequence", "timestamp", "event", "outcome", "agent", "tool", "requestId")
+        elif mode in ("replay-policy", "replay-dry-run"):
+            if args.desired_state is None and mode == "replay-policy":
+                raise ValueError("replay-policy needs --desired-state (the current or a historical compiled desired state)")
+            if mode == "replay-policy":
+                desired = json.loads(args.desired_state.read_text(encoding="utf-8"))
+                document = audit.replay_policy(scoped, desired)
+                rows = [{"requestId": d["requestId"], "agent": d["agent"], "tool": d["tool"], "recorded": d["recorded"]["decision"],
+                         "replayed": d["replayed"]["decision"], "inputsIncomplete": d["inputsIncomplete"]} for d in document["differences"]]
+                columns = ("requestId", "agent", "tool", "recorded", "replayed", "inputsIncomplete")
+            else:
+                document = audit.dry_run_replay(scoped, {}, default=audit.MockConnector())
+                rows = [{key: step.get(key) for key in ("requestId", "sequence", "tool", "recorded", "status")} for step in document["steps"]]
+                columns = ("requestId", "sequence", "tool", "recorded", "status")
+        else:
+            raise ValueError("unknown audit command")
+    text = audit.to_csv(rows, columns) if args.format == "csv" else audit.to_json(document)
+    if args.output:
+        args.output.write_text(text, encoding="utf-8")
+        print(f"Wrote {args.output}")
+    else:
+        sys.stdout.write(text)
+    return 0
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
@@ -837,6 +909,22 @@ def main() -> int:
     connection.add_argument("--actor", required=True)
     connection.add_argument("--reason")
 
+    audit = sub.add_parser(
+        "audit",
+        help="query the Action Ledger: filter, task timeline, policy replay, sandbox dry-run, CSV/JSON export (read-only)",
+    )
+    audit.add_argument("audit_command", choices=("query", "timeline", "replay-policy", "replay-dry-run"))
+    audit.add_argument("--ledger", type=pathlib.Path, help="a ledger or export file (otherwise read from --project-name)")
+    audit.add_argument("--project-name")
+    audit.add_argument("--desired-state", type=pathlib.Path, help="compiled desired state to replay policy against (current or historical)")
+    audit.add_argument("--format", choices=("json", "csv"), default="json")
+    audit.add_argument("--output", type=pathlib.Path)
+    audit.add_argument("--allow-unverified", action="store_true", help="look at a ledger whose chain does not verify")
+    for flag in ("agent", "principal", "approver", "capability", "provider", "tool", "outcome", "since", "until", "task", "correlation",
+                 "external-object", "request"):
+        audit.add_argument(f"--{flag}")
+    audit.add_argument("--event-type", help="authorization, approval, execution, read, handoff, policy-change, operator-action")
+
     args = parser.parse_args()
     try:
         if args.command == "skills":
@@ -904,6 +992,8 @@ def main() -> int:
             return runtime_connection(args.project_name, "list")
         if args.command == "offboard":
             return runtime_connection(args.project_name, "offboard", actor=args.actor, reason=args.reason, agent=args.agent)
+        if args.command == "audit":
+            return runtime_audit(args)
         if args.command == "grants":
             return runtime_grants(args.project_name, args.grants_command, agent=args.agent, grant_id=args.grant_id, actor=args.actor)
         if args.command == "connection":

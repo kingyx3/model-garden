@@ -227,6 +227,18 @@ This enables enterprise showback and incident reconstruction without placing pri
 
 A shared consumption pool is only a commercial/accounting grouping. It never weakens per-Agent action audit, approval rules or client/environment isolation.
 
+### Audit query, task timeline and replay (v0.8.19)
+
+`client-operator.py audit` asks the Action Ledger without touching a live system (`platform/core/audit_query.py`). Give it `--ledger <file>` (the ledger or an export) or `--project-name` to read the running client's ledger; it verifies the hash chain first and refuses a ledger that does not verify unless `--allow-unverified` is passed.
+
+- `audit query` filters by `--agent`, `--principal`, `--approver`, `--capability`, `--provider`, `--tool`, `--event-type`, `--outcome`, `--since`/`--until`, `--task`, `--correlation`, `--external-object` and `--request`.
+- `audit timeline --task T` (or `--correlation C`) joins reads, delegation chains, approvals, executions, hand-offs and any usage (`tokens`, `costCents`, `steps`) the events report across Agents, in ledger order.
+- `audit replay-policy --desired-state <compiled state>` re-evaluates each recorded authorization against the current or a historical compiled policy and lists the differences. Arguments are redacted in the ledger, so when a policy has conditional rules the affected results are marked `inputsIncomplete` rather than claimed as matches. The access level actually applied is now recorded on each event (`ledger.principalAccess`).
+- `audit replay-dry-run` walks recorded executions against sandbox connectors only; anything that is not a `SandboxConnector` is refused when the replay is built, it writes nothing to the ledger, and steps with redacted arguments are skipped unless the sandbox accepts them. The CLI uses a mock that makes no network call.
+- `--format csv` (spreadsheet formulas neutralised) or `--format json`, with `--output`, gives DDQ and auditor evidence.
+
+What remains is evidence, not code: a real multi-Agent client producing delegation chains (#71), and attributing each action to the external provider's acting identity (#129).
+
 ## Current evidence boundary
 
 Credential-free tests cover capability resolution and the manifest, ledger v3 bounds and redaction, read-event digests, channel principal mapping, Tool selection, MCP materialization, governance, versioned action audit, audit-chain tamper detection, approval identity, single-use approval behavior, bounded cost-attribution context, governance-volume isolation, Calendar connector behavior and Docker credential isolation. Metering tests cover canonical client/Agent/environment/provider attribution, shared-pool/subscription dimensions and rejection of obvious sensitive billing properties.
