@@ -410,7 +410,7 @@ class GovernedToolRuntime:
             tool_name, arguments, execute, family=family, provider=route["ledger"]["provider"],
             tier=2, justification=justification, ledger_extra={
                 key: value for key, value in route["ledger"].items() if key not in ("provider", "tier")
-            }, external_object_ref=lambda result: result.get("externalObjectRef"),
+            }, external_object_ref=MCP_EXECUTOR.receipt_reference,
             # Approvals cannot transfer to another route or credential with identical arguments.
             governance_extra={"credentialScope": hashlib.sha256(
                 f"{tenant}|{agent}|{connection_id}|{connection['revision']}|{connection['activationId']}|{route['grant']['grantId']}".encode()
