@@ -84,6 +84,7 @@ LEDGER_STRING_KEYS = (
     "connectionId",
     "actingIdentity",
     "upstreamTool",
+    "principalAccess",
 )
 LEDGER_INT_KEYS = ("tier",)
 _BOUNDED_KEYS = frozenset({"originatingPrincipal", "channel", "triggerRef", "taskId", "parentRequestId"})
@@ -747,6 +748,8 @@ def execute_action(
     family = CAPABILITIES.family_of(tool_name)
     if family is not None:
         base_ledger["capability"] = family
+    if principal_access is not None:
+        base_ledger["principalAccess"] = principal_access  # lets a later policy replay use the access level that was really applied
     base_ledger.update(ledger or {})
     base_ledger = ledger_context(base_ledger)
 
