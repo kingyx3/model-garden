@@ -333,14 +333,14 @@ def _worker_settings(binding: dict[str, Any]) -> tuple[dict[str, Any] | None, st
 GATEWAY_CONFIG_PATH = pathlib.Path(".modelgarden") / "gateway.json"
 GATEWAY_HTTP_PORT = 8080
 GATEWAY_SMTP_PORT = 2525
-GATEWAY_SECRET_ENV = {
-    "slack_signing_secret_ref": "MODEL_GARDEN_SLACK_SIGNING_SECRET",
-    "slack_bot_token_ref": "MODEL_GARDEN_SLACK_BOT_TOKEN",
-    "teams_app_secret_ref": "MODEL_GARDEN_TEAMS_APP_SECRET",
-    "webchat_key_ref": "MODEL_GARDEN_WEBCHAT_KEY",
-    "approval_link_key_ref": "MODEL_GARDEN_APPROVAL_LINK_KEY",
-    "smtp_password_ref": "MODEL_GARDEN_SMTP_PASSWORD",
-}
+GATEWAY_SECRET_ENV = dict([
+    ("slack_signing_secret_ref", "MODEL_GARDEN_SLACK_SIGNING_SECRET"),
+    ("slack_bot_token_ref", "MODEL_GARDEN_SLACK_BOT_TOKEN"),
+    ("teams_app_secret_ref", "MODEL_GARDEN_TEAMS_APP_SECRET"),
+    ("webchat_key_ref", "MODEL_GARDEN_WEBCHAT_KEY"),
+    ("approval_link_key_ref", "MODEL_GARDEN_APPROVAL_LINK_KEY"),
+    ("smtp_password_ref", "MODEL_GARDEN_SMTP_PASSWORD"),
+])
 
 
 def _gateway_settings(binding: dict[str, Any]) -> tuple[dict[str, Any] | None, dict[str, str], dict[str, str]]:
