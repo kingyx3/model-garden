@@ -21,7 +21,14 @@ is left alone). It prints the steps only a person can perform: the platform cann
 provider, delete secrets from the secret store (the output lists the secret *references* of the revoked grants
 so each can be deleted), erase local data or tear the stack down.
 
-``grants list`` shows the grants without any secret reference; ``grants revoke`` revokes one.
+Operator-only ``grants create`` provisions a separately scoped coworker grant; ``grants rotate``
+rebinds it to a fresh secret reference and ``grants health`` marks failure or
+recovery. These commands accept ONLY ``secret://`` *references*, never secret values,
+and they do not install, resolve or authorize a provider credential. The external
+secret must already be provisioned in the approved tenant vault. Every change is
+ledgered; ``grants list`` and create/rotate/health outputs are redacted by the store.
+After revocation a new grant for the same coworker/connection requires a NEW
+secret reference: the revoked one is never silently reused.
 """
 from __future__ import annotations
 
@@ -82,19 +89,25 @@ def _manifest(args: argparse.Namespace, *, required: bool) -> dict:
     return loaded if isinstance(loaded, dict) else {}
 
 
-def _registry(args: argparse.Namespace, manifest: dict, audit_path: pathlib.Path, *, required: bool):
+def _registry(args: argparse.Namespace, manifest: dict, audit_path: pathlib.Path, *, required: bool, create: bool = False):
     """The environment's grant registry, or ``None`` when none exists (single-Agent deployments before grants).
 
     ``required`` is set when the caller asked about specific grants or one coworker: an unknown environment is then an
     error rather than "no grants".
     """
-    tenant = args.tenant or READINESS.tenant_of(manifest)
+    stated = READINESS.tenant_of(manifest)
+    if args.tenant and stated and args.tenant != stated:
+        raise ValueError("the supplied tenant does not match the environment manifest")
+    tenant = args.tenant or stated
     if tenant is None:
         if required:
             raise ValueError("cannot tell which environment's grants to use; pass --tenant <client>-<environment> or --manifest")
         return None
     root = args.store / READINESS.REGISTRY_DIR
-    if not (root / f"{tenant}.grants.json").is_file():
+    target = root / f"{tenant}.grants.json"
+    if target.is_symlink() or root.is_symlink():
+        raise ValueError("grant registry cannot be a symbolic link")
+    if not target.is_file() and not create:
         return None
     return GRANTS.GrantRegistry(
         root, tenant=tenant, audit=lambda action, by, details: GOVERN.record_operator_action(audit_path, action, by, details)
@@ -123,7 +136,27 @@ def main(argv: list[str] | None = None) -> int:
     grant_revoke = grant_sub.add_parser("revoke", help="revoke one grant; no other coworker is affected")
     grant_revoke.add_argument("grant_id")
     grant_revoke.add_argument("--actor", required=True)
-    for each in (off, grant_list, grant_revoke):
+    grant_create = grant_sub.add_parser("create", help="provision one coworker's independently scoped grant (references only)")
+    grant_create.add_argument("--agent", required=True)
+    grant_create.add_argument("--family", required=True)
+    grant_create.add_argument("--provider", required=True)
+    grant_create.add_argument("--connection-id", required=True)
+    grant_create.add_argument("--isolation", choices=GRANTS.SUPPORTED_ISOLATIONS, required=True)
+    grant_create.add_argument("--acting-identity", required=True, help="provider-side coworker identity, never a token")
+    grant_create.add_argument("--secret-ref", required=True, help="secret:// vault reference, never its value")
+    grant_create.add_argument("--scope", action="append", required=True, help="portable Tool; repeat for every allowed operation")
+    grant_create.add_argument("--owner", required=True, help="person responsible for this grant")
+    grant_create.add_argument("--actor", required=True, help="operator creating the grant")
+    grant_create.add_argument("--expires-at", type=int, help="optional expiry as Unix seconds")
+    grant_rotate = grant_sub.add_parser("rotate", help="replace one coworker's existing secret reference")
+    grant_rotate.add_argument("grant_id")
+    grant_rotate.add_argument("--secret-ref", required=True, help="fresh secret:// reference; no token material")
+    grant_rotate.add_argument("--actor", required=True)
+    grant_health = grant_sub.add_parser("health", help="record provider grant health for one coworker")
+    grant_health.add_argument("grant_id")
+    grant_health.add_argument("health", choices=GRANTS.HEALTH)
+    grant_health.add_argument("--actor", required=True)
+    for each in (off, grant_list, grant_revoke, grant_create, grant_rotate, grant_health):
         each.add_argument("--manifest", type=pathlib.Path, help="capability manifest (default: MODEL_GARDEN_CAPABILITY_MANIFEST)")
         each.add_argument("--tenant", help="grant registry tenant <client>-<environment> (default: from the manifest)")
     args = parser.parse_args(argv)
@@ -144,12 +177,37 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         if args.command == "grants":
             manifest = _manifest(args, required=False)
-            registry = _registry(args, manifest, audit_path, required=True)
+            registry = _registry(args, manifest, audit_path, required=True, create=args.grants_command == "create")
             if registry is None:
+                if args.grants_command != "list":
+                    raise ValueError("no grant registry exists for this tenant; create a grant first")
                 print(json.dumps({"grants": [], "registry": "none"}, indent=2, sort_keys=True))
                 return 0
             if args.grants_command == "list":
                 print(json.dumps({"grants": registry.list(agent=args.agent)}, indent=2, sort_keys=True))
+                return 0
+            if args.grants_command == "create":
+                # A grant can only authorize known portable Tools of the named family.
+                # Unknown or cross-family scopes cannot accidentally acquire authority later.
+                scopes = sorted(set(args.scope))
+                if any(CAPABILITIES.catalog_tool(tool) is None or tool.split(".", 1)[0] != args.family for tool in scopes):
+                    raise ValueError("grant scopes must be catalogued portable Tools of the named family")
+                created = registry.create(
+                    agent=args.agent, family=args.family, provider=args.provider,
+                    connection_id=args.connection_id, isolation=args.isolation,
+                    acting_identity=args.acting_identity, secret_ref=args.secret_ref,
+                    scopes=scopes, owner=args.owner, by=args.actor,
+                    expires_at=args.expires_at, now=int(time.time()),
+                )
+                print(json.dumps({"created": created}, indent=2, sort_keys=True))
+                return 0
+            if args.grants_command == "rotate":
+                rotated = registry.rotate(args.grant_id, secret_ref=args.secret_ref, by=args.actor, now=int(time.time()))
+                print(json.dumps({"rotated": rotated}, indent=2, sort_keys=True))
+                return 0
+            if args.grants_command == "health":
+                state = registry.set_health(args.grant_id, args.health, by=args.actor)
+                print(json.dumps({"updated": state}, indent=2, sort_keys=True))
                 return 0
             revoked = registry.revoke(args.grant_id, by=args.actor, now=int(time.time()))
             print(json.dumps({"revoked": {key: revoked[key] for key in ("id", "agent", "family", "provider")}}, indent=2, sort_keys=True))

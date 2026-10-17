@@ -30,6 +30,29 @@ The runtime now resolves **only a private tenant-scoped connection ID** rather t
 
 `GovernedToolRuntime.upstream_call(connection_id, upstream_name, arguments)` resolves this state using its compiled Agent identity and tenant manifest, and rechecks status, grant, exact route revision and activation-time tool fingerprints immediately before calling the injected upstream transport. Exact-action approval IDs include a nonsecret digest of tenant, coworker, connection revision, grant ID **and a newly generated activation ID**; an approval from before disabling, reactivating or replacing a connection cannot be replayed. Failures and invalid JSON schema inputs are returned without echoing raw provider error text or confidential arguments. This is internal governance logic, **not** a shipped customer connector, self-service admin UI, credential vault, maintained live transport, or source-provider proof. Customer-facing enablement remains blocked until those stages are satisfied (#87/#158/#159/#86).
 
+## Isolated coworker grant provisioning (v0.8.11)
+
+The operator can now create, rotate, mark failed/recovered and revoke **one coworker's provider grant** without editing the private registry. This is a credential-reference and authorization **record** only: it does not create an OAuth consent, fetch or store a token, connect to an MCP server, or mark a provider live. Provision each coworker's own upstream identity and secret in the approved tenant vault first. Run inside the private governed-tools operator environment, never from Hermes/the model:
+
+```bash
+python3 scripts/runtime-connection.py /opt/data/.modelgarden grants create \
+  --tenant acme-prod --agent receptionist --family crm --provider hubspot \
+  --connection-id crm-main --isolation own-identity \
+  --acting-identity receptionist@client.example \
+  --secret-ref secret://acme/prod/receptionist-v1 \
+  --scope crm.read --scope crm.create --owner owner@client.example \
+  --actor operator@client.example
+
+python3 scripts/runtime-connection.py /opt/data/.modelgarden grants rotate g-0123456789ab \
+  --tenant acme-prod --secret-ref secret://acme/prod/receptionist-v2 --actor operator@client.example
+
+python3 scripts/runtime-connection.py /opt/data/.modelgarden grants health g-0123456789ab failed \
+  --tenant acme-prod --actor operator@client.example
+```
+
+Use `--manifest <path>` with `--tenant` to cross-check the intended environment: mismatches are refused. Creation accepts only catalogued portable Tools in the named family, only isolated `own-identity` or `isolated-grant` access (never `shared-login`), and returns a redacted public grant view. Changes are audit-logged without raw secret references or values; a `secret://` reference is **not** itself a secret. After revocation the old secret reference cannot be reused; provision a new credential reference and repeat connection review/activation as applicable. Separate client-owner consent and independently reviewed upstream schema remain mandatory. This provisioning command alone does not make external integrations live.
+
+
 ## MCP connection lifecycle hardening (v0.8.9)
 
 - **Revocation and review are fenced:** an activation can no longer commit if an operator disabled or replaced a connection during schema/grant review, even if the manifest content stayed identical. Final activation checks fresh schema approval and the independently scoped coworker grant under a state transition lock. Concurrent activations cannot silently replace each other's activation identity. Disabling discards prior activation fingerprints/identity and denies subsequent execution until owner consent and review are repeated.
