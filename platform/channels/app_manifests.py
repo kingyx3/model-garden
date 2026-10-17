@@ -17,7 +17,7 @@ deployment as ``secret://`` references).
 - **Deterministic.** The same settings always produce the same bytes (fixed zip timestamps, sorted JSON), so a reviewer can diff a regenerated
   package against the one the admin installed. The icons are plain placeholders the client replaces with its own branding.
 - **Not done here.** Creating the app, installing it, rotating its credentials (#68) and proving a live message round trip in a real
-  workspace or tenant; file upload is not wired, so the files scopes are only for a deployment that adds it.
+  workspace or tenant; Slack file upload is available when the gateway is configured with ``slack.upload_files``, and only then are the ``files:write`` scopes (``files=True``) needed; Teams file upload is not wired.
 """
 from __future__ import annotations
 

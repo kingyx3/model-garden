@@ -38,6 +38,7 @@ from typing import Any
 
 MAX_SEEN = 5000
 MAX_REPLY_CHARS = 3500
+MAX_ATTACHMENTS = 3
 Audit = Callable[[str, str, dict[str, Any]], Any]
 
 
@@ -82,8 +83,10 @@ class ChannelIngress:
         agent: str = "coworker",
         executor: Any | None = None,
         audit: Audit | None = None,
+        deliverables: Callable[[Any, Any, str], Any] | None = None,
     ) -> None:
         self._adapters = dict(adapters)
+        self._deliverables = deliverables
         self._directory = directory
         self._respond = respond
         self._decide = decide
@@ -151,6 +154,16 @@ class ChannelIngress:
             conversation_id=inbound.conversation_id, thread_id=inbound.thread_id, text=text[:MAX_REPLY_CHARS], attachments=attachments,
         ))
 
+    def _attachments(self, inbound: Any, principal: Any, answer: str) -> tuple[Any, ...]:
+        """Deliverables the reply should carry, from the injected policy; a problem here never stops the answer."""
+        if self._deliverables is None:
+            return ()
+        try:
+            return tuple(self._deliverables(inbound, principal, answer))[:MAX_ATTACHMENTS]
+        except Exception as exc:  # noqa: BLE001 - the answer itself still goes out
+            self._note("channel.deliverables-failed", "runtime:gateway", {"channel": inbound.channel, "error": type(exc).__name__})
+            return ()
+
     def _process(self, adapter: Any, inbound: Any) -> str:
         try:
             principal = self._directory.principal_for(inbound)
@@ -171,7 +184,7 @@ class ChannelIngress:
                 return "schedule-command"
             answer = self._respond(inbound, principal)
             if answer:
-                self._send(adapter, inbound, answer)
+                self._send(adapter, inbound, answer, self._attachments(inbound, principal, answer))
                 return "answered"
             return "no-answer"
         except Exception as exc:  # noqa: BLE001 - say that it failed, never what the message held
