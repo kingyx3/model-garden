@@ -70,6 +70,7 @@ def _module(key: str):
         "grants": "platform/core/provider_grants.py",
         "artifacts": "platform/core/artifacts.py",
         "spool": "platform/channels/mail_spool.py",
+        "recorder": "platform/channels/conversation_recorder.py",
         "support": "platform/channels/support_mailbox.py",
         "email": "platform/channels/email_channel.py",
         "text": "platform/channels/text_channel.py",
@@ -288,6 +289,17 @@ class Worker:
         options = {"retention_days": days} if isinstance(days, int) else {}
         return _module("artifacts").ArtifactStore(self.data / "artifacts", tenant=self.tenant, audit=self.audit, **options)
 
+    def _conversation_recorder(self):
+        """The cross-channel timeline recorder; customers link only on verified evidence, and only against the Tier 0 contact log."""
+        recorder = _module("recorder")
+        store = recorder._conversations().ConversationStore(self.data / "conversations", tenant=self.tenant, audit=self.audit)
+        try:
+            contacts = self._sidecar().crm_store()
+        except PermissionError:  # no Tier 0 contact log is bound: conversations are recorded and never linked
+            return recorder.ConversationRecorder(store, agent=self._agent())
+        # Rebuilt on each lookup so a contact a person adds while the worker runs can be matched by the next email.
+        return recorder.ConversationRecorder(store, agent=self._agent(), directory=lambda kind, digest: recorder.contacts_directory(contacts)(kind, digest))
+
     def mailbox_handler(self) -> Callable[[bytes, int], dict[str, Any]]:
         settings = self.config["mailbox"]
         email, support, text = _module("email"), _module("support"), _module("text")
@@ -325,7 +337,7 @@ class Worker:
 
         mailbox = support.SupportMailbox(
             adapter, text.PrincipalDirectory(), {"mail.draft": draft}, classify=classify, answer=answer, escalate=escalate,
-            handled=support.MessageLog(self.data / "mail-handled"), audit=self.audit,
+            handled=support.MessageLog(self.data / "mail-handled"), audit=self.audit, conversations=self._conversation_recorder(),
         )
         return lambda raw, now: mailbox.handle(raw, now=now)
 
