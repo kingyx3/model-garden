@@ -143,9 +143,9 @@ class Case(unittest.TestCase):
         with self.assertRaises(Error):
             other.resolve(attested_agent="receptionist", family="crm", tool="crm.create",
                           originator_permissions=["crm.create"], enabled_tools=["crm.create"], now=T0 + 1)
-        other_path = self.root / "globex-prod.grants.json"
-        other_path.write_text((self.root / "acme-prod.grants.json").read_text())
-        other_path.chmod(0o600)  # a store file must be private; the point of this check is the wrong tenant, not the mode
+        copied = self.root / "globex-prod.grants.json"
+        copied.write_text((self.root / "acme-prod.grants.json").read_text())
+        copied.chmod(0o600)  # The unsafe fixture must pass file permissions to reach tenant validation.
         with self.assertRaisesRegex(Error, "another tenant"):
             other.list()
         with self.assertRaises(Error):
@@ -202,7 +202,7 @@ class Case(unittest.TestCase):
         self.assertEqual(outside.read_text(), "untouched")
         self.registry.path.unlink()
         lock = self.root / ".acme-prod.grants.lock"
-        lock.unlink(missing_ok=True)  # the earlier list() already created a real lock file; replace it with a symlink
+        lock.unlink()  # A failed list() created the private lock; replace it for the symlink test.
         lock.symlink_to(outside)
         with self.assertRaises(OSError):
             self.grant()

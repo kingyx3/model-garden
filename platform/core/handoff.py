@@ -17,12 +17,16 @@ belong to the channel adapters and are not implemented here.
 from __future__ import annotations
 
 import datetime as dt
+import fcntl
 import json
 import os
 import pathlib
 import re
+import tempfile
 import time
-from typing import Any, Mapping
+import uuid
+from contextlib import contextmanager
+from typing import Any, Iterator, Mapping
 
 SCHEMA_VERSION = 1
 OUTCOMES = ("done", "declined")
@@ -47,15 +51,41 @@ def _dir(path: pathlib.Path) -> pathlib.Path:
     return path
 
 
+@contextmanager
+def _exclusive(root: pathlib.Path) -> Iterator[None]:
+    """Serialize every mutation of a tenant's hand-off store, including across worker processes.
+
+    Keep the lock in the root (not pending/): a completion moves a record between directories.
+    This runtime uses Linux/POSIX filesystem locking; the lock file is never removed.
+    """
+    folder = _dir(pathlib.Path(root))
+    flags = os.O_CREAT | os.O_RDWR | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(folder / ".lock", flags, 0o600)
+    try:
+        os.fchmod(descriptor, 0o600)
+        fcntl.flock(descriptor, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(descriptor, fcntl.LOCK_UN)
+    finally:
+        os.close(descriptor)
+
+
 def _write(path: pathlib.Path, document: Mapping[str, Any]) -> None:
+    """Private atomic replacement: never share a temporary filename with another writer."""
     _dir(path.parent)
-    temporary = path.with_suffix(".tmp")
-    descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
-        handle.write(json.dumps(document, indent=2, sort_keys=True) + "\n")
-        handle.flush()
-        os.fsync(handle.fileno())
-    os.replace(temporary, path)
+    descriptor, name = tempfile.mkstemp(prefix=f".{path.stem}-", suffix=".tmp", dir=path.parent)
+    temporary = pathlib.Path(name)
+    try:
+        os.fchmod(descriptor, 0o600)
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            handle.write(json.dumps(document, indent=2, sort_keys=True) + "\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 def _read(path: pathlib.Path) -> dict[str, Any]:
@@ -96,24 +126,26 @@ def create(
         raise HandoffError(f"deadline_hours must be an integer from 1 to {MAX_DEADLINE_HOURS}")
     handoff_id = _check_id(request.get("requestId", ""))
     pending_path = pathlib.Path(root) / "pending" / f"{handoff_id}.json"
-    if pending_path.is_file():
-        return _read(pending_path)
-    created = int(time.time()) if now is None else now
-    document: dict[str, Any] = {
-        "schemaVersion": SCHEMA_VERSION,
-        "id": handoff_id,
-        "status": "pending",
-        "reason": reason,
-        "capability": capability,
-        "tool": request["tool"],
-        "assignee": _name(assignee, "assignee"),
-        "channel": "inbox",
-        "createdAt": created,
-        "deadline": created + deadline_hours * 3600,
-        "request": dict(request),
-    }
-    _write(pending_path, document)
-    return document
+    person = _name(assignee, "assignee")
+    with _exclusive(root):
+        if pending_path.is_file():
+            return _read(pending_path)
+        created = int(time.time()) if now is None else now
+        document: dict[str, Any] = {
+            "schemaVersion": SCHEMA_VERSION,
+            "id": handoff_id,
+            "status": "pending",
+            "reason": reason,
+            "capability": capability,
+            "tool": request["tool"],
+            "assignee": person,
+            "channel": "inbox",
+            "createdAt": created,
+            "deadline": created + deadline_hours * 3600,
+            "request": dict(request),
+        }
+        _write(pending_path, document)
+        return document
 
 
 def pending(root: pathlib.Path) -> list[dict[str, Any]]:
@@ -164,24 +196,27 @@ def complete(
     handoff_id = _check_id(handoff_id)
     person = _name(by, "completing person")
     pending_path = pathlib.Path(root) / "pending" / f"{handoff_id}.json"
-    if not pending_path.is_file():
-        raise HandoffError(f"no pending hand-off exists for {handoff_id}")
-    document = _read(pending_path)
-    completed = int(time.time()) if now is None else now
-    document.update(
-        status=outcome,
-        completedBy=person,
-        completedAt=completed,
-        late=completed > int(document.get("deadline", completed)),
-    )
-    if note and note.strip():
-        document["note"] = note.strip()[:MAX_NOTE]
-    if via is not None:
-        document["completedVia"] = _name(via, "reply channel")
-    closed_path = pathlib.Path(root) / "closed" / f"{handoff_id}-{completed}.json"
-    _write(closed_path, document)
-    pending_path.unlink()
-    return document
+    channel = _name(via, "reply channel") if via is not None else None
+    with _exclusive(root):
+        if not pending_path.is_file():
+            raise HandoffError(f"no pending hand-off exists for {handoff_id}")
+        document = _read(pending_path)
+        completed = int(time.time()) if now is None else now
+        document.update(
+            status=outcome,
+            completedBy=person,
+            completedAt=completed,
+            late=completed > int(document.get("deadline", completed)),
+        )
+        if note and note.strip():
+            document["note"] = note.strip()[:MAX_NOTE]
+        if channel is not None:
+            document["completedVia"] = channel
+        # Reopening and closing again in the same second must not overwrite an earlier receipt.
+        closed_path = pathlib.Path(root) / "closed" / f"{handoff_id}-{completed}-{uuid.uuid4().hex}.json"
+        _write(closed_path, document)
+        pending_path.unlink()
+        return document
 
 
 NOTICE_KINDS = ("assigned", "reminder", "escalation")
@@ -251,16 +286,17 @@ def mark_notified(
     handoff_id = _check_id(handoff_id)
     channel = _name(via, "delivery channel")
     path = pathlib.Path(root) / "pending" / f"{handoff_id}.json"
-    if not path.is_file():
-        raise HandoffError(f"no pending hand-off exists for {handoff_id}")
-    document = _read(path)
-    notices = document.get("notices") if isinstance(document.get("notices"), dict) else {}
-    if kind in notices:
+    with _exclusive(root):
+        if not path.is_file():
+            raise HandoffError(f"no pending hand-off exists for {handoff_id}")
+        document = _read(path)
+        notices = document.get("notices") if isinstance(document.get("notices"), dict) else {}
+        if kind in notices:
+            return document
+        notices[kind] = {"at": int(time.time()) if now is None else now, "via": channel}
+        document["notices"] = notices
+        _write(path, document)
         return document
-    notices[kind] = {"at": int(time.time()) if now is None else now, "via": channel}
-    document["notices"] = notices
-    _write(path, document)
-    return document
 
 
 def acknowledge(
@@ -274,14 +310,15 @@ def acknowledge(
     handoff_id = _check_id(handoff_id)
     person, channel = _name(by, "acknowledging person"), _name(via, "reply channel")
     path = pathlib.Path(root) / "pending" / f"{handoff_id}.json"
-    if not path.is_file():
-        raise HandoffError(f"no pending hand-off exists for {handoff_id}")
-    document = _read(path)
-    if isinstance(document.get("acknowledged"), dict):
+    with _exclusive(root):
+        if not path.is_file():
+            raise HandoffError(f"no pending hand-off exists for {handoff_id}")
+        document = _read(path)
+        if isinstance(document.get("acknowledged"), dict):
+            return document
+        document["acknowledged"] = {"by": person, "at": int(time.time()) if now is None else now, "via": channel}
+        _write(path, document)
         return document
-    document["acknowledged"] = {"by": person, "at": int(time.time()) if now is None else now, "via": channel}
-    _write(path, document)
-    return document
 
 
 def describe(document: Mapping[str, Any], *, now: int | None = None) -> dict[str, Any]:
