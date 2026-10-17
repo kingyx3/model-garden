@@ -257,6 +257,57 @@ class McpConnectionStore:
             raise ConnectionRefused("MCP connection requires renewed review")
         return item
 
+
+    def list_readiness(self, *, agent: str, grants: Any, now: int) -> list[dict[str, Any]]:
+        """Private, no-network operator diagnostics; never a provider-live assertion.
+
+        The report reveals only reviewed portable Tool names and coarse remediation
+        states. It does not include connection URLs, secret references, acting IDs,
+        user arguments, raw upstream schemas or the private activation token.
+        """
+        self._key(agent, "status")
+        if grants.tenant != self.tenant:
+            raise ConnectionRefused("grant registry does not match the connection tenant")
+        with self._locked() as state:
+            items = [copy.deepcopy(item) for item in state["connections"].values() if item.get("agent") == agent]
+        report: list[dict[str, Any]] = []
+        for item in sorted(items, key=lambda entry: entry["id"]):
+            valid_activation = False
+            if item.get("active"):
+                try:
+                    self.resolve(item["id"], agent=agent)
+                    valid_activation = True
+                except (ConnectionRefused, ValueError, KeyError, TypeError):
+                    pass
+            tools: list[dict[str, Any]] = []
+            grant_ready = True
+            server = _mcp().validate_server(item["declaration"])
+            for upstream, spec in sorted(server["tools"].items()):
+                ready = False
+                try:
+                    _gateway().prepare(
+                        item["declaration"], registry=grants, tenant=self.tenant,
+                        attested_agent=agent, upstream=upstream,
+                        enabled_tools=(spec["tool"],), originator_permissions=(spec["tool"],),
+                        now=now, connection_id=item["id"],
+                    )
+                    ready = True
+                except (PermissionError, ValueError, KeyError, TypeError):
+                    pass
+                if not ready:
+                    grant_ready = False
+                tools.append({"tool": spec["tool"], "risk": spec["risk"], "grantReady": ready})
+            # Configured != connected or live. Never infer upstream health from grant records.
+            status = ("inactive" if not item.get("active") else
+                      "review-required" if not valid_activation else
+                      "grant-unavailable" if not grant_ready else
+                      "configured-awaiting-upstream-proof")
+            report.append({
+                "id": item["id"], "server": server["name"], "agent": agent,
+                "active": bool(item.get("active")), "status": status, "tools": tools,
+            })
+        return report
+
     def list_public(self, *, agent: str) -> list[dict[str, Any]]:
         """Operator status without even revealing opaque secret reference names."""
         self._key(agent, "status")
