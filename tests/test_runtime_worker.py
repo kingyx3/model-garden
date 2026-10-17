@@ -267,3 +267,24 @@ class CoworkerClientTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ExportJobTests(Case):
+    def test_the_export_job_copies_the_ledger_and_is_skipped_unless_configured(self):
+        self.assertEqual(self.make().run_export(T0), {"skipped": "no-export-configured"})
+        sink = worker._module("ledger").DirectorySink(self.root / "sink")
+        configured = self.make({"export": {"gcsBucket": "acme-ledger-export"}})
+        configured.export_sink = sink
+        self.assertEqual(configured.run_export(T0), {"skipped": "no-ledger-yet"})
+        configured.audit("worker.test", "runtime:worker", {"n": 1})
+        result = configured.run_export(T0)
+        self.assertGreaterEqual(result["exported"], 1)
+        self.assertEqual(len(sink.records()), result["totalChainedEvents"])
+        self.assertIn("export", configured.tick())
+
+    def test_the_export_settings_are_validated_without_secrets(self):
+        for bad in ({"gcsBucket": "UPPER"}, {"gcsBucket": "ok-bucket", "key": "x"}, {"impersonate": "x@y.example"}):
+            with self.assertRaises((worker.WorkerConfigError, ValueError)):
+                worker.load_config({"export": bad})
+        good = worker.load_config({"export": {"gcsBucket": "ok-bucket", "impersonate": "mg-exp-1234abcd@acme-proj.iam.gserviceaccount.com"}})
+        self.assertEqual(good["export"]["gcsBucket"], "ok-bucket")

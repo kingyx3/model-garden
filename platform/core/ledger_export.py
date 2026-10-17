@@ -16,8 +16,9 @@ Properties:
 
 Sinks provided: ``DirectorySink`` (an append-only layout, intended to be a mount whose write
 policy is controlled by a different identity than the runtime) and ``WebhookSink`` (generic
-SIEM/HTTP collector; write-only, so it cannot be read back by ``verify``). A retention-locked
-object-storage sink is not implemented here.
+SIEM/HTTP collector; write-only, so it cannot be read back by ``verify``) and ``GcsSink`` (a Google
+Cloud Storage bucket, written create-only; the reference target is the retention-locked bucket and the
+separate export identity that ``infra/docker-host/gcp`` creates).
 """
 from __future__ import annotations
 
@@ -25,8 +26,10 @@ import hashlib
 import json
 import os
 import pathlib
+import re
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from collections.abc import Callable, Iterable, Iterator, Mapping
 from typing import Any
@@ -197,6 +200,132 @@ class WebhookSink:
 
     def put_head(self, head: Mapping[str, Any]) -> None:
         self._post({"kind": "head", "head": dict(head)}, f"head-{head['sequence']}-{head['headHash']}")
+
+
+HttpCall = Callable[[str, str, Mapping[str, str], bytes | None], tuple[int, bytes]]
+_GCS_HOSTS = ("https://storage.googleapis.com/", "https://iamcredentials.googleapis.com/")
+_BUCKET = re.compile(r"^[a-z0-9][a-z0-9._-]{1,220}[a-z0-9]$")
+_SERVICE_ACCOUNT = re.compile(r"^[a-z][a-z0-9-]{4,28}[a-z0-9]@[a-z][a-z0-9-]{4,28}[a-z0-9]\.iam\.gserviceaccount\.com$")
+
+
+def _http(method: str, url: str, headers: Mapping[str, str], body: bytes | None) -> tuple[int, bytes]:
+    if not url.startswith(_GCS_HOSTS + ("http://metadata.google.internal/",)):
+        raise LedgerExportError("the GCS sink only talks to Google Cloud endpoints")
+    request = urllib.request.Request(url, data=body, headers=dict(headers), method=method)
+    try:
+        with urllib.request.urlopen(request, timeout=20) as response:  # noqa: S310 - host checked above
+            return response.status, response.read(16 * 1024 * 1024)
+    except urllib.error.HTTPError as exc:
+        return exc.code, b""
+
+
+def metadata_token(http: HttpCall | None = None) -> Callable[[], str]:
+    """Access tokens for the VM's own service account, from the metadata server (nothing is stored)."""
+    call = http or _http
+
+    def token() -> str:
+        status, raw = call("GET", "http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token",
+                           {"Metadata-Flavor": "Google"}, None)
+        if status != 200:
+            raise LedgerExportError(f"the metadata server refused a token (HTTP {status})")
+        return json.loads(raw)["access_token"]
+
+    return token
+
+
+def impersonated_token(service_account: str, base: Callable[[], str], *, scope: str, http: HttpCall | None = None) -> Callable[[], str]:
+    """Access tokens for a separate service account, minted by the caller's identity (it needs Token Creator on that account only)."""
+    if not _SERVICE_ACCOUNT.match(service_account):
+        raise ValueError("the export identity must be a service account email")
+    call = http or _http
+
+    def token() -> str:
+        url = f"https://iamcredentials.googleapis.com/v1/projects/-/serviceAccounts/{service_account}:generateAccessToken"
+        status, raw = call("POST", url, {"Authorization": f"Bearer {base()}", "Content-Type": "application/json"},
+                           json.dumps({"scope": [scope]}).encode("utf-8"))
+        if status != 200:
+            raise LedgerExportError(f"the export identity could not be impersonated (HTTP {status})")
+        return json.loads(raw)["accessToken"]
+
+    return token
+
+
+class GcsSink:
+    """A Google Cloud Storage bucket as the export target: create-only writes, readable by a separate verifier identity.
+
+    Objects use the directory layout (``records/<seq>-<id>.json``, ``heads/...``) and are written with ``ifGenerationMatch=0``,
+    so an existing object is never replaced; an object that already exists counts as delivered, which keeps retries and
+    at-least-once delivery harmless. The export identity needs only object-create on the bucket, and a locked retention policy on
+    the bucket (see ``infra/docker-host/gcp``) is what stops anyone, including the runtime, from deleting or shortening it. The
+    exporter cannot read back, so a record that was already there under a different content is caught by ``verify``, run by the
+    verifier identity, not at write time. Tokens come from ``token`` (a callable) and are never stored or logged.
+    """
+
+    def __init__(self, bucket: str, token: Callable[[], str], *, prefix: str = "", http: HttpCall | None = None) -> None:
+        if not _BUCKET.match(bucket):
+            raise ValueError("a GCS bucket name is 3-222 lowercase letters, digits, dots, hyphens or underscores")
+        clean = prefix.strip("/")
+        if clean and (not re.fullmatch(r"[A-Za-z0-9._/-]{1,100}", clean) or any(part in ("", ".", "..") for part in clean.split("/"))):
+            raise ValueError("the sink prefix may use letters, digits, dots, hyphens, underscores and slashes only")
+        self.bucket, self.prefix, self._token, self._http = bucket, clean, token, http or _http
+
+    def _name(self, kind: str, name: str) -> str:
+        return "/".join(part for part in (self.prefix, kind, name) if part)
+
+    def _headers(self, extra: Mapping[str, str] | None = None) -> dict[str, str]:
+        return {"Authorization": f"Bearer {self._token()}", **(extra or {})}
+
+    def _put(self, object_name: str, document: Mapping[str, Any]) -> None:
+        url = (f"https://storage.googleapis.com/upload/storage/v1/b/{self.bucket}/o?uploadType=media&ifGenerationMatch=0&name="
+               + urllib.parse.quote(object_name, safe=""))
+        try:
+            status, _ = self._http("POST", url, self._headers({"Content-Type": "application/json"}), (_canonical(document) + "\n").encode("utf-8"))
+        except (urllib.error.URLError, OSError) as exc:
+            raise LedgerExportError(f"GCS delivery failed: {type(exc).__name__}") from exc
+        if status == 412:  # already stored: a retry, or a duplicate delivery
+            return
+        if not 200 <= status < 300:
+            raise LedgerExportError(f"GCS delivery rejected with status {status}")
+
+    def put_records(self, records: Iterable[Mapping[str, Any]]) -> None:
+        for record in records:
+            self._put(self._name("records", f"{record['sequence']:0{_SEQUENCE_WIDTH}d}-{record['recordId'][:16]}.json"), record)
+
+    def put_head(self, head: Mapping[str, Any]) -> None:
+        self._put(self._name("heads", f"{head['sequence']:0{_SEQUENCE_WIDTH}d}-{head['exportedAt']}-{head['headHash'][:16]}.json"), head)
+
+    def _list(self, kind: str) -> list[str]:
+        names: list[str] = []
+        token = ""
+        while True:
+            query = {"prefix": self._name(kind, "")}
+            if token:
+                query["pageToken"] = token
+            url = f"https://storage.googleapis.com/storage/v1/b/{self.bucket}/o?" + urllib.parse.urlencode(query)
+            status, raw = self._http("GET", url, self._headers(), None)
+            if status != 200:
+                raise LedgerExportError(f"GCS listing refused with status {status}")
+            page = json.loads(raw)
+            names.extend(item["name"] for item in page.get("items", []))
+            token = page.get("nextPageToken", "")
+            if not token:
+                return sorted(names)
+
+    def _read(self, kind: str) -> list[dict[str, Any]]:
+        documents = []
+        for name in self._list(kind):
+            url = f"https://storage.googleapis.com/storage/v1/b/{self.bucket}/o/{urllib.parse.quote(name, safe='')}?alt=media"
+            status, raw = self._http("GET", url, self._headers(), None)
+            if status != 200:
+                raise LedgerExportError(f"GCS read refused with status {status}")
+            documents.append(json.loads(raw))
+        return documents
+
+    def records(self) -> list[dict[str, Any]]:
+        return self._read("records")
+
+    def heads(self) -> list[dict[str, Any]]:
+        return self._read("heads")
 
 
 def _load_state(path: pathlib.Path) -> dict[str, Any]:

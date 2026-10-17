@@ -88,12 +88,15 @@ controls:
       - scripts/ledger-export.py
       - platform/core/ledger_export.py
       - tests/test_ledger_export.py
+      - tests/test_ledger_export_gcs.py
+      - infra/docker-host/gcp
     limitations: >-
       The local chain is tamper-evident, not independently immutable: a host/storage administrator
       could replace or delete the complete local log/head. An export tool and verifier exist
-      (append-only directory sink and generic HTTPS collector, with truncation, divergence and gap
-      detection), but nothing is deployed by default: a separately administered retention-locked
-      target, its separate export identity, scheduling, alert routing and retention duration remain
+      (append-only directory sink, generic HTTPS collector and a create-only GCS sink, with truncation,
+      divergence and gap detection), and the Docker host module can create a retention-locked bucket with a
+      separate create-only export identity, but all of it is opt-in and nothing is deployed by default:
+      the bucket, the lock, the verifier's access, alert routing and the chosen retention remain
       deployment-specific controls with no retained live evidence.
 
   human_oversight:

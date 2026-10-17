@@ -42,7 +42,7 @@ from collections.abc import Callable, Iterable, Mapping
 from typing import Any
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
-DEFAULT_INTERVALS = {"scheduler": 60, "mailbox": 30, "notices": 60, "retention": 3600}
+DEFAULT_INTERVALS = {"scheduler": 60, "mailbox": 30, "notices": 60, "retention": 3600, "export": 300}
 MIN_INTERVAL, MAX_INTERVAL = 10, 86_400
 MAX_QUEUE = 2_000
 IDENTITY = "runtime:worker"
@@ -76,6 +76,7 @@ def _module(key: str):
         "coworker": "platform/runtime/coworker_client.py",
         "sidecar": "platform/runtime/governed_mcp.py",
         "transports": "platform/channels/transports.py",
+        "ledger": "platform/core/ledger_export.py",
     }
     return _load(f"model_garden_worker_{key}", paths[key])
 
@@ -99,7 +100,7 @@ def load_config(document: Mapping[str, Any]) -> dict[str, Any]:
     """Validate the non-secret worker configuration rendered from ``EnvironmentBinding.spec.worker``."""
     if not isinstance(document, Mapping):
         raise WorkerConfigError("worker configuration must be an object")
-    allowed = {"deployedBy", "intervals", "people", "escalateTo", "owners", "mailbox", "coworker", "connectors", "artifactRetentionDays"}
+    allowed = {"deployedBy", "intervals", "people", "escalateTo", "owners", "mailbox", "coworker", "connectors", "artifactRetentionDays", "export"}
     unknown = sorted(set(document) - allowed)
     if unknown:
         raise WorkerConfigError(f"unknown worker settings: {', '.join(unknown)}")
@@ -124,6 +125,13 @@ def load_config(document: Mapping[str, Any]) -> dict[str, Any]:
         if not isinstance(coworker, Mapping) or set(coworker) - {"url", "model"}:
             raise WorkerConfigError("coworker holds only url and model; the key comes from MODEL_GARDEN_COWORKER_API_KEY")
         _module("coworker").check_base_url(str(coworker.get("url", "")))
+    export = document.get("export")
+    if export is not None:
+        if not isinstance(export, Mapping) or set(export) - {"gcsBucket", "impersonate", "prefix"} or not export.get("gcsBucket"):
+            raise WorkerConfigError("export holds gcsBucket plus optional impersonate and prefix")
+        _module("ledger").GcsSink(str(export["gcsBucket"]), lambda: "", prefix=str(export.get("prefix") or ""))  # validates the names
+        if export.get("impersonate") is not None:
+            _module("ledger").impersonated_token(str(export["impersonate"]), lambda: "", scope="x")
     escalate_to = document.get("escalateTo")
     if escalate_to is not None:
         _person(escalate_to, "escalateTo")
@@ -136,6 +144,7 @@ def load_config(document: Mapping[str, Any]) -> dict[str, Any]:
         "deployedBy": document.get("deployedBy") or None, "intervals": intervals, "people": dict(people), "escalateTo": escalate_to,
         "owners": owners, "mailbox": dict(mailbox) if mailbox else None, "coworker": dict(coworker) if coworker else None,
         "connectors": dict(connectors), "artifactRetentionDays": document.get("artifactRetentionDays"),
+        "export": dict(export) if export else None,
     }
 
 
@@ -202,6 +211,7 @@ class Worker:
         coworker: Any | None = None,
         senders: Mapping[str, Callable[[str, str], Any]] | None = None,
         clock: Callable[[], float] = time.time,
+        export_sink: Any | None = None,
     ) -> None:
         self.desired_state_path = pathlib.Path(desired_state_path)
         self.desired_state = json.loads(self.desired_state_path.read_text(encoding="utf-8"))
@@ -212,6 +222,7 @@ class Worker:
         self.coworker = coworker
         self.senders = dict(senders or {})
         self.clock = clock
+        self.export_sink = export_sink
         self.queue = NoticeQueue(self.data / "worker")
         self.last_run: dict[str, float] = {}
         self.heartbeat = self.data / "worker" / "heartbeat.json"
@@ -355,12 +366,26 @@ class Worker:
             out["mail"] = self._spool().purge(now=now)
         return out
 
+    def run_export(self, now: int) -> dict[str, Any]:
+        """Copy new ledger records and a head manifest to the retention-locked bucket, as the separate export identity."""
+        settings = self.config["export"]
+        if settings is None:
+            return {"skipped": "no-export-configured"}
+        ledger = _module("ledger")
+        token = ledger.metadata_token()
+        if settings.get("impersonate"):
+            token = ledger.impersonated_token(settings["impersonate"], token, scope="https://www.googleapis.com/auth/devstorage.read_write")
+        sink = self.export_sink or ledger.GcsSink(settings["gcsBucket"], token, prefix=settings.get("prefix") or "")
+        if not self.audit_path.is_file():
+            return {"skipped": "no-ledger-yet"}
+        return ledger.export_ledger(self.audit_path, sink, self.data / "worker" / "export-state.json")
+
     # -- loop ------------------------------------------------------------------------------------------
 
     def jobs(self) -> list[tuple[str, Callable[[int], dict[str, Any]]]]:
         return [
             ("scheduler", self.run_scheduler), ("mailbox", self.run_mailbox),
-            ("notices", self.deliver_notices), ("retention", self.run_retention),
+            ("notices", self.deliver_notices), ("retention", self.run_retention), ("export", self.run_export),
         ]
 
     def tick(self) -> dict[str, Any]:
