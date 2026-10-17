@@ -33,6 +33,7 @@ import os
 import pathlib
 import re
 import secrets
+import stat
 from collections.abc import Callable, Iterable, Iterator, Mapping
 from typing import Any
 
@@ -87,29 +88,62 @@ class GrantRegistry:
     @contextlib.contextmanager
     def _locked(self) -> Iterator[dict[str, Any]]:
         self.root.mkdir(parents=True, exist_ok=True, mode=0o700)
-        try:
-            os.chmod(self.root, 0o700)
-        except OSError:
-            pass
-        descriptor = os.open(self.root / f".{self.tenant}.grants.lock", os.O_RDWR | os.O_CREAT, 0o600)
+        info = self.root.lstat()
+        if not stat.S_ISDIR(info.st_mode) or info.st_mode & 0o077:
+            raise GrantError("grant store directory must be private and not a symlink")
+
+        def regular(path: pathlib.Path, flags: int) -> int:
+            fd = os.open(path, flags | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600)
+            info = os.fstat(fd)
+            if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_mode & 0o077:
+                os.close(fd)
+                raise GrantError("grant store requires private regular files")
+            return fd
+
+        descriptor = regular(self.root / f".{self.tenant}.grants.lock", os.O_RDWR | os.O_CREAT)
         try:
             fcntl.flock(descriptor, fcntl.LOCK_EX)
             state: dict[str, Any] = {"schemaVersion": SCHEMA_VERSION, "tenant": self.tenant, "grants": {}}
-            if self.path.is_file():
-                loaded = json.loads(self.path.read_text(encoding="utf-8"))
+            try:
+                reader = regular(self.path, os.O_RDONLY)
+            except FileNotFoundError:
+                reader = None
+            if reader is not None:
+                with os.fdopen(reader, "rb") as stream:
+                    payload = stream.read(2_000_001)
+                if len(payload) > 2_000_000:
+                    raise GrantError("grant store exceeds size limit")
+                loaded = json.loads(payload)
                 if not isinstance(loaded, dict) or loaded.get("schemaVersion") != SCHEMA_VERSION or loaded.get("tenant") != self.tenant:
                     raise GrantError("grant registry has an unsupported format or belongs to another tenant")
+                if not isinstance(loaded.get("grants"), dict) or len(loaded["grants"]) > MAX_GRANTS:
+                    raise GrantError("grant registry contains invalid grants")
                 state = loaded
             before = json.dumps(state, sort_keys=True)
             yield state
             if json.dumps(state, sort_keys=True) != before:
-                temporary = self.path.with_suffix(".tmp")
-                handle = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-                with os.fdopen(handle, "w", encoding="utf-8") as stream:
-                    stream.write(json.dumps(state, sort_keys=True) + "\n")
-                    stream.flush()
-                    os.fsync(stream.fileno())
-                os.replace(temporary, self.path)
+                # Fail closed if an existing target was replaced with a symlink or special file.
+                try:
+                    check = regular(self.path, os.O_RDONLY)
+                except FileNotFoundError:
+                    check = None
+                if check is not None:
+                    os.close(check)
+                temporary = self.root / f".{self.tenant}.{secrets.token_hex(16)}.tmp"
+                handle = regular(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL)
+                try:
+                    with os.fdopen(handle, "w", encoding="utf-8") as stream:
+                        stream.write(json.dumps(state, sort_keys=True) + "\n")
+                        stream.flush()
+                        os.fsync(stream.fileno())
+                    os.replace(temporary, self.path)
+                    directory_fd = os.open(self.root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+                    try:
+                        os.fsync(directory_fd)
+                    finally:
+                        os.close(directory_fd)
+                finally:
+                    temporary.unlink(missing_ok=True)
         finally:
             fcntl.flock(descriptor, fcntl.LOCK_UN)
             os.close(descriptor)
@@ -125,8 +159,9 @@ class GrantRegistry:
     @staticmethod
     def _public(grant: Mapping[str, Any]) -> dict[str, Any]:
         """A grant as shown to operators: the secret reference is shown only as a digest."""
-        shown = {key: value for key, value in grant.items() if key != "secretRef"}
+        shown = {key: value for key, value in grant.items() if key not in ("secretRef", "retiredSecretRefs")}
         shown["secretRefDigest"] = digest(grant["secretRef"])
+        shown["retiredSecretRefDigests"] = [digest(ref) for ref in grant.get("retiredSecretRefs", [])]
         shown["multiCoworkerSupported"] = grant["isolation"] in SUPPORTED_ISOLATIONS
         return shown
 
@@ -169,9 +204,9 @@ class GrantRegistry:
             for other in grants.values():
                 if other["agent"] == agent and other["connectionId"] == connection_id and not other.get("revokedAt"):
                     raise GrantError("this coworker already has a grant on that connection; rotate or revoke it instead")
-                if other["agent"] == agent and other["secretRef"] == secret_ref:
+                if other["agent"] == agent and secret_ref in (other["secretRef"], *other.get("retiredSecretRefs", [])):
                     raise GrantError("a previously issued secret reference cannot be reused after revocation; provision a fresh one")
-                if other["agent"] != agent and other["secretRef"] == secret_ref:
+                if other["agent"] != agent and secret_ref in (other["secretRef"], *other.get("retiredSecretRefs", [])):
                     raise GrantError("that secret reference already belongs to another coworker; each coworker needs its own credential")
                 if other["agent"] != agent and other["provider"] == provider and other["actingIdentity"] == acting_identity:
                     raise GrantError("that provider identity already belongs to another coworker; each coworker needs its own identity or isolated grant")
@@ -235,8 +270,9 @@ class GrantRegistry:
         def apply(grant: dict[str, Any], grants: dict[str, Any]) -> dict[str, Any]:
             if grant.get("revokedAt"):
                 raise GrantError("a revoked grant cannot be rotated; provision a new one")
-            if any(other["secretRef"] == secret_ref for other in grants.values()):
+            if any(secret_ref in (other["secretRef"], *other.get("retiredSecretRefs", [])) for other in grants.values()):
                 raise GrantError("that secret reference is already in use; a rotated credential must be new")
+            grant.setdefault("retiredSecretRefs", []).append(grant["secretRef"])
             grant.update(secretRef=secret_ref, rotatedAt=now, rotations=grant["rotations"] + 1, health="healthy")
             return {}
         return self._change(grant_id, by, "grant.rotate", apply)
