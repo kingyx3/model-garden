@@ -40,6 +40,19 @@ def _load_deployer():
 DEPLOY = _load_deployer()
 
 
+def _load_lawful_basis():
+    path = ROOT / "platform" / "core" / "lawful_basis.py"
+    spec = importlib.util.spec_from_file_location("model_garden_voice_lawful_basis", path)
+    module = importlib.util.module_from_spec(spec)
+    if spec.loader is None:
+        raise RuntimeError(f"cannot load {path}")
+    spec.loader.exec_module(module)
+    return module
+
+
+transcript_environment = _load_lawful_basis().transcript_environment
+
+
 def _load_json(path: pathlib.Path) -> dict[str, Any]:
     value = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(value, dict):
@@ -159,6 +172,8 @@ def apply(binding_path: pathlib.Path, bundle_dir: pathlib.Path, project: str, se
     }
     if voice.get("human_transfer_target"):
         voice_environment["MODEL_GARDEN_HUMAN_TRANSFER_TARGET"] = voice["human_transfer_target"]
+    # Transcript settings come from the binding; turning the spoken disclosure off needs the accountable owner's signature (#107).
+    voice_environment.update(transcript_environment(binding, project))
 
     document = {
         "services": {
