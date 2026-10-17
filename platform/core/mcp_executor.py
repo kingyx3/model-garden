@@ -11,6 +11,7 @@ import copy
 import importlib.util
 import json
 import pathlib
+import re
 import sys
 from collections.abc import Callable, Iterable, Mapping
 from typing import Any
@@ -19,6 +20,8 @@ from jsonschema import Draft202012Validator, ValidationError
 
 MAX_ARGUMENT_BYTES = 65536
 MAX_RESPONSE_BYTES = 1048576
+# Only an opaque, short provider object ID may appear verbatim in the audit ledger.
+_SAFE_RECEIPT = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$")
 
 
 def _sibling(module: str, filename: str):
@@ -45,6 +48,16 @@ def _capabilities():
 
 class GatewayError(PermissionError):
     """A reviewed route, per-coworker authorization or requested operation is unavailable."""
+
+
+class UpstreamToolError(RuntimeError):
+    """Upstream MCP returned an operation-level error; raw provider data is never echoed."""
+
+
+def receipt_reference(result: Mapping[str, Any]) -> str | None:
+    """Allow only an opaque, bounded external reference in audit, never provider prose."""
+    ref = result.get("externalObjectRef") if isinstance(result, Mapping) else None
+    return ref if isinstance(ref, str) and _SAFE_RECEIPT.fullmatch(ref) else None
 
 
 def _bounded_json(value: Any, limit: int, label: str) -> str:
@@ -163,13 +176,19 @@ def invoke(
                     or latest.get("activationId") != route.get("activationId")):
                 raise GatewayError("connection revoked or replaced before execution")
             result = session.call_tool(upstream, dict(arguments))
-    except (GatewayError, _mcp().SchemaDriftError, ValidationError):
+            # MCP Tools signal business failures with isError rather than HTTP errors.
+            # Treat those as failed executions, not successful auditable side effects.
+            if isinstance(result, dict) and result.get("isError") is True:
+                raise UpstreamToolError("upstream MCP operation reported an error")
+    except (GatewayError, _mcp().SchemaDriftError, ValidationError, UpstreamToolError):
         raise
     except Exception:
         # Provider/transport errors can contain bearer credentials or customer data.
         raise RuntimeError("upstream MCP transport unavailable") from None
     if not isinstance(result, dict):
         raise GatewayError("upstream result must be an object")
+    if "isError" in result and not isinstance(result["isError"], bool):
+        raise GatewayError("upstream MCP result has an invalid error flag")
     encoded = _bounded_json(result, MAX_RESPONSE_BYTES, "upstream result")
     if len(credential) >= 12 and credential in encoded:
         raise GatewayError("upstream response leaked an authorization credential")
