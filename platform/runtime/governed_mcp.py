@@ -509,16 +509,30 @@ class GovernedToolRuntime:
             audit=lambda action, by, details: GOVERN.record_operator_action(self.audit_path, action, by, details),
         )
 
-    def docs_create(self, *, title: str, content: str, justification: str | None = None) -> dict[str, Any]:
-        """Keep a finished document (Markdown) for the requester; returns its location, never a file system path."""
+    def docs_create(
+        self, *, title: str, content: str | None = None, justification: str | None = None, format: str = "markdown",
+        structure: dict[str, Any] | None = None, sources: list[str] | None = None,
+    ) -> dict[str, Any]:
+        """Keep a finished document for the requester (Markdown, or a real DOCX/XLSX/PPTX/PDF/CSV file); returns its location, never a file system path."""
         store = self._require_docs()
         agent = self.desired_state.get("agent", {}).get("metadata", {}).get("name")
         identity = self._caller()[0]
+        # Only what the caller supplied is bound into the approval, so a plain Markdown request is unchanged by the extra options.
+        arguments: dict[str, Any] = {"title": title}
+        if content is not None:
+            arguments["content"] = content
+        if format != "markdown":
+            arguments["format"] = format
+        if structure is not None:
+            arguments["structure"] = structure
+        if sources:
+            arguments["sources"] = list(sources)
         return self._execute(
             "docs.create",
-            {"title": title, "content": content},
+            arguments,
             lambda exact: ARTIFACTS.create_document(
-                store, title=exact["title"], content=exact["content"], agent=agent, requested_by=identity,
+                store, title=exact["title"], content=exact.get("content"), agent=agent, requested_by=identity,
+                sources=exact.get("sources") or (), format=exact.get("format", "markdown"), structure=exact.get("structure"),
             ),
             provider=ARTIFACTS.PROVIDER_ID,
             tier=0,
@@ -811,17 +825,27 @@ def build_server(runtime: GovernedToolRuntime) -> MCPServer:
         return runtime.kb_search(query=query, source=source, limit=limit, justification=justification)
 
     @mcp.tool(name="docs_create")
-    def docs_create(title: str, content: str, justification: str | None = None) -> dict[str, Any]:
-        """Keep a finished document for the person who asked, in this client's own private store.
+    def docs_create(
+        title: str, content: str | None = None, justification: str | None = None, format: str = "markdown",
+        structure: dict[str, Any] | None = None, sources: list[str] | None = None,
+    ) -> dict[str, Any]:
+        """Keep a finished document or file for the person who asked, in this client's own private store.
 
-        title is a short name; content is the document in plain Markdown (no scripts or embedded files).
+        title is a short name. For a plain document leave format as "markdown" and give content in plain Markdown
+        (no scripts or embedded files). For a real file set format to one of docx, pdf, pptx, xlsx or csv and give
+        structure instead of content: docx and pdf take {"sections": [{"heading": ..., "paragraphs": [...]}]},
+        pptx takes {"slides": [{"title": ..., "bullets": [...]}]}, xlsx takes {"sheets": [{"name": ..., "rows": [[...]]}]}
+        and csv takes {"rows": [[...]]}. Text is kept as text: nothing is run, linked or calculated when the file is opened.
+        sources lists identifiers of what it was built from (for example "kb:rules-of-engagement#hours"), never content.
         The result gives a `documentId` location: tell the person where it is, not what it contains,
         and never put customer card or health details in it. Say plainly that a person fetches it from
         the operator's artifact list; it is not sent anywhere by this call.
 
         justification: one short sentence on why this document is needed (recorded in the audit ledger).
         """
-        return runtime.docs_create(title=title, content=content, justification=justification)
+        return runtime.docs_create(
+            title=title, content=content, justification=justification, format=format, structure=structure, sources=sources,
+        )
 
     @mcp.tool(name="files_search")
     def files_search(query: str, justification: str | None = None) -> dict[str, Any]:

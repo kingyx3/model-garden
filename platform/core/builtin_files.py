@@ -8,8 +8,8 @@ Tools onto the Tier 0 artifact store (``artifacts.py``). It is credential-free a
   boundary's principal context, never from a model argument. A requester searches, reads and writes only their own
   artifacts, which is the Tier 0 form of "respects the source permissions of the acting principal".
 - **No folders.** There is no folder tree at Tier 0, so a ``folderId`` is refused instead of silently ignored.
-- **Text in, text out.** ``docs.create``, ``files.write`` and ``docs.read`` handle Markdown or plain text. Binary files
-  built by ``deliverables.py`` (DOCX, XLSX) appear in ``files.search`` and ``files.read`` as metadata only; their bytes are
+- **Text in, text out.** ``docs.read`` and ``files.write`` handle Markdown or plain text; ``docs.create`` also builds a real
+  DOCX, XLSX, PPTX, PDF or CSV from ``format`` and ``structure`` (``deliverables.py``). Binary files appear in ``files.search`` and ``files.read`` as metadata only; their bytes are
   fetched through the artifact store, not handed to the model.
 - **Ledger.** Creation is ledgered by the store with the location (``tier0:<tenant>/<id>``), size and digest, never the
   content or title; every result carries that location as ``externalObjectRef``.
@@ -87,8 +87,19 @@ class Tier0Files:
     # -- portable Tools -----------------------------------------------------------------
 
     def docs_create(self, arguments: dict[str, Any], *, now: int | None = None) -> dict[str, Any]:
-        args = _only(arguments, {"title", "content"}, "docs.create")
-        entry = self._write(_text(args.get("title"), "title", 120), args.get("content"), now=now)
+        args = _only(arguments, {"title", "content", "format", "structure", "sources"}, "docs.create")
+        title = _text(args.get("title"), "title", 120)
+        if args.get("format", "markdown") == "markdown" and args.get("structure") is None and not args.get("sources"):
+            entry = self._write(title, args.get("content"), now=now)
+        else:
+            try:
+                created = self._module.create_document(
+                    self._store, title=title, content=args.get("content"), agent=self._agent, requested_by=self._by,
+                    sources=args.get("sources") or (), format=args.get("format", "markdown"), structure=args.get("structure"),
+                )
+            except self._module.ArtifactError as exc:
+                raise FilesError(str(exc)) from exc
+            entry = {"id": created["artifactId"], "location": created["documentId"], "duplicate": created["duplicate"]}
         return {"provider": "built-in-artifacts", "documentId": entry["id"], "externalObjectRef": entry["location"], "duplicate": entry["duplicate"]}
 
     def files_write(self, arguments: dict[str, Any], *, now: int | None = None) -> dict[str, Any]:

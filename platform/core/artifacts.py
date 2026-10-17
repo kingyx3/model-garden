@@ -28,6 +28,8 @@ import os
 import pathlib
 import re
 import secrets
+import sys
+import importlib.util
 from collections.abc import Callable, Iterator, Sequence
 from typing import Any
 
@@ -262,27 +264,67 @@ class ArtifactStore:
         return {"expired": len(expired)}
 
 
+DOCUMENT_FORMATS = ("markdown", "docx", "xlsx", "pptx", "pdf", "csv")
+_STRUCTURE_KEY = {"docx": "sections", "pdf": "sections", "pptx": "slides", "xlsx": "sheets", "csv": "rows"}
+
+
+def _deliverables():
+    name = "model_garden_tier0_deliverables"
+    if name not in sys.modules:
+        spec = importlib.util.spec_from_file_location(name, pathlib.Path(__file__).with_name("deliverables.py"))
+        module = importlib.util.module_from_spec(spec)
+        assert spec.loader is not None
+        sys.modules[name] = module
+        spec.loader.exec_module(module)
+    return sys.modules[name]
+
+
 def create_document(
-    store: "ArtifactStore", *, title: str, content: str, agent: str, requested_by: str, sources: Sequence[str] = (),
+    store: "ArtifactStore", *, title: str, content: str | None = None, agent: str, requested_by: str, sources: Sequence[str] = (),
+    format: str = "markdown", structure: Any = None,
 ) -> dict[str, Any]:
-    """The Tier 0 body of the portable ``docs.create`` Tool: a Markdown document stored for the requester.
+    """The Tier 0 body of the portable ``docs.create`` Tool: a finished document stored for the requester.
 
     ``documentId`` is the artifact's ``tier0:<tenant>/<id>`` location, which is what a person (or a channel reply) uses to find
-    it; the same title and text from the same requester return the same document. Plain Markdown only: no active content, and
-    the size is bounded before anything is written. Only identifiers go to the ledger (the store records them), never the text.
+    it; the same title and content from the same requester return the same document. The default ``markdown`` format takes
+    ``content``. ``docx``, ``pdf``, ``pptx``, ``xlsx`` and ``csv`` take ``structure`` (``sections``, ``slides``, ``sheets`` or
+    ``rows``; see ``deliverables.py``) and are built by it, so a coworker produces a real file and not only text. Passive content only (no
+    macros, links or formulas), size-bounded before anything is written. Only identifiers, the format and the source
+    identifiers go to the ledger (the store records them), never the text.
     """
     if not isinstance(title, str) or not title.strip():
         raise ArtifactError("a document needs a title")
-    if not isinstance(content, str) or not content.strip():
-        raise ArtifactError("a document needs content")
-    if len(content) > MAX_DOCUMENT_CHARS:
-        raise ArtifactError(f"a document is at most {MAX_DOCUMENT_CHARS} characters")
-    label = _display_name(title.strip() if title.strip().lower().endswith(".md") else title.strip() + ".md")
-    entry = store.put(
-        name=label, content=content.encode("utf-8"), media_type="text/markdown", agent=agent, requested_by=requested_by,
-        sources=sources,
-    )
+    if format not in DOCUMENT_FORMATS:
+        raise ArtifactError("format must be one of " + ", ".join(DOCUMENT_FORMATS))
+    if format == "markdown":
+        if structure is not None:
+            raise ArtifactError("a markdown document takes content, not structure")
+        if not isinstance(content, str) or not content.strip():
+            raise ArtifactError("a document needs content")
+        if len(content) > MAX_DOCUMENT_CHARS:
+            raise ArtifactError(f"a document is at most {MAX_DOCUMENT_CHARS} characters")
+        label = _display_name(title.strip() if title.strip().lower().endswith(".md") else title.strip() + ".md")
+        entry = store.put(
+            name=label, content=content.encode("utf-8"), media_type="text/markdown", agent=agent, requested_by=requested_by,
+            sources=sources,
+        )
+    else:
+        key = _STRUCTURE_KEY[format]
+        if content not in (None, ""):
+            raise ArtifactError(f"a {format} document takes structure ({key}), not content")
+        if not isinstance(structure, dict) or set(structure) - {key} or key not in structure:
+            raise ArtifactError(f"a {format} document needs structure with exactly {key}")
+        module = _deliverables()
+        built = {key: structure[key], **({"title": title.strip()} if format in ("docx", "pdf", "pptx") else {})}
+        try:
+            entry = module.deliver(
+                store, kind=format, name=_display_name(title.strip()), content=built, agent=agent, requested_by=requested_by,
+                sources=sources,
+            )
+        except module.DeliverableError as exc:
+            raise ArtifactError(str(exc)) from exc
     return {
         "documentId": entry["location"], "artifactId": entry["id"], "name": entry["name"], "bytes": entry["bytes"],
         "sha256": entry["sha256"], "expiresAt": entry["expiresAt"], "duplicate": bool(entry.get("duplicate")),
+        "format": format, "mediaType": entry["mediaType"],
     }
