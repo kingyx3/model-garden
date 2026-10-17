@@ -250,6 +250,23 @@ class DeploymentTests(unittest.TestCase):
                 deployer.render_bundle(profile, case._binding(root, {"gateway": no_web}), root / "bad", "acme-dev")
             with self.assertRaisesRegex(ValueError, "vault_key_ref"):
                 deployer.render_bundle(profile, case._binding(root, {"upstream": {"mcp": {**upstream["mcp"], "vault_key_ref": "plain"}}}), root / "bad2", "acme-dev")
+            no_vault = {"mcp": {"enabled": True, "secret_refs": ["secret://hubspot/receptionist"]}}
+            with self.assertRaisesRegex(ValueError, "vault_key_ref"):
+                deployer.render_bundle(profile, case._binding(root, {"gateway": gateway, "upstream": no_vault}), root / "bad3", "acme-dev")
+            vault_only = {"mcp": {"enabled": True, "vault_key_ref": "secret://vault/private"}}
+            deployer.render_bundle(profile, case._binding(root, {"gateway": gateway, "upstream": vault_only}), root / "vault-only", "acme-dev")
+            compose = yaml.safe_load((root / "vault-only" / "compose.yaml").read_text(encoding="utf-8"))
+            self.assertEqual(compose["services"]["governed-tools"]["environment"]["MODEL_GARDEN_UPSTREAM_MCP"], "enabled")
+            with self.assertRaisesRegex(ValueError, "secret_refs"):
+                deployer.render_bundle(profile, case._binding(root, {"upstream": {"mcp": {"enabled": True}}}), root / "bad4", "acme-dev")
+
+    def test_a_deployment_refuses_a_gateway_key_the_sidecar_cannot_open(self):
+        config = {"enrollment": {"vaultPublicKey": KEYS["public"]}}
+        deployer._check_vault_pair(config, KEYS["private"])
+        deployer._check_vault_pair(None, KEYS["private"])
+        for private in (OTHER_KEYS["private"], "not-a-key"):
+            with self.assertRaisesRegex(ValueError, "does not match"):
+                deployer._check_vault_pair(config, private)
 
 
 if __name__ == "__main__":

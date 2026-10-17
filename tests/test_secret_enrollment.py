@@ -133,9 +133,13 @@ class SubmitTests(Case):
             self.store.submit(opened["token"], SECRET, submitted_by=OTHER, now=T0 + 5)
         self.assertEqual(self.store.submit(opened["token"], SECRET, submitted_by=OWNER, now=T0 + 6)["version"], 1)
 
+    def test_the_owner_address_matches_whatever_its_case(self):
+        opened = self.open()
+        self.assertEqual(self.store.submit(opened["token"], SECRET, submitted_by=OWNER.upper(), now=T0 + 6)["version"], 1)
+
     def test_values_are_validated_by_kind_and_nothing_is_stored_on_refusal(self):
         for kind, value in (("bearer", ""), ("bearer", "two\nlines"), ("bearer", " padded"), ("bearer", "x" * 4097), ("bearer", "tab\there"), ("bearer", 5),
-                            ("basic", "nocolon"), ("basic", ":nouser"), ("api-key", "a\x00b")):
+                            ("basic", "nocolon"), ("basic", ":nouser"), ("api-key", "a\x00b"), ("bearer", "cl\u00e9-unicode")):
             opened = self.open(kind=kind)
             with self.assertRaises(Error, msg=repr((kind, value))):
                 self.store.submit(opened["token"], value, submitted_by=OWNER, now=T0 + 1)  # type: ignore[arg-type]

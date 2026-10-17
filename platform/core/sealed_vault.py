@@ -57,6 +57,13 @@ def generate_keypair() -> dict[str, str]:
     }
 
 
+def public_key_of(private_key: str) -> str:
+    """The base64 public key matching a base64 private key, so a deployment can prove the gateway seals to the sidecar's key."""
+    _, serialization, x25519, _, _ = _crypto()
+    private = x25519.X25519PrivateKey.from_private_bytes(_raw_key(private_key, "private"))
+    return base64.b64encode(private.public_key().public_bytes(serialization.Encoding.Raw, serialization.PublicFormat.Raw)).decode()
+
+
 def _raw_key(text: Any, label: str) -> bytes:
     try:
         raw = base64.b64decode(str(text), validate=True)

@@ -211,10 +211,15 @@ def _test(args, store, server, offered, approvals, grants, audit, *, environ, tr
         except Exception as exc:  # noqa: BLE001 - report the class only; upstream text can carry data or credentials
             ok = False
             report.update(called=args.operation, error=type(exc).__name__)
+            # Only a credential or transport failure says the connection is broken; a mistyped argument or an upstream
+            # "not found" is a failed test, never a reason to cut off the coworker's live grant.
+            unreachable = (isinstance(exc, RuntimeError) and not isinstance(exc, EXECUTOR.UpstreamToolError)) or (
+                isinstance(exc, EXECUTOR.GatewayError) and str(exc) == "upstream credential is unavailable")
+            if unreachable:
+                grants.set_health(grant_id, "failed", by=args.actor)
+                report["grantHealth"] = "failed"
     if problems:
         report["notReady"] = problems
-    if grant_id is not None:
-        grants.set_health(grant_id, "healthy" if ok else "failed", by=args.actor)
     audit("mcp.connection-test", args.actor, {"tenant": args.tenant, "agent": args.agent, "connectionId": args.connection_id,
                                               "operation": args.operation, "outcome": "passed" if ok else "failed",
                                               **({"receipt": report["receipt"]} if report.get("receipt") else {})})

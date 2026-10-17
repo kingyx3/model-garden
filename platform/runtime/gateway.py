@@ -192,9 +192,11 @@ $('secret').onsubmit=function(e){e.preventDefault();var v=$('value').value;$('va
 post('/connections/enroll',{token:link,value:v},S.getItem('mg-session')).then(function(r){return r.json().then(function(j){return [r.status,j]})})
 .then(function(x){if(x[0]===200){S.removeItem('mg-enroll');show('');$('note').textContent='Saved: '+x[1].masked+'. You can close this page.'}
 else if(x[0]===401){S.removeItem('mg-session');show('signin');$('note').textContent=x[1].error}
-else{$('note').textContent=(x[1].error||'That did not work.')+' Ask for a new link if this one has expired or was used.'}})};
+else{$('note').textContent=(x[1].error||'That did not work.')+' Ask for a new link if this one has expired or was used.'}})
+.catch(function(){$('note').textContent='Nothing was saved. Check your connection and try again.'})};
 if(p.login){post('/channels/web/session',{login:p.login}).then(function(r){return r.json()}).then(function(j){
-if(j.session){S.setItem('mg-session',j.session);S.setItem('mg-prefix',j.prefix)}else{$('note').textContent='That sign-in link is not valid or was already used.'}ready()})}
+if(j.session){S.setItem('mg-session',j.session);S.setItem('mg-prefix',j.prefix)}else{$('note').textContent='That sign-in link is not valid or was already used.'}ready()})
+.catch(function(){$('note').textContent='Sign-in did not complete. Check your connection and try again.';ready()})}
 else ready();
 })();
 """

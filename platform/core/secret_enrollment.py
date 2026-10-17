@@ -181,8 +181,10 @@ class EnrollmentStore:
 
     @staticmethod
     def _valid_value(kind: str, value: Any) -> str:
-        if not isinstance(value, str) or not value or len(value) > MAX_VALUE or _CONTROL.search(value) or value != value.strip():
-            raise EnrollmentError(f"the credential is one line of at most {MAX_VALUE} characters with no leading or trailing space")
+        if (not isinstance(value, str) or not value or len(value) > MAX_VALUE or _CONTROL.search(value) or value != value.strip()
+                or not value.isascii()):
+            # HTTP headers carry the value, so it must be ASCII.
+            raise EnrollmentError(f"the credential is one line of at most {MAX_VALUE} ASCII characters with no leading or trailing space")
         if kind == "basic" and (":" not in value or value.startswith(":")):
             raise EnrollmentError("a basic credential is user:password")
         return value
@@ -205,7 +207,7 @@ class EnrollmentStore:
             elif match["expiresAt"] <= now:
                 match["state"] = "expired"
                 reason = "expired"
-            elif match["owner"] != submitted_by:
+            elif match["owner"].casefold() != submitted_by.casefold():
                 reason = "wrong-person"
             else:
                 reason = ""
