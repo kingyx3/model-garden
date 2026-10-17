@@ -15,3 +15,9 @@ The repository version is stored in `VERSION`. Use semantic versioning:
 5. Any migration steps are documented before tagging.
 
 Client workspaces **must** pin an immutable published Model Garden release in `platform.lock.yaml`, not track `main`. Validate the same client revision through DEV before PROD promotion. Infrastructure upgrades and client Agent/Skill changes follow separately reviewed changes; production release tags are never moved.
+
+## Publication and CI ownership
+
+Merging a version-bumped PR into `main` runs the complete validation suite; **only a validated `main` run** publishes the immutable `v<VERSION>` tag and GitHub Release. Tag pushes do not run or publish a second copy of the same validation suite. Do not create release tags manually: if a tag already exists at a different commit, the `main` publisher fails closed rather than moving it.
+
+The repository's `scripts/validate-release-tag.py` remains available for manual release-tag/version checks. Keep the GitHub release and client lockfile pointed to the published, unchanged commit.
