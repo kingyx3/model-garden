@@ -244,6 +244,15 @@ class McpConnectionStore:
         self._record("mcp.connection-disable", who, snapshot)
         return {"id": connection_id, "agent": agent, "active": False}
 
+    def staged(self, connection_id: str, *, agent: str) -> dict[str, Any]:
+        """The staged declaration, active or not, for operator review and activation only (never the runtime path)."""
+        key = self._key(agent, connection_id)
+        with self._locked() as state:
+            item = copy.deepcopy(state["connections"].get(key))
+        if item is None:
+            raise ConnectionRefused("no such coworker connection")
+        return {"id": item["id"], "agent": agent, "declaration": item["declaration"], "revision": item["revision"], "active": bool(item.get("active"))}
+
     def resolve(self, connection_id: str, *, agent: str) -> dict[str, Any]:
         """Only the internal runtime can read this secret-reference-bearing record."""
         key = self._key(agent, connection_id)

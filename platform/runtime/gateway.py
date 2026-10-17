@@ -16,6 +16,10 @@ Routes (everything else is 404):
 - ``POST /channels/slack/events`` (Events API, including the URL verification challenge), ``POST /channels/slack/interactive``
 - ``POST /channels/teams/messages`` (message activities and Adaptive Card ``Action.Submit`` approval clicks)
 - ``GET|POST /approvals/confirm`` the page behind an emailed approval link (preview on GET, decide only on POST)
+- ``GET /connections/enroll`` and ``POST /connections/enroll`` (when ``enrollment`` is configured) the page behind a credential
+  enrollment link (``secret_enrollment``). The enrollment token sits in the fragment; the owner signs in with the web chat's magic
+  link (which returns to this page), and the submission is accepted only from the named owner's verified session. The value goes
+  only to the sealed vault (``sealed_vault.SealedVault``, which holds the sidecar's public key and can never read it back).
 
 Every channel request is verified by its adapter first; the principal is the verified sender mapped through the people directory,
 never the text. Hand-off replies and schedule commands typed in a channel are routed to their modules; other messages are put to the
@@ -52,6 +56,7 @@ HTTP_PORT = 8080
 SMTP_PORT = 2525
 ANNOUNCE_EVERY = 15
 IDENTITY = "runtime:gateway"
+_ENROLL_TOKEN = re.compile(r"[A-Za-z0-9_-]{32,128}")
 _CSP = "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
 _PAGE_HEADERS = {"Content-Security-Policy": _CSP, "X-Frame-Options": "DENY", "Cache-Control": "no-store", "Referrer-Policy": "no-referrer",
                  "X-Content-Type-Options": "nosniff"}
@@ -79,6 +84,8 @@ def _module(key: str):
         "delivery": "platform/core/notice_delivery.py", "handoff": "platform/core/handoff.py",
         "handoff_reply": "platform/core/handoff_reply.py", "schedules": "platform/core/schedules.py",
         "artifacts": "platform/core/artifacts.py", "coworker": "platform/runtime/coworker_client.py",
+        "enrollment": "platform/core/secret_enrollment.py", "vault": "platform/core/sealed_vault.py",
+        "readiness": "platform/core/grant_readiness.py",
     }
     # Shared names, so an error class raised in one module is the class another module catches.
     shared = {"text": "model_garden_text_channel", "schedules": "model_garden_schedule_commands_store"}
@@ -98,7 +105,7 @@ def load_config(document: Mapping[str, Any]) -> dict[str, Any]:
     """Validate the non-secret configuration rendered from ``EnvironmentBinding.spec.gateway``."""
     if not isinstance(document, Mapping):
         raise GatewayConfigError("gateway configuration must be an object")
-    allowed = {"publicOrigin", "directory", "people", "escalateTo", "web", "slack", "teams", "approvals", "mailbox", "coworker", "agent"}
+    allowed = {"publicOrigin", "directory", "people", "escalateTo", "web", "slack", "teams", "approvals", "mailbox", "coworker", "agent", "enrollment"}
     unknown = sorted(set(document) - allowed)
     if unknown:
         raise GatewayConfigError(f"unknown gateway settings: {', '.join(unknown)}")
@@ -109,7 +116,7 @@ def load_config(document: Mapping[str, Any]) -> dict[str, Any]:
     _module("text").PrincipalDirectory(document.get("directory") or {})
     sections: dict[str, Any] = {}
     for name, required in (("web", {"allowedAddresses"}), ("slack", {"botUserId"}), ("teams", {"appId", "tenants"}),
-                           ("approvals", set()), ("mailbox", {"addresses"}), ("coworker", {"url"})):
+                           ("approvals", set()), ("mailbox", {"addresses"}), ("coworker", {"url"}), ("enrollment", {"vaultPublicKey"})):
         section = document.get(name)
         if section is None:
             continue
@@ -124,10 +131,19 @@ def load_config(document: Mapping[str, Any]) -> dict[str, Any]:
             raise GatewayConfigError("web.mail needs from and host (the relay that sends sign-in links)")
     if "coworker" in sections:
         _module("coworker").check_base_url(str(sections["coworker"]["url"]))
+    if "enrollment" in sections:
+        if "web" not in sections:
+            raise GatewayConfigError("credential enrollment needs web sign-in, so only the named owner can submit")
+        if set(sections["enrollment"]) - {"vaultPublicKey"}:
+            raise GatewayConfigError("enrollment holds only vaultPublicKey")
+        try:
+            _module("vault").SealedVault(pathlib.Path("."), public_key=sections["enrollment"]["vaultPublicKey"])
+        except _module("vault").VaultError as exc:
+            raise GatewayConfigError(str(exc)) from None
     return {
         "publicOrigin": origin, "directory": dict(document.get("directory") or {}), "people": dict(document.get("people") or {}),
         "escalateTo": document.get("escalateTo"), "agent": document.get("agent") or "coworker", **{k: sections.get(k) for k in
-        ("web", "slack", "teams", "approvals", "mailbox", "coworker")},
+        ("web", "slack", "teams", "approvals", "mailbox", "coworker", "enrollment")},
     }
 
 
@@ -144,6 +160,45 @@ CHAT_HTML = """<!doctype html>
 <section id="chat" hidden><div id="log" aria-live="polite"></div>
 <form id="send"><input id="text" autocomplete="off" required><button>Send</button></form></section>
 </main><script src="/chat/app.js"></script></body></html>
+"""
+
+ENROLL_HTML = """<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex">
+<title>Connect a system for your coworker</title><link rel="stylesheet" href="/chat/app.css"></head>
+<body><main>
+<h1>Connect a system for your coworker</h1>
+<p id="note" role="status"></p>
+<section id="signin" hidden><p>This link is for the owner it was sent to. Enter your work email address and we will send you a sign-in link that brings you back here.</p>
+<form id="login"><input id="address" type="email" autocomplete="email" required><button>Send link</button></form></section>
+<section id="enter" hidden><p>Paste the credential (an API key, a token, or user:password). It is sealed for your coworker's governed connection only: it cannot be read back here, and it is never shown in chat or logs.</p>
+<form id="secret"><input id="value" type="password" autocomplete="off" required><button>Save</button></form></section>
+</main><script src="/connections/enroll/app.js"></script></body></html>
+"""
+
+ENROLL_JS = """(function(){
+var S=window.sessionStorage,$=function(i){return document.getElementById(i)},p={};
+location.hash.slice(1).split('&').forEach(function(kv){var i=kv.indexOf('=');if(i>0)p[kv.slice(0,i)]=decodeURIComponent(kv.slice(i+1))});
+history.replaceState(null,'','/connections/enroll');
+if(p.enroll)S.setItem('mg-enroll',p.enroll);
+var link=S.getItem('mg-enroll');
+function show(id){$('signin').hidden=id!=='signin';$('enter').hidden=id!=='enter'}
+function post(path,body,session){var h={'Content-Type':'application/json'};if(session)h.Authorization='Bearer '+session;
+return fetch(path,{method:'POST',headers:h,body:JSON.stringify(body)})}
+function ready(){show(S.getItem('mg-session')?'enter':'signin')}
+if(!link){$('note').textContent='Open the link exactly as it was sent to you.';return}
+$('login').onsubmit=function(e){e.preventDefault();post('/channels/web/login',{address:$('address').value,enroll:link}).then(function(){
+$('note').textContent='If that address is allowed, a sign-in link is on its way.'})};
+$('secret').onsubmit=function(e){e.preventDefault();var v=$('value').value;$('value').value='';
+post('/connections/enroll',{token:link,value:v},S.getItem('mg-session')).then(function(r){return r.json().then(function(j){return [r.status,j]})})
+.then(function(x){if(x[0]===200){S.removeItem('mg-enroll');show('');$('note').textContent='Saved: '+x[1].masked+'. You can close this page.'}
+else if(x[0]===401){S.removeItem('mg-session');show('signin');$('note').textContent=x[1].error}
+else{$('note').textContent=(x[1].error||'That did not work.')+' Ask for a new link if this one has expired or was used.'}})
+.catch(function(){$('note').textContent='Nothing was saved. Check your connection and try again.'})};
+if(p.login){post('/channels/web/session',{login:p.login}).then(function(r){return r.json()}).then(function(j){
+if(j.session){S.setItem('mg-session',j.session);S.setItem('mg-prefix',j.prefix)}else{$('note').textContent='That sign-in link is not valid or was already used.'}ready()})
+.catch(function(){$('note').textContent='Sign-in did not complete. Check your connection and try again.';ready()})}
+else ready();
+})();
 """
 
 CHAT_CSS = """body{font:16px system-ui,sans-serif;margin:0;background:#f6f6f4;color:#1b1b1b}main{max-width:40rem;margin:0 auto;padding:1rem}
@@ -236,6 +291,19 @@ class Gateway:
             )
         else:
             self.confirm = None
+        self.enrollments = None
+        if self.config["enrollment"]:
+            # One store per <client>-<environment>, the tenant the grant registry and the operator command use.
+            manifest_path = environ.get("MODEL_GARDEN_CAPABILITY_MANIFEST", "")
+            try:
+                manifest = json.loads(pathlib.Path(manifest_path).read_text(encoding="utf-8")) if manifest_path else {}
+            except (OSError, ValueError):
+                manifest = {}
+            enrollment_tenant = _module("readiness").tenant_of(manifest) if isinstance(manifest, dict) else None
+            if not enrollment_tenant:
+                raise GatewayConfigError("credential enrollment needs the capability manifest to name the client and environment")
+            vault = _module("vault").SealedVault(self.data / "vault", public_key=self.config["enrollment"]["vaultPublicKey"])
+            self.enrollments = _module("enrollment").EnrollmentStore(self.data / "secret-enrollments", tenant=enrollment_tenant, vault=vault, audit=self.audit)
         self.executor = executor
         self.ingress = _module("ingress").ChannelIngress(
             self.adapters, self.directory, respond=self._respond, decide=self._decide, handoff_replies=self._handoff_replies(),
@@ -390,6 +458,8 @@ class Gateway:
             return Response(200, CHAT_JS.encode("utf-8"), "text/javascript; charset=utf-8", _PAGE_HEADERS)
         if route == "/chat/app.css" and method == "GET" and self.auth is not None:
             return Response(200, CHAT_CSS.encode("utf-8"), "text/css; charset=utf-8", _PAGE_HEADERS)
+        if route.startswith("/connections/enroll") and self.enrollments is not None:
+            return self._enroll(route, method, headers, body, json_response)
         if route == "/approvals/confirm" and self.confirm is not None:
             page = self.confirm.handle(method, token=(query.get("token") or [None])[0], body=body, headers=headers)
             return Response(page.status, page.body.encode("utf-8") if isinstance(page.body, str) else page.body, "text/html; charset=utf-8", dict(page.headers))
@@ -411,16 +481,46 @@ class Gateway:
             return json_response(401, {"error": "not verified"})
         return json_response(404, {"error": "not found"})
 
+    def _enroll(self, route: str, method: str, headers: Mapping[str, str], body: bytes, json_response: Callable[..., Any]) -> Any:
+        """The owner's credential entry page and its submission; the value goes only to the sealed vault."""
+        Response = _module("ingress").Response
+        if route == "/connections/enroll" and method == "GET":
+            return Response(200, ENROLL_HTML.encode("utf-8"), "text/html; charset=utf-8", _PAGE_HEADERS)
+        if route == "/connections/enroll/app.js" and method == "GET":
+            return Response(200, ENROLL_JS.encode("utf-8"), "text/javascript; charset=utf-8", _PAGE_HEADERS)
+        if route != "/connections/enroll" or method != "POST":
+            return json_response(404, {"error": "not found"})
+        try:
+            identity = self._web_identity(headers)
+        except _module("text").ChannelVerificationError:
+            return json_response(401, {"error": "Sign in with the owner's address first."})
+        try:
+            request = json.loads(body or b"{}")
+            token, value = request.get("token"), request.get("value")
+        except (ValueError, AttributeError):
+            return json_response(400, {"error": "This link is not valid."})
+        try:
+            # The verified web sign-in is the owner check: the enrollment refuses anyone but the person it names.
+            stored = self.enrollments.submit(token, value, submitted_by=identity.channel_user_id, now=int(self.clock()))
+        except _module("enrollment").EnrollmentError as exc:
+            return json_response(400, {"error": str(exc)[:200]})
+        return json_response(200, {"ok": True, "version": stored["version"], "masked": stored["masked"]})
+
     def _web(self, route: str, method: str, query: Mapping[str, list[str]], headers: Mapping[str, str], body: bytes, json_response: Callable[..., Any]) -> Any:
         if route == "/channels/web/login":
             try:
-                address = str(json.loads(body or b"{}").get("address", ""))
-            except ValueError:
-                address = ""
+                request = json.loads(body or b"{}")
+                address = str(request.get("address", ""))
+                enroll = str(request.get("enroll", ""))
+            except (ValueError, AttributeError):
+                address, enroll = "", ""
             token = self.auth.issue_login(address)
             if token is not None:
+                # From a credential enrollment page, the sign-in link returns there with the enrollment token still in the fragment.
+                link = (f"{self.config['publicOrigin']}/connections/enroll#login={urllib.parse.quote(token)}&enroll={enroll}"
+                        if self.enrollments is not None and _ENROLL_TOKEN.fullmatch(enroll) else f"{self.config['publicOrigin']}/chat#login={urllib.parse.quote(token)}")
                 try:
-                    self._login_mail(address.strip(), f"{self.config['publicOrigin']}/chat#login={urllib.parse.quote(token)}")
+                    self._login_mail(address.strip(), link)
                 except Exception as exc:  # noqa: BLE001 - the page says the same thing either way
                     self.audit("channel.login-mail-failed", IDENTITY, {"error": type(exc).__name__})
             return json_response(202, {"ok": True})

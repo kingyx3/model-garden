@@ -130,6 +130,7 @@ class GovernedToolRuntime:
         upstream_transport=None,
         upstream_dns_resolver=None,
         upstream_secret_resolver=None,
+        upstream_rest_transport=None,
     ) -> None:
         self.desired_state = _load_json_object(desired_state_path, "compiled desired state")
         if self.desired_state.get("schemaVersion") != 1:
@@ -152,6 +153,8 @@ class GovernedToolRuntime:
         self.upstream_transport = upstream_transport
         self.upstream_dns_resolver = upstream_dns_resolver
         self.upstream_secret_resolver = upstream_secret_resolver
+        # A client's own REST API (a connection whose declaration carries ``api``) uses this transport instead; same governed path.
+        self.upstream_rest_transport = upstream_rest_transport
         self.read_policy = GOVERN.parse_read_policy(self.environ.get("MODEL_GARDEN_READ_AUDIT"))
         digest = hashlib.sha256(GOVERN._canonical_json(self.desired_state).encode("utf-8")).hexdigest()
         self.agent_version = f"sha256:{digest[:16]}"
@@ -373,6 +376,8 @@ class GovernedToolRuntime:
         connection = connections.resolve(connection_id, agent=agent)
         declaration = connection["declaration"]
         server = MCP_EXECUTOR._mcp().validate_server(declaration)
+        if "api" in server and self.upstream_rest_transport is None:
+            raise PermissionError("no approved REST API transport is installed")
         entry = server["tools"].get(upstream)
         if entry is None:
             raise PermissionError("upstream operation is not allowed")
@@ -404,10 +409,14 @@ class GovernedToolRuntime:
             return prepared
         route = check()
         def execute(exact):
+            approvals = MCP_EXECUTOR._mcp().SchemaApprovals(self.governance_root / "mcp-schema-approvals", tenant=tenant)
+            transport = self.upstream_transport
+            if "api" in route["server"]:
+                api = route["server"]["api"]
+                def transport(url, pinned_ip, credential):  # noqa: E306 - the reviewed definition, never a caller-supplied URL
+                    return self.upstream_rest_transport(api, pinned_ip, credential, approvals)
             return MCP_EXECUTOR.invoke(
-                route, exact, approvals=MCP_EXECUTOR._mcp().SchemaApprovals(
-                    self.governance_root / "mcp-schema-approvals", tenant=tenant
-                ), transport_factory=self.upstream_transport, secret_resolver=self.upstream_secret_resolver,
+                route, exact, approvals=approvals, transport_factory=transport, secret_resolver=self.upstream_secret_resolver,
                 dns_resolver=self.upstream_dns_resolver, recheck=check,
             )
         return self._execute(
@@ -446,6 +455,8 @@ class GovernedToolRuntime:
                 record = connections.resolve(item["id"], agent=agent)
                 server = MCP_EXECUTOR._mcp().validate_server(record["declaration"])
             except (PermissionError, ValueError, KeyError):
+                continue
+            if "api" in server and self.upstream_rest_transport is None:
                 continue
             for upstream, entry in sorted(server["tools"].items()):
                 selected = GOVERN._selected_tool(self.desired_state, entry["tool"])

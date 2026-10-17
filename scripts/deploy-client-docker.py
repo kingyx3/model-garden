@@ -76,6 +76,8 @@ RUNTIME_SOURCE_PATHS = (
     pathlib.Path("platform/core/skillsets.py"),
     pathlib.Path("platform/core/provider_grants.py"),
     pathlib.Path("platform/core/grant_readiness.py"),
+    pathlib.Path("platform/core/secret_enrollment.py"),
+    pathlib.Path("platform/core/sealed_vault.py"),
     pathlib.Path("platform/core/knowledge_deploy.py"),
     pathlib.Path("platform/core/team.py"),
     pathlib.Path("platform/core/mcp_passthrough.py"),
@@ -359,16 +361,50 @@ def _upstream_settings(binding: dict[str, Any]) -> list[str] | None:
     if not isinstance(upstream, dict) or set(upstream) - {"mcp"}:
         raise ValueError("Docker target failed: EnvironmentBinding upstream holds only mcp")
     mcp = upstream["mcp"]
-    if not isinstance(mcp, dict) or set(mcp) - {"enabled", "secret_refs"}:
-        raise ValueError("Docker target failed: upstream.mcp holds only enabled and secret_refs")
+    if not isinstance(mcp, dict) or set(mcp) - {"enabled", "secret_refs", "vault_key_ref"}:
+        raise ValueError("Docker target failed: upstream.mcp holds only enabled, secret_refs and vault_key_ref")
     if mcp.get("enabled") is not True:
         return None
-    refs = mcp.get("secret_refs")
-    if not isinstance(refs, list) or not refs or len(refs) > 50 or not all(
+    refs = mcp.get("secret_refs", [] if "vault_key_ref" in mcp else None)
+    # Owner-entered credentials live in the sealed vault, so a deployment with a vault key may have no deploy-time references.
+    if not isinstance(refs, list) or (not refs and "vault_key_ref" not in mcp) or len(refs) > 50 or not all(
         isinstance(item, str) and item.startswith("secret://") and len(item) > len("secret://") for item in refs
     ):
         raise ValueError("Docker target failed: upstream.mcp.secret_refs must list secret:// references")
     return sorted(set(refs))
+
+
+def _vault_key_ref(binding: dict[str, Any]) -> str | None:
+    """``upstream.mcp.vault_key_ref``: the sealed vault's private key, injected into the governed sidecar alone.
+
+    With it the sidecar can open credentials a client owner entered through an enrollment link (``sealed_vault``); the gateway only
+    ever gets the matching public key (``gateway.enrollment.vault_public_key``). Without it, only deploy-time references resolve.
+    """
+    if _upstream_settings(binding) is None:
+        return None
+    ref = binding["spec"]["upstream"]["mcp"].get("vault_key_ref")
+    if ref is None:
+        return None
+    if not isinstance(ref, str) or not ref.startswith("secret://") or len(ref) <= len("secret://"):
+        raise ValueError("Docker target failed: upstream.mcp.vault_key_ref must be a secret:// reference")
+    return ref
+
+
+def _check_vault_pair(gateway_config: dict[str, Any] | None, private_key: str | None) -> None:
+    """Refuse to deploy when the gateway would seal owner-entered credentials to a key the sidecar cannot open."""
+    public_key = ((gateway_config or {}).get("enrollment") or {}).get("vaultPublicKey")
+    if public_key is None or private_key is None:
+        return
+    spec = importlib.util.spec_from_file_location("model_garden_deploy_sealed_vault", ROOT / "platform" / "core" / "sealed_vault.py")
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+    try:
+        matches = module.public_key_of(private_key) == public_key
+    except module.VaultError:
+        matches = False
+    if not matches:
+        raise ValueError("Docker target failed: gateway.enrollment.vault_public_key does not match the key behind upstream.mcp.vault_key_ref")
 
 
 def _upstream_env(refs: list[str]) -> dict[str, str]:
@@ -408,7 +444,7 @@ def _gateway_settings(binding: dict[str, Any]) -> tuple[dict[str, Any] | None, d
     if not isinstance(gateway, dict):
         raise ValueError("Docker target failed: EnvironmentBinding gateway must be an object")
     allowed = {"enabled", "public_origin", "agent", "directory", "people", "escalate_to", "web", "slack", "teams", "approvals", "mailbox",
-               "coworker_api_key_ref", "secrets", "smtp_user", "bind", "smtp_bind"}
+               "coworker_api_key_ref", "secrets", "smtp_user", "bind", "smtp_bind", "enrollment"}
     unknown = sorted(set(gateway) - allowed)
     if unknown:
         raise ValueError(f"Docker target failed: unknown gateway settings: {', '.join(unknown)}")
@@ -460,6 +496,14 @@ def _gateway_settings(binding: dict[str, Any]) -> tuple[dict[str, Any] | None, d
         config["mailbox"] = {"addresses": mailbox.get("addresses"), "hostname": mailbox.get("hostname", "mail"), "trustedRelays": mailbox.get("trusted_relays") or []}
     if key_ref:
         config["coworker"] = {"url": f"http://coworker-api:{COWORKER_API_PORT}/v1"}
+    enrollment = gateway.get("enrollment")
+    if enrollment is not None:
+        if not isinstance(enrollment, dict) or set(enrollment) != {"vault_public_key"} or web is None:
+            raise ValueError("Docker target failed: gateway.enrollment holds vault_public_key and needs web sign-in")
+        if _vault_key_ref(binding) is None:
+            # Without the sidecar's private key an owner's entry would be saved and never usable.
+            raise ValueError("Docker target failed: gateway.enrollment needs upstream.mcp enabled with vault_key_ref")
+        config["enrollment"] = {"vaultPublicKey": enrollment["vault_public_key"]}
     missing = sorted(required - set(secret_env))
     if missing:
         raise ValueError(f"Docker target failed: gateway needs secrets for its channels: {', '.join(missing)}")
@@ -534,6 +578,7 @@ def _compose(
     coworker_api: bool = False,
     gateway: tuple[dict[str, Any], dict[str, str], dict[str, str]] | None = None,
     upstream_refs: list[str] | None = None,
+    vault_key: bool = False,
 ) -> str:
     provider_env = PROVIDER_ENV[provider]
     hermes: dict[str, Any] = {
@@ -571,7 +616,9 @@ def _compose(
                 **({"MODEL_GARDEN_READ_AUDIT": read_audit} if read_audit else {}),
                 **({"MODEL_GARDEN_UPSTREAM_MCP": "enabled",
                     **{name: f"${{{name}:?{name} is required}}" for name in sorted(_upstream_env(upstream_refs))}}
-                   if upstream_refs else {}),
+                   if upstream_refs is not None else {}),
+                **({"MODEL_GARDEN_VAULT_PRIVATE_KEY": "${MODEL_GARDEN_VAULT_PRIVATE_KEY:?MODEL_GARDEN_VAULT_PRIVATE_KEY is required}"}
+                   if vault_key else {}),
             },
             "volumes": ["governance-data:/opt/data"],
             "healthcheck": _healthcheck(9120),
@@ -755,7 +802,8 @@ def render_bundle(
     (bundle_dir / "compose.yaml").write_text(
         _compose(project_name, provider, lock, read_audit=read_audit, built_in_tools=built_in_tools,
                  worker=worker_config is not None, coworker_api=coworker_key_ref is not None,
-                 gateway=gateway if gateway[0] is not None else None, upstream_refs=upstream_refs),
+                 gateway=gateway if gateway[0] is not None else None, upstream_refs=upstream_refs,
+                 vault_key=_vault_key_ref(binding) is not None),
         encoding="utf-8",
     )
     metadata = {
@@ -859,7 +907,11 @@ def apply_bundle(
         runtime_env["MODEL_GARDEN_COWORKER_API_KEY"] = resolved[coworker_key_ref]
     for name, ref in _upstream_env(_upstream_settings(binding) or []).items():
         runtime_env[name] = resolved[ref]
+    vault_ref = _vault_key_ref(binding)
+    if vault_ref is not None:
+        runtime_env["MODEL_GARDEN_VAULT_PRIVATE_KEY"] = resolved[vault_ref]
     gateway_config, gateway_secrets, _ = _gateway_settings(binding)
+    _check_vault_pair(gateway_config, resolved[vault_ref] if vault_ref is not None else None)
     for name, ref in gateway_secrets.items():
         runtime_env[name] = resolved[ref]
     # Retired vendor-token environment variables never reach the replacement runtime.

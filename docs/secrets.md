@@ -72,6 +72,17 @@ OAuth refresh tokens or other dynamic grants created by an end-user/provider aut
 
 The deployment process resolves the aggregate map, removes it before Docker execution and injects only the credentials required by the selected runtime processes/capabilities. Hermes/model execution must not receive unrelated Calendar, CRM or telephony credentials; governed Tool sidecars receive only their connector-specific credentials.
 
+## Owner-entered credentials (sealed vault)
+
+A credential a client owner adds later (an API key or token for a custom API or MCP server, #159) does not go through the deploy-time map and is never typed into chat, a workspace file or an issue.
+
+1. Generate a vault key pair once per environment (`python3 -c "import importlib.util as u;s=u.spec_from_file_location('v','platform/core/sealed_vault.py');m=u.module_from_spec(s);s.loader.exec_module(m);print(m.generate_keypair())"`). Put the **private** key in the environment's secret map and reference it as `upstream.mcp.vault_key_ref`; it is injected into the governed sidecar alone. Put the **public** key in `gateway.enrollment.vault_public_key` (it is not secret). Enrollment needs the gateway's web sign-in and `vault_key_ref`; `secret_refs` may then be empty when every upstream credential is owner-entered. Deploy refuses a public key that does not match the private key behind `vault_key_ref`. Credentials are one line of printable ASCII, because they travel in HTTP headers.
+2. The operator opens an enrollment for one coworker's connection: `runtime-connection.py /opt/data/.modelgarden credential open --agent <agent> --connection <id> --kind bearer|api-key|basic|oauth-client --owner <owner address> --actor <operator> --origin <gateway origin>`. It prints a single-use link (15 minutes by default) and the stable reference to use in the coworker's grant and the connection declaration (`secret://<client>-<environment>/<agent>/<connection>`).
+3. The owner opens the link, signs in with the address the enrollment names (a magic link that returns to the page) and pastes the value. Anyone else's session, an expired or used link, or no session is refused. The gateway seals the value to the sidecar's public key on the shared governance volume; it cannot read it back. The ledger records who set which version, never the value or the link.
+4. The sidecar resolves the stable reference from the vault first, then from deploy-time variables. Rotating is another `credential open`; the stable reference moves to the new version and the old one is deleted, with no restaging. `credential revoke` deletes it, and the reference stops resolving at once (it never falls back to an older version). `credential status` shows only whether it is set, its version, who set it and a masked length.
+
+The vault is files on the governance volume, encrypted per value (X25519, HKDF-SHA256, ChaCha20-Poly1305, the reference bound as associated data), 0600 in a 0700 directory. Back the volume up with the rest of governance data; losing the private key makes every owner-entered credential unrecoverable, and the owner re-enters it.
+
 ## GitHub/cloud identity after bootstrap
 
 The generated keyless client workflow uses non-secret repository variables for identifiers such as GCP project, region, Workload Identity Provider, deployment service account and Terraform state location. GitHub exchanges its OIDC identity for short-lived cloud credentials at deployment time.

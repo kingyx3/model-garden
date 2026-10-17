@@ -104,7 +104,7 @@ def prepare(
     if grant["isolation"] not in ("own-identity", "isolated-grant"):
         raise GatewayError("shared provider identity is not authorized for unattended execution")
     return {"server": server, "declaration": copy.deepcopy(dict(declaration)), "upstream": upstream, "tool": tool, "risk": entry["risk"], "grant": grant,
-            "ledger": {"provider": "mcp:" + server["name"], "tier": 2,
+            "ledger": {"provider": ("api:" if "api" in server else "mcp:") + server["name"], "tier": 2,
                        "connectionId": grant["connectionId"], "grantId": grant["grantId"],
                        "actingIdentity": grant["actingIdentity"], "upstreamTool": upstream}}
 

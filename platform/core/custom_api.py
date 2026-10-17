@@ -4,8 +4,10 @@ A client should be able to connect an API Model Garden has no connector for, wit
 an unrestricted HTTP requester. This is the credential-free contract for that. It validates a **definition** (a base URL plus
 named operations, each with a method, a path, bounded parameters and an optional request body), classifies every operation's
 risk, lets a person approve the exact definition, and builds a checked request for one declared operation. It contains **no
-HTTP client** and no secret: the sidecar would send the request it builds, add the credential from a ``secret://`` reference
-and apply the limits below. It is not wired into the sidecar.
+HTTP client** and no secret: ``platform/runtime/upstream_http.RestApiSession`` sends the request it builds, adds the credential
+resolved from the ``secret://`` reference and applies the limits below. A definition reaches the governed sidecar as the ``api``
+part of an MCP connection declaration (``mcp_passthrough.validate_server``), so staging, owner consent, activation, per-coworker
+grants, schema pins and exact-action approval are the same as for an MCP server.
 
 - **Only what is declared.** There is no "call any URL" operation. Each operation is a method and a path under the base URL
   with named parameters; a request for anything else is refused. Path parameters can only be plain identifiers (letters,
@@ -271,12 +273,23 @@ def _operation(op_id: str, entry: Any) -> dict[str, Any]:
 
 
 def operation_tools(definition: Mapping[str, Any]) -> list[dict[str, Any]]:
-    """Each operation as an ``mcp_passthrough`` pinned tool, so approval pins method, path, summary and every schema."""
+    """Each operation as an ``mcp_passthrough`` pinned tool, so approval pins method, path, summary and every schema.
+
+    ``inputSchema`` is a plain JSON Schema of the arguments (each parameter, plus ``body`` when the operation takes one), so the
+    governed executor validates a call exactly as it does an MCP tool's; the ``x-`` annotations pin method, path, base URL, risk,
+    authentication type and where each parameter goes.
+    """
     normal = validate_definition(definition)
     tools = []
     for op_id, operation in sorted(normal["operations"].items()):
-        schema = {"type": "object", "x-method": operation["method"], "x-path": operation["path"], "x-base": normal["baseUrl"], "x-risk": operation["risk"],
-                  "x-auth": normal["auth"]["type"], "properties": operation["parameters"], "body": operation.get("body", {})}
+        properties = {name: spec["schema"] for name, spec in operation["parameters"].items()}
+        required = [name for name, spec in operation["parameters"].items() if spec["required"]]
+        if operation.get("body") is not None:
+            properties["body"] = operation["body"]
+            required.append("body")
+        schema = {"type": "object", "properties": properties, "required": sorted(required), "additionalProperties": False,
+                  "x-method": operation["method"], "x-path": operation["path"], "x-base": normal["baseUrl"], "x-risk": operation["risk"],
+                  "x-auth": normal["auth"]["type"], "x-in": {name: spec["in"] for name, spec in operation["parameters"].items()}}
         tools.append({"name": op_id, "description": operation["summary"], "inputSchema": schema})
     return tools
 

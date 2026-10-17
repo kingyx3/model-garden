@@ -2,7 +2,7 @@
 
 ``mcp_executor.invoke`` is deliberately not an HTTP client. It asks the deployment for three things: a transport factory
 ``(url, pinned_ip, credential) -> context manager yielding a session``, a DNS resolver and a secret resolver. This module is those
-three, and nothing else. It is installed in the governed sidecar only when the deployment turns upstream MCP on
+three (plus the REST variant of the transport for a client's own API). It is installed in the governed sidecar only when the deployment turns upstream MCP on
 (``MODEL_GARDEN_UPSTREAM_MCP=enabled``); without it the sidecar still refuses every upstream call.
 
 - **Pinned address, normal TLS.** The connection goes to the IP the endpoint guard qualified, while the certificate is verified for the
@@ -14,17 +14,26 @@ three, and nothing else. It is installed in the governed sidecar only when the d
   ``tools/call`` to the single declared server. It exposes ``list_tools()`` and ``call_tool(name, arguments)`` and nothing else.
 - **Credentials stay out of everything.** The bearer credential goes in the ``Authorization`` header only. No exception or return value
   built here carries the header, the URL's path or any upstream body; errors name the HTTP status or a JSON-RPC code only.
+- **A client's own REST API, the same way.** ``RestApiSession`` serves a connection whose declaration carries a ``custom_api``
+  definition: it lists only the declared operations and sends only the request ``custom_api.build_request`` builds for an approved one,
+  with the same pinning, no-redirect and size rules. A 4xx other than 401/403 is an operation failure; nothing upstream is echoed.
 - **Secrets by reference.** ``EnvSecretResolver`` maps a ``secret://`` reference to an environment variable the deployment injected into
-  this service alone (``MODEL_GARDEN_SECRET_<digest>``). The Hermes process has no such variable.
+  this service alone (``MODEL_GARDEN_SECRET_<digest>``). The Hermes process has no such variable. When the deployment also injects
+  ``MODEL_GARDEN_VAULT_PRIVATE_KEY``, a credential the client owner entered through an enrollment link is read from the sealed vault
+  (``sealed_vault.SealedResolver``) first; a vault entry that does not open is unavailable, never a fallback.
 """
 from __future__ import annotations
 
+import base64
 import hashlib
 import http.client
+import importlib.util
 import json
+import pathlib
 import re
 import socket
 import ssl
+import sys
 from collections.abc import Callable, Iterable, Mapping
 from typing import Any
 
@@ -55,6 +64,44 @@ class EnvSecretResolver:
         if not value:
             raise UpstreamTransportError("credential unavailable")
         return value
+
+
+class VaultThenEnvResolver:
+    """An owner-enrolled credential from the sealed vault when there is one, else the deploy-time injected variable."""
+
+    def __init__(self, vault: Callable[[str], str] | Any, environ: Mapping[str, str]) -> None:
+        self._vault, self._env = vault, EnvSecretResolver(environ)
+
+    def __call__(self, reference: str) -> str:
+        if self._vault.has(reference):
+            try:
+                return self._vault(reference)
+            except Exception:  # noqa: BLE001 - a vault entry that does not open is unavailable, never a fallback
+                raise UpstreamTransportError("credential unavailable") from None
+        return self._env(reference)
+
+
+def _sealed_vault():
+    name = "model_garden_upstream_sealed_vault"
+    if name not in sys.modules:
+        spec = importlib.util.spec_from_file_location(name, pathlib.Path(__file__).resolve().parents[1] / "core" / "sealed_vault.py")
+        module = importlib.util.module_from_spec(spec)
+        assert spec.loader is not None
+        sys.modules[name] = module
+        spec.loader.exec_module(module)
+    return sys.modules[name]
+
+
+DEFAULT_VAULT_ROOT = "/opt/data/.modelgarden/vault"
+
+
+def secret_resolver(environ: Mapping[str, str]) -> Callable[[str], str]:
+    """The sidecar's secret lookup: the sealed vault (if its private key was injected) first, then injected variables."""
+    private = environ.get("MODEL_GARDEN_VAULT_PRIVATE_KEY", "").strip()
+    if not private:
+        return EnvSecretResolver(environ)
+    vault = _sealed_vault().SealedResolver(pathlib.Path(environ.get("MODEL_GARDEN_VAULT_ROOT") or DEFAULT_VAULT_ROOT), private_key=private)
+    return VaultThenEnvResolver(vault, environ)
 
 
 def system_dns_resolver(host: str) -> list[str]:
@@ -212,6 +259,108 @@ class McpHttpSession:
         return result
 
 
+class RestApiSession:
+    """A client's own REST API presented to ``mcp_executor.invoke`` as a session over its declared, approved operations.
+
+    ``list_tools`` is the reviewed definition's operations (``custom_api.operation_tools``), so the executor checks the same pins it
+    checks for an MCP server. ``call_tool`` sends only the request ``custom_api.build_request`` builds for one approved operation, to the
+    pinned address, with the credential added according to the definition's authentication type. There is no other request.
+    """
+
+    def __init__(self, definition: Mapping[str, Any], pinned_ip: str, credential: str, approvals: Any, *, connect: Connect | None = None) -> None:
+        self._definition, self._approvals = definition, approvals
+        self._api = _custom_api()
+        self._host, self._port, _ = _split(self._api.validate_definition(definition)["baseUrl"])
+        self._pinned, self._credential = pinned_ip, credential
+        self._timeout = float(self._api.LIMITS["timeoutSeconds"])
+        self._connect = connect or (lambda host, ip, port, timeout: PinnedHTTPSConnection(host, ip, port, timeout))
+
+    def __enter__(self) -> "RestApiSession":
+        return self
+
+    def __exit__(self, *exc: Any) -> None:
+        return None
+
+    def list_tools(self) -> list[dict[str, Any]]:
+        return self._api.operation_tools(self._definition)
+
+    def _auth_headers(self) -> dict[str, str]:
+        auth = self._api.validate_definition(self._definition)["auth"]
+        if auth["type"] == "bearer":
+            return {"Authorization": f"Bearer {self._credential}"}
+        if auth["type"] == "header":
+            return {auth["header"]: self._credential}
+        if auth["type"] == "basic":  # the stored credential is "user:password"
+            return {"Authorization": "Basic " + base64.b64encode(self._credential.encode("utf-8")).decode("ascii")}
+        return {}
+
+    def call_tool(self, name: str, arguments: Mapping[str, Any]) -> dict[str, Any]:
+        try:
+            request = self._api.build_request(self._definition, name, arguments, self._approvals)
+        except ValueError:
+            raise UpstreamTransportError("request refused by the API definition") from None
+        host, port, target = _split(request["url"].split("?", 1)[0])
+        if (host, port) != (self._host, self._port):
+            raise UpstreamTransportError("request left the declared API")
+        if "?" in request["url"]:
+            target += "?" + request["url"].split("?", 1)[1]
+        headers = {"Accept": "application/json", **self._auth_headers()}
+        body = None
+        if "body" in request:
+            body = json.dumps(request["body"], separators=(",", ":"), sort_keys=True).encode("utf-8")
+            headers["Content-Type"] = "application/json"
+        connection = self._connect(self._host, self._pinned, self._port, self._timeout)
+        try:
+            connection.request(request["method"], target, body=body, headers=headers)
+            response = connection.getresponse()
+            raw = response.read(MAX_RESPONSE_BYTES + 1)
+            status, content_type = response.status, (response.getheader("Content-Type") or "").split(";")[0].strip().lower()
+        except (OSError, http.client.HTTPException, ssl.SSLError):
+            raise UpstreamTransportError("upstream unreachable") from None
+        finally:
+            connection.close()
+        if 300 <= status < 400:
+            raise UpstreamTransportError("upstream redirected; redirects are never followed")
+        if status in (401, 403):
+            raise UpstreamTransportError(f"upstream refused the credential ({status})")
+        if status == 429 or status >= 500:
+            raise UpstreamTransportError(f"upstream answered HTTP {status}")
+        if len(raw) > MAX_RESPONSE_BYTES:
+            raise UpstreamTransportError("upstream response too large")
+        if 400 <= status < 500:  # the API rejected this request: an operation-level failure, with no upstream text
+            return {"isError": True, "status": status}
+        if not raw.strip():
+            document: Any = {}
+        elif content_type == "application/json" or content_type.endswith("+json"):
+            try:
+                document = json.loads(raw)
+            except (ValueError, UnicodeDecodeError):
+                raise UpstreamTransportError("upstream sent an unreadable reply") from None
+        else:
+            raise UpstreamTransportError("upstream reply is not JSON")
+        result: dict[str, Any] = {"isError": False, "status": status, "structuredContent": document if isinstance(document, dict) else {"items": document}}
+        identifier = document.get("id") if isinstance(document, dict) else None
+        if isinstance(identifier, (str, int)) and not isinstance(identifier, bool) and _SAFE_ID.match(str(identifier)):
+            result["externalObjectRef"] = str(identifier)
+        return result
+
+
+def _custom_api():
+    name = "model_garden_upstream_custom_api"
+    if name not in sys.modules:
+        spec = importlib.util.spec_from_file_location(name, pathlib.Path(__file__).resolve().parents[1] / "core" / "custom_api.py")
+        module = importlib.util.module_from_spec(spec)
+        assert spec.loader is not None
+        sys.modules[name] = module
+        spec.loader.exec_module(module)
+    return sys.modules[name]
+
+
+def rest_transport_factory(definition: Mapping[str, Any], pinned_ip: str, credential: str, approvals: Any) -> RestApiSession:
+    """The transport the governed sidecar uses for a connection whose declaration carries a client's own REST ``api``."""
+    return RestApiSession(definition, pinned_ip, credential, approvals)
+
+
 def transport_factory(url: str, pinned_ip: str, credential: str) -> McpHttpSession:
     """The ``transport_factory`` ``mcp_executor.invoke`` expects."""
     return McpHttpSession(url, pinned_ip, credential)
@@ -221,5 +370,5 @@ def install(environ: Mapping[str, str]) -> dict[str, Any] | None:
     """Keyword arguments for ``GovernedToolRuntime`` when the deployment turned upstream MCP on, else ``None`` (everything stays refused)."""
     if environ.get("MODEL_GARDEN_UPSTREAM_MCP", "").strip().lower() != "enabled":
         return None
-    return {"upstream_transport": transport_factory, "upstream_dns_resolver": system_dns_resolver,
-            "upstream_secret_resolver": EnvSecretResolver(environ)}
+    return {"upstream_transport": transport_factory, "upstream_rest_transport": rest_transport_factory,
+            "upstream_dns_resolver": system_dns_resolver, "upstream_secret_resolver": secret_resolver(environ)}
