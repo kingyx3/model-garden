@@ -15,6 +15,7 @@ import io
 import json
 import os
 import pathlib
+import re
 import sys
 import unittest
 from unittest import mock
@@ -199,7 +200,7 @@ class ScenarioA(W.Case):
         self.receive(email("<m1@customer.example>", f"What are your opening hours? My card is {CARD}."))
         stored = self.everything_stored()
         timeline = "".join(path.read_text() for path in (self.data / "conversations").iterdir() if path.suffix == ".json")
-        ledger = (self.data / "audit.jsonl").read_text()
+        ledger = re.sub(r"[0-9a-f]{32,}", "", (self.data / "audit.jsonl").read_text())  # digests are random hex that can hold "4111"
         for private in (CARD, "4111", filing_tests.SECRET_WORDS, "Hargreaves"):
             self.assertNotIn(private, ledger, private)
             self.assertNotIn(private, timeline, private)
