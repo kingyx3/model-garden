@@ -198,6 +198,20 @@ class OperatorCommandTests(unittest.TestCase):
         self.assertEqual(json.loads(self.run_cli("stats")[1]), {"conversations": 0, "linked": 0, "review": 0})
         self.assertEqual([event["action"] for event in self.ledger() if event["action"].startswith("conversation.")], ["conversation.erase", "conversation.purge"])
 
+    def test_a_person_can_list_link_and_unlink_a_conversation_the_queue_never_held(self):
+        code, out, _ = self.run_cli("list", "--unlinked")
+        self.assertEqual({row["id"] for row in json.loads(out)}, {self.cid, self.other})
+        self.assertEqual(self.run_cli("link", "--conversation", self.other, "--customer", "c-9", "--by", PERSON)[0], 0)
+        self.assertEqual([row["id"] for row in json.loads(self.run_cli("list", "--unlinked")[1])], [self.cid])
+        self.assertEqual(len(json.loads(self.run_cli("timeline", "--customer", "c-9")[1])), 1)  # the email's message
+        code, _, err = self.run_cli("link", "--conversation", self.other, "--customer", "c-10", "--by", PERSON)
+        self.assertEqual(code, 1)
+        self.assertIn("already linked", err)
+        self.assertEqual(self.run_cli("unlink", "--conversation", self.other, "--by", PERSON)[0], 0)
+        self.assertEqual(json.loads(self.run_cli("timeline", "--customer", "c-9")[1]), [])
+        actions = [event["action"] for event in self.ledger() if event["action"].startswith("conversation.")]
+        self.assertEqual(actions, ["conversation.link", "conversation.unlink"])
+
     def test_bad_input_fails_cleanly(self):
         for args in (("confirm", "rv-nope", "--customer", "c-1", "--by", PERSON), ("dismiss", "rv-nope", "--by", PERSON),
                      ("timeline", "--conversation", "cv-nope"), ("erase", "--customer", "c-1", "--by", " "),
@@ -227,13 +241,24 @@ class OperatorCliTests(unittest.TestCase):
             operator.runtime_conversations("acme-dev", "confirm", target="rv-0123456789abcdef", customer="c-1", by=PERSON)
             operator.runtime_conversations("acme-dev", "timeline", conversation="cv-0123456789abcdef0123")
             operator.runtime_conversations("acme-dev", "purge", older_than_days=365, by=PERSON)
+            operator.runtime_conversations("acme-dev", "list", unlinked=True)
+            operator.runtime_conversations("acme-dev", "link", conversation="cv-0123456789abcdef0123", customer="c-1", by=PERSON)
+            operator.runtime_conversations("acme-dev", "unlink", conversation="cv-0123456789abcdef0123", by=PERSON)
         executed = [command for command in calls if command[:2] == ["docker", "exec"]]
         self.assertEqual(executed[0][-2:], ["/opt/data/.modelgarden/conversations", "stats"])
         self.assertEqual(executed[1][-6:], ["confirm", "rv-0123456789abcdef", "--customer", "c-1", "--by", PERSON])
         self.assertEqual(executed[2][-2:], ["--conversation", "cv-0123456789abcdef0123"])
         self.assertEqual(executed[3][-4:], ["--older-than-days", "365", "--by", PERSON])
+        self.assertEqual(executed[4][-2:], ["list", "--unlinked"])
+        cv = "cv-0123456789abcdef0123"
+        self.assertEqual(executed[5][-7:], ["link", "--conversation", cv, "--customer", "c-1", "--by", PERSON])
+        self.assertEqual(executed[6][-5:], ["unlink", "--conversation", cv, "--by", PERSON])
         before = len(calls)
-        for command, kwargs in (("wipe", {}), ("confirm", {"target": "nope", "customer": "c-1", "by": PERSON}),
+        for command, kwargs in (("link", {"conversation": "cv-0123456789abcdef0123", "by": PERSON}),
+                                ("link", {"customer": "c-1", "by": PERSON}),
+                                ("unlink", {"by": PERSON}), ("unlink", {"conversation": "cv-0123456789abcdef0123", "customer": "c-1", "by": PERSON}),
+                                ("link", {"conversation": "cv-0123456789abcdef0123", "customer": "c-1"}),
+                                ("wipe", {}), ("confirm", {"target": "nope", "customer": "c-1", "by": PERSON}),
                                 ("confirm", {"target": "rv-0123456789abcdef", "by": PERSON}),
                                 ("confirm", {"target": "rv-0123456789abcdef", "customer": "c-1"}),
                                 ("timeline", {}), ("timeline", {"conversation": "cv-0123456789abcdef0123", "customer": "c-1"}),

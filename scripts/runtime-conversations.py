@@ -2,11 +2,14 @@
 """Inspect and manage the cross-channel conversation timeline (run inside governed-tools).
 
   runtime-conversations.py ROOT stats
+  runtime-conversations.py ROOT list [--unlinked]
   runtime-conversations.py ROOT review
   runtime-conversations.py ROOT timeline --conversation cv-0123456789abcdef0123
   runtime-conversations.py ROOT timeline --customer c-1
   runtime-conversations.py ROOT confirm rv-0123456789abcdef --customer c-1 --by jordan@client.example
   runtime-conversations.py ROOT dismiss rv-0123456789abcdef --by jordan@client.example
+  runtime-conversations.py ROOT link --conversation cv-0123456789abcdef0123 --customer c-1 --by jordan@client.example
+  runtime-conversations.py ROOT unlink --conversation cv-0123456789abcdef0123 --by jordan@client.example
   runtime-conversations.py ROOT erase --customer c-1 --by jordan@client.example
   runtime-conversations.py ROOT purge --older-than-days 365 --by jordan@client.example
 
@@ -61,6 +64,8 @@ def main(argv: list[str] | None = None, *, now: int | None = None) -> int:
         os.environ.get("MODEL_GARDEN_AUDIT_PATH", "/opt/data/.modelgarden/audit.jsonl")))
     commands = parser.add_subparsers(dest="command", required=True)
     commands.add_parser("stats")
+    listing = commands.add_parser("list")
+    listing.add_argument("--unlinked", action="store_true", help="only conversations no customer is linked to")
     commands.add_parser("review")
     timeline = commands.add_parser("timeline")
     group = timeline.add_mutually_exclusive_group(required=True)
@@ -70,6 +75,13 @@ def main(argv: list[str] | None = None, *, now: int | None = None) -> int:
     confirm.add_argument("review_id")
     confirm.add_argument("--customer", required=True)
     confirm.add_argument("--by", required=True)
+    link = commands.add_parser("link")
+    link.add_argument("--conversation", required=True)
+    link.add_argument("--customer", required=True)
+    link.add_argument("--by", required=True)
+    unlink = commands.add_parser("unlink")
+    unlink.add_argument("--conversation", required=True)
+    unlink.add_argument("--by", required=True)
     dismiss = commands.add_parser("dismiss")
     dismiss.add_argument("review_id")
     dismiss.add_argument("--by", required=True)
@@ -91,6 +103,13 @@ def main(argv: list[str] | None = None, *, now: int | None = None) -> int:
         )
         if args.command == "stats":
             result = store.stats()
+        elif args.command == "list":
+            result = store.list_conversations(unlinked_only=args.unlinked)
+        elif args.command == "link":
+            result = store.link(args.conversation, args.customer, by=args.by, now=clock)
+        elif args.command == "unlink":
+            store.unlink(args.conversation, by=args.by)
+            result = {"unlinked": args.conversation}
         elif args.command == "review":
             result = [{key: item[key] for key in ("id", "conversationId", "reason", "candidates", "createdAt")} for item in store.review_queue()]
         elif args.command == "timeline":

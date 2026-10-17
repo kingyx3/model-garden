@@ -227,6 +227,70 @@ class LinkingTests(Case):
         self.assertIsNone(self.store.link_of(fresh))
 
 
+class DirectLinkTests(Case):
+    def test_a_person_can_link_a_conversation_that_has_no_evidence_and_it_joins_the_timeline_and_is_ledgered(self):
+        call, mail = self.call(), self.mail()
+        self.store.add_interaction(call, kind="call", external_id="call", at=T0, ref="transcript:call-1")
+        self.store.add_interaction(mail, kind="message", external_id="m1", at=T0 + 3600, ref="message:m1")
+        self.store.resolve(mail, self.directory, now=T0)  # no evidence on either: nothing is queued or linked
+        self.assertEqual(self.store.stats(), {"conversations": 2, "linked": 0, "review": 0})
+        outcome = self.store.link(call, "c-alex", by=ADMIN, now=T0 + 10)
+        self.assertEqual(outcome, {"conversationId": call, "customerId": "c-alex"})
+        self.assertEqual(self.store.link_of(call)["confidence"], f"confirmed-by:{ADMIN}")
+        self.store.link(mail, "c-alex", by=ADMIN, now=T0 + 11)
+        self.assertEqual([item["channel"] for item in self.store.customer_timeline("c-alex")], ["voice", "email"])
+        linked = [event for event in self.events if event[0] == "conversation.link"]
+        self.assertEqual([(event[1], event[2]["conversationId"]) for event in linked], [(ADMIN, call), (ADMIN, mail)])
+        self.assertNotIn("transcript:call-1", json.dumps(self.events))
+
+    def test_linking_closes_the_review_item_and_is_idempotent_for_the_same_customer(self):
+        call = self.call()
+        self.store.add_evidence(call, "phone", ALEX_PHONE, verified=False, provenance="caller-id")
+        self.assertEqual(self.store.resolve(call, self.directory, now=T0)["state"], "review")
+        self.store.link(call, "c-alex", by=ADMIN, now=T0)
+        self.assertEqual(self.store.stats(), {"conversations": 1, "linked": 1, "review": 0})
+        self.store.link(call, "c-alex", by=ADMIN, now=T0 + 1)  # the same decision again changes nothing
+        self.assertEqual(self.store.stats()["linked"], 1)
+
+    def test_re_pointing_needs_an_explicit_unlink_and_both_are_ledgered(self):
+        call = self.call()
+        self.store.link(call, "c-alex", by=ADMIN, now=T0)
+        with self.assertRaisesRegex(Error, "already linked"):
+            self.store.link(call, "c-sam", by=ADMIN, now=T0)
+        self.assertEqual(self.store.link_of(call)["customerId"], "c-alex")
+        self.store.unlink(call, by=ADMIN)
+        self.assertIsNone(self.store.link_of(call))
+        self.assertEqual(self.store.customer_timeline("c-alex"), [])
+        self.assertEqual(self.store.stats()["conversations"], 1)  # the conversation stays
+        self.store.link(call, "c-sam", by=ADMIN, now=T0)
+        with self.assertRaisesRegex(Error, "not linked"):
+            self.store.unlink(self.mail(), by=ADMIN)
+        self.assertIn("conversation.unlink", [event[0] for event in self.events])
+
+    def test_bad_input_changes_nothing(self):
+        call = self.call()
+        for args in ((call, "", ADMIN), (call, "c-alex", ""), (call, "c-alex", " "), ("cv-missing", "c-alex", ADMIN)):
+            with self.assertRaises(Error, msg=str(args)):
+                self.store.link(args[0], args[1], by=args[2], now=T0)
+        self.assertEqual(self.store.stats()["linked"], 0)
+        with self.assertRaises(Error):
+            self.store.unlink("cv-missing", by=ADMIN)
+
+    def test_listing_shows_ids_and_link_state_never_evidence_or_references(self):
+        call, mail = self.call(), self.mail()
+        self.store.add_evidence(call, "phone", ALEX_PHONE, verified=False, provenance="caller-id")
+        self.store.add_interaction(call, kind="call", external_id="call", at=T0, ref="transcript:call-1")
+        self.store.link(mail, "c-sam", by=ADMIN, now=T0)
+        rows = self.store.list_conversations()
+        self.assertEqual([(row["id"], row["channel"], row["linked"]) for row in rows], [(call, "voice", False), (mail, "email", True)])
+        self.assertEqual(rows[1]["customerId"], "c-sam")
+        self.assertEqual(rows[0]["interactions"], 1)
+        self.assertEqual([row["id"] for row in self.store.list_conversations(unlinked_only=True)], [call])
+        text = json.dumps(rows)
+        for private in ("transcript:call-1", "digest", ALEX_PHONE):
+            self.assertNotIn(private, text)
+
+
 class PrivacyTests(Case):
     def linked(self, external="call-1", email=ALEX_EMAIL):
         cid = self.call(external)
