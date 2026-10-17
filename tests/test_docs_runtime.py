@@ -197,7 +197,7 @@ class SurfaceTests(Case):
     def test_the_registry_lists_the_built_in_provider_as_tier_zero_credential_free(self):
         registry = _load("registry_for_docs", "platform/core/integrations.py")
         provider = next(item for item in registry.load_registry()["providers"] if item["id"] == "built-in-artifacts")
-        self.assertEqual((provider["family"], provider["tier"], provider["status"], provider["tools"]), ("docs", 0, "built-credential-free", ["docs.create"]))
+        self.assertEqual((provider["family"], provider["tier"], provider["status"], provider["tools"]), ("docs", 0, "built-credential-free", ["docs.create", "docs.read"]))
         self.assertNotIn("proof", provider)
 
     def test_a_skill_needing_docs_is_ready_with_the_built_in_provider_only(self):
