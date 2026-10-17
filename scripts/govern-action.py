@@ -835,8 +835,12 @@ def record_policy_change(
     after: list[dict[str, Any]] | None,
     *,
     changed_by: str,
+    agent: str | None = None,
 ) -> dict[str, Any] | None:
-    """Ledger a policy change with who made it and the rule-level diff; no-op when nothing changed."""
+    """Ledger a policy change with who made it and the rule-level diff; no-op when nothing changed.
+
+    ``agent`` names the Agent whose policy changed when one environment serves several (a team runtime); omitted otherwise.
+    """
     if not isinstance(changed_by, str) or not changed_by.strip():
         raise ValueError("Governed action failed: a policy change must record who made it")
     diff = POLICY.diff_policies(before, after)
@@ -850,6 +854,8 @@ def record_policy_change(
         "changedBy": changed_by.strip()[:MAX_CONTEXT_VALUE],
         "details": diff,
     }
+    if agent:
+        event["agent"] = agent
     append_audit_event(path, event)
     return event
 

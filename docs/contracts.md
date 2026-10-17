@@ -106,7 +106,7 @@ Not yet supported: classification of free-text content (for example deciding tha
 
 ## Delegation between Agents (task envelopes)
 
-`platform/core/delegation.py` holds the rules for a coordinator Agent handing work to a specialist without creating a way to do more than a person could have asked for. It is a pure module with tests, **not wired into a runtime**: the governed sidecar still serves one Agent per environment (#95), so nothing here yet decides a live call.
+`platform/core/delegation.py` holds the rules for a coordinator Agent handing work to a specialist without creating a way to do more than a person could have asked for. It is a pure module with tests; `platform/runtime/team_runtime.py` applies it to several Agents (see "Team of Agents"). No model-callable delegation Tool exists yet: a host starts tasks and delegates, and the model never names another Agent.
 
 - **Envelope.** goal, constraints, deadline, budget (`tokens`, `costCents`, `steps`), the Tools the task may use, the originating principal, the parent task and the chain of Agents so far. The root envelope's authority is the requesting person's permissions narrowed to what the first Agent holds; a child cannot change the originating principal.
 - **Attenuation.** A delegate's effective authority is its own grants ∩ the delegator's authority for this task ∩ the originating principal's permissions, re-checked on every hop. A delegate asked to use a Tool outside that set is refused rather than silently narrowed, and authority never grows along a chain.
@@ -217,13 +217,20 @@ Open: reading Skillsets in the compiler or a registry, knowledge-aware prerequis
 
 ## Team of Agents
 
-`platform/core/team.py` checks the compiled desired states of several Agents (the compiler already emits them when no `--agent` is given) before a runtime may advertise more than one coworker. It changes nothing and is not wired into a runtime; the governed sidecar still serves one Agent per environment (#95).
+`platform/core/team.py` checks the compiled desired states of several Agents (the compiler already emits them when no `--agent` is given) before a runtime may advertise more than one coworker. It changes nothing itself; `platform/runtime/team_runtime.py` (below) is what refuses to start a team that fails it.
 
 - **Tool isolation.** `authorize_call` allows a call only if the Tool is one of the *calling* Agent's own compiled Tools, using the attested Agent name; another Agent's Tool is refused. The action request identity already includes the Agent, so one Agent's approval cannot be replayed by another.
 - **Own provider access.** With several Agents, each Agent whose Tools belong to an external (tier 1+) family needs a usable grant of its own covering them (`plan` reports `blocked` with a plain reason); Tier 0 families need none; an unbound family blocks. Duplicate Agent names are refused.
 - **Single-Agent workspaces are unchanged:** one Agent and no registry is `ready` through the environment binding.
 
-Open: a multi-Agent sidecar and deployment, per-Agent usage attribution and ledger separation at runtime, and cross-Agent token isolation proof against a real provider (#95, #129).
+**Team runtime (`platform/runtime/team_runtime.py`, `scripts/runtime-team.py prepare compiled.json --base DIR --environment-binding env.yaml`).** One governed runtime per Agent, so the Agent is the runtime instance a call reaches and never something the model says:
+
+- **Isolated state, one ledger.** Each Agent has its own approval, hand-off, memory and artifact roots under `<base>/agents/<name>/`, its own desired state and capability manifest, and every Agent appends to the one hash-chained ledger at `<base>/audit.jsonl` with its name on each event. A pending approval, hand-off or file of one Agent is never visible to another; the per-Agent usage counts (`maxPerDay`, `maxPerPrincipalPerDay`) and the operator `audit` filters work on the shared ledger. Policy and knowledge changes are ledgered per Agent (`team.ledger_deployments`, `--ledger-deployments PERSON`).
+- **Refuses to start unready.** More than one Agent starts only when `team.plan` is ready: each Agent that needs an external connector family holds a usable grant of its own (never a shared login), no family is unbound, names are unique lowercase DNS-like names (they become directories). Otherwise it raises (the CLI exits 1) naming every blocker and writes nothing. One Agent starts exactly as before.
+- **One sidecar per Agent.** `launch_plan` (printed by `prepare`) gives each Agent its own `governed_mcp.py` command, port, approval root and manifest, sharing only the ledger. An Agent's Hermes profile points at its own port; no routing by a model-supplied name exists.
+- **Delegation under the envelope rules.** `start_task` and `delegate` apply the rules above with the delegate's own compiled Tools as its grants and the parent's authority as the originator bound (it can only shrink). Each hop is a `delegation.hop` event and each refused hop a `delegation.refused` event naming the refusal reason; fan-out is counted from the ledger so it survives a restart. A governed call made under `team.acting(agent, envelope)` carries `taskId`, `originatingPrincipal` and `delegationChain` in the ledger's governance context, and is denied and ledgered (`outside-delegated-authority`, `task-deadline-passed`, `task-budget-exhausted`, `task-bound-to-another-agent`) before policy is consulted when it is outside the task's authority, past its deadline, out of budget or running on another Agent's runtime. An envelope that does not belong to the Agent or names a Tool it was not compiled with is refused.
+
+Open: the Docker/Hermes deployment that launches the per-Agent sidecars (`deploy-client-docker.py` still builds one), a model-callable delegation Tool and the runtime-native handoff/A2A decision, charging usage to the envelope as calls complete, provisioning real per-coworker provider identities, and cross-Agent token isolation proof against a real provider (#95, #96, #129).
 
 ## Governed MCP passthrough
 

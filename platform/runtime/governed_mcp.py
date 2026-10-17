@@ -131,6 +131,7 @@ class GovernedToolRuntime:
         upstream_dns_resolver=None,
         upstream_secret_resolver=None,
         upstream_rest_transport=None,
+        task_resolver=None,
     ) -> None:
         self.desired_state = _load_json_object(desired_state_path, "compiled desired state")
         if self.desired_state.get("schemaVersion") != 1:
@@ -155,6 +156,9 @@ class GovernedToolRuntime:
         self.upstream_secret_resolver = upstream_secret_resolver
         # A client's own REST API (a connection whose declaration carries ``api``) uses this transport instead; same governed path.
         self.upstream_rest_transport = upstream_rest_transport
+        # A team runtime, never the model, supplies the delegated task this call runs under (see platform/runtime/team_runtime.py):
+        # ``{"governance": {...taskId, originatingPrincipal, delegationChain}, "authority": [Tools], "halt": reason or None}``.
+        self.task_resolver = task_resolver
         self.read_policy = GOVERN.parse_read_policy(self.environ.get("MODEL_GARDEN_READ_AUDIT"))
         digest = hashlib.sha256(GOVERN._canonical_json(self.desired_state).encode("utf-8")).hexdigest()
         self.agent_version = f"sha256:{digest[:16]}"
@@ -289,6 +293,9 @@ class GovernedToolRuntime:
         governance_extra: Mapping[str, str] | None = None,
     ) -> dict[str, Any]:
         identity, governance_context, principal_access = self._caller()
+        task = self.task_resolver() if self.task_resolver is not None else None
+        if task is not None:
+            governance_context.update(task["governance"])
         governance_context.update(governance_extra or {})
         request = GOVERN.build_action_request(
             self.desired_state,
@@ -297,6 +304,16 @@ class GovernedToolRuntime:
             initiating_user=identity,
             governance_context=governance_context,
         )
+        if task is not None:
+            # The task's authority is the delegation floor: a Tool outside it, or a task past its deadline or budget, never reaches policy.
+            reason = task.get("halt") or (None if tool_name in task["authority"] else "outside-delegated-authority")
+            if reason is not None:
+                event = GOVERN.make_audit_event(
+                    "authorization", request, outcome="deny", details={"reason": reason},
+                    ledger={**self._ledger(provider=provider, justification=None, tier=tier), **(ledger_extra or {})},
+                )
+                GOVERN.append_audit_event(self.audit_path, event)
+                raise PermissionError(f"Tool {tool_name!r} is not allowed for this delegated task ({reason})")
         if family is not None:
             state = CAPABILITIES.read_connection_health(self.governance_root).get(family, {}).get("health")
             if state in CAPABILITIES.UNAVAILABLE_HEALTH:

@@ -20,7 +20,7 @@ governed-tools sidecar
        +-> approved connector
 ```
 
-The sidecar is not a control plane and is not exposed on a host port. It is part of the same isolated client Docker deployment and consumes the same compiled single-Agent desired state. Persistent approval and audit state is mounted only into the governed Tool sidecar; Hermes does not mount that governance volume and therefore cannot create approval evidence by writing directly to the file-backed operator store.
+The sidecar is not a control plane and is not exposed on a host port. It is part of the same isolated client Docker deployment and consumes the compiled desired state of one Agent. Several Agents run as one such sidecar each (`scripts/runtime-team.py prepare`, see "Team of Agents" in the contracts), sharing only the ledger; the Docker deployment still builds one. Persistent approval and audit state is mounted only into the governed Tool sidecar; Hermes does not mount that governance volume and therefore cannot create approval evidence by writing directly to the file-backed operator store.
 
 Hermes only receives MCP Tool names corresponding to Tools explicitly selected by that Agent. Provisioning fails closed if a selected Tool has no implemented governed runtime binding.
 
