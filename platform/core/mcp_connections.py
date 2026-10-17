@@ -154,6 +154,9 @@ class McpConnectionStore:
                 raise ConnectionRefused("no connection to replace")
             if old is None and len(state["connections"]) >= MAX_CONNECTIONS:
                 raise ConnectionRefused("too many connections for this tenant")
+            # Monotonic fencing version: replacement invalidates reviews started
+            # before this transition, even if the declaration digest is unchanged.
+            entry["generation"] = (old.get("generation", 0) if old else 0) + 1
             state["connections"][key] = entry
         self._record("mcp.connection-stage" if old is None else "mcp.connection-replace", who, entry,
                      deactivated=True, previousRevision=old["revision"] if old else None)
@@ -174,6 +177,10 @@ class McpConnectionStore:
         server = _mcp().validate_server(entry["declaration"])
         if owner != server["owner"]:
             raise ConnectionRefused("consent must come from the named client owner")
+        if owner == reviewer:
+            raise ConnectionRefused("connection activation needs separate client-owner consent and operator review")
+        if entry.get("active"):
+            raise ConnectionRefused("already active; stage a reviewed replacement before reactivation")
         if grants.tenant != self.tenant or approvals.tenant != self.tenant:
             raise ConnectionRefused("grants and schema approvals must belong to this tenant")
         if not isinstance(offered, Sequence) or isinstance(offered, (str, bytes)) or len(offered) > _mcp().MAX_TOOLS * 5:
@@ -196,11 +203,25 @@ class McpConnectionStore:
             fingerprints[upstream] = _mcp().fingerprint(tool)
         with self._locked() as state:
             actual = state["connections"].get(key)
-            if actual is None or actual["revision"] != entry["revision"]:
+            if (actual is None or actual["revision"] != entry["revision"]
+                    or actual.get("generation") != entry.get("generation")
+                    or actual.get("active") != entry.get("active")
+                    or actual.get("activationId") != entry.get("activationId")):
                 raise ConnectionRefused("connection changed during review; review the new revision")
+            # Grant revocation or replacement can happen after initial review.
+            # Validate every operation again while holding the final state lock.
+            # The runtime separately rechecks the grant immediately before execution.
+            for upstream, spec in server["tools"].items():
+                offered_tool = catalog[upstream]
+                _mcp().call_gate(entry["declaration"], offered_tool, approvals)
+                _gateway().prepare(
+                    entry["declaration"], registry=grants, tenant=self.tenant, attested_agent=agent,
+                    upstream=upstream, enabled_tools=(spec["tool"],), originator_permissions=(spec["tool"],),
+                    now=now, connection_id=connection_id,
+                )
             actual.update(active=True, approvedBy=reviewer, consentedBy=owner,
                           activatedAt=now, activationId=secrets.token_hex(16),
-                          reviewedFingerprints=fingerprints)
+                          reviewedFingerprints=fingerprints, generation=actual["generation"] + 1)
             outcome = copy.deepcopy(actual)
         self._record("mcp.connection-activate", reviewer, outcome,
                      ownerConsent=owner, reviewedTools=sorted(fingerprints))
@@ -213,7 +234,12 @@ class McpConnectionStore:
             item = state["connections"].get(key)
             if item is None:
                 raise ConnectionRefused("no such coworker connection")
+            # Invalidate any in-flight activation snapshot as well as exact-action
+            # approvals bound to the prior activation identity.
             item["active"] = False
+            item["generation"] = item.get("generation", 0) + 1
+            item.pop("activationId", None)
+            item.pop("reviewedFingerprints", None)
             snapshot = copy.deepcopy(item)
         self._record("mcp.connection-disable", who, snapshot)
         return {"id": connection_id, "agent": agent, "active": False}
@@ -226,6 +252,7 @@ class McpConnectionStore:
         if item is None or item.get("agent") != agent or not item.get("active"):
             raise ConnectionRefused("MCP connection is not active for this coworker")
         if (item.get("revision") != _digest(_mcp().validate_server(item["declaration"]))
+                or not isinstance(item.get("generation"), int) or item["generation"] < 2
                 or not item.get("reviewedFingerprints") or not item.get("activationId")):
             raise ConnectionRefused("MCP connection requires renewed review")
         return item
