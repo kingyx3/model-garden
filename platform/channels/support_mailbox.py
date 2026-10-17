@@ -3,8 +3,9 @@
 This is the credential-free handler for one inbound message to a support or enquiries address (#109). It joins parts that
 already exist: the email surface (sender verification, loop protection, threading; ``email_channel.py``), the portable
 ``mail.draft`` Tool (Gmail or Outlook adapters, or any executor with the same shape) and the CRM sync ledger
-(``crm_filing.py``). It reads no mailbox, holds no credential, calls no model and is **not wired** to a mailbox poller or the
-governed sidecar. The classifier and the answerer are injected.
+(``crm_filing.py``). It reads no mailbox, holds no credential and calls no model; the classifier and the answerer are injected.
+The runtime worker (``platform/runtime/worker.py``) feeds it from the built-in spool with the coworker as classifier and answerer
+(answers only from a governed ``kb.search``) and a Tier 0 draft store as ``mail.draft``.
 
 - **The sender is a public principal and the body is data.** Authority comes only from the receiving server's verified
   ``Authentication-Results`` (``email_channel.py``); this handler has no approval path at all and passes the message text only to

@@ -3,8 +3,8 @@
 A client with no mailbox to connect still needs somewhere for customer email to land and a way for the coworker to read it. This is the
 credential-free half of that: a durable spool that takes raw RFC 5322 messages from whatever receives mail for the client's own address
 (a mail server's pipe or delivery agent, a catch-all, a test) and hands each one at least once to ``SupportMailbox.handle``. It listens on
-no port, speaks no SMTP, sets up no DNS or MX record, holds no credential and is **not wired** to the sidecar or a timer; it is not a
-``mail.*`` provider (nothing here reads, drafts or sends through it). No real mail has flowed through it.
+no port, speaks no SMTP, sets up no DNS or MX record and holds no credential; the runtime worker (``platform/runtime/worker.py``)
+drains it on its clock and purges it on retention. It is not a ``mail.*`` provider (nothing here reads, drafts or sends through it).
 
 - **Only mail for this client.** A message is accepted only when one of its recipient headers (``To``, ``Cc``, ``Delivered-To``,
   ``X-Original-To``, ``Envelope-To``) names one of the client's inbound addresses exactly. Mail for anyone else is *misdelivered*: it is
