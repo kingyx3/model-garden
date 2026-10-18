@@ -474,7 +474,7 @@ class Worker:
                 continue
             recorded = [fact for fact in facts if "usageId" in fact]
             for fact in recorded:
-                self.audit("usage.recorded", IDENTITY, usage.ledger_details(fact))
+                self.audit("usage.recorded", IDENTITY, usage.ledger_details(fact, agent=self._agent()))
             meter.commit(facts)
             report[surface] = {"recorded": len(recorded)}
         if unreadable:

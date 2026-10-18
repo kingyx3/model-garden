@@ -190,12 +190,13 @@ class UsageMeter:
             )
 
 
-def ledger_details(fact: Mapping[str, Any]) -> dict[str, Any]:
+def ledger_details(fact: Mapping[str, Any], *, agent: str) -> dict[str, Any]:
     """The ``usage.recorded`` ledger details for a fact: counters and names only, the session as a short hash.
 
     ``usage`` repeats the total tokens and cost in the shape the audit timeline already sums (``audit_query``)."""
     return {
         "usageId": fact["usageId"],
+        "agent": agent,
         "surface": fact["surface"],
         "session": hashlib.sha256(str(fact["sessionId"]).encode("utf-8")).hexdigest()[:16],
         "channel": fact["channel"],

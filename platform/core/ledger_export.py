@@ -149,9 +149,10 @@ class DirectorySink:
         name = f"{head['sequence']:0{_SEQUENCE_WIDTH}d}-{head['exportedAt']}-{head['headHash'][:16]}.json"
         self._write_once(self.root / "heads" / name, head)
 
-    def records(self) -> list[dict[str, Any]]:
+    def records(self, after: int = 0) -> list[dict[str, Any]]:
         folder = self.root / "records"
-        return [json.loads(path.read_text(encoding="utf-8")) for path in sorted(folder.glob("*.json"))] if folder.is_dir() else []
+        paths = sorted(path for path in folder.glob("*.json") if int(path.name.split("-", 1)[0]) > after) if folder.is_dir() else []
+        return [json.loads(path.read_text(encoding="utf-8")) for path in paths]
 
     def heads(self) -> list[dict[str, Any]]:
         folder = self.root / "heads"
@@ -294,11 +295,13 @@ class GcsSink:
     def put_head(self, head: Mapping[str, Any]) -> None:
         self._put(self._name("heads", f"{head['sequence']:0{_SEQUENCE_WIDTH}d}-{head['exportedAt']}-{head['headHash'][:16]}.json"), head)
 
-    def _list(self, kind: str) -> list[str]:
+    def _list(self, kind: str, start: str = "") -> list[str]:
         names: list[str] = []
         token = ""
         while True:
             query = {"prefix": self._name(kind, "")}
+            if start:
+                query["startOffset"] = self._name(kind, start)
             if token:
                 query["pageToken"] = token
             url = f"https://storage.googleapis.com/storage/v1/b/{self.bucket}/o?" + urllib.parse.urlencode(query)
@@ -311,9 +314,9 @@ class GcsSink:
             if not token:
                 return sorted(names)
 
-    def _read(self, kind: str) -> list[dict[str, Any]]:
+    def _read(self, kind: str, start: str = "") -> list[dict[str, Any]]:
         documents = []
-        for name in self._list(kind):
+        for name in self._list(kind, start):
             url = f"https://storage.googleapis.com/storage/v1/b/{self.bucket}/o/{urllib.parse.quote(name, safe='')}?alt=media"
             status, raw = self._http("GET", url, self._headers(), None)
             if status != 200:
@@ -321,8 +324,9 @@ class GcsSink:
             documents.append(json.loads(raw))
         return documents
 
-    def records(self) -> list[dict[str, Any]]:
-        return self._read("records")
+    def records(self, after: int = 0) -> list[dict[str, Any]]:
+        """Exported records in sequence order; ``after`` lists only those past that sequence (the billing sync's cursor)."""
+        return self._read("records", f"{after + 1:0{_SEQUENCE_WIDTH}d}" if after else "")
 
     def heads(self) -> list[dict[str, Any]]:
         return self._read("heads")

@@ -97,13 +97,14 @@ class UsageMeterTests(unittest.TestCase):
 
     def test_ledger_details_carry_counts_and_names_only(self):
         upsert(self.hermes, "session-with-a-name", tokens=(1200, 300), calls=2, cost=0.0123)
-        details = usage.ledger_details(self.collect()[0])
+        details = usage.ledger_details(self.collect()[0], agent="receptionist")
         text = json.dumps(details)
         for private in ("U-PRIVATE", "C-PRIVATE", "4111 1111", "secret prompt", "session-with-a-name"):
             self.assertNotIn(private, text)
         self.assertEqual(details["usage"], {"tokens": 1500, "costCents": 1})
         self.assertEqual((details["model"], details["provider"], details["channel"]), ("gpt-5.1", "openai", "slack"))
         self.assertEqual(len(details["session"]), 16)
+        self.assertEqual(details["agent"], "receptionist")
 
     def test_a_store_without_the_hermes_counters_is_refused(self):
         other = self.root / "other.db"
