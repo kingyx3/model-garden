@@ -89,14 +89,17 @@ Http = Callable[[str, str, Mapping[str, str], bytes], "tuple[int, bytes]"]
 
 PRESETS: dict[str, dict[str, Any]] = {
     "google": {
-        "authorizeUrl": "https://accounts.google.com/o/oauth2/v2/auth", "tokenUrl": "https://oauth2.googleapis.com/token",
+        "authorizeUrl": "https://accounts.google.com/o/oauth2/v2/auth",
+        "tokenUrl":
+            "https://oauth2.googleapis.com/token",
         "revokeUrl": "https://oauth2.googleapis.com/revoke", "allowedHosts": ["accounts.google.com", "oauth2.googleapis.com"],
         "authParams": {"access_type": "offline", "prompt": "consent", "include_granted_scopes": "false"},
         "implicitScopes": [], "benignScopes": ["openid", "email", "profile"], "scopePrefixes": [],
     },
     "microsoft": {
         "authorizeUrl": "https://login.microsoftonline.com/common/oauth2/v2.0/authorize",
-        "tokenUrl": "https://login.microsoftonline.com/common/oauth2/v2.0/token", "revokeUrl": None,
+        "tokenUrl":
+            "https://login.microsoftonline.com/common/oauth2/v2.0/token", "revokeUrl": None,
         "allowedHosts": ["login.microsoftonline.com"], "authParams": {"prompt": "consent"},
         "implicitScopes": ["offline_access"], "benignScopes": ["openid", "email", "profile"],
         "scopePrefixes": ["https://graph.microsoft.com/"],
