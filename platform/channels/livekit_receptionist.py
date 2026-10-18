@@ -175,7 +175,7 @@ class ReceptionistVoiceAgent(Agent):
             }
         )
         if self._transcript is not None:
-            self._transcript.note_outcome("transferred")
+            self._transcript.note_transfer()
         return "Human transfer requested successfully."
 
     @function_tool()

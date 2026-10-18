@@ -4,8 +4,8 @@
 This is the thin recorder between the channels that already produce finished conversations (the call-transcript filing step and
 the support mailbox) and that store. It adds **references and labels only**: a transcript or message reference, an outcome label,
 a digest of a model-written summary, ledger request ids and a hand-off marker; never a turn, a message body, an address or a
-number. It is best-effort by design (a caller wraps it so a recording problem never stops filing or a reply) and it is not wired
-into a CLI or the sidecar.
+number. It is best-effort by design (a caller wraps it so a recording problem never stops filing or a reply) and the voice path is wired through
+``scripts/runtime-file-calls.py`` (``client-operator.py file-calls``), the mail path through the runtime worker.
 
 - **Voice.** A call becomes a conversation keyed on its call hash. Its transcript, outcome, summary digest (only when the record has
   a model summary; an extractive one stays in the transcript store), each ledger request id and a transfer all go on the timeline.
@@ -90,7 +90,9 @@ class ConversationRecorder:
                 self._store.add_interaction(cid, kind="handoff", external_id="handoff", at=ended, ref=f"handoff:{call_hash}", label="transferred")
         summary = record.get("summary")
         if isinstance(summary, str) and summary.strip() and record.get("summarySource") != "extractive":
-            self._store.add_interaction(cid, kind="summary", external_id="summary", at=ended, ref=f"summary:{call_hash}",
+            source = record.get("summarySource")
+            label = source if isinstance(source, str) and _LABEL.match(source) else None
+            self._store.add_interaction(cid, kind="summary", external_id="summary", at=ended, ref=f"summary:{call_hash}", label=label,
                                         content_digest=hashlib.sha256(summary.strip().encode("utf-8")).hexdigest())
         for request_id in (record.get("requestIds") or [])[:50]:
             if isinstance(request_id, str) and _DIGEST.match(request_id):

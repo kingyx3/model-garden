@@ -211,12 +211,17 @@ def ledger_transcript_failures(
 
 
 def file_call_transcripts(
-    runtime: Any, store: Any, records: Iterable[Mapping[str, Any]], *, log: Callable[[str], None] | None = None, recorder: Any | None = None
+    runtime: Any, store: Any, records: Iterable[Mapping[str, Any]], *, log: Callable[[str], None] | None = None, recorder: Any | None = None,
+    summarizer: Callable[[Mapping[str, Any]], Mapping[str, Any]] | None = None,
 ) -> dict[str, int]:
     """File each call into the unmatched queue; a failure on one record never stops the rest.
 
     With a ``recorder`` (``conversation_recorder.ConversationRecorder``) each call is also put on the cross-channel conversation
     timeline. That is best-effort: a recording problem is logged by type and never changes how the call was filed.
+
+    With a ``summarizer`` (``call_summary.CallSummarizer``) a call not yet filed first gets a post-call summary, model-written or the
+    deterministic fallback, which is what ``crm.log-interaction`` carries (so an approval shows the exact text) and what the timeline
+    records. Already-filed calls are not summarised again, so a re-run costs no model call. A summarizer error never blocks filing.
     """
     totals = {"filed": 0, "duplicate": 0, "pending-approval": 0, "failed": 0, "skipped": 0}
     for record in records:
@@ -224,6 +229,13 @@ def file_call_transcripts(
         if arguments is None:
             totals["skipped"] += 1
             continue
+        if summarizer is not None and not store.has_reference(arguments["transcriptRef"]):
+            try:
+                record = summarizer(record)
+                arguments = interaction_from_call(record) or arguments
+            except Exception as exc:  # noqa: BLE001 - the plain outcome-and-size line is still filed
+                if log is not None:
+                    log(f"{arguments['transcriptRef']}: summary {type(exc).__name__}")
         try:
             outcome = file_interaction(runtime, store, arguments)["status"]
         except Exception as exc:  # one bad record must not stop the others; report the type only

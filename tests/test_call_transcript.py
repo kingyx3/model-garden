@@ -306,7 +306,7 @@ class WorkerWiringTests(unittest.TestCase):
             "finalize_transcript(transcript, on_failure=failed, auto_summary=True)",
             'getattr(item, "transcript_confidence", None)',
             "TranscriptWriteFailed",
-            'note_outcome("transferred")',
+            'note_transfer()',
             'note_outcome("message-taken")',
         ):
             self.assertIn(needle, self.source)
