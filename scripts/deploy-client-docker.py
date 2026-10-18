@@ -119,6 +119,7 @@ RUNTIME_SOURCE_PATHS = (
     pathlib.Path("scripts/runtime-memory.py"),
     pathlib.Path("scripts/runtime-artifacts.py"),
     pathlib.Path("scripts/runtime-conversations.py"),
+    pathlib.Path("scripts/runtime-crm-sync.py"),
     pathlib.Path("scripts/runtime-connection.py"),
     pathlib.Path("scripts/runtime-mcp-connections.py"),
     pathlib.Path("VERSION"),
