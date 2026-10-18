@@ -143,7 +143,7 @@ def _implemented_connector(family: str, provider: str, tier: int) -> bool:
     """Only shipped Tier 0 implementations or verified adapters satisfy a dependency.
 
     The registry is an implementation inventory, not proof of live OAuth consent.
-    Historical Calendar provider aliases remain backward compatible.
+    Bindings name a calendar provider ``google`` or ``microsoft``; the registry ids carry a ``-calendar`` suffix.
     """
     try:
         registry = json.loads(INTEGRATIONS_PATH.read_text(encoding="utf-8"))
