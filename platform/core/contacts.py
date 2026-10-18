@@ -31,10 +31,12 @@ import contextlib
 import datetime as dt
 import fcntl
 import hashlib
+import importlib.util
 import json
 import os
 import pathlib
 import re
+import sys
 import secrets
 import time
 from collections.abc import Iterator, Mapping
@@ -56,10 +58,22 @@ DIRECTIONS = ("inbound", "outbound")
 CONTACT_FIELDS = ("name", "phone", "email", "notes")
 UNMATCHED = "unmatched"
 PROVIDER_ID = "built-in-crm"
-REDACTED_CARD = "[REDACTED:card]"
 _EMAIL = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 _REF = re.compile(r"^[A-Za-z0-9:._/#@-]{1,256}$")
-_CARD_CANDIDATE = re.compile(r"(?<![\d])(?:\d[ \-]?){12,18}\d(?![\d])")
+
+
+def _sibling(name: str, filename: str):
+    module = sys.modules.get(name)
+    if module is None:
+        spec = importlib.util.spec_from_file_location(name, pathlib.Path(__file__).with_name(filename))
+        module = importlib.util.module_from_spec(spec)
+        assert spec.loader is not None
+        sys.modules[name] = module
+        spec.loader.exec_module(module)
+    return module
+
+
+_REDACTION = _sibling("model_garden_redaction", "redaction.py")
 
 
 class ContactError(ValueError):
@@ -68,28 +82,6 @@ class ContactError(ValueError):
 
 def _canonical(value: Any) -> str:
     return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
-
-
-def _luhn(digits: str) -> bool:
-    total = 0
-    for index, char in enumerate(reversed(digits)):
-        value = int(char)
-        if index % 2 == 1:
-            value *= 2
-            if value > 9:
-                value -= 9
-        total += value
-    return total % 10 == 0
-
-
-def redact_cards(text: str) -> str:
-    """Replace Luhn-valid 13-19 digit payment card numbers (same rule as the call transcript)."""
-
-    def replace(match: re.Match[str]) -> str:
-        digits = re.sub(r"\D", "", match.group(0))
-        return REDACTED_CARD if 13 <= len(digits) <= 19 and _luhn(digits) else match.group(0)
-
-    return _CARD_CANDIDATE.sub(replace, text)
 
 
 def normalize_phone(value: str) -> str | None:
@@ -189,7 +181,7 @@ class ContactStore:
                 raise ContactError("email is not a valid address")
             stored["email"], keys["email"] = raw, normalized
         if "notes" in fields:
-            stored["notes"] = redact_cards(_text(fields["notes"], "notes", MAX_NOTES))
+            stored["notes"] = _REDACTION.redact_cards(_text(fields["notes"], "notes", MAX_NOTES))
         if not (set(stored) & {"name", "phone", "email"}):
             raise ContactError("a contact needs at least a name, phone or email")
         created = int(time.time()) if now is None else now
@@ -224,7 +216,7 @@ class ContactStore:
             raise ContactError(f"direction must be one of {', '.join(DIRECTIONS)}")
         channel = _text(arguments.get("channel"), "channel", MAX_FIELD)
         timestamp = _timestamp(arguments.get("timestamp"))
-        summary = redact_cards(_text(arguments.get("summary"), "summary", MAX_SUMMARY))
+        summary = _REDACTION.redact_cards(_text(arguments.get("summary"), "summary", MAX_SUMMARY))
         record: dict[str, Any] = {
             "type": kind, "channel": channel, "direction": direction, "timestamp": timestamp, "summary": summary,
         }

@@ -23,10 +23,12 @@ from __future__ import annotations
 import contextlib
 import fcntl
 import hashlib
+import importlib.util
 import json
 import os
 import pathlib
 import re
+import sys
 import time
 from collections.abc import Iterator, Mapping
 from typing import Any
@@ -44,30 +46,24 @@ MAX_QUERY = 100
 MAX_RESULTS = 20
 _PROJECT = re.compile(r"^[a-z0-9][a-z0-9-]{0,39}$")
 _ID = re.compile(r"^t-[0-9a-f]{12}$")
-_CARD_CANDIDATE = re.compile(r"(?<![\d])(?:\d[ \-]?){12,18}\d(?![\d])")
-REDACTED_CARD = "[REDACTED:card]"
+
+
+def _sibling(name: str, filename: str):
+    module = sys.modules.get(name)
+    if module is None:
+        spec = importlib.util.spec_from_file_location(name, pathlib.Path(__file__).with_name(filename))
+        module = importlib.util.module_from_spec(spec)
+        assert spec.loader is not None
+        sys.modules[name] = module
+        spec.loader.exec_module(module)
+    return module
+
+
+_REDACTION = _sibling("model_garden_redaction", "redaction.py")
 
 
 class TicketError(ValueError):
     """Raised for invalid input, an unknown ticket or one the requester may not touch; never carries ticket text."""
-
-
-def _luhn(digits: str) -> bool:
-    total = 0
-    for index, char in enumerate(reversed(digits)):
-        value = int(char)
-        if index % 2 == 1:
-            value = value * 2 - 9 if value * 2 > 9 else value * 2
-        total += value
-    return total % 10 == 0
-
-
-def _redact(text: str) -> str:
-    def replace(match: re.Match[str]) -> str:
-        digits = re.sub(r"\D", "", match.group(0))
-        return REDACTED_CARD if 13 <= len(digits) <= 19 and _luhn(digits) else match.group(0)
-
-    return _CARD_CANDIDATE.sub(replace, text)
 
 
 def _text(value: Any, label: str, limit: int, *, required: bool = True) -> str:
@@ -78,7 +74,7 @@ def _text(value: Any, label: str, limit: int, *, required: bool = True) -> str:
     cleaned = value.strip()
     if len(cleaned) > limit:
         raise TicketError(f"{label} exceeds {limit} characters")
-    return _redact(cleaned)
+    return _REDACTION.redact_cards(cleaned)
 
 
 class TicketStore:

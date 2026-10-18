@@ -25,6 +25,7 @@ def _load(name: str, relative: str):
 
 
 C = _load("contacts_under_test", "platform/core/contacts.py")
+redaction = _load("redaction_for_contacts", "platform/core/redaction.py")
 transcript = _load("call_transcript_for_contacts", "platform/channels/call_transcript.py")
 govern = _load("govern_action_for_contacts", "scripts/govern-action.py")
 cli = _load("runtime_contacts_cli", "scripts/runtime-contacts.py")
@@ -90,7 +91,7 @@ class CreateTests(StoreCase):
         result = self.store.create_contact({"name": "A", "notes": f"paid with {VISA}"})
         notes = self.raw()["contacts"][result["objectId"]]["fields"]["notes"]
         self.assertNotIn("4111", notes)
-        self.assertIn(C.REDACTED_CARD, notes)
+        self.assertIn(redaction.REDACTED_CARD, notes)
 
     def test_an_asserted_identity_is_never_merged_and_the_response_does_not_reveal_a_match(self):
         first = self.store.create_contact({"name": "Alex", "phone": "+65 6123 4567"})
@@ -190,7 +191,7 @@ class InteractionTests(StoreCase):
         result = self.store.log_interaction(interaction(contact, summary=f"Caller read out {VISA} to pay"))
         stored = self.raw()["interactions"][result["interactionId"]]["summary"]
         self.assertNotIn("4111", stored)
-        self.assertIn(C.REDACTED_CARD, stored)
+        self.assertIn(redaction.REDACTED_CARD, stored)
         # The whole file, checked for the full number (a 4-digit fragment can occur inside a hash-derived id).
         text = self.store.path.read_text(encoding="utf-8")
         self.assertNotIn(VISA, text)
@@ -360,14 +361,14 @@ class OperatorScriptTests(StoreCase):
 
 
 class ParityTests(unittest.TestCase):
-    def test_card_redaction_matches_the_call_transcript(self):
+    def test_shared_card_redaction_matches_the_call_transcript(self):
         samples = [
             f"my card is {VISA} thanks", "4111-1111-1111-1111", "4111111111111111", "4111 1111 1111 1112",
             "call +65 6123 4567", "booking 20261020", "order 12345", f"two cards {VISA} and 5500 0000 0000 0004",
         ]
         for sample in samples:
             expected, _ = transcript.redact(sample)
-            actual = C.redact_cards(sample).replace(C.REDACTED_CARD, transcript.CARD_REPLACEMENT)
+            actual = redaction.redact_cards(sample).replace(redaction.REDACTED_CARD, transcript.CARD_REPLACEMENT)
             self.assertEqual(actual, expected, sample)
 
 
