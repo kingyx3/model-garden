@@ -88,8 +88,8 @@ def load_config(document: Mapping[str, Any]) -> dict[str, Any]:
     if not isinstance(state_dir, str) or not state_dir.startswith("/"):
         raise BillingError("stateDir must be an absolute path")
     sources = document.get("sources")
-    if not isinstance(sources, list) or not sources:
-        raise BillingError("sources must list at least one client environment")
+    if not isinstance(sources, list):
+        raise BillingError("sources must list the client environments to bill")
     seen = set()
     checked = []
     for index, source in enumerate(sources):

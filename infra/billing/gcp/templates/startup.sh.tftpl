@@ -1,0 +1,139 @@
+#!/bin/bash
+# Billing host boot: mount the data disk, install Docker, write Lago's env files from Secret Manager, start Lago, and install the
+# billing sync with its timers. Runs on every boot and is idempotent.
+set -euo pipefail
+export DEBIAN_FRONTEND=noninteractive
+umask 077
+
+# Data disk: formatted once, mounted at /var/lib/lago.
+device=/dev/disk/by-id/google-${data_disk}
+blkid "$device" >/dev/null || mkfs.ext4 -m 0 -E lazy_itable_init=0,discard "$device"
+mkdir -p /var/lib/lago
+grep -q " /var/lib/lago " /etc/fstab || echo "UUID=$(blkid -s UUID -o value "$device") /var/lib/lago ext4 discard,defaults,nofail 0 2" >> /etc/fstab
+mountpoint -q /var/lib/lago || mount /var/lib/lago
+install -d -m 0700 /var/lib/lago/billing /var/lib/lago/docker
+
+# Docker keeps its images and Lago's volumes (Postgres, Redis, files) on the data disk, and never starts before it is mounted.
+install -d -m 0755 /etc/docker /etc/systemd/system/docker.service.d
+echo '{"data-root": "/var/lib/lago/docker", "log-driver": "local"}' > /etc/docker/daemon.json
+printf '[Unit]\nRequiresMountsFor=/var/lib/lago\n' > /etc/systemd/system/docker.service.d/data-disk.conf
+chmod 0644 /etc/docker/daemon.json /etc/systemd/system/docker.service.d/data-disk.conf
+systemctl daemon-reload
+
+if ! command -v docker >/dev/null; then
+  apt-get update
+  apt-get install -y ca-certificates curl
+  install -m 0755 -d /etc/apt/keyrings
+  curl -fsSL https://download.docker.com/linux/debian/gpg -o /etc/apt/keyrings/docker.asc
+  chmod a+r /etc/apt/keyrings/docker.asc
+  . /etc/os-release
+  echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/debian $VERSION_CODENAME stable" > /etc/apt/sources.list.d/docker.list
+  apt-get update
+  apt-get install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin python3 python3-yaml
+  systemctl enable --now docker
+fi
+
+secret() { gcloud secrets versions access latest --secret="$1" --quiet; }
+# Read every secret before writing anything, so a failed read stops the boot instead of leaving an empty value.
+postgres_password=$(secret ${secrets["postgres-password"]})
+secret_key_base=$(secret ${secrets["secret-key-base"]})
+rsa_private_key=$(secret ${secrets["rsa-private-key"]})
+encryption_primary_key=$(secret ${secrets["encryption-primary-key"]})
+encryption_deterministic_key=$(secret ${secrets["encryption-deterministic-key"]})
+encryption_salt=$(secret ${secrets["encryption-key-derivation-salt"]})
+admin_password=$(secret ${secrets["admin-password"]})
+api_key=$(secret ${secrets["api-key"]})
+install -d -m 0700 /etc/lago
+cat > /etc/lago/postgres.env <<ENV
+POSTGRES_PASSWORD=$postgres_password
+ENV
+cat > /etc/lago/lago.env <<ENV
+DATABASE_URL=postgresql://lago:$postgres_password@db:5432/lago?search_path=public
+SECRET_KEY_BASE=$secret_key_base
+LAGO_RSA_PRIVATE_KEY=$rsa_private_key
+LAGO_ENCRYPTION_PRIMARY_KEY=$encryption_primary_key
+LAGO_ENCRYPTION_DETERMINISTIC_KEY=$encryption_deterministic_key
+LAGO_ENCRYPTION_KEY_DERIVATION_SALT=$encryption_salt
+LAGO_ORG_USER_PASSWORD=$admin_password
+LAGO_ORG_API_KEY=$api_key
+ENV
+chmod 0600 /etc/lago/postgres.env /etc/lago/lago.env
+
+install -d -m 0755 /opt/lago
+cat > /opt/lago/compose.yaml <<'COMPOSE'
+${compose}
+COMPOSE
+docker compose -p lago -f /opt/lago/compose.yaml up -d --remove-orphans
+
+# The billing sync: Model Garden's own code, shipped in this script, run by systemd timers as root on this host only.
+rm -rf /opt/model-garden-billing
+%{ for path, content in billing_files ~}
+install -D -m 0644 /dev/null /opt/model-garden-billing/${path}
+echo '${content}' | base64 -d > /opt/model-garden-billing/${path}
+%{ endfor ~}
+install -d -m 0700 /etc/model-garden-billing
+cat > /etc/model-garden-billing/billing.yaml <<'CONFIG'
+${billing_config}
+CONFIG
+cat > /opt/model-garden-billing/run.sh <<RUN
+#!/bin/bash
+# Set up the billable metrics (idempotent), then send new usage. The API key is read per run and never written to disk.
+set -euo pipefail
+LAGO_API_KEY="\$(gcloud secrets versions access latest --secret=${secrets["api-key"]} --quiet)"
+export LAGO_API_KEY
+python3 /opt/model-garden-billing/scripts/billing-sync.py metrics --config /etc/model-garden-billing/billing.yaml
+python3 /opt/model-garden-billing/scripts/billing-sync.py sync --config /etc/model-garden-billing/billing.yaml
+RUN
+cat > /opt/model-garden-billing/backup.sh <<BACKUP
+#!/bin/bash
+# Nightly custom-format dump of the Lago database to the create-only backup bucket.
+set -euo pipefail
+docker compose -p lago -f /opt/lago/compose.yaml exec -T db pg_dump -U lago -Fc lago \
+  | gcloud storage cp - "gs://${backup_bucket}/lago-\$(date -u +%Y%m%dT%H%M%SZ).dump" --quiet
+BACKUP
+chmod 0700 /opt/model-garden-billing/run.sh /opt/model-garden-billing/backup.sh
+
+cat > /etc/systemd/system/model-garden-billing.service <<'UNIT'
+[Unit]
+Description=Model Garden billing sync (exported ledgers to Lago)
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/opt/model-garden-billing/run.sh
+UNIT
+cat > /etc/systemd/system/model-garden-billing.timer <<'UNIT'
+[Unit]
+Description=Run the Model Garden billing sync
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=${sync_minutes}min
+
+[Install]
+WantedBy=timers.target
+UNIT
+cat > /etc/systemd/system/lago-backup.service <<'UNIT'
+[Unit]
+Description=Dump the Lago database to the backup bucket
+After=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/opt/model-garden-billing/backup.sh
+UNIT
+cat > /etc/systemd/system/lago-backup.timer <<'UNIT'
+[Unit]
+Description=Nightly Lago database dump
+
+[Timer]
+OnCalendar=*-*-* 02:00:00 UTC
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+UNIT
+systemctl daemon-reload
+systemctl enable --now model-garden-billing.timer lago-backup.timer
+touch /var/lib/model-garden-billing-bootstrap-complete

@@ -1,0 +1,119 @@
+# Lago ${lago_version}, adapted from Lago's own docker-compose.yml: secrets come from root-only env files written at boot from Secret
+# Manager, the volumes live on the data disk (Docker's data root), and only the front end (80) and API (3000) are published, to IAP
+# tunnels.
+volumes:
+  postgres:
+  redis:
+  storage:
+
+x-backend: &backend
+  image: getlago/api:${lago_version}
+  restart: unless-stopped
+  env_file: /etc/lago/lago.env
+  environment: &backend-env
+    RAILS_ENV: production
+    RAILS_LOG_TO_STDOUT: "true"
+    REDIS_URL: redis://redis:6379
+    LAGO_REDIS_CACHE_URL: redis://redis:6379
+    LAGO_API_URL: ${api_url}
+    LAGO_FRONT_URL: ${front_url}
+    LAGO_PDF_URL: http://pdf:3000
+    LAGO_USE_AWS_S3: "false"
+    LAGO_USE_GCS: "false"
+    LAGO_SIDEKIQ_WEB: "false"
+    LAGO_DISABLE_SEGMENT: "true"
+    LAGO_DISABLE_SIGNUP: "true"
+    LAGO_CREATE_ORG: "true"
+    LAGO_ORG_NAME: "${organization}"
+    LAGO_ORG_USER_EMAIL: "${admin_email}"
+  volumes:
+    - storage:/app/storage
+  depends_on: &backend-depends
+    db:
+      condition: service_healthy
+      restart: true
+    redis:
+      condition: service_healthy
+      restart: true
+
+services:
+  db:
+    image: getlago/postgres-partman:15.0-alpine
+    restart: unless-stopped
+    env_file: /etc/lago/postgres.env
+    environment:
+      POSTGRES_DB: lago
+      POSTGRES_USER: lago
+      PGDATA: /data/postgres
+    volumes:
+      - postgres:/data/postgres
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U lago -d lago -h localhost"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  migrate:
+    <<: *backend
+    restart: "no"
+    command: ["./scripts/migrate.sh"]
+
+  api:
+    <<: *backend
+    command: ["./scripts/start.api.sh"]
+    depends_on:
+      <<: *backend-depends
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:3000/health || exit 1"]
+      interval: 10s
+      start_period: 30s
+      timeout: 60s
+    ports:
+      - "3000:3000"
+
+  api-worker:
+    <<: *backend
+    command: ["./scripts/start.worker.sh"]
+    depends_on:
+      <<: *backend-depends
+      migrate:
+        condition: service_completed_successfully
+
+  api-clock:
+    <<: *backend
+    command: ["./scripts/start.clock.sh"]
+    depends_on:
+      <<: *backend-depends
+      migrate:
+        condition: service_completed_successfully
+
+  front:
+    image: getlago/front:${lago_version}
+    restart: unless-stopped
+    environment:
+      API_URL: ${api_url}
+      APP_ENV: production
+      LAGO_DISABLE_SIGNUP: "true"
+    depends_on:
+      api:
+        condition: service_healthy
+    ports:
+      - "80:80"
+
+  pdf:
+    image: getlago/lago-gotenberg:7.8.2
+    restart: unless-stopped

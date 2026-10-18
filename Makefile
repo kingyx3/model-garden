@@ -21,6 +21,9 @@ terraform:
 	terraform -chdir=infra/docker-host/gcp fmt -check
 	terraform -chdir=infra/docker-host/gcp init -backend=false -input=false >/dev/null
 	terraform -chdir=infra/docker-host/gcp validate
+	terraform -chdir=infra/billing/gcp fmt -check
+	terraform -chdir=infra/billing/gcp init -backend=false -input=false >/dev/null
+	terraform -chdir=infra/billing/gcp validate
 
 hermes:
 	bash scripts/smoke-hermes-runtime.sh
