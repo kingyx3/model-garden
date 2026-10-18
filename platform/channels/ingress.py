@@ -11,7 +11,8 @@ holds no credential and sends nothing itself: it is handed the raw request and t
 - **Authority from the channel.** The principal is the verified sender mapped through the ``PrincipalDirectory``. Nothing in the
   text changes it. An unmapped sender is a public, read-only principal.
 - **Routing in a fixed order.** A hand-off reply (``done <ref>``) goes to ``HandoffReplies`` and closes the hand-off under the
-  channel identity; a schedule command (``schedule create ...``) goes to ``schedule_commands`` for a mapped person only; anything
+  channel identity; a schedule command (``schedule create ...``) goes to ``schedule_commands`` for a mapped person only; ``inbox``
+  shows what is waiting (see ``platform/core/inbox.py``) to a mapped person in a direct conversation only; anything
   else is a question for the coworker, answered by the injected ``respond`` callable. Hand-off replies are accepted only in a
   direct conversation.
 - **Approvals.** A verified button click goes to ``decide_from_channel``; the responder must be a mapped approver. The reply to
@@ -29,6 +30,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import pathlib
+import re
 import sys
 import threading
 from collections import OrderedDict
@@ -39,6 +41,7 @@ from typing import Any
 MAX_SEEN = 5000
 MAX_REPLY_CHARS = 3500
 MAX_ATTACHMENTS = 3
+INBOX_COMMAND = re.compile(r"^/?inbox$", re.IGNORECASE)
 Audit = Callable[[str, str, dict[str, Any]], Any]
 
 
@@ -84,8 +87,10 @@ class ChannelIngress:
         executor: Any | None = None,
         audit: Audit | None = None,
         deliverables: Callable[[Any, Any, str], Any] | None = None,
+        inbox: Callable[[Any, Any], str] | None = None,
     ) -> None:
         self._adapters = dict(adapters)
+        self._inbox = inbox
         self._deliverables = deliverables
         self._directory = directory
         self._respond = respond
@@ -182,6 +187,14 @@ class ChannelIngress:
                 )
                 self._send(adapter, inbound, reply or "")
                 return "schedule-command"
+            if self._inbox is not None and INBOX_COMMAND.match(text.strip()):
+                if principal.mapped and self._is_direct(inbound):
+                    reply = self._inbox(inbound, principal)
+                    self._note("channel.inbox-viewed", principal.identity, {"channel": inbound.channel})
+                else:  # the same words for a stranger and for a shared channel: nothing is revealed
+                    reply = "I can show what is waiting only to a team member in a direct message."
+                self._send(adapter, inbound, reply)
+                return "inbox-command"
             answer = self._respond(inbound, principal)
             if answer:
                 self._send(adapter, inbound, answer, self._attachments(inbound, principal, answer))

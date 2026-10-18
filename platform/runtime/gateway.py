@@ -91,7 +91,7 @@ def _module(key: str):
         "handoff_reply": "platform/core/handoff_reply.py", "schedules": "platform/core/schedules.py",
         "artifacts": "platform/core/artifacts.py", "coworker": "platform/runtime/coworker_client.py",
         "enrollment": "platform/core/secret_enrollment.py", "vault": "platform/core/sealed_vault.py",
-        "receipts": "platform/channels/receipts.py", "oauth": "platform/core/oauth_consent.py", "readiness": "platform/core/grant_readiness.py", "studio": "platform/runtime/studio.py",
+        "receipts": "platform/channels/receipts.py", "inbox": "platform/core/inbox.py", "oauth": "platform/core/oauth_consent.py", "readiness": "platform/core/grant_readiness.py", "studio": "platform/runtime/studio.py",
     }
     # Shared names, so an error class raised in one module is the class another module catches.
     shared = {"text": "model_garden_text_channel", "schedules": "model_garden_schedule_commands_store"}
@@ -410,7 +410,7 @@ class Gateway:
         self.ingress = _module("ingress").ChannelIngress(
             self.adapters, self.directory, respond=self._respond, decide=self._decide, handoff_replies=self._handoff_replies(),
             schedules=self._schedule_store(), agent=self.config["agent"], executor=executor, audit=self.audit,
-            deliverables=self._deliverables,
+            deliverables=self._deliverables, inbox=self._inbox_text,
         )
 
     # -- shared -------------------------------------------------------------------------------------------
@@ -489,6 +489,16 @@ class Gateway:
                                                          "bytes": attachment.size_bytes, "sha256": attachment.digest[:16]})
             attachments.append(attachment)
         return tuple(attachments)
+
+    def _inbox_text(self, inbound: Any, principal: Any) -> str:
+        """What is waiting, for the mapped person asking: everything for an approver or admin, otherwise their own hand-offs."""
+        inbox = _module("inbox")
+        snapshot = inbox.collect(
+            approvals=self.data / "approvals", handoffs=self.data / "handoffs", contacts=self.data / "contacts", governance=self.data,
+            tickets=self.data / "tickets", now=int(self.clock()),
+        )
+        everything = bool({"approver", "admin"} & set(principal.roles))
+        return inbox.format_chat(inbox.for_person(snapshot, principal.identity, everything=everything))
 
     def _upload_to_slack(self, conversation_id: str, thread_id: str | None, attachment: Any) -> None:
         """Upload one deliverable into a Slack thread; read with the requester it was authorised for, never a different identity."""

@@ -115,6 +115,16 @@ class GatewayCase(unittest.TestCase):
     def slack_post(self, route, body):
         return self.gateway.handle("POST", route, signed(body), body)
 
+    def sign_in(self, address="alice@acme.example"):
+        self.gateway.handle("POST", "/channels/web/login", {}, json.dumps({"address": address}).encode())
+        if not self.mail:
+            return None
+        link = self.mail[-1][1].split("\n\n")[1].strip()
+        self.assertTrue(link.startswith("https://chat.acme.example/chat#login="))
+        login = urllib.parse.unquote(link.split("#login=")[1])
+        session = self.gateway.handle("POST", "/channels/web/session", {}, json.dumps({"login": login}).encode())
+        return json.loads(session.body) if session.status == 200 else None
+
 
 class SlackTests(GatewayCase):
     def test_direct_message_is_answered_in_thread_with_mapped_identity(self):
@@ -219,16 +229,6 @@ class SlackTests(GatewayCase):
 
 
 class WebChatTests(GatewayCase):
-    def sign_in(self, address="alice@acme.example"):
-        self.gateway.handle("POST", "/channels/web/login", {}, json.dumps({"address": address}).encode())
-        if not self.mail:
-            return None
-        link = self.mail[-1][1].split("\n\n")[1].strip()
-        self.assertTrue(link.startswith("https://chat.acme.example/chat#login="))
-        login = urllib.parse.unquote(link.split("#login=")[1])
-        session = self.gateway.handle("POST", "/channels/web/session", {}, json.dumps({"login": login}).encode())
-        return json.loads(session.body) if session.status == 200 else None
-
     def test_login_never_reveals_the_allow_list(self):
         listed = self.gateway.handle("POST", "/channels/web/login", {}, b'{"address":"alice@acme.example"}')
         unlisted = self.gateway.handle("POST", "/channels/web/login", {}, b'{"address":"eve@evil.example"}')
@@ -493,6 +493,54 @@ class ReceiptTests(GatewayCase):
         self.assertEqual((none.receipts, none.announce_receipts()), (None, 0))
         with self.assertRaises(gateway.GatewayConfigError):
             gateway.load_config({**self.config, "approvals": {"notify": [], "receipts": "yes"}})
+
+
+class InboxCommandTests(GatewayCase):
+    config = {
+        **GatewayCase.config,
+        "directory": {**GatewayCase.config["directory"],
+                      "slack": {**GatewayCase.config["directory"]["slack"], "T01/U0BOB00001": {"identity": "bob@acme.example"}}},
+    }
+
+    def waiting(self):
+        import hashlib
+
+        def seed(name):
+            return hashlib.sha256(name.encode()).hexdigest()
+
+        handoff.create(self.data / "handoffs", {"requestId": seed("a"), "tool": "calendar.book", "arguments": {"note": "private"}},
+                       capability="calendar", reason="unbound", assignee="alice@acme.example", deadline_hours=48, now=NOW - 60)
+        handoff.create(self.data / "handoffs", {"requestId": seed("b"), "tool": "mail.send", "arguments": {"note": "private"}},
+                       capability="mail", reason="human-only", assignee="bob@acme.example", deadline_hours=48, now=NOW - 60)
+        return seed("a")[:12], seed("b")[:12]
+
+    def test_a_mapped_person_asks_for_the_inbox_in_a_slack_dm_and_the_coworker_is_not_involved(self):
+        alice, bob = self.waiting()
+        self.slack_post("/channels/slack/events", slack_event("inbox", ts="1700000000.000700"))
+        text = self.posts()[-1]["text"]
+        self.assertIn(f"done {alice}", text)
+        self.assertIn(f"done {bob}", text)  # an approver sees every hand-off
+        self.assertNotIn("private", text)
+        self.assertEqual(self.coworker.calls, [])
+        self.slack_post("/channels/slack/events", slack_event("inbox", user="U0BOB00001", ts="1700000000.000701"))
+        member = self.posts()[-1]["text"]
+        self.assertIn(f"done {bob}", member)
+        self.assertNotIn(alice, member)  # a member sees only their own
+        self.slack_post("/channels/slack/events", slack_event("inbox", user="U0STRANGER", ts="1700000000.000702"))
+        self.assertEqual(self.posts()[-1]["text"], "I can show what is waiting only to a team member in a direct message.")
+        events = [json.loads(line) for line in (self.data / "audit.jsonl").read_text().splitlines()]
+        self.assertEqual([event["performedBy"] for event in events if event.get("action") == "channel.inbox-viewed"], ["alice@acme.example", "bob@acme.example"])
+
+    def test_the_built_in_web_chat_answers_inbox_for_the_signed_in_person(self):
+        alice, _ = self.waiting()
+        session = self.sign_in()
+        headers = {"Authorization": "Bearer " + session["session"], "Content-Type": "application/json"}
+        conversation = session["prefix"] + "-inbox"
+        body = json.dumps({"conversationId": conversation, "messageId": "m1", "text": "inbox"}).encode()
+        self.assertEqual(self.gateway.handle("POST", "/channels/web/messages", headers, body).status, 200)
+        events = json.loads(self.gateway.handle("GET", f"/channels/web/events?conversationId={conversation}&after=0", headers, b"").body)["events"]
+        self.assertIn(f"done {alice}", events[0]["text"])
+        self.assertEqual(self.coworker.calls, [])
 
 
 if __name__ == "__main__":
