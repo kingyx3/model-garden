@@ -4,8 +4,9 @@ A client security owner has to be able to scope, attribute and revoke one cowork
 calendar without touching another's (#129). Shared connector *code* is fine; a shared business-system login or
 token across autonomous coworkers is not. This module is the credential-free contract for that: a registry of
 provider authorizations, one per coworker per connection, and the resolution the governed boundary has to use. It
-holds **references**, never secrets (``secret://`` names only), and it is **not wired into the sidecar**: today the
-sidecar still resolves provider access from the environment-level binding.
+holds **references**, never secret values (``secret://`` names only). The governed upstream execution path
+resolves connection-specific grants using the runtime-attested Agent identity; real provider-side identity and
+revocation proof is still required before any external integration can be called tenant-live.
 
 - **One grant per coworker and connection.** A record binds an immutable tenant (client and environment), Agent,
   provider family, provider and connection id to an acting identity or isolated delegated grant, a secret
