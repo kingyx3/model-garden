@@ -261,6 +261,46 @@ class Case(unittest.TestCase):
         result = self.build(escalate=broken).handle(raw(), now=T0)
         self.assertEqual((result["status"], result["escalation"], result["crm"]["state"]), ("needs-person", "failed", "synced"))
 
+    # -- a thread for a person is a ticket too --------------------------------------------------------------
+
+    def test_a_thread_for_a_person_opens_one_ticket_with_identifiers_only(self):
+        tickets = _load("tickets_for_support", "platform/core/tickets.py")
+        store = tickets.TicketStore(self.root / "tickets", tenant="acme")
+        opened: list[dict] = []
+
+        def open_ticket(item):
+            opened.append(item)
+            return store.create(project="support", title=f"Needs a person ({item['reason']})", description=f"{item['category']} {item['threadRef'][:24]}",
+                                requested_by="runtime:support-mailbox", now=T0)
+
+        self.label = "complaint"
+        body = "My boiler card 4111 1111 1111 1111 was charged twice and I am furious"
+        first = self.build(ticket=open_ticket).handle(raw(body=body), now=T0)
+        self.assertEqual(first["status"], "needs-person")
+        again = self.build(ticket=open_ticket).handle(
+            raw(body=body, message_id="<c2@customer.example>", extra="In-Reply-To: <c1@customer.example>\r\nReferences: <c1@customer.example>\r\n"), now=T0 + 30)
+        self.assertEqual(first["ticket"], again["ticket"])  # the same thread and reason give the same ticket
+        self.assertEqual(len(store.open_items()), 1)
+        self.assertEqual(set(opened[0]), {"threadRef", "category", "reason"})
+        stored = json.dumps(store.get(first["ticket"]))
+        for private in ("boiler", "4111", "furious", "alex@customer.example"):
+            self.assertNotIn(private, stored)
+
+    def test_answered_spam_and_ignored_mail_open_no_ticket_and_a_failing_opener_never_loses_the_thread(self):
+        opened: list[dict] = []
+        self.build(ticket=opened.append).handle(raw(), now=T0)  # an enquiry is drafted, not handed over
+        self.label = "spam"
+        self.build(ticket=opened.append).handle(raw(message_id="<s1@customer.example>"), now=T0)
+        self.assertEqual(opened, [])
+
+        def broken(_):
+            raise RuntimeError("disk full")
+
+        self.label = "complaint"
+        result = self.build(ticket=broken).handle(raw(message_id="<c9@customer.example>"), now=T0)
+        self.assertEqual((result["status"], result["ticket"], result["crm"]["state"]), ("needs-person", "failed:RuntimeError", "synced"))
+        self.assertNotIn("ticket", self.build().handle(raw(message_id="<c10@customer.example>"), now=T0))  # no opener: nothing changes
+
     # -- filing ------------------------------------------------------------------------------------------
 
     def test_each_thread_is_filed_once_through_the_sync_ledger_with_no_message_text(self):

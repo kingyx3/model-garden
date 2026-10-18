@@ -25,6 +25,10 @@ The runtime worker (``platform/runtime/worker.py``) feeds it from the built-in s
   approval under the client's policy) sends the draft. A client may list ``enquiry`` and/or ``booking`` in ``send_categories`` so
   the handler *requests* ``mail.send`` for that draft through an injected governed executor; whether it runs is still decided by
   the approval policy, and ``complaint``, ``other`` and ``spam`` can never be listed.
+- **A person's thread is a ticket too.** When a ticket opener is supplied (the worker supplies the Tier 0 ticket store when it is bound),
+  every thread handed to a person also opens one ticket carrying the thread reference, category and reason only, never the message
+  text, so it stays in the runtime inbox until someone finishes it; the same thread and reason always give the same ticket and a
+  failure to open one never loses the thread.
 - **Filed through the sync ledger.** Each handled thread (including those handed to a person) is filed as one email interaction,
   one ledger entry per thread, with the thread's digest as its reference and no message text. A CRM outage never stops the
   handler; the entry waits in the ledger.
@@ -146,6 +150,7 @@ class SupportMailbox:
         request_send: Callable[[dict[str, Any]], Mapping[str, Any]] | None = None,
         send_categories: Iterable[str] = (),
         escalate: Callable[[dict[str, Any]], Any] | None = None,
+        ticket: Callable[[dict[str, Any]], Mapping[str, Any]] | None = None,
         handled: MessageLog | None = None,
         audit: Audit | None = None,
         conversations: Any | None = None,
@@ -169,6 +174,7 @@ class SupportMailbox:
         self._contact_for = contact_for or (lambda _address: "unmatched")
         self._request_send, self._send_categories = request_send, frozenset(chosen)
         self._escalate, self._handled, self._audit = escalate, handled, audit
+        self._ticket = ticket  # opens a Tier 0 ticket for a thread a person must handle; it is handed identifiers, never message text
         self._conversations = conversations  # a ConversationRecorder: the thread is also put on the cross-channel timeline
 
     # -- helpers -----------------------------------------------------------------------------
@@ -268,6 +274,12 @@ class SupportMailbox:
                     self._escalate({"threadRef": out["threadRef"], "category": category, "reason": why})
                 except Exception:  # noqa: BLE001 - a failed notification must not lose the thread
                     out["escalation"] = "failed"
+            if self._ticket is not None:
+                try:  # a thread for a person is also a durable work item; redelivery returns the same ticket
+                    opened = self._ticket({"threadRef": out["threadRef"], "category": category, "reason": why})
+                    out["ticket"] = opened.get("ticketId") if isinstance(opened, Mapping) else None
+                except Exception as exc:  # noqa: BLE001 - a failed ticket must not lose the thread
+                    out["ticket"] = f"failed:{type(exc).__name__}"
             out["crm"] = self._file(address if verified else None, thread, category, "needs-person", now)
             return done(out)
 

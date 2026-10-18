@@ -114,6 +114,9 @@ class TeamRuntime:
             name = TEAM.agent_name(state)
             if not AGENT_NAME.fullmatch(name):
                 raise TeamError(f"Agent name {name!r} must be a lowercase DNS-like name (it becomes a directory and a process identity)")
+            attributed = (state.get("source") or {}).get("name")
+            if attributed != name:  # the governed boundary attributes every request and ledger event to source.name
+                raise TeamError(f"Agent {name!r} would be recorded in the ledger as {attributed!r}: source.name and the Agent's name must be the same")
         if report["mode"] == "multi-agent" and not report["ready"]:
             raise TeamError("the team is not ready to start: " + "; ".join(TEAM.blocked_reasons(report)))
         self.report = report
