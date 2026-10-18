@@ -85,7 +85,7 @@ class Case(unittest.TestCase):
                                  capability="mail", reason="human-only", assignee="bob@acme.example", deadline_hours=1, now=NOW - 7200)
         pending = self.data / "approvals" / "pending"
         pending.mkdir(parents=True)
-        (pending / f"{request_id('approval')}.json").write_text(json.dumps({"requestId": request_id("approval"), "tool": "crm.create", "arguments": {"fields": {"name": SECRET}}}))
+        (pending / f"{request_id('approval')}.json").write_text(json.dumps({"requestId": request_id("approval"), "tool": "crm.create", "requestedAt": NOW - 300, "arguments": {"fields": {"name": SECRET}}}))
         store = tickets.TicketStore(self.data / "tickets", tenant="acme")
         store.create(project="support", title=SECRET, description=SECRET, requested_by="unmapped:slack:x", now=NOW - 600)
         return for_alice["id"], for_bob["id"]

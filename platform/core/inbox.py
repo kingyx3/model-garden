@@ -41,7 +41,24 @@ def _sibling(name: str, filename: str):
     return module
 
 
+def _approval_module():
+    """The approval store module (``scripts/runtime-approval.py``) when it is deployed beside the platform, else ``None``."""
+    name = "model_garden_inbox_approval"
+    if name not in sys.modules:
+        path = pathlib.Path(__file__).resolve().parents[2] / "scripts" / "runtime-approval.py"
+        if not path.is_file():
+            return None
+        spec = importlib.util.spec_from_file_location(name, path)
+        module = importlib.util.module_from_spec(spec)
+        assert spec.loader is not None
+        sys.modules[name] = module
+        spec.loader.exec_module(module)
+    return sys.modules[name]
+
+
 def _approvals(root: pathlib.Path, now: int) -> list[dict[str, Any]]:
+    approval = _approval_module()
+    ttl = approval.ttl_seconds() if approval is not None else None
     folder = pathlib.Path(root) / "pending"
     items: list[dict[str, Any]] = []
     for path in sorted(folder.glob("*.json")) if folder.is_dir() else []:
@@ -53,6 +70,8 @@ def _approvals(root: pathlib.Path, now: int) -> list[dict[str, Any]]:
         if not isinstance(request_id, str) or path.stem != request_id or len(request_id) != REQUEST_ID_LENGTH:
             continue
         tool = request.get("tool")
+        if approval is not None and approval.is_expired(path, request, "requestedAt", now=now, ttl=ttl):
+            continue  # it can no longer be decided; the person who needs it done asks again
         waiting = max(0, now - int(path.stat().st_mtime))
         items.append({
             "kind": "approval", "id": request_id, "tool": tool if isinstance(tool, str) else None,

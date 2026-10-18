@@ -197,7 +197,20 @@ class SlackTests(GatewayCase):
         self.assertFalse((self.data / "approvals" / "decisions" / f"{APPROVE_REQUEST}.json").exists())
         self.assertEqual(click("U0ALICE01").status, 200)
         decision = json.loads((self.data / "approvals" / "decisions" / f"{APPROVE_REQUEST}.json").read_text())
-        self.assertEqual(decision, {"requestId": APPROVE_REQUEST, "approved": True, "approver": "alice@acme.example"})
+        self.assertEqual({k: v for k, v in decision.items() if k != "decidedAt"}, {"requestId": APPROVE_REQUEST, "approved": True, "approver": "alice@acme.example"})
+        self.assertIsInstance(decision["decidedAt"], int)
+
+    def test_an_expired_approval_is_not_announced_and_a_late_click_is_refused(self):
+        import time
+        (self.data / "approvals" / "pending").mkdir(parents=True)
+        (self.data / "approvals" / "pending" / f"{APPROVE_REQUEST}.json").write_text(json.dumps(
+            {"requestId": APPROVE_REQUEST, "agent": "receptionist", "tool": "crm.update", "justification": "update the deal",
+             "requestedAt": int(time.time()) - 48 * 3600}))
+        payload = {"type": "block_actions", "user": {"id": "U0ALICE01"}, "team": {"id": "T01"},
+                   "actions": [{"action_id": slack.APPROVE_ACTION, "value": APPROVE_REQUEST}]}
+        body = urllib.parse.urlencode({"payload": json.dumps(payload)}).encode()
+        self.assertEqual(self.slack_post("/channels/slack/interactive", body).status, 409)
+        self.assertFalse((self.data / "approvals" / "decisions" / f"{APPROVE_REQUEST}.json").exists())
 
     def test_pending_approvals_are_announced_once_as_buttons(self):
         (self.data / "approvals" / "pending").mkdir(parents=True)

@@ -128,6 +128,11 @@ class CollectTests(InboxCase):
         (self.approvals / "pending").mkdir(parents=True, exist_ok=True)
         self.assertEqual(self.collect()["items"], [])
 
+    def test_an_expired_approval_is_not_listed_because_it_can_no_longer_be_decided(self):
+        self.approval("fresh", age=3600)
+        self.approval("stale", age=30 * 3600)
+        self.assertEqual([item["id"] for item in self.collect()["items"]], [request_id("fresh")])
+
     def test_unsafe_or_corrupt_records_are_skipped_rather_than_crashing_the_view(self):
         self.approval("good")
         folder = self.approvals / "pending"
