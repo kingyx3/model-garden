@@ -1,15 +1,27 @@
 #!/usr/bin/env python3
-"""List and decide exact governed runtime actions without a control plane."""
+"""List and decide exact governed runtime actions without a control plane.
+
+An approval is for *now*: a pending request and a recorded decision both expire (default 24 hours, ``MODEL_GARDEN_APPROVAL_TTL_HOURS``
+1-720), so a decision given long ago can never authorise an identical request made much later. A request records when it was asked
+(``requestedAt``) and a decision when it was made (``decidedAt``); a record without one (made before this existed) is aged by its file
+time. An expired request cannot be decided and is not listed, and an expired decision is discarded by the governed boundary instead of
+being used (``sweep`` removes both).
+"""
 from __future__ import annotations
 
 import argparse
 import json
+import os
 import pathlib
 import re
 import sys
+import time
+from collections.abc import Mapping
 from typing import Any
 
 REQUEST_ID = re.compile(r"^[0-9a-f]{64}$")
+DEFAULT_TTL_HOURS = 24
+MAX_TTL_HOURS = 720
 
 
 def _load(path: pathlib.Path) -> dict[str, Any]:
@@ -32,21 +44,68 @@ def _validate_request_id(request_id: str) -> str:
     return request_id
 
 
-def pending(store: pathlib.Path) -> list[dict[str, Any]]:
+def ttl_seconds(environ: Mapping[str, str] | None = None) -> int:
+    """How long an approval request or decision stays valid, from ``MODEL_GARDEN_APPROVAL_TTL_HOURS`` (default 24, 1 to 720)."""
+    raw = (os.environ if environ is None else environ).get("MODEL_GARDEN_APPROVAL_TTL_HOURS", "").strip()
+    if not raw:
+        return DEFAULT_TTL_HOURS * 3600
+    if not raw.isdigit() or not 1 <= int(raw) <= MAX_TTL_HOURS:
+        raise ValueError(f"MODEL_GARDEN_APPROVAL_TTL_HOURS must be a whole number of hours from 1 to {MAX_TTL_HOURS}")
+    return int(raw) * 3600
+
+
+def age_seconds(path: pathlib.Path, record: Mapping[str, Any], key: str, *, now: float | None = None) -> int:
+    """Seconds since the record's own timestamp (``requestedAt`` or ``decidedAt``), or since its file was written when it has none."""
+    stamp = record.get(key)
+    if not (isinstance(stamp, (int, float)) and not isinstance(stamp, bool)):
+        stamp = path.stat().st_mtime
+    return max(0, int((time.time() if now is None else now) - stamp))
+
+
+def is_expired(path: pathlib.Path, record: Mapping[str, Any], key: str, *, now: float | None = None, ttl: int | None = None) -> bool:
+    return age_seconds(path, record, key, now=now) >= (ttl_seconds() if ttl is None else ttl)
+
+
+def pending(store: pathlib.Path, *, now: float | None = None, ttl: int | None = None, include_expired: bool = False) -> list[dict[str, Any]]:
+    """Requests still waiting for a decision (those that have expired are left out unless ``include_expired``, which marks them)."""
     directory = store / "pending"
     if not directory.exists():
         return []
+    limit = ttl_seconds() if ttl is None else ttl
     requests = []
     for path in sorted(directory.glob("*.json")):
         request = _load(path)
         request_id = request.get("requestId")
         if not isinstance(request_id, str) or path.stem != request_id or not REQUEST_ID.fullmatch(request_id):
             raise ValueError(f"unsafe pending approval record: {path}")
-        requests.append(request)
+        expired = is_expired(path, request, "requestedAt", now=now, ttl=limit)
+        if expired and not include_expired:
+            continue
+        requests.append({**request, "expired": True} if expired else request)
     return requests
 
 
-def decide(store: pathlib.Path, request_id: str, *, approved: bool, approver: str) -> dict[str, Any]:
+def sweep(store: pathlib.Path, *, now: float | None = None, ttl: int | None = None) -> list[dict[str, str]]:
+    """Remove expired requests and decisions; returns what was removed as ``{"requestId", "kind"}`` (identifiers only)."""
+    limit = ttl_seconds() if ttl is None else ttl
+    removed: list[dict[str, str]] = []
+    for kind, key in (("pending", "requestedAt"), ("decisions", "decidedAt")):
+        directory = store / kind
+        for path in sorted(directory.glob("*.json")) if directory.is_dir() else []:
+            if not REQUEST_ID.fullmatch(path.stem):
+                continue
+            try:
+                record = _load(path)
+                if is_expired(path, record, key, now=now, ttl=limit):
+                    path.unlink()
+                    removed.append({"requestId": path.stem, "kind": "request" if kind == "pending" else "decision"})
+            except (OSError, ValueError, json.JSONDecodeError):
+                continue
+    return removed
+
+
+def decide(store: pathlib.Path, request_id: str, *, approved: bool, approver: str, now: float | None = None,
+           ttl: int | None = None) -> dict[str, Any]:
     request_id = _validate_request_id(request_id)
     approver = approver.strip()
     if not approver:
@@ -57,7 +116,9 @@ def decide(store: pathlib.Path, request_id: str, *, approved: bool, approver: st
     request = _load(pending_path)
     if request.get("requestId") != request_id:
         raise ValueError("pending request id does not match filename")
-    decision = {"requestId": request_id, "approved": approved, "approver": approver}
+    if is_expired(pending_path, request, "requestedAt", now=now, ttl=ttl):
+        raise ValueError(f"the approval request {request_id[:12]} has expired; ask for it again")
+    decision = {"requestId": request_id, "approved": approved, "approver": approver, "decidedAt": int(time.time() if now is None else now)}
     _atomic_json(store / "decisions" / f"{request_id}.json", decision)
     return decision
 
@@ -66,7 +127,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("store", type=pathlib.Path, help="approval store root")
     sub = parser.add_subparsers(dest="command", required=True)
-    sub.add_parser("list", help="list pending exact actions")
+    sub.add_parser("list", help="list pending exact actions (expired ones are marked)")
     approve = sub.add_parser("approve", help="approve one exact pending action")
     approve.add_argument("request_id")
     approve.add_argument("--approver", required=True)
@@ -77,7 +138,7 @@ def main() -> int:
 
     try:
         if args.command == "list":
-            print(json.dumps(pending(args.store), indent=2, sort_keys=True))
+            print(json.dumps(pending(args.store, include_expired=True), indent=2, sort_keys=True))
             return 0
         decision = decide(
             args.store,

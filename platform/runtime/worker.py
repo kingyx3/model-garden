@@ -78,6 +78,7 @@ def _module(key: str):
         "sidecar": "platform/runtime/governed_mcp.py",
         "transports": "platform/channels/transports.py",
         "ledger": "platform/core/ledger_export.py",
+        "approval": "scripts/runtime-approval.py",
     }
     return _load(f"model_garden_worker_{key}", paths[key])
 
@@ -421,7 +422,16 @@ class Worker:
         out: dict[str, Any] = {"artifacts": self._artifacts().purge_expired(now=now)}
         if self.config["mailbox"] is not None:
             out["mail"] = self._spool().purge(now=now)
+        out["approvals"] = self.expire_approvals(now)
         return out
+
+    def expire_approvals(self, now: int) -> int:
+        """Remove approval requests and decisions older than ``MODEL_GARDEN_APPROVAL_TTL_HOURS`` and ledger each (ids only)."""
+        approval = _module("approval")
+        removed = approval.sweep(self.data / "approvals", now=now, ttl=approval.ttl_seconds())
+        for item in removed:
+            self.audit("approval.expired", IDENTITY, {"requestId": item["requestId"], "kind": item["kind"]})
+        return len(removed)
 
     def run_export(self, now: int) -> dict[str, Any]:
         """Copy new ledger records and a head manifest to the retention-locked bucket, as the separate export identity."""

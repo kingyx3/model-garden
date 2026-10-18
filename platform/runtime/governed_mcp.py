@@ -67,6 +67,7 @@ MCP_EXECUTOR = _load_module("model_garden_runtime_mcp_executor", ROOT / "platfor
 MCP_CONNECTIONS = _load_module("model_garden_runtime_mcp_connections", ROOT / "platform" / "core" / "mcp_connections.py")
 FILES = _load_module("model_garden_runtime_builtin_files", ROOT / "platform" / "core" / "builtin_files.py")
 TICKETS = _load_module("model_garden_runtime_tickets", ROOT / "platform" / "core" / "tickets.py")
+APPROVAL = _load_module("model_garden_runtime_approval", ROOT / "scripts" / "runtime-approval.py")
 UPSTREAM_HTTP = _load_module("model_garden_runtime_upstream_http", ROOT / "platform" / "runtime" / "upstream_http.py")
 AUTH_FAILURE = re.compile(r"\((401|403)\)")
 
@@ -135,6 +136,7 @@ class GovernedToolRuntime:
         upstream_secret_resolver=None,
         upstream_rest_transport=None,
         task_resolver=None,
+        clock=time.time,
     ) -> None:
         self.desired_state = _load_json_object(desired_state_path, "compiled desired state")
         if self.desired_state.get("schemaVersion") != 1:
@@ -146,6 +148,9 @@ class GovernedToolRuntime:
         self.memory_root = approval_root.parent / "memory"
         self.artifact_root = approval_root.parent / "artifacts"
         self.environ = dict(os.environ if environ is None else environ)
+        # An approval is for now: a request and a decision both expire (MODEL_GARDEN_APPROVAL_TTL_HOURS); a bad value fails here, not later.
+        self.approval_ttl = APPROVAL.ttl_seconds(self.environ)
+        self.clock = clock
         # Default named person for Tier 4 hand-offs; a human-only policy rule names its own.
         self.handoff_assignee = self.environ.get("MODEL_GARDEN_HANDOFF_ASSIGNEE", "").strip() or None
         # A channel gateway supplies the verified principal for the current request.
@@ -257,6 +262,13 @@ class GovernedToolRuntime:
             decision = _load_json_object(claimed, "approval decision")
             if decision.get("requestId") != request_id:
                 raise ValueError("approval decision requestId does not match its filename")
+            age = APPROVAL.age_seconds(claimed, decision, "decidedAt", now=self.clock())
+            if age >= self.approval_ttl:
+                # A decision given long ago must not authorise an identical request made now: drop it and ask again.
+                claimed.unlink(missing_ok=True)
+                GOVERN.record_operator_action(self.audit_path, "approval.expired", "runtime:governed-tools",
+                                              {"requestId": request_id, "kind": "decision", "ageSeconds": age})
+                return None, None
             return decision, claimed
         except Exception:
             claimed.unlink(missing_ok=True)
@@ -268,7 +280,19 @@ class GovernedToolRuntime:
             path.unlink(missing_ok=True)
 
     def _pending(self, request: dict[str, Any]) -> None:
-        _atomic_json(_request_path(self.approval_root, "pending", request["requestId"]), request)
+        path = _request_path(self.approval_root, "pending", request["requestId"])
+        stamp = None
+        if path.is_file():
+            # Asking again must not extend a live request, but an expired one starts over.
+            try:
+                existing = _load_json_object(path, "pending approval")
+                if not APPROVAL.is_expired(path, existing, "requestedAt", now=self.clock(), ttl=self.approval_ttl):
+                    stamp = existing.get("requestedAt")
+            except (OSError, ValueError):
+                stamp = None
+        if not (isinstance(stamp, (int, float)) and not isinstance(stamp, bool)):
+            stamp = int(self.clock())
+        _atomic_json(path, {**request, "requestedAt": stamp})
 
     def _clear_pending(self, request_id: str) -> None:
         path = _request_path(self.approval_root, "pending", request_id)

@@ -328,6 +328,24 @@ class LoopTests(Case):
         self.assertTrue(worker.healthy(self.data / "worker" / "heartbeat.json", now=T0 + 10))
         self.assertFalse(worker.healthy(self.data / "worker" / "heartbeat.json", now=T0 + 1000))
 
+    def test_retention_removes_expired_approvals_and_ledgers_each_by_id_only(self):
+        runtime = self.make({})
+        approvals = self.data / "approvals"
+        old, fresh = "ab" * 32, "cd" * 32
+        for kind, key in (("pending", "requestedAt"), ("decisions", "decidedAt")):
+            (approvals / kind).mkdir(parents=True)
+            for request_id, stamp in ((old, T0 - 30 * 3600), (fresh, T0 - 3600)):
+                (approvals / kind / f"{request_id}.json").write_text(json.dumps({"requestId": request_id, key: stamp, "arguments": {"secret": "customer text"}}))
+        report = runtime.tick()
+        self.assertEqual(report["retention"]["approvals"], 2)
+        self.assertFalse((approvals / "pending" / f"{old}.json").exists())
+        self.assertFalse((approvals / "decisions" / f"{old}.json").exists())
+        self.assertTrue((approvals / "pending" / f"{fresh}.json").exists())
+        expired = [event for event in self.events() if event.get("action") == "approval.expired"]
+        self.assertEqual(sorted(event["details"]["kind"] for event in expired), ["decision", "request"])
+        self.assertTrue(all(event["details"]["requestId"] == old for event in expired))
+        self.assertNotIn("customer text", (self.data / "audit.jsonl").read_text())
+
     def test_jobs_respect_their_interval(self):
         runtime = self.make({})
         self.assertIn("retention", runtime.tick())
