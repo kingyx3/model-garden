@@ -222,6 +222,97 @@ class MailboxTests(Case):
         self.assertNotIn("ticket.opened", (self.data / "audit.jsonl").read_text())
 
 
+class EventTriggerTests(Case):
+    def config(self):
+        return {"mailbox": {"addresses": [MAILBOX], "trustedAuthservId": MX, "owner": OWNER}, "owners": {OWNER: ["kb.search"]},
+                "people": {OWNER: {"channel": "slack", "address": "D0OWNER"}}}
+
+    def trigger(self, runtime, event="mail.received", **overrides):
+        values = dict(owner=OWNER, agent="receptionist", goal="Look at what just arrived", event=event, budget={"steps": 3, "tokens": 5000},
+                      required_capabilities=["kb.search"], now=T0)
+        values.update(overrides)
+        return runtime._schedule_store().create_trigger(**values)
+
+    def make_runtime(self, coworker, **kwargs):
+        return self.make(self.config(), coworker=coworker, senders={"slack": lambda address, text: None}, **kwargs)
+
+    def runs(self, runtime):
+        return runtime._schedule_store().runs()
+
+    def test_a_trigger_on_mail_received_runs_once_for_each_handled_message(self):
+        fake = FakeCoworker()
+        runtime = self.make_runtime(fake)
+        self.trigger(runtime)
+        runtime._spool().ingest(raw(), now=T0 - 5)
+        runtime._spool().ingest(raw("<c2@customer.example>"), now=T0 - 4)
+        runtime.tick()
+        runs = self.runs(runtime)
+        self.assertEqual([run["trigger"] for run in runs], ["event:mail.received", "event:mail.received"])
+        self.assertEqual([call[0] for call in fake.calls].count("complete"), 2)
+        shown = json.dumps(self.events())
+        self.assertNotIn("alex@customer.example", shown)
+        self.assertNotIn("4111", shown)  # only the kind and a digest of the reference reach the runner and the ledger
+
+    def test_a_redelivered_message_is_not_a_second_event(self):
+        fake = FakeCoworker()
+        runtime = self.make_runtime(fake)
+        self.trigger(runtime)
+        runtime._spool().ingest(raw(), now=T0 - 5)
+        runtime.tick()
+        runtime._spool().ingest(raw(), now=T0 - 4)  # the same message arriving again
+        self.clock[0] += 3600
+        runtime.tick()
+        self.assertEqual(len(self.runs(runtime)), 1)
+
+    def test_loops_and_spam_are_not_events_and_a_trigger_for_another_event_stays_quiet(self):
+        fake = FakeCoworker()
+        runtime = self.make_runtime(fake)
+        self.trigger(runtime, event="ticket.created")
+        runtime._spool().ingest(raw(), now=T0 - 5)
+        runtime.tick()
+        self.assertEqual(self.runs(runtime), [])  # an answered enquiry opens no ticket, so nothing fired
+        auto = raw("<auto@customer.example>").replace(b"Subject: Hours", b"Subject: Out of office\r\nAuto-Submitted: auto-replied")
+        quiet = self.make_runtime(FakeCoworker())
+        self.trigger(quiet)
+        quiet._spool().ingest(auto, now=T0 - 5)
+        quiet.tick()
+        self.assertEqual(self.runs(quiet), [])
+
+    def test_mail_that_needs_a_person_fires_ticket_created_as_well_as_mail_received(self):
+        fake = FakeCoworker(answer=False)
+        runtime = self.make_runtime(fake, tickets=True)
+        self.trigger(runtime, event="ticket.created")
+        self.trigger(runtime, event="mail.received", goal="Note the new mail")
+        runtime._spool().ingest(raw(), now=T0 - 5)
+        runtime.tick()
+        self.assertEqual(sorted(run["trigger"] for run in self.runs(runtime)), ["event:mail.received", "event:ticket.created"])
+        self.assertEqual(len(runtime._sidecar().tickets_store().open_items()), 1)
+
+    def test_a_trigger_at_its_hourly_limit_is_skipped_and_a_failing_runner_never_loses_the_mail(self):
+        fake = FakeCoworker()
+        runtime = self.make_runtime(fake)
+        self.trigger(runtime, max_per_hour=1)
+        for index in range(3):
+            runtime._spool().ingest(raw(f"<c{index}@customer.example>"), now=T0 - 5 + index)
+        runtime.tick()
+        self.assertEqual(len(self.runs(runtime)), 1)
+
+        class Broken(FakeCoworker):
+            def complete(self, *args, **kwargs):
+                raise RuntimeError("customer text must not leak")
+
+        failing = self.make_runtime(Broken())
+        self.trigger(failing)
+        failing._spool().ingest(raw("<f1@customer.example>"), now=T0 - 5)
+        report = failing.tick()
+        self.assertEqual(report["mailbox"]["done"], 1)  # the message was still handled and filed
+        self.assertNotIn("customer text must not leak", (self.data / "audit.jsonl").read_text())
+
+    def test_without_a_coworker_events_are_not_run(self):
+        runtime = self.make(self.config(), senders={"slack": lambda address, text: None})
+        self.assertEqual(runtime.fire_event("mail.received", "ref", T0), {"skipped": "no-coworker-configured"})
+
+
 class LoopTests(Case):
     def test_a_failing_job_is_ledgered_by_type_and_does_not_stop_the_others(self):
         runtime = self.make({})
