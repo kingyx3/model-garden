@@ -61,7 +61,7 @@ With `connectors.tickets: {provider: built-in-tickets, tier: 0}` bound, the gove
 - **Where a person finds them.** The runtime inbox (`runtime-inbox.py`) adds an "open tickets" line with a count and the oldest age (no text), and `runtime-tickets.py list|show|update` is the operator command on the client host; an `update` is ledgered as `ticket.update` under the named person with the id and status only.
 - **The support mailbox uses it.** When the built-in store is bound, every customer email thread handed to a person (a complaint, "other", no approved answer, a thread at its reply limit and so on) also opens one ticket carrying the thread reference, category and reason, never the message text, ledgered as `ticket.opened` by the platform; the same thread and reason give the same ticket and a failure never loses the thread.
 
-Not done: a web-chat surface for the list, a retention rule for old tickets, projects or assignment, and any live proof (#77).
+An `inbox` message in a direct chat conversation shows a mapped team member what is waiting, including the open-ticket count (see `docs/channels.md`). Not done: a chat view of the tickets themselves (the coworker's `tickets_search` answers that), a retention rule for old tickets, projects or assignment, and any live proof (#77).
 
 ## Tier 0 contact and interaction log
 

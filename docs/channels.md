@@ -137,6 +137,16 @@ The same module can file an email once an adapter exists: a sender verified by t
 
 Not done: replying in the thread where the request began (the ledger does not record the originating conversation, so receipts go to the approver conversations), and any live Slack, Teams or web-chat run.
 
+## The `inbox` command
+
+A mapped team member who sends exactly `inbox` (or `/inbox`) in a **direct** conversation on any surface (built-in web chat, Slack DM, Teams chat) gets what is waiting for a person (`platform/core/inbox.py`, #77, #84, #88), answered by the gateway itself rather than the coworker:
+
+- **Who sees what.** An approver or admin sees pending approvals (with a pointer to the Approve and Reject buttons), every open hand-off, open tickets (count and oldest age), unhealthy connections and records to review. Any other mapped member sees only the hand-offs assigned to them, each with the exact reply that closes it (`done <ref>` or `declined <ref> <reason>`), which the existing channel reply path records under their verified identity.
+- **Authority from the channel only.** A public or unmapped sender, or a message in a shared channel, gets one neutral sentence and nothing else, so the command reveals nothing and cannot be used to probe what exists. Other words that merely contain "inbox" go to the coworker as before.
+- **Non-sensitive by construction.** It names Tools, reasons, assignees, deadlines, short references and counts; never an action's arguments, a ticket's text, a contact or a message. Each use is ledgered as `channel.inbox-viewed` with the person and channel only.
+
+Not done: a rich card or button view, and any live Slack, Teams or web-chat run.
+
 ## One contract, every surface
 
 `tests/test_channel_contract.py` runs one compiled receptionist behind the email, Slack, Teams and web chat adapters and checks the same outcomes on each: the same mapped person gets the same identity and approval rights, a stranger is public and read-only whatever their text claims, a mapped member's write needs approval and names them and the surface, and only a mapped approver's structured click decides. The Agent definition is not modified by the surface. The Teams adapter passes the same suite, which is the "same Agent on Slack and Teams without changes" evidence; Teams file upload, bot registration and live-tenant proof remain open (#83).

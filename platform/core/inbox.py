@@ -222,3 +222,48 @@ def format_text(inbox: dict[str, Any]) -> str:
             lines.append(f"  REVIEW    {item['count']} {item['what'].replace('-', ' ')}")
         lines.append(f"            next: {item['next']}")
     return "\n".join(lines) + "\n"
+
+
+def for_person(inbox: dict[str, Any], identity: str, *, everything: bool) -> dict[str, Any]:
+    """The part of an inbox one person may see in chat.
+
+    An approver or admin (``everything``) sees all of it. Anyone else sees only the hand-offs assigned to them: approvals, tickets,
+    connection health and records to review are for the people who run the runtime.
+    """
+    if everything:
+        return inbox
+    mine = [item for item in inbox["items"] if item["kind"] == "handoff" and item.get("assignee") == identity]
+    return {
+        "generatedAt": inbox["generatedAt"], "items": mine,
+        "counts": {"approvals": 0, "handoffs": len(mine), "overdueHandoffs": sum(1 for item in mine if item["overdue"]), "reviews": 0,
+                   "tickets": 0, "connections": 0},
+    }
+
+
+def format_chat(inbox: dict[str, Any]) -> str:
+    """The inbox as a short chat message: the same non-sensitive facts, with replies and buttons instead of shell commands."""
+    if not inbox["items"]:
+        return "Nothing is waiting for you."
+    counts = inbox["counts"]
+    parts = [f"{counts[key]} {label}" for key, label in (("approvals", "approval(s)"), ("handoffs", "hand-off(s)"), ("tickets", "open ticket(s)"),
+                                                          ("reviews", "record(s) to review"), ("connections", "connection(s) not healthy")) if counts[key]]
+    if counts["overdueHandoffs"]:
+        parts.append(f"{counts['overdueHandoffs']} overdue")
+    lines = ["Waiting: " + ", ".join(parts) + "."]
+    for item in inbox["items"]:
+        if item["kind"] == "approval":
+            lines.append(f"- Approval: {item['tool'] or 'an action'}, waiting {_age(item['waitingSeconds'])} (ref {item['id'][:12]}). "
+                         "Use the Approve or Reject buttons on its approval message.")
+        elif item["kind"] == "handoff":
+            ref = item["id"][:12]
+            state = "OVERDUE" if item["overdue"] else "open"
+            lines.append(f"- Hand-off for {item['assignee']}: {item['tool']}, {state} ({item['reason']}). "
+                         f"Reply `done {ref}` when it is done or `declined {ref} <reason>`.")
+        elif item["kind"] == "connection":
+            why = f" ({item['reason']})" if item.get("reason") else ""
+            lines.append(f"- Connection {item['family']} is {item['health'].upper()}{why}. Ask its owner to reconnect it.")
+        elif item["kind"] == "tickets":
+            lines.append(f"- {item['count']} open ticket(s), the oldest waiting {_age(item['oldestWaitingSeconds'])}. Ask the coworker to search tickets.")
+        else:
+            lines.append(f"- {item['count']} {item['what'].replace('-', ' ')} to review. An operator can show them on the client host.")
+    return "\n".join(lines)
