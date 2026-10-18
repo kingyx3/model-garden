@@ -8,6 +8,8 @@ is asked through the Hermes API server (``coworker_client.py``) and governed Too
 Routes (everything else is 404):
 
 - ``GET /healthz``
+- ``GET /studio`` (when ``studio`` is configured) the owner's Employee Studio and ``/studio/api/*`` (``platform/runtime/studio.py``): everyone
+  on the web allow-list can read; only the named owner can propose, approve, reject or roll back a change request.
 - ``GET /chat`` the built-in web chat page, with its script and style served from this origin (the CSP allows nothing else).
   Sign-in is a magic link whose token sits in the URL *fragment*, which is never sent to a server, so a mail scanner that fetches
   the link spends nothing; the page posts it to ``/channels/web/session`` and keeps the session in ``sessionStorage``.
@@ -85,7 +87,7 @@ def _module(key: str):
         "handoff_reply": "platform/core/handoff_reply.py", "schedules": "platform/core/schedules.py",
         "artifacts": "platform/core/artifacts.py", "coworker": "platform/runtime/coworker_client.py",
         "enrollment": "platform/core/secret_enrollment.py", "vault": "platform/core/sealed_vault.py",
-        "readiness": "platform/core/grant_readiness.py",
+        "readiness": "platform/core/grant_readiness.py", "studio": "platform/runtime/studio.py",
     }
     # Shared names, so an error class raised in one module is the class another module catches.
     shared = {"text": "model_garden_text_channel", "schedules": "model_garden_schedule_commands_store"}
@@ -105,7 +107,7 @@ def load_config(document: Mapping[str, Any]) -> dict[str, Any]:
     """Validate the non-secret configuration rendered from ``EnvironmentBinding.spec.gateway``."""
     if not isinstance(document, Mapping):
         raise GatewayConfigError("gateway configuration must be an object")
-    allowed = {"publicOrigin", "directory", "people", "escalateTo", "web", "slack", "teams", "approvals", "mailbox", "coworker", "agent", "enrollment"}
+    allowed = {"publicOrigin", "directory", "people", "escalateTo", "web", "slack", "teams", "approvals", "mailbox", "coworker", "agent", "enrollment", "studio"}
     unknown = sorted(set(document) - allowed)
     if unknown:
         raise GatewayConfigError(f"unknown gateway settings: {', '.join(unknown)}")
@@ -116,7 +118,7 @@ def load_config(document: Mapping[str, Any]) -> dict[str, Any]:
     _module("text").PrincipalDirectory(document.get("directory") or {})
     sections: dict[str, Any] = {}
     for name, required in (("web", {"allowedAddresses"}), ("slack", {"botUserId"}), ("teams", {"appId", "tenants"}),
-                           ("approvals", set()), ("mailbox", {"addresses"}), ("coworker", {"url"}), ("enrollment", {"vaultPublicKey"})):
+                           ("approvals", set()), ("mailbox", {"addresses"}), ("coworker", {"url"}), ("enrollment", {"vaultPublicKey"}), ("studio", {"owner"})):
         section = document.get(name)
         if section is None:
             continue
@@ -140,10 +142,17 @@ def load_config(document: Mapping[str, Any]) -> dict[str, Any]:
             _module("vault").SealedVault(pathlib.Path("."), public_key=sections["enrollment"]["vaultPublicKey"])
         except _module("vault").VaultError as exc:
             raise GatewayConfigError(str(exc)) from None
+    if "studio" in sections:
+        if "web" not in sections:
+            raise GatewayConfigError("the Studio needs web sign-in, so only the verified owner can change anything")
+        try:
+            sections["studio"] = _module("studio").check_config(sections["studio"])
+        except _module("studio").StudioConfigError as exc:
+            raise GatewayConfigError(str(exc)) from None
     return {
         "publicOrigin": origin, "directory": dict(document.get("directory") or {}), "people": dict(document.get("people") or {}),
         "escalateTo": document.get("escalateTo"), "agent": document.get("agent") or "coworker", **{k: sections.get(k) for k in
-        ("web", "slack", "teams", "approvals", "mailbox", "coworker", "enrollment")},
+        ("web", "slack", "teams", "approvals", "mailbox", "coworker", "enrollment", "studio")},
     }
 
 
@@ -304,6 +313,7 @@ class Gateway:
                 raise GatewayConfigError("credential enrollment needs the capability manifest to name the client and environment")
             vault = _module("vault").SealedVault(self.data / "vault", public_key=self.config["enrollment"]["vaultPublicKey"])
             self.enrollments = _module("enrollment").EnrollmentStore(self.data / "secret-enrollments", tenant=enrollment_tenant, vault=vault, audit=self.audit)
+        self.studio = _module("studio").Studio(self, self.config["studio"]) if self.config["studio"] else None
         self.executor = executor
         self.ingress = _module("ingress").ChannelIngress(
             self.adapters, self.directory, respond=self._respond, decide=self._decide, handoff_replies=self._handoff_replies(),
@@ -458,6 +468,8 @@ class Gateway:
             return Response(200, CHAT_JS.encode("utf-8"), "text/javascript; charset=utf-8", _PAGE_HEADERS)
         if route == "/chat/app.css" and method == "GET" and self.auth is not None:
             return Response(200, CHAT_CSS.encode("utf-8"), "text/css; charset=utf-8", _PAGE_HEADERS)
+        if (route == "/studio" or route.startswith("/studio/")) and self.studio is not None:
+            return self.studio.handle(method, route, headers, body)
         if route.startswith("/connections/enroll") and self.enrollments is not None:
             return self._enroll(route, method, headers, body, json_response)
         if route == "/approvals/confirm" and self.confirm is not None:
@@ -512,13 +524,14 @@ class Gateway:
                 request = json.loads(body or b"{}")
                 address = str(request.get("address", ""))
                 enroll = str(request.get("enroll", ""))
+                studio = request.get("studio") is True and self.studio is not None
             except (ValueError, AttributeError):
-                address, enroll = "", ""
+                address, enroll, studio = "", "", False
             token = self.auth.issue_login(address)
             if token is not None:
                 # From a credential enrollment page, the sign-in link returns there with the enrollment token still in the fragment.
                 link = (f"{self.config['publicOrigin']}/connections/enroll#login={urllib.parse.quote(token)}&enroll={enroll}"
-                        if self.enrollments is not None and _ENROLL_TOKEN.fullmatch(enroll) else f"{self.config['publicOrigin']}/chat#login={urllib.parse.quote(token)}")
+                        if self.enrollments is not None and _ENROLL_TOKEN.fullmatch(enroll) else f"{self.config['publicOrigin']}/{'studio' if studio else 'chat'}#login={urllib.parse.quote(token)}")
                 try:
                     self._login_mail(address.strip(), link)
                 except Exception as exc:  # noqa: BLE001 - the page says the same thing either way
