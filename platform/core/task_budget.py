@@ -3,8 +3,8 @@
 ``delegation.delegate`` already makes a child's budget no larger than what its parent has left, but on its own two siblings could
 each be given everything the parent had left, so a task with a budget of 100 could spend 200. ``TaskBudgetTree`` is the
 credential-free bookkeeping a multi-Agent runtime needs to make the budget real across hops. It is pure (state in memory, with
-``snapshot``/``restore`` for durability), calls ``delegation`` for every rule it already enforces, and is **not wired into a
-runtime**: there is no multi-Agent runtime yet (#95).
+``snapshot``/``restore`` for durability), calls ``delegation`` for every rule it already enforces, and is wired to a team's
+governed calls by ``platform/runtime/team_runtime.py`` (#95).
 
 - **Delegating reserves.** The child's budget is set aside from its parent's own: the parent's *available* budget is
   ``budget - spent - reserved``, and a second child can only be given what is still available, so the children of a task can

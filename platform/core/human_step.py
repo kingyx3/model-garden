@@ -4,8 +4,8 @@ Judgement calls stay with people (#97): when a task step needs a person, the tas
 spin. It opens a hand-off for the named person carrying the exact ask, then reads the answer back later. This
 module is the contract for that step; it adds no storage of its own. The pending hand-off record is the durable
 pause, so a restart loses nothing, and the existing inbox, notices and ``runtime-handoff.py complete`` are how the
-person is told and answers. It is **not wired into a runtime** (there is no multi-Agent task runner yet, #95) and
-no channel delivery beyond the built-in inbox is included.
+person is told and answers. ``platform/runtime/team_runtime.py`` runs it on a delegated task; no channel delivery beyond the
+built-in inbox and the existing notice runner is added here.
 
 - **The step carries the ask.** The hand-off request holds the task and step identifiers, the exact ask and a
   short context, so the person sees what is needed. Notices still carry only the Tool name and a short reference.

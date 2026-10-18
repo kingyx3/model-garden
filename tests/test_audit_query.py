@@ -82,6 +82,27 @@ class AuditQueryTests(unittest.TestCase):
         synthetic = [{**e, "details": {**(e.get("details") or {}), "usage": {"tokens": 10, "costCents": 2}}} for e in self.events if e["event"] == "execution"]
         self.assertEqual(audit.timeline(synthetic, task="task-1")["usage"], {"tokens": 20, "costCents": 4, "steps": 0})
 
+    def test_timeline_includes_the_operator_events_that_name_the_task(self):
+        for action, by, details in (
+            ("delegation.hop", "agent:coordinator", {"fromTask": "task-1", "toTask": "task-1.1", "fromAgent": "coordinator", "toAgent": "receptionist",
+                                                     "depth": 1, "chain": ["coordinator", "receptionist"], "goalDigest": "a" * 64}),
+            ("task.human-step.resolved", "jordan@acme.example", {"taskId": "task-1", "step": "approve", "outcome": "done", "noteDigest": "b" * 64}),
+            ("task.human-step.opened", "agent:coordinator", {"taskId": "task-2", "step": "other", "outcome": "opened"}),
+        ):
+            govern.record_operator_action(self.ledger, action, by, details)
+        events = audit.read_ledger(self.ledger)
+        result = audit.timeline(events, task="task-1")
+        named = [(step["action"], step["by"]) for step in result["steps"] if step.get("action")]
+        self.assertEqual(named, [("delegation.hop", "agent:coordinator"), ("task.human-step.resolved", "jordan@acme.example")])
+        self.assertEqual(result["agents"], ["coordinator", "receptionist"])
+        hop = next(step for step in result["steps"] if step.get("action") == "delegation.hop")
+        self.assertEqual(hop["details"]["toTask"], "task-1.1")
+        self.assertNotIn("goalDigest", hop["details"])  # only the identifying fields are shown
+        self.assertEqual([step["action"] for step in audit.timeline(events, task="task-1.1")["steps"] if step.get("action")], ["delegation.hop"])
+        other = audit.query(events, audit.Filter(task="task-2"))
+        self.assertIn("task.human-step.opened", [event.get("action") for event in other])
+        self.assertNotIn("delegation.hop", [event.get("action") for event in other])
+
     def test_policy_replay_reports_only_real_differences(self):
         same = audit.replay_policy(self.events, self.state)
         self.assertEqual(same["different"], 0)
