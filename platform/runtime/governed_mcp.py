@@ -235,6 +235,12 @@ class GovernedToolRuntime:
         # With a per-coworker grant registry present, a connected Skill is ready only if this coworker holds its own usable grant.
         return GRANT_READINESS.overlay_from_root(manifest, self.governance_root / GRANT_READINESS.REGISTRY_DIR, now=int(time.time()))
 
+    def capabilities_for_caller(self) -> dict[str, Any]:
+        """The capability manifest as the coworker may repeat it to whoever is asking: plain next steps for a verified team member, only
+        ready or blocked for anyone else (see ``capabilities.caller_view``). Operator wording, provider names and knowledge-source states
+        never reach a customer."""
+        return CAPABILITIES.caller_view(self.capabilities(), member=self._caller()[2] == "member")
+
     def _take_approval(self, request_id: str) -> tuple[dict[str, Any] | None, pathlib.Path | None]:
         """Atomically claim one decision without letting a crashed claim block fresh approval."""
         path = _request_path(self.approval_root, "decisions", request_id)
@@ -918,8 +924,13 @@ def build_server(runtime: GovernedToolRuntime) -> MCPServer:
 
     @mcp.tool(name="platform_capabilities")
     def platform_capabilities() -> dict[str, Any]:
-        """List what this coworker can and cannot do here: capability, provider, tier, health and fallback."""
-        return runtime.capabilities()
+        """List what this coworker can and cannot do here, for the person you are talking to.
+
+        Each Skill says whether it is `ready`. If one is not, say plainly that you cannot do it here yet. When the person is a verified
+        team member the Skill also has a `nextStep`: tell them that one step in your own words, never a command. Anyone else sees only
+        ready or blocked, so do not guess at why or at how this business is set up: offer a message or a human hand-off instead.
+        """
+        return runtime.capabilities_for_caller()
 
     @mcp.tool(name="kb_search")
     def kb_search(query: str, source: str | None = None, limit: int = 3, justification: str | None = None, locale: str | None = None) -> dict[str, Any]:

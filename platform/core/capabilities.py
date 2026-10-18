@@ -13,6 +13,7 @@ chooses a provider. This module owns three small, deterministic jobs:
 """
 from __future__ import annotations
 
+import copy
 import datetime as dt
 import importlib.util
 import json
@@ -292,11 +293,13 @@ def knowledge_states(
     ]
 
 
-def remediation_for(dependencies: list[Mapping[str, Any]]) -> str | None:
+def remediation_for(dependencies: list[Mapping[str, Any]], *, plain: bool = False) -> str | None:
     """The one non-secret action that unblocks a Skill, or ``None`` when nothing blocks it.
 
     Names the first blocking dependency (by capability name) and never includes a secret, scope,
     account or source content: only the family, the command or the kind of approval needed.
+    ``plain`` words the two steps that name an operator shell command for a business owner instead (ask the operator or
+    consultant to do it), which is what the coworker passes on in chat.
     """
     for dependency in sorted(
         (item for item in dependencies if item.get("status") in BLOCKING),
@@ -304,6 +307,8 @@ def remediation_for(dependencies: list[Mapping[str, Any]]) -> str | None:
     ):
         family, status = dependency.get("family"), dependency.get("status")
         if status == "missing":
+            if plain:
+                return f"Connect {family}: ask your operator or consultant to start the guided connect step for it"
             return f"Connect {family}: run `python3 scripts/client-operator.py connect {family}` to see the options"
         if status == "no-content":
             if any(source.get("state") == "stale" for source in dependency.get("content", {}).get("sources", [])):
@@ -323,6 +328,11 @@ def remediation_for(dependencies: list[Mapping[str, Any]]) -> str | None:
         if status == "unavailable":
             return f"Ask the operator to reauthorize the {family} connection, then record it as healthy"
         if status == "no-grant":
+            if plain:
+                return (
+                    f"Give this coworker its own {family} access: ask your operator to provision a grant for it "
+                    "(another coworker's access cannot be used)"
+                )
             return (
                 f"Give this coworker its own {family} access: run `python3 scripts/client-operator.py connect {family}` "
                 "and provision a grant for it (another coworker's access cannot be used)"
@@ -624,3 +634,36 @@ def apply_connection_health(manifest: dict[str, Any], health: Mapping[str, Mappi
             else:
                 skill.pop("remediation", None)
     return updated
+
+
+PUBLIC_DEPENDENCY_KEYS = ("capability", "family", "required", "status", "fallbackTier")
+PUBLIC_CAPABILITY_KEYS = ("family", "status", "fallback")
+
+
+def caller_view(manifest: Mapping[str, Any], *, member: bool) -> dict[str, Any]:
+    """What ``platform_capabilities`` tells the coworker, narrowed to who is asking.
+
+    The full manifest carries operator wording (shell commands to connect a provider), provider names, grant state and the names and
+    states of knowledge sources. None of that is for a customer:
+
+    - A verified team member (``member``) gets each blocked Skill's one ``nextStep`` in plain words (ask the operator or consultant;
+      never a command) and the rest of the manifest as it is, without the operator ``remediation`` text.
+    - Anyone else (a public caller, an unmapped sender, a call with no attributed person) gets only whether each Skill is ready and
+      the capability family and status, so the coworker can truthfully say "I can't book appointments here" and nothing about how
+      this client's systems are set up or which sources it holds.
+    """
+    view = copy.deepcopy(dict(manifest))
+    for skill in view.get("skills", []):
+        skill.pop("remediation", None)
+        if member:
+            step = None if skill.get("ready") else remediation_for(skill.get("dependencies", []), plain=True)
+            if step:
+                skill["nextStep"] = step
+        else:
+            skill["dependencies"] = [{key: item[key] for key in PUBLIC_DEPENDENCY_KEYS if key in item} for item in skill.get("dependencies", [])]
+            for key in ("reason", "canEnable"):
+                skill.pop(key, None)
+    if not member:
+        view["capabilities"] = [{key: item[key] for key in PUBLIC_CAPABILITY_KEYS if key in item} for item in view.get("capabilities", [])]
+        view.pop("environment", None)
+    return view
