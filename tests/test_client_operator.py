@@ -39,11 +39,11 @@ class ClientOperatorTests(unittest.TestCase):
                 encoding="utf-8",
             )
             with mock.patch.object(operator, "_run") as run, mock.patch.object(operator.getpass, "getpass") as getpass:
-                operator.configure(workspace, "kingyx3/acme-ai-workspace", "dev", None, dry_run=True)
+                operator.configure(workspace, "kingyx3/acme-ai-workspace", "dev", dry_run=True)
             run.assert_not_called()
             getpass.assert_not_called()
 
-    def test_configure_writes_exact_secret_map_without_requiring_runner(self):
+    def test_configure_writes_exact_secret_map(self):
         with tempfile.TemporaryDirectory() as tmp:
             workspace = pathlib.Path(tmp) / "workspace"
             (workspace / "environments").mkdir(parents=True)
@@ -78,30 +78,6 @@ class ClientOperatorTests(unittest.TestCase):
             )
             self.assertFalse(any(command[:3] == ["gh", "variable", "set"] for command, _ in calls))
 
-    def test_configure_can_still_set_legacy_self_hosted_runner(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            workspace = pathlib.Path(tmp) / "workspace"
-            (workspace / "environments").mkdir(parents=True)
-            (workspace / "environments" / "dev.yaml").write_text(
-                """environment: dev\nruntime:\n  profile: receptionist\n  model_credential_ref: secret://model/dev\n""",
-                encoding="utf-8",
-            )
-            calls = []
-
-            def fake_run(command, *, cwd=None, input_text=None, capture=True):
-                calls.append((command, input_text))
-                return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
-
-            with mock.patch.object(operator, "_require_command"), mock.patch.object(operator, "_run", side_effect=fake_run), mock.patch.object(
-                operator.getpass, "getpass", return_value="model-secret"
-            ):
-                operator.configure(workspace, "kingyx3/acme-ai-workspace", "dev", "acme-docker")
-
-            variable_calls = [command for command, _ in calls if command[:3] == ["gh", "variable", "set"]]
-            self.assertEqual(len(variable_calls), 1)
-            self.assertIn("MODEL_GARDEN_DOCKER_RUNNER", variable_calls[0])
-            self.assertIn("acme-docker", variable_calls[0])
-
     def test_configure_rejects_raw_credential_fields_before_prompting(self):
         with tempfile.TemporaryDirectory() as tmp:
             workspace = pathlib.Path(tmp) / "workspace"
@@ -115,7 +91,7 @@ class ClientOperatorTests(unittest.TestCase):
                     operator.configure(workspace, "kingyx3/acme-ai-workspace", "dev")
             getpass.assert_not_called()
 
-    def test_doctor_accepts_keyless_gcp_instead_of_runner_variable(self):
+    def test_doctor_accepts_keyless_gcp(self):
         with tempfile.TemporaryDirectory() as tmp:
             workspace = pathlib.Path(tmp) / "workspace"
             bootstrapper.bootstrap(workspace, "acme")

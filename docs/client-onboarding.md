@@ -133,7 +133,7 @@ No long-lived cloud deployment JSON is needed after bootstrap. Platform releases
 
 `scripts/launch.py` delegates to `scripts/launch-client.py`, which composes `scripts/client-operator.py` and `scripts/bootstrap-cloud.py`. Run those lower-level commands directly only for diagnostics, automation internals or an intentional non-default environment.
 
-The private self-hosted Docker-runner path remains a compatibility/exception option where cloud-native remote administration is unavailable or prohibited; it is not the preferred managed GCP path.
+Keyless cloud deployment is the only supported deployment path; there is no self-hosted runner option.
 
 ## Client/platform ownership boundary
 

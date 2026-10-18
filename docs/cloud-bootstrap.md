@@ -98,7 +98,7 @@ For GCP it then:
 6. streams the environment-scoped runtime secret map to the remote deployment process without putting it in command arguments;
 7. runs the existing Model Garden Docker deployment/health/rollback adapter remotely.
 
-There is no permanent self-hosted GitHub runner requirement in this path.
+No self-hosted GitHub runner is involved.
 
 ## Public gateway ingress (opt-in)
 
