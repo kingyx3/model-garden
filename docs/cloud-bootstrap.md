@@ -100,6 +100,24 @@ For GCP it then:
 
 There is no permanent self-hosted GitHub runner requirement in this path.
 
+## Public gateway ingress (opt-in)
+
+To make the channel gateway reachable from Slack, Teams and browsers, set these in the client's Terraform variables (all off by default; see `docs/self-hosting.md` for the table):
+
+```hcl
+gateway_ingress_enabled = true
+gateway_domain          = "chat.client.example"
+gateway_dns_zone        = "client-example"   # optional Cloud DNS zone; omit to manage DNS elsewhere
+```
+
+1. Set `gateway.bind: 0.0.0.0` in the EnvironmentBinding (and `gateway.public_origin: https://chat.client.example`) so Compose publishes 8080 on the VM interface. The firewall rule limits it to Google's load-balancer ranges.
+2. Apply. Read the `gateway_public_ip` output.
+3. DNS: with `gateway_dns_zone` set (bootstrap `enable_gateway_dns = true` grants the deployer `roles/dns.admin` and enables the DNS API), Terraform creates the A record. Otherwise create an A record for `gateway_domain` pointing at `gateway_public_ip` at your DNS provider. The zone must be authoritative for the domain.
+4. Certificate: the Google-managed certificate is `PROVISIONING` until DNS resolves to the IP, then becomes `ACTIVE`, usually within 15 to 60 minutes (occasionally longer). Check with `gcloud compute ssl-certificates describe <name>-gateway --global --format='get(managed.status)'`. Until then HTTPS handshakes fail; plain HTTP redirects to HTTPS.
+5. Verify `curl https://chat.client.example/healthz`, then register the Slack and Teams callback URLs under `gateway_url`.
+
+Inbound mail is a second opt-in: `gateway_smtp_enabled = true` with `gateway_smtp_source_ranges = ["203.0.113.10/32"]`, `gateway.smtp_bind: 0.0.0.0`, and an MX or A record for the mail host pointing at `gateway_smtp_ip`. It uses a global TCP proxy load balancer (public 25 to container 2525); because the proxy hides the sender, the allow-list is a Cloud Armor policy, so nothing outside the ranges reaches the listener. Tear-down is setting the variables back to `false` and applying.
+
 ## Idempotency boundaries
 
 - **Bootstrap desired state:** Terraform under `infra/bootstrap/gcp`; normally run once, repeatable using retained bootstrap state.
