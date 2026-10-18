@@ -111,6 +111,18 @@ class SkillActivationTests(unittest.TestCase):
                 tool for entry in manifest["capabilities"] for tool in entry["tools"]
             ])
 
+    def test_disabled_skill_without_a_declaration_cannot_be_enabled(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = self.workspace(pathlib.Path(tmp))
+            self.edit_agent(workspace, disabled=["book-appointment"])
+            desired = compiler.compile_workspace(workspace, "receptionist", environment_binding=ZERO_STACK)[0]
+            desired["disabledSkillDeclarations"] = []
+            manifest = capabilities.build_manifest(desired, WITH_CALENDAR)
+            skill = next(x for x in manifest["skills"] if x["name"] == "book-appointment")
+            self.assertFalse(skill["ready"])
+            self.assertFalse(skill["canEnable"])
+            self.assertIn("Recompile", skill["reason"])
+
     def test_enabling_blocked_skill_fails_closed_then_succeeds_with_calendar(self):
         with tempfile.TemporaryDirectory() as tmp:
             workspace = self.workspace(pathlib.Path(tmp))
