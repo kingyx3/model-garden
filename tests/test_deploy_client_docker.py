@@ -67,9 +67,9 @@ class DeployClientDockerTests(unittest.TestCase):
         }
         if calendar:
             spec["connectors"] = {
-                "google_calendar": {
+                "calendar": {
+                    "provider": "google",
                     "token_ref": "secret://google/dev-calendar",
-                    "calendar_id": "primary",
                 }
             }
         if extra:

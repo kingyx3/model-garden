@@ -109,11 +109,6 @@ class CapabilityResolutionTests(unittest.TestCase):
                 ROOT / "examples" / "workspace", "receptionist", environment_binding={"environment": "dev"}
             )
 
-    def test_ambiguous_calendar_binding_is_rejected(self):
-        binding = {"connectors": {"calendar": {"provider": "google"}, "microsoft_calendar": {"mailbox": "x@y.example"}}}
-        with self.assertRaisesRegex(ValueError, "more than one provider"):
-            capabilities.bound_providers(binding)
-
     def test_unknown_declaration_fails_compilation(self):
         with tempfile.TemporaryDirectory() as tmp:
             workspace = self._workspace(pathlib.Path(tmp))

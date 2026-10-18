@@ -30,8 +30,7 @@ class GovernedMcpRuntimeTests(unittest.TestCase):
             desired = compiler.compile_workspace(ROOT / "examples/workspace", "receptionist")[0]
             (root / "desired.json").write_text(json.dumps(desired), encoding="utf-8")
             runtime = runtime_module.GovernedToolRuntime(
-                root / "desired.json", root / "audit.jsonl", root / "approvals",
-                environ={"MODEL_GARDEN_GOOGLE_CALENDAR_TOKEN": "unused-secret"},
+                root / "desired.json", root / "audit.jsonl", root / "approvals", environ={},
             )
             names = {tool.name for tool in asyncio.run(runtime_module.build_server(runtime).list_tools())}
             self.assertTrue({"kb_search", "crm_create", "crm_read", "crm_log_interaction",

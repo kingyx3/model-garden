@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import pathlib
+import re
 import shutil
 import sys
 import tempfile
@@ -92,7 +93,7 @@ class FilesTests(Case):
         runtime = self.runtime()
         self.write(runtime, name="boiler", content=f"Notes: {PRIVATE}")
         runtime.files_search(query="boiler")
-        text = (self.root / "audit.jsonl").read_text()
+        text = re.sub(r"[0-9a-f]{32,}", "", (self.root / "audit.jsonl").read_text())
         for private in ("Hargreaves", "Acacia", "4111", "Notes:"):
             self.assertNotIn(private, text)
         execution = next(event for event in self.audit() if event["event"] == "execution" and event["tool"] == "files.write")

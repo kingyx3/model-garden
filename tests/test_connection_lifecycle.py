@@ -91,7 +91,7 @@ class RuntimeChangeTests(Case):
     def runtime(self):
         return runtime_module.GovernedToolRuntime(
             self.root / "desired.json", self.store / "audit.jsonl", self.store / "approvals",
-            environ={"MODEL_GARDEN_GOOGLE_CALENDAR_TOKEN": "t", "MODEL_GARDEN_CAPABILITY_MANIFEST": str(self.manifest_path)},
+            environ={"MODEL_GARDEN_CAPABILITY_MANIFEST": str(self.manifest_path)},
         )
 
     def test_a_runtime_completion_cannot_clear_a_revocation_and_writes_no_event_for_it(self):

@@ -21,7 +21,6 @@ from __future__ import annotations
 from collections.abc import Iterable, Mapping, Sequence
 from typing import Any
 
-_LEGACY_FAMILY = {"google_calendar": "calendar", "microsoft_calendar": "calendar"}
 
 
 class TeamError(PermissionError):
@@ -58,8 +57,6 @@ def _index(states: Sequence[Mapping[str, Any]]) -> dict[str, Mapping[str, Any]]:
 def _binding(environment_binding: Mapping[str, Any] | None, family: str) -> Mapping[str, Any] | None:
     connectors = (environment_binding or {}).get("connectors") or {}
     entry = connectors.get(family)
-    if entry is None:
-        entry = next((value for key, value in connectors.items() if _LEGACY_FAMILY.get(key) == family), None)
     return entry if isinstance(entry, Mapping) else None
 
 

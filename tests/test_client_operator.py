@@ -35,7 +35,7 @@ class ClientOperatorTests(unittest.TestCase):
             workspace = pathlib.Path(tmp) / "workspace"
             (workspace / "environments").mkdir(parents=True)
             (workspace / "environments" / "dev.yaml").write_text(
-                """environment: dev\nruntime:\n  profile: sales-assistant\n  model_credential_ref: secret://model/dev\nconnectors:\n  google_calendar:\n    token_ref: secret://google/dev\n""",
+                """environment: dev\nruntime:\n  profile: sales-assistant\n  model_credential_ref: secret://model/dev\nconnectors:\n  crm:\n    token_ref: secret://google/dev\n""",
                 encoding="utf-8",
             )
             with mock.patch.object(operator, "_run") as run, mock.patch.object(operator.getpass, "getpass") as getpass:
@@ -48,7 +48,7 @@ class ClientOperatorTests(unittest.TestCase):
             workspace = pathlib.Path(tmp) / "workspace"
             (workspace / "environments").mkdir(parents=True)
             (workspace / "environments" / "prod.yaml").write_text(
-                """environment: prod\nruntime:\n  profile: receptionist\n  model_credential_ref: secret://model/prod\nconnectors:\n  google_calendar:\n    token_ref: secret://google/prod\n""",
+                """environment: prod\nruntime:\n  profile: receptionist\n  model_credential_ref: secret://model/prod\nconnectors:\n  crm:\n    token_ref: secret://google/prod\n""",
                 encoding="utf-8",
             )
             calls = []

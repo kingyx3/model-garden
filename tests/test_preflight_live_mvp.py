@@ -17,8 +17,6 @@ class LiveMvpPreflightTests(unittest.TestCase):
     def complete_env(self):
         return {
             "OPENAI_API_KEY": "model-secret",
-            "MODEL_GARDEN_GOOGLE_CALENDAR_TOKEN": "calendar-token",
-            "MODEL_GARDEN_GOOGLE_CALENDAR_ID": "calendar@example.test",
             "LIVEKIT_URL": "wss://livekit.example.test",
             "LIVEKIT_API_KEY": "livekit-key",
             "LIVEKIT_API_SECRET": "livekit-secret",
@@ -26,7 +24,7 @@ class LiveMvpPreflightTests(unittest.TestCase):
         }
 
     @mock.patch.object(preflight.shutil, "which", return_value="/usr/bin/docker")
-    def test_retired_native_calendar_token_never_passes_upstream_proof_gate(self, _which):
+    def test_calendar_never_passes_without_upstream_proof(self, _which):
         result = preflight.check(self.complete_env())
         self.assertFalse(result["ready"])
         self.assertIn("approved upstream MCP execution", result["missing"]["calendar"][0])
@@ -34,7 +32,6 @@ class LiveMvpPreflightTests(unittest.TestCase):
     @mock.patch.object(preflight.shutil, "which", return_value=None)
     def test_reports_missing_capabilities_without_secret_values(self, _which):
         env = self.complete_env()
-        del env["MODEL_GARDEN_GOOGLE_CALENDAR_TOKEN"]
         del env["LIVEKIT_API_SECRET"]
         result = preflight.check(env)
         self.assertFalse(result["ready"])
@@ -44,7 +41,6 @@ class LiveMvpPreflightTests(unittest.TestCase):
         rendered = repr(result)
         self.assertNotIn("model-secret", rendered)
         self.assertNotIn("livekit-key", rendered)
-        self.assertNotIn("calendar-token", rendered)
 
     def test_whitespace_binding_counts_as_missing(self):
         env = self.complete_env()

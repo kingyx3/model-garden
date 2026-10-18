@@ -25,8 +25,8 @@ def check(env: dict[str, str], *, require_docker: bool = True) -> dict:
         absent = [name for name in names if not env.get(name, "").strip()]
         if absent:
             missing[capability] = absent
-    # Calendar client code was retired in v0.8.0. A token alone cannot prove
-    # that an upstream route supports governed booking or isolated grants.
+    # Calendar needs an approved upstream route; a token alone cannot prove
+    # that it supports governed booking or isolated grants.
     missing["calendar"] = ["approved upstream MCP execution and tenant proof (not implemented)"]
     if require_docker and shutil.which("docker") is None:
         missing["runtime"] = ["docker"]

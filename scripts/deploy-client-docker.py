@@ -992,9 +992,6 @@ def apply_bundle(
     _check_vault_pair(gateway_config, resolved[vault_ref] if vault_ref is not None else None)
     for name, ref in gateway_secrets.items():
         runtime_env[name] = resolved[ref]
-    # Retired vendor-token environment variables never reach the replacement runtime.
-    runtime_env.pop("MODEL_GARDEN_GOOGLE_CALENDAR_TOKEN", None)
-    runtime_env.pop("MODEL_GARDEN_MICROSOFT_CALENDAR_TOKEN", None)
 
     compose = ["docker", "compose", "-p", project_name, "-f", str(bundle_dir / "compose.yaml")]
     image = f"model-garden-{project_name}:current"

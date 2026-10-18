@@ -32,7 +32,6 @@ HUMAN_HANDOFF_TIER = 4
 CONNECTION_HEALTH = ("healthy", "degraded", "failed", "revoked")
 UNAVAILABLE_HEALTH = {"failed", "revoked"}
 BLOCKING = {"missing", "no-content", "unavailable", "no-grant", "grant-unavailable", "grant-scope"}
-LEGACY_CONNECTOR_KEYS = {"google_calendar": ("calendar", "google"), "microsoft_calendar": ("calendar", "microsoft")}
 SAFE_SCOPE = re.compile(r"^[A-Za-z0-9._:/+-]{1,200}$")
 SAFE_NAME = re.compile(r"^[a-z]+$")
 
@@ -166,9 +165,8 @@ def _implemented_connector(family: str, provider: str, tier: int) -> bool:
 def bound_providers(binding: Mapping[str, Any], catalog: dict[str, Any] | None = None) -> dict[str, dict[str, Any]]:
     """Return {family: non-secret connection facts} declared by an EnvironmentBinding.
 
-    ``connectors.<family>.provider`` is the portable shape. The legacy
-    ``connectors.google_calendar`` / ``connectors.microsoft_calendar`` shapes map to
-    ``calendar``. Only allow-listed, non-secret fields are returned.
+    ``connectors.<family>.provider`` is the only shape. Only allow-listed, non-secret
+    fields are returned.
     """
     connectors = _binding_spec(binding).get("connectors")
     if connectors is None:
@@ -181,9 +179,7 @@ def bound_providers(binding: Mapping[str, Any], catalog: dict[str, Any] | None =
     for key, value in connectors.items():
         if not isinstance(value, Mapping):
             raise ValueError(f"EnvironmentBinding connectors.{key} must be an object")
-        if key in LEGACY_CONNECTOR_KEYS:
-            family, provider = LEGACY_CONNECTOR_KEYS[key]
-        elif key in known:
+        if key in known:
             family, provider = key, value.get("provider")
         else:
             continue

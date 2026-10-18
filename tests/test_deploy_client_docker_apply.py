@@ -160,19 +160,14 @@ class DeployClientDockerApplyTests(unittest.TestCase):
             return Result()
 
         with tempfile.TemporaryDirectory() as tmp, mock.patch.object(deployer, "_run", side_effect=fake_run), mock.patch.object(deployer, "_wait_healthy", return_value=True):
-            with mock.patch.dict(os.environ, {
-                "MODEL_GARDEN_GOOGLE_CALENDAR_TOKEN": "stray-google-token",
-                "MODEL_GARDEN_RUNTIME_SECRETS_JSON": "never-forward",
-            }, clear=False):
+            with mock.patch.dict(os.environ, {"MODEL_GARDEN_RUNTIME_SECRETS_JSON": "never-forward"}, clear=False):
                 deployer.apply_bundle(pathlib.Path(tmp), binding, "acme-dev", secrets_json=json.dumps({
                     "secret://model/dev": "model-token",
                     "secret://microsoft/dev-calendar": "microsoft-token",
                 }), timeout=1)
         self.assertTrue(envs)
         for env in envs:
-            self.assertNotIn("MODEL_GARDEN_GOOGLE_CALENDAR_TOKEN", env)
             self.assertNotIn("MODEL_GARDEN_RUNTIME_SECRETS_JSON", env)
-            self.assertNotIn("MODEL_GARDEN_MICROSOFT_CALENDAR_TOKEN", env)
             self.assertEqual(env["MODEL_GARDEN_MODEL_CREDENTIAL"], "model-token")
 
 
