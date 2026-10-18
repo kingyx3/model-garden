@@ -140,6 +140,43 @@ controls:
       current operational evidence. The current host bootstrap resolves the Debian image family
       and Docker packages from provider/package repositories rather than a fully immutable host BOM.
 
+  host_reproducibility:
+    status: implemented_live_proof_pending
+    statement: >-
+      The GCP Docker-host module accepts an approved immutable boot image and exact Docker engine,
+      containerd, buildx and compose package versions, records them as a host bill of materials
+      (instance metadata and the host_bom output), and scripts/host-bom.py checks that a running host
+      consumed exactly those inputs and writes a digested evidence record. Unset, the host still resolves
+      the newest Debian 12 image and Docker packages at rebuild time and the tool reports that as unpinned.
+    evidence:
+      - infra/docker-host/gcp/main.tf
+      - scripts/host-bom.py
+      - tests/test_enterprise_gates.py
+      - docs/cloud-bootstrap.md
+      - docs/security.md
+    limitations: >-
+      Pinning and checking host inputs is not bit-for-bit reproducibility or a formal supply-chain
+      certification. No fresh production-shaped host has been rebuilt from recorded inputs and passed
+      the live acceptance path, and approved host BOM updates must remain deliberate release changes.
+
+  repository_governance:
+    status: policy_required
+    statement: >-
+      The main-branch ruleset enforces the technical validation contexts. Independent approving review,
+      CODEOWNER review, review-thread resolution and break-glass-only administrative bypass are
+      repository-administration controls: scripts/repo-governance-check.py compares an exported ruleset
+      and CODEOWNERS with the target, lists each gap, and for a sole-maintainer repository records the
+      missing second reviewer as a named operating limitation instead of claiming the control.
+    evidence:
+      - scripts/repo-governance-check.py
+      - tests/test_enterprise_gates.py
+      - .github/CODEOWNERS
+      - docs/security.md
+    limitations: >-
+      Software cannot change repository settings or prove an administrator never bypassed them. Until a
+      second qualified maintainer exists, independent review is an operating limitation relying on the
+      enforced automated gates and immutable release evidence; repository audit logs remain external evidence.
+
   encryption_in_transit:
     status: client_configured
     statement: >-

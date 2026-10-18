@@ -1,9 +1,9 @@
 """A team of Agents in one environment: per-Agent Tool isolation and per-Agent provider access.
 
-The compiler can already emit desired state for several Agents (``compile-workspace.py`` without ``--agent``), but the
-governed sidecar still serves one (#95). This module is the credential-free check a multi-Agent runtime has to pass
+The compiler can already emit desired state for several Agents (``compile-workspace.py`` without ``--agent``), but each
+governed sidecar serves one Agent (#95). This module is the credential-free check a multi-Agent runtime has to pass
 before it may advertise more than one coworker. It reads compiled desired states and, optionally, the per-coworker
-grant registry (``provider_grants.py``, #129); it changes nothing and is not wired into a runtime.
+grant registry (``provider_grants.py``, #129); it changes nothing; ``platform/runtime/team_runtime.py`` refuses to start a team that fails it.
 
 - **Tool isolation.** ``authorize_call`` allows a call only if the Tool is one of the *calling* Agent's own compiled
   Tools. The Agent name must be the runtime-attested one; another Agent's Tool is refused even though it exists in the

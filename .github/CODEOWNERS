@@ -4,6 +4,9 @@
 /scripts/ @kingyx3
 /.github/ @kingyx3
 /contracts/ @kingyx3
+/assurance/ @kingyx3
+/evals/ @kingyx3
+/templates/ @kingyx3
 
 # Reference customer content
 /examples/ @kingyx3

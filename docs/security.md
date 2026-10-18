@@ -36,7 +36,7 @@ Model Garden's early-client deployment is intentionally small: one isolated clie
 4. Do not expose Hermes or governed Tool services publicly unless the selected channel/integration contract explicitly requires it. The governed Tool service may bind inside the private Docker network so the Hermes container can reach it; no host port is published by the baseline.
 5. Keep host firewall rules minimal and scope provider/channel ingress narrowly.
 6. Apply regular OS/container dependency updates through a tested Model Garden release rather than mutating production hosts ad hoc.
-7. Treat the current Debian-image-family and Docker-package installation path as a rebuild dependency: before regulated/high-assurance production, either pin/attest the host image and package set or retain equivalent rebuild evidence proving the replacement host consumed the approved versions. Do not claim bit-for-bit host reproducibility while those sources remain provider/package-repository resolved.
+7. Treat the Debian-image-family and Docker-package installation path as a rebuild dependency: before regulated/high-assurance production, pin the host image and package set (`host_image`, `docker_package_versions` on the Docker-host module; see [cloud bootstrap](cloud-bootstrap.md#host-rebuild-inputs)) or retain equivalent rebuild evidence proving the replacement host consumed the approved versions. Unset, both still resolve at rebuild time, and `scripts/host-bom.py verify` reports them as unpinned. Do not claim bit-for-bit host reproducibility or supply-chain certification from pinning alone.
 
 ## Secure software supply chain
 
@@ -53,6 +53,8 @@ The repository ruleset must be treated as part of the enterprise control plane, 
 
 The current software can enforce CI content but cannot itself prove that a GitHub administrator never bypassed repository policy. Repository-setting evidence and audit logs remain part of deployment/operating assurance.
 
+`scripts/repo-governance-check.py` reads an exported ruleset (`gh api repos/OWNER/REPO/rulesets/ID`) and `.github/CODEOWNERS` and reports each difference from the target: required checks, independent approving review, CODEOWNER review, review-thread resolution, force-push and deletion protection, routine administrative bypass (pull-request-only bypass counts as break-glass) and CODEOWNERS coverage of the infrastructure, platform, scripts, contracts, workflow, assurance, evals and template paths. For a repository with one qualified maintainer, `--sole-maintainer --accepted-by <person>` records the missing independent and CODEOWNER review as a named operating limitation (the enforced automated gates and immutable release evidence stand in for them); it never reports that control as met, and the gaps one person can fix (threads, bypass, checks) stay failures. Changing the ruleset itself remains a repository-administration action.
+
 ## Terraform state
 
 The current GCP bootstrap under `infra/bootstrap/gcp` creates the remote Terraform state used by normal keyless deployment. Limit state access to the deployment/admin identities that require it. State can contain infrastructure metadata and may become sensitive if future resources expose generated values, so do not treat the state bucket as public operational documentation.
@@ -65,7 +67,7 @@ Business definitions and raw runtime credentials must not be intentionally store
 
 - Preserve the known-good Model Garden release, workspace revision and previous deployable image needed for rollback.
 - Document ownership and backup/restore requirements for persistent Hermes/runtime data.
-- Export relevant application, governed-action and cloud audit records to the client's or Model Garden's existing logging/SIEM stack when required.
+- Export relevant application, governed-action and cloud audit records to the client's or Model Garden's existing logging/SIEM stack when required. The reference ledger-export bucket (`ledger_export_enabled`) retains every exported object for `export_retention_days`, **365 days** by default and between 1 and 3650 (set per client with `MODEL_GARDEN_EXPORT_RETENTION_DAYS`); a locked policy (`export_lock_retention`, required for production) can only be lengthened, so choose the client's approved period before locking it.
 - Use protected production GitHub Environments and business/operator approval before promotion.
 - Test prohibited actions, approval-required actions, credential revocation, audit-chain verification and rollback as part of production acceptance.
 

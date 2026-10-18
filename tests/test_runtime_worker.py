@@ -5,6 +5,7 @@ import calendar
 import importlib.util
 import json
 import pathlib
+import re
 import subprocess
 import sys
 import tempfile
@@ -177,7 +178,7 @@ class MailboxTests(Case):
         self.assertEqual(len(drafts), 1)
         self.assertEqual(sent[0][0], "D0OWNER")
         self.assertIn("reply draft", sent[0][1])
-        ledger = (self.data / "audit.jsonl").read_text()
+        ledger = re.sub(r"[0-9a-f]{32,}", "", (self.data / "audit.jsonl").read_text())  # digests are random hex that can hold "4111"
         self.assertNotIn("4111", ledger)
         self.assertIn('"kb.search"', ledger)  # the knowledge read is a governed, ledgered read
 

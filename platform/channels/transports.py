@@ -6,7 +6,8 @@ caller (the gateway reads it from the environment) and has an injectable HTTP fu
 
 - **Slack** posts only to ``https://slack.com/api/`` methods with the bot token as a bearer, checks Slack's ``ok`` flag and returns the
   message ``ts``. Errors carry Slack's short error code, never the request. Uploaded files are fetched only from ``files.slack.com``
-  with the bot token, bounded in size.
+  with the bot token, bounded in size. A deliverable is posted with Slack's external upload flow: the bytes go only to Slack's file
+  host and without the bot token.
 - **Teams** exchanges the bot's client secret for a Bot Framework token (cached until shortly before it expires) and posts the activity to
   the conversation on the service URL the adapter remembered from a verified inbound activity. It never chooses a URL itself.
 - **Teams token verification** checks a Bot Framework bearer token's RS256 signature against Microsoft's published signing keys using
@@ -68,10 +69,14 @@ class SlackTransport:
     def _auth(self, content_type: str | None = "application/json; charset=utf-8") -> dict[str, str]:
         return {"Authorization": f"Bearer {self._token}", **({"Content-Type": content_type} if content_type else {})}
 
-    def _call(self, method: str, payload: Mapping[str, Any]) -> dict[str, Any]:
+    def _call(self, method: str, payload: Mapping[str, Any], *, form: bool = False) -> dict[str, Any]:
         if not re.fullmatch(r"[a-z]+\.[a-zA-Z.]+", method):
             raise TransportError("slack: not a Slack method")
-        status, raw = self._http(SLACK_API + method, json.dumps(payload).encode("utf-8"), self._auth(), TIMEOUT)
+        if form:  # the file-upload methods take form fields, not JSON
+            body = urllib.parse.urlencode({key: str(value) for key, value in payload.items()}).encode("utf-8")
+            status, raw = self._http(SLACK_API + method, body, self._auth("application/x-www-form-urlencoded"), TIMEOUT)
+        else:
+            status, raw = self._http(SLACK_API + method, json.dumps(payload).encode("utf-8"), self._auth(), TIMEOUT)
         document = _json(raw)
         if status != 200 or not isinstance(document, dict):
             raise TransportError(f"slack: HTTP {status}")
@@ -89,6 +94,36 @@ class SlackTransport:
     def send_text(self, address: str, text: str) -> str:
         """For ``notice_delivery``: a notice to the person's direct-message channel id."""
         return self({"method": "chat.postMessage", "channel": address, "text": text[:3500]})
+
+    def upload_file(self, channel: str, thread: str | None, name: str, content: bytes, *, max_bytes: int = MAX_FILE_BYTES) -> str:
+        """Post ``content`` into a conversation as a file (Slack's external upload flow); returns the Slack file id.
+
+        Three calls: ask for an upload URL, send the bytes to Slack's own file host (never anywhere else, and without the bot token),
+        then complete the upload into the channel and thread. Needs the app's ``files:write`` scope. Bounded in size; a failure
+        carries Slack's short error code or the HTTP status, never the file.
+        """
+        if not isinstance(channel, str) or not re.fullmatch(r"[CDG][A-Z0-9]{2,30}", channel):
+            raise TransportError("slack: not a conversation id")
+        if thread is not None and not re.fullmatch(r"\d{6,12}\.\d{1,8}", str(thread)):
+            raise TransportError("slack: not a thread timestamp")
+        if not isinstance(content, (bytes, bytearray)) or not 0 < len(content) <= max_bytes:
+            raise TransportError("slack: the file is empty or too large to upload")
+        label = re.sub(r"[\x00-\x1f\x7f/\\]+", " ", str(name)).strip()[:200] or "file"
+        started = self._call("files.getUploadURLExternal", {"filename": label, "length": len(content)}, form=True)
+        url, file_id = started.get("upload_url"), started.get("file_id")
+        parsed = urllib.parse.urlparse(url) if isinstance(url, str) else None
+        if parsed is None or parsed.scheme != "https" or parsed.hostname != SLACK_FILE_HOST:
+            raise TransportError("slack: the upload address is not on Slack's file host")
+        if not isinstance(file_id, str) or not re.fullmatch(r"F[A-Z0-9]{2,30}", file_id):
+            raise TransportError("slack: no file id")
+        status, _ = self._http(url, bytes(content), {"Content-Type": "application/octet-stream"}, TIMEOUT)
+        if status != 200:
+            raise TransportError(f"slack: file upload HTTP {status}")
+        fields: dict[str, Any] = {"files": json.dumps([{"id": file_id, "title": label}]), "channel_id": channel}
+        if thread:
+            fields["thread_ts"] = thread
+        self._call("files.completeUploadExternal", fields, form=True)
+        return file_id
 
     def fetch_file(self, file_id: str, *, max_bytes: int = MAX_FILE_BYTES) -> tuple[str, str, bytes]:
         """``(name, media_type, content)`` for a file shared with the coworker; only from Slack's own file host, bounded."""

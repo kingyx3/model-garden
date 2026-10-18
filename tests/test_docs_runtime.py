@@ -5,6 +5,7 @@ import asyncio
 import importlib.util
 import json
 import pathlib
+import re
 import shutil
 import sys
 import tempfile
@@ -128,7 +129,8 @@ class CreateTests(Case):
         self.assertEqual((ledger["provider"], ledger["tier"], ledger["capability"]), ("built-in-artifacts", 0, "docs"))
         self.assertTrue(ledger["externalObjectRef"].startswith("tier0:acme/a-"))
         self.assertEqual(execution["arguments"]["content"], runtime_module.GOVERN.REDACTED)
-        text = (self.root / "audit.jsonl").read_text()
+        # chained digests are random hex and can contain "4111" by chance, so only look outside them
+        text = re.sub(r"[0-9a-f]{32,}", "", (self.root / "audit.jsonl").read_text())
         for private in ("Hargreaves", "Acacia", "4111", "Notes:"):
             self.assertNotIn(private, text)
         created = next(event for event in self.audit() if event.get("action") == "artifact.create")

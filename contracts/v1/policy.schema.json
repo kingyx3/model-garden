@@ -74,7 +74,8 @@
                     },
                     "description": "Each named Tool argument must be present and equal to one of the listed values (for example {\"category\": [\"faq\"]})."
                   },
-                  "maxPerDay": {"type": "integer", "minimum": 1, "maximum": 10000, "description": "The rule applies only while fewer than this many successful executions of the matched Tool have been recorded today (UTC) in the local ledger."}
+                  "maxPerDay": {"type": "integer", "minimum": 1, "maximum": 10000, "description": "The rule applies only while fewer than this many successful executions of the matched Tool by this Agent have been recorded today (UTC) in the local ledger, whoever asked."},
+                  "maxPerPrincipalPerDay": {"type": "integer", "minimum": 1, "maximum": 10000, "description": "The rule applies only while the requesting identity has fewer than this many successful executions of the matched Tool by this Agent today (UTC), so one person or public sender cannot use up the allowance for the others. A request with no attributed identity has no count, so the rule does not apply. Both daily limits must hold when both are set."}
                 }
               },
               "signoff": {

@@ -9,8 +9,8 @@ task is delegated:
 
 The envelope is the unit that travels with a task: goal, constraints, deadline, budget, the Tools the task
 may use, the originating principal, the parent task and the chain of Agents so far. This module is pure
-(no I/O beyond an optional ledger helper) and credential-free. It is not wired into a runtime: the governed
-sidecar still serves one Agent per environment (#95), so nothing here yet decides a live call. It supplies
+(no I/O beyond an optional ledger helper) and credential-free. ``platform/runtime/team_runtime.py`` applies it to several
+Agents, each behind its own governed runtime; no model-callable delegation Tool exists. It supplies
 the rules, the governance context fields (`originatingPrincipal`, `taskId`, `delegationChain`) and the ledger
 event a multi-Agent runtime has to use, and tests that no delegation path escalates.
 

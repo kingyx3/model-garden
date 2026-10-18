@@ -163,7 +163,7 @@ class Filter:
         if self.outcome is not None:
             checks.append(event.get("outcome") == self.outcome)
         if self.task is not None:
-            checks.append(governance.get("taskId") == self.task)
+            checks.append(governance.get("taskId") == self.task or _names_task(event, self.task))
         if self.correlation is not None:
             checks.append(governance.get("correlationId") == self.correlation)
         if self.external_object is not None:
@@ -182,6 +182,16 @@ def query(events: Iterable[Mapping[str, Any]], criteria: Filter) -> list[dict[st
 
 
 # -- timeline ---------------------------------------------------------------------------------------------
+
+_TASK_KEYS = ("taskId", "fromTask", "toTask")
+_STEP_DETAILS = ("fromTask", "toTask", "fromAgent", "toAgent", "taskId", "step", "outcome", "assignee", "late", "exceeded", "reason", "depth", "chain")
+
+
+def _names_task(event: Mapping[str, Any], task: str) -> bool:
+    """An operator event (a delegation hop, a refused hop, a person's step, an exhausted budget) that names the task in its details."""
+    details = event.get("details") if isinstance(event.get("details"), Mapping) else {}
+    return event.get("event") == "operator-action" and any(details.get(key) == task for key in _TASK_KEYS)
+
 
 def _usage(event: Mapping[str, Any]) -> dict[str, int]:
     details = event.get("details") if isinstance(event.get("details"), Mapping) else {}
@@ -213,6 +223,10 @@ def timeline(events: Iterable[Mapping[str, Any]], *, task: str | None = None, co
                if kind == "read" and isinstance(event.get("details"), Mapping) else {}),
             **({"usage": used} if used else {}),
         }
+        if kind == "operator-action":  # a hop, a refused hop, a person's answer or a halted budget: who and what, never goal or note text
+            details = event.get("details") if isinstance(event.get("details"), Mapping) else {}
+            step["action"], step["by"] = event.get("action"), event.get("performedBy")
+            step["details"] = {key: details[key] for key in _STEP_DETAILS if key in details}
         steps.append(step)
         request_id = event.get("requestId")
         if isinstance(request_id, str):
@@ -220,7 +234,8 @@ def timeline(events: Iterable[Mapping[str, Any]], *, task: str | None = None, co
             entry["events"].append(kind)
             if kind in ("execution", "handoff") or (kind == "authorization" and event.get("outcome") == "deny"):
                 entry["final"] = f"{kind}:{event.get('outcome')}"
-    agents = sorted({step["agent"] for step in steps if step["agent"]})
+    agents = sorted({step["agent"] for step in steps if step["agent"]}
+                    | {name for step in steps for name in (step.get("details") or {}).get("chain", [])})
     return {
         "task": task, "correlation": correlation, "agents": agents, "requests": list(requests.values()), "steps": steps,
         "usage": totals, "events": len(steps),

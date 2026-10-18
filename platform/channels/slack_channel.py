@@ -19,7 +19,7 @@ transport that calls ``chat.postMessage`` with its own bot token.
   verified interactive payload with one of our two action IDs; the responder is the Slack user who
   clicked, and ``decide_from_channel`` still requires them to be a mapped approver.
 
-Least-privilege scopes for the app are documented in ``docs/channels.md``. Retries: Slack redelivers
+Least-privilege scopes for the app are documented in ``docs/channels.md``. A deliverable is uploaded as a file only when the deployment injects an uploader (``files:write``); otherwise it is named in the reply. Retries: Slack redelivers
 an event it thinks failed; consumers should de-duplicate on ``(conversation_id, message_id)``.
 """
 from __future__ import annotations
@@ -62,6 +62,7 @@ CHANNEL = "slack"
 TOLERANCE_SECONDS = 300
 MAX_BODY_BYTES = 1024 * 1024
 MAX_TEXT_CHARS = 20000
+MAX_UPLOADS = 3
 APPROVE_ACTION = "mg_approve"
 REJECT_ACTION = "mg_reject"
 # Subtypes that are still a person speaking; everything else (bot_message, message_changed, ...) is noise.
@@ -131,6 +132,7 @@ class SlackChannelAdapter:
         allowed_channels: tuple[str, ...] = (),
         transport: Callable[[dict[str, Any]], str] | None = None,
         clock: Callable[[], float] = time.time,
+        upload: Callable[[str, str | None, Any], Any] | None = None,
     ) -> None:
         if not isinstance(signing_secret, (bytes, bytearray)) or len(signing_secret) < 16:
             raise ValueError("Slack signing secret must be at least 16 bytes")
@@ -144,6 +146,7 @@ class SlackChannelAdapter:
         self._allowed = frozenset(allowed_channels)
         self._transport = transport
         self._clock = clock
+        self._upload = upload  # posts a deliverable as a file; without it (or if it fails) the reply carries a reference line
 
     # -- inbound ------------------------------------------------------------------------
 
@@ -252,8 +255,22 @@ class SlackChannelAdapter:
         return self._transport(message)
 
     def send_reply(self, reply: OutboundReply) -> str:
-        """Post the reply in its thread; a deliverable is posted as a reference line (location, digest), not uploaded."""
-        text = "\n".join([reply.text[:MAX_TEXT_CHARS], *TEXT.describe_attachments(reply.attachments)])
+        """Post the reply in its thread. A deliverable is uploaded as a file when an uploader is configured, otherwise (or if the
+        upload fails) it is named in the reply as a reference line (location, digest). Files go first, so the text never claims a
+        file that did not arrive."""
+        remaining = list(reply.attachments[:10])
+        if self._upload is not None:
+            remaining, shared = [], 0
+            for item in reply.attachments[:10]:
+                if shared < MAX_UPLOADS:
+                    try:
+                        self._upload(reply.conversation_id, reply.thread_id, item)
+                        shared += 1
+                        continue
+                    except Exception:  # noqa: BLE001 - the reference line below still tells the person where the file is
+                        pass
+                remaining.append(item)
+        text = "\n".join([reply.text[:MAX_TEXT_CHARS], *TEXT.describe_attachments(tuple(remaining))])
         return self._post(reply.conversation_id, reply.thread_id, text[:MAX_TEXT_CHARS])
 
     def send_receipt(self, receipt: ActionReceipt) -> str:
