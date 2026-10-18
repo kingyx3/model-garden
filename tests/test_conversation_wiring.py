@@ -137,7 +137,7 @@ class CallWiringTests(filing_tests.CommandTests):
         for private in (filing_tests.SECRET_WORDS, "Hargreaves"):
             self.assertNotIn(private, first)
         kinds = {item["kind"] for item in store.conversation_timeline(store.conversation_id("voice", "call-b"))}
-        self.assertEqual(kinds, {"call", "outcome", "handoff"})
+        self.assertEqual(kinds, {"call", "outcome", "handoff", "summary"})  # the post-call summary: a digest and source label, never its words
 
     def test_a_timeline_problem_never_changes_how_the_call_was_filed(self):
         blocker = self.root / "conversations"

@@ -540,6 +540,7 @@ def runtime_conversations(
     older_than_days: int | None = None,
     by: str | None = None,
     unlinked: bool = False,
+    ledger: bool = False,
 ) -> int:
     """Show or manage the cross-channel conversation timeline (references only); changes are ledgered under the named person."""
     if command not in CONVERSATION_COMMANDS:
@@ -554,6 +555,8 @@ def runtime_conversations(
         raise ValueError("--by must name the person deciding")
     if command == "timeline" and (conversation is None) == (customer is None):
         raise ValueError("timeline needs exactly one of --conversation or --customer")
+    if ledger and not (command == "timeline" and conversation is not None):
+        raise ValueError("--ledger shows a conversation's ledger events and needs timeline --conversation")
     if command == "erase" and (conversation is None) == (customer is None):
         raise ValueError("erase needs exactly one of --conversation or --customer")
     if command == "confirm" and customer is None:
@@ -574,6 +577,8 @@ def runtime_conversations(
         inner.extend(["--conversation", conversation])
     if customer:
         inner.extend(["--customer", customer])
+    if ledger:
+        inner.append("--ledger")
     if command == "purge":
         inner.extend(["--older-than-days", str(older_than_days)])
     if command in {"confirm", "dismiss", "link", "unlink", "erase", "purge"}:
@@ -799,7 +804,8 @@ def runtime_audit(args: argparse.Namespace) -> int:
         criteria = audit.Filter(
             agent=args.agent, principal=args.principal, approver=args.approver, capability=args.capability, provider=args.provider,
             tool=args.tool, event=args.event_type, outcome=args.outcome, since=args.since, until=args.until, task=args.task,
-            correlation=args.correlation, external_object=args.external_object, request=args.request,
+            correlation=args.correlation, external_object=args.external_object,
+            request=None if (args.audit_command == "timeline" and "," in (args.request or "")) else args.request,
         )
         scoped = audit.query(events, criteria)
         mode, columns = args.audit_command, audit.EVENT_COLUMNS
@@ -807,7 +813,11 @@ def runtime_audit(args: argparse.Namespace) -> int:
             document: Any = {"chain": {k: verdict.get(k) for k in ("valid", "events", "headHash")}, "matched": len(scoped), "events": scoped}
             rows = audit.event_rows(scoped)
         elif mode == "timeline":
-            document = audit.timeline(events, task=args.task, correlation=args.correlation)
+            if args.task is None and args.correlation is None and (args.request or args.call):
+                ids = [part.strip() for part in (args.request or "").split(",") if part.strip()]
+                document = audit.request_timeline(events, ids, call=args.call)
+            else:
+                document = audit.timeline(events, task=args.task, correlation=args.correlation)
             rows = [{key: step.get(key) for key in ("sequence", "timestamp", "event", "outcome", "agent", "tool", "requestId")} for step in document["steps"]]
             columns = ("sequence", "timestamp", "event", "outcome", "agent", "tool", "requestId")
         elif mode in ("replay-policy", "replay-dry-run"):
@@ -914,6 +924,7 @@ def main() -> int:
     conversations.add_argument("--customer", help="a customer id")
     conversations.add_argument("--older-than-days", type=int, help="retention: remove conversations older than this")
     conversations.add_argument("--unlinked", action="store_true", help="with list: only conversations no customer is linked to")
+    conversations.add_argument("--ledger", action="store_true", help="with timeline --conversation: also show every ledger event of the conversation's requests and call, together")
     conversations.add_argument("--by", help="the named person deciding, for confirm, dismiss, link, unlink, erase and purge")
     inbox = sub.add_parser("inbox", help="show everything waiting for a person: approvals, hand-offs, records to review")
     inbox.add_argument("--project-name", required=True)
@@ -996,6 +1007,7 @@ def main() -> int:
     for flag in ("agent", "principal", "approver", "capability", "provider", "tool", "outcome", "since", "until", "task", "correlation",
                  "external-object", "request"):
         audit.add_argument(f"--{flag}")
+    audit.add_argument("--call", help="timeline: every ledger event of one call (by call hash), together with any --request ids (comma-separated, 8+ characters each)")
     audit.add_argument("--event-type", help="authorization, approval, execution, read, handoff, policy-change, operator-action")
 
     args = parser.parse_args()
@@ -1093,7 +1105,7 @@ def main() -> int:
         if args.command == "conversations":
             return runtime_conversations(
                 args.project_name, args.action, target=args.target, conversation=args.conversation, customer=args.customer,
-                older_than_days=args.older_than_days, by=args.by, unlinked=args.unlinked,
+                older_than_days=args.older_than_days, by=args.by, unlinked=args.unlinked, ledger=args.ledger,
             )
         if args.command == "artifacts":
             return runtime_artifacts(args.project_name, args.action, artifact_id=args.artifact_id, by=args.by, requested_by=args.requested_by)
