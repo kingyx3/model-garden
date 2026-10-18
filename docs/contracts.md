@@ -105,7 +105,7 @@ Not yet supported: classification of free-text content (for example deciding tha
 
 ## Delegation between Agents (task envelopes)
 
-`platform/core/delegation.py` holds the rules for a coordinator Agent handing work to a specialist without creating a way to do more than a person could have asked for. It is a pure module with tests, **not wired into a runtime**: the governed sidecar still serves one Agent per environment (#95), so nothing here yet decides a live call.
+`platform/core/delegation.py` holds the rules for a coordinator Agent handing work to a specialist without creating a way to do more than a person could have asked for. It is a pure module with tests; `task_graph.py` (see "Multi-Agent task graphs") is the executor that applies it, but the governed sidecar still serves one Agent per environment, so a live call is not yet decided by it.
 
 - **Envelope.** goal, constraints, deadline, budget (`tokens`, `costCents`, `steps`), the Tools the task may use, the originating principal, the parent task and the chain of Agents so far. The root envelope's authority is the requesting person's permissions narrowed to what the first Agent holds; a child cannot change the originating principal.
 - **Attenuation.** A delegate's effective authority is its own grants ∩ the delegator's authority for this task ∩ the originating principal's permissions, re-checked on every hop. A delegate asked to use a Tool outside that set is refused rather than silently narrowed, and authority never grows along a chain.
@@ -216,13 +216,34 @@ Open: reading Skillsets in the compiler or a registry, knowledge-aware prerequis
 
 ## Team of Agents
 
-`platform/core/team.py` checks the compiled desired states of several Agents (the compiler already emits them when no `--agent` is given) before a runtime may advertise more than one coworker. It changes nothing and is not wired into a runtime; the governed sidecar still serves one Agent per environment (#95).
+`platform/core/team.py` checks the compiled desired states of several Agents (the compiler already emits them when no `--agent` is given) before a runtime may advertise more than one coworker. It changes nothing; the governed sidecar still serves one Agent per environment, and `deploy-team-docker.py` runs one sidecar per Agent (#95).
 
 - **Tool isolation.** `authorize_call` allows a call only if the Tool is one of the *calling* Agent's own compiled Tools, using the attested Agent name; another Agent's Tool is refused. The action request identity already includes the Agent, so one Agent's approval cannot be replayed by another.
 - **Own provider access.** With several Agents, each Agent whose Tools belong to an external (tier 1+) family needs a usable grant of its own covering them (`plan` reports `blocked` with a plain reason); Tier 0 families need none; an unbound family blocks. Duplicate Agent names are refused.
 - **Single-Agent workspaces are unchanged:** one Agent and no registry is `ready` through the environment binding.
 
-Open: a multi-Agent sidecar and deployment, per-Agent usage attribution and ledger separation at runtime, and cross-Agent token isolation proof against a real provider (#95, #129).
+Open: per-Agent provider grants resolved by the sidecar, and cross-Agent token isolation proof against a real provider (#95, #129). The deployment side is `scripts/deploy-team-docker.py` (below).
+
+### Deploying several Agents in one environment
+
+`scripts/deploy-team-docker.py <profiles-root> <environment-binding.json> <bundle-dir> --project-name NAME` (or `--profile NAME=DIR` per Agent) renders one Compose bundle with a full runtime per Agent (#95). It is opt-in and credential-free: `deploy-client-docker.py` is untouched, so single-Agent bundles are byte-identical, and a team is 2 to 12 Agents.
+
+- **One attested identity per Agent.** Each Agent keeps its own compiled profile; the sidecar attests the Agent from that profile's desired state `source.name`, which must equal the profile directory name and, when present, `EnvironmentBinding.spec.agents`. Duplicates and mismatches are refused. Each sidecar also gets its own initiating identity `runtime:hermes:<agent>` (single-Agent bundles keep `runtime:hermes`), so grants, MCP connections, approvals, hand-offs, memory and ledger events are attributed to the right Agent.
+- **Nothing shared but the model credential reference.** Services are `<agent>-<service>`, state volumes (including the hash-chained ledger) are per Agent, and each Agent has a private network on which its services keep the usual short names, so profiles and worker config work unchanged and one Agent cannot reach another's sidecar.
+- **`spec.agents`** is a list of names (checked against the profiles) or an object mapping an Agent to an overlay of binding keys (`gateway`, `worker`, `upstream_mcp`, ...) that replaces the shared key for that Agent only. Two Agents publishing the same host port are refused, so give the channel gateway to one Agent with an overlay.
+- Each Agent also ships `task_graph.py` and `runtime-tasks.py`, so the operator command is available beside its sidecar.
+
+## Multi-Agent task graphs
+
+`platform/core/task_graph.py` runs a graph of delegated and human steps across Agents (#96, #97, #98); `scripts/runtime-tasks.py` is the operator command (`submit`, `validate`, `advance`, `status`, `list`, `timeline`, `cancel`). Graph specs are JSON (see the module docstring) and state is one file-locked JSON document per graph under `<data root>/tasks`.
+
+- **Authority only shrinks.** Submission builds every node's envelope with `delegation.delegate` (Tools = delegate's grants ∩ delegator's authority ∩ requester's permissions; budget and expiry no larger than the delegator's; depth, fan-out and loops bounded). A node that needs a Tool outside that, a budget key the graph lacks or a later expiry rejects the whole graph, stores nothing and ledgers `taskgraph.rejected`. When a node starts its authority is re-narrowed to what its Agent and the requester hold at that moment, so a revoked grant fails an unstarted node (`authority-refused`); it is never widened. A human step has no Tools, and a person's answer is data.
+- **One shared budget, drawn atomically.** The graph's `budget` is a single pool; a node's own `budget` is a ceiling inside it, not a reservation. Parallel nodes (threads or processes) draw under one file lock; a draw past the pool or the node ceiling is refused whole, the node fails `budget-exhausted` and the owner is told once.
+- **Parallel with dependencies.** `dependsOn` (and `parent`, the delegator) order the nodes; ready nodes run concurrently up to `--workers`. Cycles, unknown dependencies and duplicate ids are rejected. `failurePolicy: cancel` (default) cancels every unfinished node when one fails; `isolate` skips only its dependents. A cancelled node learns at its next draw and its late result is discarded; a node whose runner died is failed after its lease rather than re-run.
+- **Human handoff is a node.** A `handoff` node opens a durable Tier 4 hand-off (`human_step`) in `<data root>/handoffs` and pauses only its branch. `advance` resumes it when the person answers (the note becomes the node's output); decline or timeout follows `fail`, `skip` or `escalate` once to another named person. The person is told, and the overdue escalation is sent, by the existing hand-off notices and notice delivery (worker or `runtime-handoff.py deliver`); a cancelled graph closes its open hand-offs.
+- **Ledger.** `taskgraph.submit`, `delegation.hop`, `taskgraph.node.start|succeeded|failed|skipped|cancelled|waiting`, `taskgraph.budget.draw|exhausted`, `taskgraph.authority-refused`, `taskgraph.cancel`, `taskgraph.finish` and `task.human-step.*`: identifiers, counts, reason codes and digests, never goals, notes, outputs or error text. `runtime-tasks.py timeline` filters them by graph.
+
+Open: the worker does not yet advance graphs on its clock (run `advance` from an operator or scheduler), a graph's Agents must share one data root (a team's per-Agent volumes need a designated coordinator volume or shared mount; none is rendered yet), `apply` for team bundles, per-Agent coworker API in the team bundle for non-default layouts, a runner that executes through each Agent's governed sidecar rather than the coworker API, and live evidence (#95, #96, #97, #98, #71).
 
 ## Governed MCP passthrough
 
