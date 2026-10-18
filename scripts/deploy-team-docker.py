@@ -44,11 +44,6 @@ import yaml
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 AGENT_NAME = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,30}[a-z0-9])?$")
 MAX_AGENTS = 12
-# Runtime source a team needs beyond the single-Agent bundle: the task-graph executor and its operator command.
-TEAM_SOURCE_PATHS = (
-    pathlib.Path("platform/core/task_graph.py"),
-    pathlib.Path("scripts/runtime-tasks.py"),
-)
 IDENTITY_ENV = "MODEL_GARDEN_INITIATING_IDENTITY"
 
 
@@ -189,13 +184,6 @@ def render_team_bundle(
                 platform_root=platform_root, fetch_source=fetch_source,
             )
             composes[name] = yaml.safe_load((bundle_dir / "agents" / name / "compose.yaml").read_text(encoding="utf-8"))
-            for relative in TEAM_SOURCE_PATHS:
-                source = platform_root / relative
-                if not source.is_file() or source.is_symlink():
-                    raise ValueError(f"Team target failed: missing runtime source file {relative.as_posix()}")
-                target = bundle_dir / "agents" / name / "model-garden-platform" / relative
-                target.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(source, target)
             agents.append({
                 "agent": name, "identity": agent_identity(name), "network": name,
                 "services": sorted(f"{name}-{short}" for short in composes[name]["services"]),

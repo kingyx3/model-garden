@@ -85,11 +85,9 @@ class TeamDeployTests(unittest.TestCase):
         self.assertFalse(set(mounts) & {"governance-data:/opt/data", "hermes-data:/opt/data"})
         self.assertEqual([item["agent"] for item in metadata["agents"]], ["billing", "front-desk"])
         self.assertEqual(metadata["kind"], "DockerTeamDeploymentBundle")
-        for name in profiles:  # each Agent ships its own compiled state, and the task-graph executor for the operator command
+        for name in profiles:  # each Agent ships its own compiled state
             state = json.loads((self.root / "bundle" / "agents" / name / "profile" / ".modelgarden" / "desired-state.json").read_text())
             self.assertEqual(state["source"]["name"], name)
-            self.assertTrue((self.root / "bundle" / "agents" / name / "model-garden-platform" / "scripts" / "runtime-tasks.py").is_file())
-            self.assertTrue((self.root / "bundle" / "agents" / name / "model-garden-platform" / "platform" / "core" / "task_graph.py").is_file())
 
     def test_secrets_stay_out_of_the_bundle(self):
         profiles = {"a": self.profile("a"), "b": self.profile("b")}
@@ -144,7 +142,6 @@ class TeamDeployTests(unittest.TestCase):
         self.assertNotIn("networks", compose)
         self.assertEqual(sorted(compose["services"]), ["governed-tools", "hermes"])
         self.assertEqual(compose["services"]["governed-tools"]["environment"]["MODEL_GARDEN_INITIATING_IDENTITY"], "runtime:hermes")
-        self.assertFalse((first / "model-garden-platform" / "platform" / "core" / "task_graph.py").exists())
         # an agents key in the binding does not change what the single-Agent script renders
         with_agents = self.root / "three"
         single.render_bundle(profile, self.binding(agents=["solo"]), with_agents, "acme-dev")
