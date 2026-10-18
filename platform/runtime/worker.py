@@ -23,6 +23,9 @@ small, bounded amount of work:
 - **events**: the event sources the worker does not witness itself. It fires ``chat.message`` for each digest the channel gateway left
   in the shared event outbox (``event_outbox.py``; no sender, id or text) and ``ticket.created`` for each Tier 0 ticket created since
   its last pass by any route (the coworker through the sidecar, a person); a ticket the mailbox already announced is not run twice.
+- **knowledge**: tells the escalation contact (else the mailbox owner) once when an approved business-rules source is due for review
+  within two weeks and once when it has passed its ``reviewBy`` date (after which the coworker stops answering from it), naming only
+  the source and the date.
 - **retention**: purges expired artifacts and mail past the retention period.
 - **export** (when configured): copies new ledger records to the retention-locked bucket; a local ledger that no longer matches
   the export, or one falling behind because exporting fails, is alerted to ``escalateTo`` through the notices job
@@ -37,6 +40,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import datetime as dt
 import fcntl
 import hashlib
 import importlib.util
@@ -52,7 +56,7 @@ from collections.abc import Callable, Mapping
 from typing import Any
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
-DEFAULT_INTERVALS = {"scheduler": 60, "mailbox": 30, "notices": 60, "retention": 3600, "export": 300, "crm-sync": 120, "events": 30}
+DEFAULT_INTERVALS = {"scheduler": 60, "mailbox": 30, "notices": 60, "retention": 3600, "export": 300, "crm-sync": 120, "events": 30, "knowledge": 21_600}
 MIN_INTERVAL, MAX_INTERVAL = 10, 86_400
 # A stalled export alerts the escalation contact when the ledger is this far ahead of it, or has waited this long.
 EXPORT_MAX_LAG_EVENTS = 100
@@ -95,6 +99,7 @@ MODULES = {
     "approval": "scripts/runtime-approval.py",
     "crm_sync": "platform/core/crm_sync.py",
     "outbox": "platform/core/event_outbox.py",
+    "knowledge": "platform/core/knowledge.py",
     "crm_filing": "platform/core/crm_filing.py",
 }
 
@@ -444,6 +449,58 @@ class Worker:
 
         return contact_for
 
+    def _told_once(self, kind: str, reference: str) -> bool:
+        """True the first time this ``kind`` and ``reference`` is seen and remembers it, so a condition that lasts is announced once."""
+        path = self.data / "worker" / "told.json"
+        digest = hashlib.sha256(f"{kind}|{reference}".encode("utf-8")).hexdigest()[:24]
+        try:
+            known = [item for item in json.loads(path.read_text(encoding="utf-8")) if isinstance(item, str)]
+        except (OSError, ValueError, TypeError):
+            known = []
+        if digest in known:
+            return False
+        path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        temporary = path.with_suffix(".tmp")
+        temporary.write_text(json.dumps([*known, digest][-MAX_QUEUE:]) + "\n", encoding="utf-8")
+        os.replace(temporary, path)
+        return True
+
+    def run_knowledge(self, now: int) -> dict[str, Any]:
+        """Tell the contact when an approved business-rules source is due for review or has passed its ``reviewBy`` date (declared dates only)."""
+        to = self.config["escalateTo"] or (self.config["mailbox"] or {}).get("owner")
+        if not to:
+            return {"skipped": "nobody-to-tell"}
+        knowledge = _module("knowledge")
+        today = dt.datetime.fromtimestamp(now, dt.timezone.utc).date()
+        due = stale = 0
+        for item in self.desired_state.get("knowledge") or []:
+            spec = item.get("spec") if isinstance(item, Mapping) else None
+            name = (item.get("metadata") or {}).get("name") if isinstance(item, Mapping) else None
+            if not isinstance(spec, Mapping) or not isinstance(name, str) or not spec.get("reviewBy"):
+                continue
+            state = knowledge.source_state(spec, agent=self._agent(), today=today)
+            try:
+                days = (dt.date.fromisoformat(str(spec["reviewBy"])) - today).days
+            except ValueError:
+                continue
+            if state == "stale":
+                phase = "stale"
+            elif state == "usable" and days <= knowledge.REVIEW_SOON_DAYS:
+                phase = "due-soon"
+            else:
+                continue
+            if not self._told_once("knowledge-review", f"{name}|{spec['reviewBy']}|{phase}"):
+                continue
+            if phase == "stale":
+                stale += 1
+                text = (f"The business-rules source {name} passed its review date ({spec['reviewBy']}), so the coworker has stopped answering from it. "
+                        "Confirm the content is still right, set a later reviewBy and redeploy.")
+            else:
+                due += 1
+                text = f"The business-rules source {name} is due for review on {spec['reviewBy']} ({days} day(s) left). After that the coworker stops answering from it."
+            self.queue.add("knowledge-review", to, text, reference=f"{name}:{phase}"[:40])
+        return {"dueSoon": due, "stale": stale}
+
     def _blocked_notified(self) -> pathlib.Path:
         return self.data / "crm-sync" / "blocked-notified.json"
 
@@ -676,7 +733,7 @@ class Worker:
 
     def jobs(self) -> list[tuple[str, Callable[[int], dict[str, Any]]]]:
         return [
-            ("scheduler", self.run_scheduler), ("mailbox", self.run_mailbox), ("crm-sync", self.run_crm_sync), ("events", self.run_events),
+            ("scheduler", self.run_scheduler), ("mailbox", self.run_mailbox), ("crm-sync", self.run_crm_sync), ("events", self.run_events), ("knowledge", self.run_knowledge),
             ("notices", self.deliver_notices), ("retention", self.run_retention), ("export", self.run_export),
         ]
 
