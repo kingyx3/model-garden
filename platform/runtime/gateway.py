@@ -632,7 +632,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0 if healthy(args.port) else 1
     try:
         gateway = build(args, os.environ)
-    except (OSError, ValueError, KeyError) as exc:
+    except (OSError, ValueError, KeyError, RuntimeError) as exc:  # RuntimeError: CoworkerError, TransportError
         print(f"Channel gateway failed to start: {type(exc).__name__}: {exc}", file=sys.stderr)
         return 1
     server = ThreadingHTTPServer(("0.0.0.0", args.port), make_handler(gateway))  # noqa: S104 - private Compose network; published only by the operator

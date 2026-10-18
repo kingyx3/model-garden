@@ -221,6 +221,34 @@ class LoopTests(Case):
         self.assertEqual(len(runtime.queue.pending()), 1)
 
 
+class StartupFailureTests(Case):
+    def run_main(self, config, env):
+        import contextlib
+        import io
+        import os
+        from unittest import mock
+        path = self.root / "worker.json"
+        path.write_text(json.dumps(config))
+        err = io.StringIO()
+        with mock.patch.dict(os.environ, env, clear=False), contextlib.redirect_stderr(err):
+            code = worker.main(["--desired-state", str(compiled(self.root)), "--data-root", str(self.data),
+                                "--config", str(path), "--once"])
+        return code, err.getvalue()
+
+    def test_short_coworker_key_is_one_line_without_the_key(self):
+        code, err = self.run_main({"coworker": {"url": "http://hermes:8642/v1"}}, {"MODEL_GARDEN_COWORKER_API_KEY": "shortkey"})
+        self.assertEqual(code, 1)
+        self.assertTrue(err.startswith("Runtime worker failed to start: CoworkerError: "))
+        self.assertEqual(len(err.strip().splitlines()), 1)
+        self.assertNotIn("shortkey", err)
+
+    def test_malformed_slack_token_is_one_line_without_the_token(self):
+        code, err = self.run_main({}, {"MODEL_GARDEN_SLACK_BOT_TOKEN": "not-a-bot-token"})
+        self.assertEqual(code, 1)
+        self.assertTrue(err.startswith("Runtime worker failed to start: TransportError: "))
+        self.assertNotIn("not-a-bot-token", err)
+
+
 class CoworkerClientTests(unittest.TestCase):
     def client(self, reply, status=200):
         self.requests = []

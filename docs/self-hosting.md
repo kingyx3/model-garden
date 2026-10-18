@@ -49,6 +49,8 @@ worker:
   intervals: {scheduler: 60, mailbox: 30, notices: 60, retention: 3600}
 ```
 
+The worker and the gateway keep separate `people` and `escalate_to` settings, but when both are enabled a side that omits them takes the other's, so filling in either list is enough for notices to reach people. If both give `people` and one person has a different channel or address in each, the deploy fails with an error naming that person.
+
 Customer email answered by the worker is drafted from approved knowledge only and kept as a Tier 0 draft; the mailbox owner is told it is ready and sends it. Inbound mail still reaches the spool through the mail server's pipe (`scripts/runtime-mailbox.py ingest`).
 
 ## Channel gateway

@@ -474,7 +474,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0 if healthy(args.data_root / "worker" / "heartbeat.json", now=time.time()) else 1
     try:
         worker = build(args, os.environ)
-    except (OSError, ValueError, KeyError) as exc:
+    except (OSError, ValueError, KeyError, RuntimeError) as exc:  # RuntimeError: CoworkerError, TransportError, LedgerExportError
         print(f"Runtime worker failed to start: {type(exc).__name__}: {exc}", file=sys.stderr)
         return 1
     if args.once:

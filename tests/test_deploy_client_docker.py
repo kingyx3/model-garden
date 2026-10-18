@@ -225,6 +225,34 @@ class DeployClientDockerTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "ledger_export"):
                 deployer.render_bundle(profile, self._binding(root, {"worker": {**worker, "ledger_export": {"token": "x"}}}), root / "bad", "acme-dev")
 
+    def test_worker_and_gateway_share_people_and_escalation_and_must_agree(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            profile = self._profile(root, tools=("kb.search",))
+            gateway = {
+                "enabled": True, "coworker_api_key_ref": "secret://coworker-api/dev",
+                "secrets": {"slack_signing_secret_ref": "secret://slack/signing", "slack_bot_token_ref": "secret://slack/bot"},
+                "slack": {"bot_user_id": "U0BOT0001"},
+                "people": {"jordan@acme.example": {"channel": "slack", "address": "D0123", "identity": "U123"}},
+                "escalate_to": "ops@acme.example",
+            }
+            worker = {"enabled": True, "coworker_api_key_ref": "secret://coworker-api/dev"}
+            deployer.render_bundle(profile, self._binding(root, {"gateway": gateway, "worker": worker}), root / "a", "acme-dev")
+            wc = json.loads((root / "a" / "profile" / ".modelgarden" / "worker.json").read_text(encoding="utf-8"))
+            self.assertEqual(wc["people"]["jordan@acme.example"]["address"], "D0123")
+            self.assertEqual(wc["escalateTo"], "ops@acme.example")
+            # and the other way round: the worker's list fills an omitting gateway
+            gateway2 = {k: v for k, v in gateway.items() if k not in ("people", "escalate_to")}
+            worker2 = {**worker, "people": {"jordan@acme.example": {"channel": "inbox"}}, "escalate_to": "boss@acme.example"}
+            deployer.render_bundle(profile, self._binding(root, {"gateway": gateway2, "worker": worker2}), root / "b", "acme-dev")
+            gc = json.loads((root / "b" / "profile" / ".modelgarden" / "gateway.json").read_text(encoding="utf-8"))
+            self.assertEqual(gc["people"], {"jordan@acme.example": {"channel": "inbox"}})
+            self.assertEqual(gc["escalateTo"], "boss@acme.example")
+            # disagreement fails the deploy
+            worker3 = {**worker, "people": {"jordan@acme.example": {"channel": "slack", "address": "D9999"}}}
+            with self.assertRaisesRegex(ValueError, "disagree about jordan@acme.example"):
+                deployer.render_bundle(profile, self._binding(root, {"gateway": gateway, "worker": worker3}), root / "c", "acme-dev")
+
     def test_worker_is_off_unless_enabled_and_rejects_unknown_settings(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = pathlib.Path(tmp)

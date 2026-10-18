@@ -372,5 +372,33 @@ class ConfigTests(unittest.TestCase):
             self.assertIn("MODEL_GARDEN_SLACK_BOT_TOKEN", str(caught.exception))
 
 
+class StartupFailureTests(unittest.TestCase):
+    def run_main(self, config, env):
+        import contextlib
+        import io
+        import os
+        from unittest import mock
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            path = root / "gateway.json"
+            path.write_text(json.dumps(config))
+            err = io.StringIO()
+            with mock.patch.dict(os.environ, env, clear=False), contextlib.redirect_stderr(err):
+                code = gateway.main(["--desired-state", str(compiled(root)), "--data-root", str(root / "d"), "--config", str(path)])
+        return code, err.getvalue()
+
+    def test_short_coworker_key_is_one_line_without_the_key(self):
+        code, err = self.run_main({"coworker": {"url": "http://hermes:8642/v1"}}, {"MODEL_GARDEN_COWORKER_API_KEY": "shortkey"})
+        self.assertEqual(code, 1)
+        self.assertTrue(err.startswith("Channel gateway failed to start: CoworkerError: "))
+        self.assertEqual(len(err.strip().splitlines()), 1)
+        self.assertNotIn("shortkey", err)
+
+    def test_bad_config_is_one_line(self):
+        code, err = self.run_main({"surprise": True}, {})
+        self.assertEqual(code, 1)
+        self.assertTrue(err.startswith("Channel gateway failed to start: GatewayConfigError: "))
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -347,6 +347,31 @@ def _worker_settings(binding: dict[str, Any]) -> tuple[dict[str, Any] | None, st
     return config, key_ref
 
 
+def _share_notice_routing(worker_config: dict[str, Any] | None, gateway_config: dict[str, Any] | None) -> None:
+    """Make the worker and the gateway agree on who is reached how (``people``) and who is escalated to (``escalate_to``).
+
+    Each keeps its own list, so a list filled in on only one side would leave the other's notices going nowhere. A side that
+    omits ``people`` or ``escalate_to`` takes the other's; when both give ``people`` and one person is reached differently, the
+    deploy fails instead of guessing which is right.
+    """
+    if worker_config is None or gateway_config is None:
+        return
+    for person in sorted(set(worker_config["people"]) & set(gateway_config["people"])):
+        w, g = worker_config["people"][person], gateway_config["people"][person]
+        if not isinstance(w, dict) or not isinstance(g, dict):
+            continue
+        if (w.get("channel"), w.get("address", "")) != (g.get("channel"), g.get("address", "")):
+            raise ValueError(f"Docker target failed: worker.people and gateway.people disagree about {person}; give them the same channel and address")
+    if not worker_config["people"]:
+        worker_config["people"] = dict(gateway_config["people"])
+    elif not gateway_config["people"]:
+        gateway_config["people"] = dict(worker_config["people"])
+    if not worker_config.get("escalateTo") and gateway_config.get("escalateTo"):
+        worker_config["escalateTo"] = gateway_config["escalateTo"]
+    elif not gateway_config.get("escalateTo") and worker_config.get("escalateTo"):
+        gateway_config["escalateTo"] = worker_config["escalateTo"]
+
+
 def _upstream_settings(binding: dict[str, Any]) -> list[str] | None:
     """``EnvironmentBinding.spec.upstream.mcp`` (opt-in): the ``secret://`` references the governed sidecar may resolve for approved upstream MCP.
 
@@ -777,6 +802,7 @@ def render_bundle(
     manifest = _capability_manifest(_desired_state(profile_dir), binding)
     worker_config, coworker_key_ref = _worker_settings(binding)
     gateway = _gateway_settings(binding)
+    _share_notice_routing(worker_config, gateway[0])
     if gateway[0] is not None and gateway[1].get("MODEL_GARDEN_COWORKER_API_KEY"):
         if coworker_key_ref not in (None, gateway[1]["MODEL_GARDEN_COWORKER_API_KEY"]):
             raise ValueError("Docker target failed: worker and gateway must share one coworker API key reference")
