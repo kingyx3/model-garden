@@ -48,7 +48,7 @@ Only information Model Garden cannot safely invent or derive should require inpu
 - one temporary bootstrap service-account JSON for the target GCP project on first bootstrap;
 - a repository/project/ownership override only when the inferred default is not the intended target;
 - runtime/integration credentials actually referenced by the selected environment, plus provider authorization and a sustainable renewal/revocation path;
-- client-owned OAuth/account consent for client business systems;
+- client-owned OAuth/account consent for client business systems (the owner signs in and consents at the provider through the gateway's `/connections/oauth/start` link; the operator opens it with `runtime-connection.py oauth open`, see [`secrets.md`](secrets.md#provider-oauth-consent-google-microsoft-oidcoauth); not yet live-proven with a real tenant);
 - business-approved Agent/Skill/Knowledge/eval content and human handoff rules;
 - production business approval before live traffic.
 
