@@ -29,13 +29,13 @@ isolated per-client GCP Docker host
         +-- client-scoped persistent runtime/governance volumes
 ```
 
-The current GCP reference intentionally does not deploy Kubernetes, a shared control plane, a custom model gateway, LiveKit infrastructure, Lago infrastructure or a portal.
+The current GCP reference intentionally does not deploy Kubernetes, a shared control plane, a custom model gateway, LiveKit infrastructure or a portal. Billing is one shared Lago host per Model Garden operator (`infra/billing/gcp`), never part of a client runtime.
 
 ## Runtime worker
 
 `EnvironmentBinding.spec.worker` (opt-in, `enabled: true`) adds two services to the Docker bundle:
 
-- `governed-worker` (`platform/runtime/worker.py`) shares the governance volume with the governed sidecar and is the clock for work nobody prompts: it applies the workspace's `Schedule` definitions on start under `MODEL_GARDEN_DEPLOYED_BY`, runs due schedules and resumes tasks whose human step was answered, drains the built-in inbound mail spool into the support mailbox (and fires `mail.received` and `ticket.created` event triggers for what it handled), delivers hand-off, human-step, connection, grant, schedule and mailbox notices through each person's own channel, and purges expired artifacts and mail. A failing job is ledgered as `worker.job-failed` (job and error type only) and never stops the others; `worker.py --health` is the container health check and `--once` runs one pass for an operator.
+- `governed-worker` (`platform/runtime/worker.py`) shares the governance volume with the governed sidecar and is the clock for work nobody prompts: it applies the workspace's `Schedule` definitions on start under `MODEL_GARDEN_DEPLOYED_BY`, runs due schedules and resumes tasks whose human step was answered, drains the built-in inbound mail spool into the support mailbox (and fires `mail.received` and `ticket.created` event triggers for what it handled), delivers hand-off, human-step, connection, grant, schedule and mailbox notices through each person's own channel, purges expired artifacts and mail, and meters model usage from both Hermes state volumes, which it mounts read-only, into the ledger ([metering](metering.md#metering-in-the-runtime)). A failing job is ledgered as `worker.job-failed` (job and error type only) and never stops the others; `worker.py --health` is the container health check and `--once` runs one pass for an operator.
 - `coworker-api`, present when `coworker_api_key_ref` is set, is a second Hermes process (`hermes gateway run`) serving only its OpenAI-compatible API server on the private Compose network with `API_SERVER_KEY`. The worker asks the coworker through it (`platform/runtime/coworker_client.py`) and never holds a model credential; the client refuses any non-private URL.
 
 ```yaml
@@ -106,7 +106,7 @@ Outputs: `gateway_public_ip`, `gateway_url` (use as `gateway.public_origin`) and
 | Google Calendar | External Google API | External | It is the client's source system, not a Model Garden service to reproduce. |
 | LiveKit realtime media | Replaceable adapter; infrastructure not provisioned by Model Garden today | Use LiveKit Cloud free/included capacity for the first live proof; self-host when evidence justifies it | Self-hosting is supported upstream but requires a public realtime host, TLS/TURN, Redis, upgrades and broad UDP exposure. The managed free tier can be cheaper than an additional GCP VM at MVP volume. |
 | SIP/PSTN | External telephony path | External paid dependency | Even with a self-hosted SIP server, a real phone number/PSTN carrier remains external. |
-| Lago | Thin usage-event adapter only; no shared deployment yet | Self-host later when billing is actually needed | One shared Model Garden-operated Lago is preferable to one instance per client, but deploying billing infrastructure before billable usage exists is unnecessary. |
+| Lago | One shared self-hosted Lago host (`infra/billing/gcp`) fed by the billing sync | Self-host centrally | One Model Garden-operated Lago for all clients, reached only through IAP, reading usage from each client's ledger export. See [metering](metering.md). |
 | Observability | Existing logs/audit/evals first | Add OSS observability only when current evidence is insufficient | Do not add a telemetry stack solely because it is available. |
 
 ## LiveKit: when to self-host
@@ -137,19 +137,19 @@ When that point arrives, prefer a dedicated voice/media target rather than silen
 
 ## Lago: self-host centrally, not per client
 
-The application boundary already supports a configurable Lago base URL. When Model Garden begins charging from metered usage, deploy one shared Model Garden-operated Lago service rather than adding Lago to every client runtime.
+`infra/billing/gcp` deploys one shared Model Garden-operated Lago service rather than adding Lago to every client runtime. Client runtimes meter usage into their own ledger and never hold a billing credential; the billing host reads each client's ledger export as a verifier and sends the usage to Lago ([metering](metering.md#running-the-shared-lago)).
 
 Keep the separation:
 
 ```text
-client runtime -> attributable usage event -> shared Lago -> commercial billing
+client runtime -> ledger export (usage facts) -> billing sync -> shared Lago -> commercial billing
        |
        +-------------------------------------> first-party governance/audit remains separate
 ```
 
 Billing must never become the source of truth for what the AI did or who authorized it.
 
-Before production billing, prove deterministic event deduplication, reconcile sample usage against provider statements, back up the billing database, and test restore/upgrade procedures.
+The host takes daily data-disk snapshots and nightly Postgres dumps to a create-only bucket. Before production billing, reconcile sample usage against provider statements and test a restore and a Lago upgrade on a `dev` host.
 
 ## Cloudflare Free: useful boundaries
 
@@ -208,7 +208,7 @@ The cheapest service on a price sheet is not cheaper if it adds an always-on VM 
 5. Prove the phone path, human fallback and representative live evals.
 6. Measure actual model, media, telephony and GCP usage.
 7. Only then decide whether LiveKit self-hosting or open-weight inference reduces total cost.
-8. Deploy shared self-hosted Lago only when commercial metering/billing becomes an active requirement; front its HTTP surface with Tunnel/Access if that meaningfully reduces GCP exposure/cost.
+8. Deploy the shared Lago host (`infra/billing/gcp`) when the first client is billed from metered usage; its UI and API stay private behind IAP.
 
 ## Vendor facts to re-verify before deployment
 

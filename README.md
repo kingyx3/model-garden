@@ -74,11 +74,12 @@ examples/workspace/           reference client desired state and evals
 platform/core/                governance, Tier 0 stores, upstream connection approval (no vendor API clients)
 platform/channels/            replaceable channel adapters
 platform/runtime/             governed runtime/MCP boundary
-platform/metering/            external metering adapters
+platform/metering/            usage metering, Lago client and billing sync
 scripts/                       launch, compile, govern, assure and deploy helpers
 tests/                         regression and acceptance coverage
 infra/bootstrap/gcp/           keyless trust/state bootstrap
 infra/docker-host/gcp/         isolated GCP Docker-host desired state
+infra/billing/gcp/             shared private Lago billing host
 templates/client-workflows/    generated client deployment workflow
 ```
 
