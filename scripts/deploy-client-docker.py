@@ -68,6 +68,7 @@ RUNTIME_SOURCE_PATHS = (
     pathlib.Path("platform/core/scheduler.py"),
     pathlib.Path("platform/core/human_step.py"),
     pathlib.Path("platform/core/crm_sync.py"),
+    pathlib.Path("platform/core/event_outbox.py"),
     pathlib.Path("platform/core/artifacts.py"),
     pathlib.Path("platform/core/builtin_files.py"),
     pathlib.Path("platform/core/tickets.py"),
@@ -224,6 +225,22 @@ def _read_audit_mode(binding: dict[str, Any]) -> str | None:
     if not isinstance(mode, str) or not READ_AUDIT.fullmatch(mode):
         raise ValueError("Docker target failed: audit.reads must be full, aggregate or sampled:<N>")
     return mode
+
+
+def _approval_ttl_hours(binding: dict[str, Any]) -> str | None:
+    """``spec.approvals.ttl_hours``: how long an approval request or decision stays valid (1 to 720; unset keeps the runtime default of 24)."""
+    spec = binding.get("spec")
+    approvals = spec.get("approvals") if isinstance(spec, dict) else None
+    if approvals is None:
+        return None
+    if not isinstance(approvals, dict) or set(approvals) - {"ttl_hours"}:
+        raise ValueError("Docker target failed: EnvironmentBinding approvals holds only ttl_hours")
+    hours = approvals.get("ttl_hours")
+    if hours is None:
+        return None
+    if not isinstance(hours, int) or isinstance(hours, bool) or not 1 <= hours <= 720:
+        raise ValueError("Docker target failed: approvals.ttl_hours must be a whole number of hours from 1 to 720")
+    return str(hours)
 
 
 def _selected_tools(profile_dir: pathlib.Path) -> set[str]:
@@ -657,6 +674,7 @@ def _compose(
     lock: dict[str, str],
     *,
     read_audit: str | None = None,
+    approval_ttl_hours: str | None = None,
     built_in_tools: bool = False,
     worker: bool = False,
     coworker_api: bool = False,
@@ -698,6 +716,7 @@ def _compose(
                 "MODEL_GARDEN_DEPLOYED_BY": "${MODEL_GARDEN_DEPLOYED_BY:-}",
                 "MODEL_GARDEN_CAPABILITY_MANIFEST": f"/opt/profile-seed/{MANIFEST_PATH.as_posix()}",
                 **({"MODEL_GARDEN_READ_AUDIT": read_audit} if read_audit else {}),
+                **({"MODEL_GARDEN_APPROVAL_TTL_HOURS": approval_ttl_hours} if approval_ttl_hours else {}),
                 **({"MODEL_GARDEN_UPSTREAM_MCP": "enabled",
                     **{name: f"${{{name}:?{name} is required}}" for name in sorted(_upstream_env(upstream_refs))}}
                    if upstream_refs is not None else {}),
@@ -736,6 +755,7 @@ def _compose(
             "MODEL_GARDEN_WORKER_CONFIG": f"/opt/profile-seed/{WORKER_CONFIG_PATH.as_posix()}",
             "MODEL_GARDEN_CAPABILITY_MANIFEST": f"/opt/profile-seed/{MANIFEST_PATH.as_posix()}",
             "MODEL_GARDEN_DEPLOYED_BY": "${MODEL_GARDEN_DEPLOYED_BY:-}",
+            **({"MODEL_GARDEN_APPROVAL_TTL_HOURS": approval_ttl_hours} if approval_ttl_hours else {}),
         }
         if coworker_api:
             environment["MODEL_GARDEN_COWORKER_API_KEY"] = "${MODEL_GARDEN_COWORKER_API_KEY:?MODEL_GARDEN_COWORKER_API_KEY is required}"
@@ -769,6 +789,7 @@ def _compose(
             "MODEL_GARDEN_CAPABILITY_MANIFEST": f"/opt/profile-seed/{MANIFEST_PATH.as_posix()}",
             **{name: f"${{{name}:?{name} is required}}" for name in sorted(secret_env)},
             **({"MODEL_GARDEN_SMTP_USER": deploy["smtp_user"]} if "smtp_user" in deploy else {}),
+            **({"MODEL_GARDEN_APPROVAL_TTL_HOURS": approval_ttl_hours} if approval_ttl_hours else {}),
         }
         ports = []
         if any(key in config for key in ("web", "slack", "teams")) or config.get("approvals", {}).get("emailLinks"):
@@ -874,6 +895,7 @@ def render_bundle(
             raise ValueError("Docker target failed: worker and gateway must share one coworker API key reference")
         coworker_key_ref = gateway[1]["MODEL_GARDEN_COWORKER_API_KEY"]
     read_audit = _read_audit_mode(binding)
+    approval_ttl_hours = _approval_ttl_hours(binding)
     upstream_refs = _upstream_settings(binding)
     built_in_tools = bool(selected_tools & BUILT_IN_TOOLS) or upstream_refs is not None
     lock = _load_hermes_lock(platform_root)
@@ -892,7 +914,7 @@ def render_bundle(
     (bundle_dir / "entrypoint.sh").write_text(_entrypoint(), encoding="utf-8")
     (bundle_dir / "Dockerfile").write_text(_dockerfile(lock), encoding="utf-8")
     (bundle_dir / "compose.yaml").write_text(
-        _compose(project_name, provider, lock, read_audit=read_audit, built_in_tools=built_in_tools,
+        _compose(project_name, provider, lock, read_audit=read_audit, approval_ttl_hours=approval_ttl_hours, built_in_tools=built_in_tools,
                  worker=worker_config is not None, coworker_api=coworker_key_ref is not None,
                  gateway=gateway if gateway[0] is not None else None, upstream_refs=upstream_refs,
                  vault_key=_vault_key_ref(binding) is not None),

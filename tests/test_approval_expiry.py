@@ -1,6 +1,7 @@
 """Credential-free checks that an approval is for now: requests and decisions expire, and a late decision never authorises (#114, #117, #82)."""
 from __future__ import annotations
 
+import importlib.util
 import json
 import os
 import pathlib
@@ -9,6 +10,8 @@ import tempfile
 import time
 import unittest
 
+import yaml
+
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 from test_docs_runtime import Case as RuntimeCase, approval_module, runtime_module  # noqa: E402 - shared fixtures
 
@@ -16,6 +19,12 @@ HOUR = 3600
 T0 = 1_800_000_000
 REQUEST = "ab" * 32
 OTHER = "cd" * 32
+
+
+_deploy_spec = importlib.util.spec_from_file_location("deploy_client_docker_for_approval_ttl", pathlib.Path(__file__).resolve().parents[1] / "scripts" / "deploy-client-docker.py")
+deployer = importlib.util.module_from_spec(_deploy_spec)
+assert _deploy_spec.loader is not None
+_deploy_spec.loader.exec_module(deployer)
 
 
 def write(store: pathlib.Path, kind: str, request_id: str, record: dict, *, mtime: float | None = None) -> pathlib.Path:
@@ -64,12 +73,14 @@ class StoreTests(unittest.TestCase):
         self.assertEqual(approval_module.pending(self.store, now=T0 + 25 * HOUR), [])
 
     def test_sweep_removes_only_expired_requests_and_decisions_and_reports_ids(self):
-        write(self.store, "pending", REQUEST, {"requestedAt": T0})
+        write(self.store, "pending", REQUEST, {"requestedAt": T0, "tool": "crm.update", "arguments": {"note": "private"}})
         write(self.store, "pending", OTHER, {"requestedAt": T0 + 24 * HOUR})
         write(self.store, "decisions", REQUEST, {"decidedAt": T0, "approved": True})
         write(self.store, "decisions", OTHER, {"decidedAt": T0 + 24 * HOUR, "approved": True})
         removed = approval_module.sweep(self.store, now=T0 + 25 * HOUR)
         self.assertEqual(sorted((item["kind"], item["requestId"]) for item in removed), [("decision", REQUEST), ("request", REQUEST)])
+        self.assertEqual([item.get("tool") for item in removed if item["kind"] == "request"], ["crm.update"])  # a Tool name only, never arguments
+        self.assertNotIn("tool", next(item for item in removed if item["kind"] == "decision"))
         self.assertTrue((self.store / "pending" / f"{OTHER}.json").exists())
         self.assertTrue((self.store / "decisions" / f"{OTHER}.json").exists())
         self.assertEqual(approval_module.sweep(self.store, now=T0 + 25 * HOUR), [])
@@ -80,6 +91,40 @@ class StoreTests(unittest.TestCase):
         (self.store / "pending" / f"{REQUEST}.json").write_text("not json", encoding="utf-8")
         self.assertEqual(approval_module.sweep(self.store, now=T0 + 99 * HOUR), [])
         self.assertEqual(approval_module.sweep(self.store / "missing", now=T0), [])
+
+
+class BindingTests(unittest.TestCase):
+    """`spec.approvals.ttl_hours` reaches every container that reads the approval store, so an operator can set the window without editing compose."""
+
+    def compose(self, hours):
+        gateway = ({"slack": {"botUserId": "U0BOT0001"}}, {}, {"bind": "127.0.0.1", "smtp_bind": "127.0.0.1"})
+        return yaml.safe_load(deployer._compose(
+            "acme-dev", "openai", {"version": "0.21.2", "commit": "a" * 40}, built_in_tools=True, worker=True, gateway=gateway,
+            approval_ttl_hours=deployer._approval_ttl_hours({"spec": {"approvals": {"ttl_hours": hours}}}) if hours is not None else None,
+        ))
+
+    def test_the_window_is_passed_to_the_sidecar_the_worker_and_the_gateway(self):
+        services = self.compose(48)["services"]
+        for name in ("governed-tools", "governed-worker", "channel-gateway"):
+            self.assertEqual(services[name]["environment"]["MODEL_GARDEN_APPROVAL_TTL_HOURS"], "48", name)
+        self.assertNotIn("MODEL_GARDEN_APPROVAL_TTL_HOURS", services["hermes"].get("environment", {}))  # the model's process never sees it
+
+    def test_unset_keeps_the_runtime_default_and_adds_nothing(self):
+        for service in self.compose(None)["services"].values():
+            self.assertNotIn("MODEL_GARDEN_APPROVAL_TTL_HOURS", service.get("environment", {}))
+        self.assertIsNone(deployer._approval_ttl_hours({"spec": {}}))
+        self.assertIsNone(deployer._approval_ttl_hours({"spec": {"approvals": {}}}))
+
+    def test_a_bad_value_or_an_unknown_key_stops_the_deploy_instead_of_never_expiring(self):
+        for bad in (0, 721, -1, 1.5, "24", True, [24]):
+            with self.assertRaisesRegex(ValueError, "ttl_hours"):
+                deployer._approval_ttl_hours({"spec": {"approvals": {"ttl_hours": bad}}})
+        with self.assertRaisesRegex(ValueError, "only ttl_hours"):
+            deployer._approval_ttl_hours({"spec": {"approvals": {"ttl_hours": 24, "skip": True}}})
+        with self.assertRaisesRegex(ValueError, "only ttl_hours"):
+            deployer._approval_ttl_hours({"spec": {"approvals": "forever"}})
+        self.assertEqual(deployer._approval_ttl_hours({"spec": {"approvals": {"ttl_hours": 720}}}), "720")
+        self.assertEqual(deployer._approval_ttl_hours({"spec": {"approvals": {"ttl_hours": 1}}}), "1")
 
 
 class RuntimeTests(RuntimeCase):

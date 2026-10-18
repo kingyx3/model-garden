@@ -20,6 +20,7 @@ from collections.abc import Mapping
 from typing import Any
 
 REQUEST_ID = re.compile(r"^[0-9a-f]{64}$")
+TOOL_NAME = re.compile(r"^[a-z][a-z0-9.-]{0,63}$")
 DEFAULT_TTL_HOURS = 24
 MAX_TTL_HOURS = 720
 
@@ -86,7 +87,7 @@ def pending(store: pathlib.Path, *, now: float | None = None, ttl: int | None = 
 
 
 def sweep(store: pathlib.Path, *, now: float | None = None, ttl: int | None = None) -> list[dict[str, str]]:
-    """Remove expired requests and decisions; returns what was removed as ``{"requestId", "kind"}`` (identifiers only)."""
+    """Remove expired requests and decisions; returns what was removed as ``{"requestId", "kind"}`` plus the ``tool`` name of a request (identifiers only)."""
     limit = ttl_seconds() if ttl is None else ttl
     removed: list[dict[str, str]] = []
     for kind, key in (("pending", "requestedAt"), ("decisions", "decidedAt")):
@@ -98,7 +99,11 @@ def sweep(store: pathlib.Path, *, now: float | None = None, ttl: int | None = No
                 record = _load(path)
                 if is_expired(path, record, key, now=now, ttl=limit):
                     path.unlink()
-                    removed.append({"requestId": path.stem, "kind": "request" if kind == "pending" else "decision"})
+                    item = {"requestId": path.stem, "kind": "request" if kind == "pending" else "decision"}
+                    tool = record.get("tool")
+                    if kind == "pending" and isinstance(tool, str) and TOOL_NAME.fullmatch(tool):
+                        item["tool"] = tool  # a Tool name is safe to tell a person; arguments and justification are never copied
+                    removed.append(item)
             except (OSError, ValueError, json.JSONDecodeError):
                 continue
     return removed

@@ -31,6 +31,7 @@ smtp_intake = gateway._module("smtp")
 spool_module = gateway._module("spool")
 handoff = gateway._module("handoff")
 approval = gateway._module("approval")
+outbox_module = gateway._module("event_outbox")
 
 SIGNING = b"s" * 32
 BOT = "U0BOT0001"
@@ -161,6 +162,39 @@ class SlackTests(GatewayCase):
         bot = self.slack_post("/channels/slack/events", slack_event(bot_id="B01", ts="1700000000.000500"))
         self.assertEqual(bot.status, 200)
         self.assertEqual(len(self.coworker.calls), 1)
+
+    def outbox_events(self):
+        path = self.data / "events" / "events.jsonl"
+        return [json.loads(line) for line in path.read_text().splitlines()] if path.exists() else []
+
+    def test_a_conversational_message_is_announced_once_as_a_digest_and_never_as_text_or_ids(self):
+        self.slack_post("/channels/slack/events", slack_event("I need a quote for card 4111 1111 1111 1111", ts="1700000000.000910"))
+        self.slack_post("/channels/slack/events", slack_event("I need a quote for card 4111 1111 1111 1111", ts="1700000000.000910"))  # redelivery
+        (event,) = self.outbox_events()
+        self.assertEqual((event["kind"], event["at"]), ("chat.message", NOW))
+        self.assertRegex(event["ref"], r"^[0-9a-f]{32}$")
+        raw = (self.data / "events" / "events.jsonl").read_text()
+        for private in ("4111", "quote", "D0DIRECT01", "U0ALICE01", "1700000000"):
+            self.assertNotIn(private, raw)
+
+    def test_commands_bots_and_unverified_traffic_are_not_announced(self):
+        self.slack_post("/channels/slack/events", slack_event("schedules", ts="1700000000.000920"))
+        self.slack_post("/channels/slack/events", slack_event("inbox", ts="1700000000.000921"))
+        self.slack_post("/channels/slack/events", slack_event(bot_id="B01", ts="1700000000.000922"))
+        self.gateway.handle("POST", "/channels/slack/events", {"X-Slack-Request-Timestamp": str(NOW), "X-Slack-Signature": "v0=00"}, slack_event(ts="1700000000.000923"))
+        self.assertEqual(self.outbox_events(), [])
+
+    def test_a_full_outbox_drops_the_event_loudly_and_the_message_is_still_answered(self):
+        outbox = self.gateway_outbox()
+        outbox.root.mkdir(parents=True, exist_ok=True)
+        outbox.path.write_bytes(b"x" * outbox_module.MAX_BYTES)
+        self.slack_post("/channels/slack/events", slack_event(ts="1700000000.000930"))
+        self.assertEqual(self.posts()[-1]["text"], "Hello from the coworker")
+        dropped = [json.loads(line) for line in (self.data / "audit.jsonl").read_text().splitlines() if "channel.event-dropped" in line]
+        self.assertEqual([item["details"] for item in dropped], [{"channel": "slack", "reason": "outbox-full"}])
+
+    def gateway_outbox(self):
+        return outbox_module.EventOutbox(self.data / "events")
 
     def test_url_verification_challenge_is_echoed(self):
         body = json.dumps({"type": "url_verification", "challenge": "abc123"}).encode()

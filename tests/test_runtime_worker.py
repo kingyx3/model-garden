@@ -24,6 +24,7 @@ def _load(name: str, relative: str):
 
 
 worker = _load("runtime_worker_under_test", "platform/runtime/worker.py")
+outbox_module = worker._module("outbox")
 coworker_client = worker._module("coworker")
 T0 = calendar.timegm((2026, 10, 19, 8, 0, 0))  # Monday 08:00 UTC
 OWNER = "jordan@acme.example"
@@ -186,7 +187,7 @@ class MailboxTests(Case):
         self.assertEqual(len(drafts), 1)
         self.assertEqual(sent[0][0], "D0OWNER")
         self.assertIn("reply draft", sent[0][1])
-        ledger = re.sub(r"[0-9a-f]{32,}", "", (self.data / "audit.jsonl").read_text())  # digests are random hex that can hold "4111"
+        ledger = re.sub(r"[0-9a-f]{16,}|\d{2}:\d{2}:\d{2}\.\d+Z", "", (self.data / "audit.jsonl").read_text())  # digests are random hex that can hold "4111"
         self.assertNotIn("4111", ledger)
         self.assertIn('"kb.search"', ledger)  # the knowledge read is a governed, ledgered read
 
@@ -253,7 +254,7 @@ class EventTriggerTests(Case):
         self.assertEqual([call[0] for call in fake.calls].count("complete"), 2)
         shown = json.dumps(self.events())
         self.assertNotIn("alex@customer.example", shown)
-        self.assertNotIn("4111", shown)  # only the kind and a digest of the reference reach the runner and the ledger
+        self.assertNotIn("4111", re.sub(r"[0-9a-f]{16,}|\d{2}:\d{2}:\d{2}\.\d+Z", "", shown))  # only the kind and a digest of the reference reach the runner and the ledger (hex ids are random)
 
     def test_a_redelivered_message_is_not_a_second_event(self):
         fake = FakeCoworker()
@@ -315,6 +316,163 @@ class EventTriggerTests(Case):
         self.assertEqual(runtime.fire_event("mail.received", "ref", T0), {"skipped": "no-coworker-configured"})
 
 
+class EventSourceTests(Case):
+    """The sources the worker does not witness itself: chat messages the gateway reported and tickets opened by any route (#99, #77)."""
+
+    config, trigger, make_runtime, runs = (EventTriggerTests.config, EventTriggerTests.trigger, EventTriggerTests.make_runtime, EventTriggerTests.runs)
+
+    def outbox(self):
+        return outbox_module.EventOutbox(self.data / "events")
+
+    def event_runs(self, runtime, kind):
+        return [run for run in self.runs(runtime) if run["trigger"] == f"event:{kind}"]
+
+    def test_each_chat_message_the_gateway_reported_runs_a_chat_trigger_once_and_only_a_digest_reaches_the_runner(self):
+        fake = FakeCoworker()
+        runtime = self.make_runtime(fake)
+        self.trigger(runtime, event="chat.message", goal="Note the new message")
+        ref = "ab" * 16
+        self.outbox().append("chat.message", ref, at=T0)
+        self.outbox().append("chat.message", ref, at=T0)  # the same event reported twice
+        self.outbox().append("chat.message", "cd" * 16, at=T0)
+        report = runtime.tick()
+        self.assertEqual(report["events"]["chat"], 3)
+        self.assertEqual(len(self.event_runs(runtime, "chat.message")), 2)  # once per distinct event
+        self.clock[0] += 60
+        self.assertEqual(runtime.tick()["events"]["chat"], 0)  # consumed: nothing runs again
+        self.assertEqual(len(self.event_runs(runtime, "chat.message")), 2)
+        shown = json.dumps(self.events())
+        self.assertNotIn(ref, shown)  # the ledger and the runner see a digest of the digest, never the reference
+
+    def test_a_trigger_for_another_event_stays_quiet_on_chat_and_nothing_is_lost_without_a_coworker(self):
+        runtime = self.make(self.config(), coworker=None, senders={"slack": lambda address, text: None})
+        self.outbox().append("chat.message", "ab" * 16, at=T0)
+        self.assertEqual(runtime.tick()["events"], {"skipped": "no-coworker-configured"})
+        self.assertEqual(len(self.outbox().read(0)[0]), 1)  # left for when a coworker is configured
+        quiet = self.make_runtime(FakeCoworker())
+        self.trigger(quiet, event="mail.received")
+        self.outbox().append("chat.message", "cd" * 16, at=T0)
+        quiet.tick()
+        self.assertEqual(self.runs(quiet), [])
+
+    def test_a_ticket_opened_by_any_route_after_the_worker_started_runs_a_ticket_trigger_once(self):
+        runtime = self.make_runtime(FakeCoworker(), tickets=True)
+        store = runtime._sidecar().tickets_store()
+        store.create(project="support", title="Before the worker watched", requested_by="runtime:old", now=T0 - 500)
+        self.trigger(runtime, event="ticket.created", goal="Look at the new ticket")
+        self.assertEqual(runtime.tick()["events"], {"chat": 0, "tickets": 0})  # first pass starts now: history is not replayed
+        self.clock[0] += 60
+        made = store.create(project="support", title="Boiler is leaking, card 4111 1111 1111 1111", requested_by="alex@customer.example", now=int(self.clock[0]) - 5)
+        report = runtime.tick()
+        self.assertEqual(report["events"]["tickets"], 1)
+        self.assertEqual(len(self.event_runs(runtime, "ticket.created")), 1)
+        self.clock[0] += 60
+        self.assertEqual(runtime.tick()["events"]["tickets"], 0)  # seen: not run again
+        self.assertEqual(len(self.event_runs(runtime, "ticket.created")), 1)
+        self.assertNotIn("Boiler", json.dumps(self.events()))
+        self.assertNotIn(made["ticketId"], json.dumps(self.events()))
+
+    def test_a_ticket_the_mailbox_already_announced_is_not_run_a_second_time_by_the_poll(self):
+        runtime = self.make_runtime(FakeCoworker(answer=False), tickets=True)
+        self.trigger(runtime, event="ticket.created", goal="Look at the new ticket")
+        runtime.tick()  # the poll starts
+        self.clock[0] += 60
+        runtime._spool().ingest(raw(), now=int(self.clock[0]) - 5)
+        runtime.tick()  # the mailbox opens a ticket and announces it; the poll sees it in the same pass
+        self.clock[0] += 60
+        runtime.tick()
+        self.assertEqual(len(self.event_runs(runtime, "ticket.created")), 1)
+
+    def test_tickets_created_in_the_same_second_are_each_run_once_across_passes(self):
+        runtime = self.make_runtime(FakeCoworker(), tickets=True)
+        store = runtime._sidecar().tickets_store()
+        self.trigger(runtime, event="ticket.created", goal="Look at the new ticket", max_per_hour=20)
+        runtime.tick()
+        for number in (1, 2):
+            self.clock[0] += 31
+            store.create(project="support", title=f"Ticket {number}", requested_by="a@x.example", now=int(self.clock[0]))
+            runtime.tick()
+        self.clock[0] += 31
+        store.create(project="support", title="Ticket 3", requested_by="a@x.example", now=int(self.clock[0]) - 31)  # same second as ticket 2
+        runtime.tick()
+        self.assertEqual(len(self.event_runs(runtime, "ticket.created")), 3)
+
+    def test_without_a_ticket_store_only_chat_events_are_handled(self):
+        runtime = self.make_runtime(FakeCoworker())
+        self.assertEqual(runtime.tick()["events"], {"chat": 0, "tickets": 0})
+        self.assertFalse((self.data / "tickets").exists())
+
+
+class KnowledgeReviewTests(Case):
+    """An approved source due for review, or past its reviewBy date, is announced once to the contact (declared dates only) (#116, #111, #77)."""
+
+    def runtime(self, sources, *, config=None):
+        sent = []
+        runtime = self.make(config if config is not None else {"escalateTo": OWNER, "people": {OWNER: {"channel": "slack", "address": "D0OWNER"}}},
+                            senders={"slack": lambda address, text: sent.append(text)})
+        base = runtime.desired_state["knowledge"][0]
+        runtime.desired_state["knowledge"] = [
+            {**base, "metadata": {**base["metadata"], "name": name},
+             "spec": {"type": "text-file", "status": "approved", "effectiveDate": "2026-01-01", "audiences": ["receptionist"], **spec}}
+            for name, spec in sources.items()
+        ]
+        self.sent = sent
+        return runtime
+
+    def told(self):
+        return [text for text in self.sent if "business-rules source" in text]
+
+    def test_a_source_due_within_two_weeks_and_one_already_stale_are_each_announced_once(self):
+        runtime = self.runtime({"hours": {"reviewBy": "2026-10-25"}, "prices": {"reviewBy": "2026-10-10"},
+                                "far-future": {"reviewBy": "2027-06-01"}, "no-review-date": {}})
+        runtime.tick()
+        self.clock[0] += 60
+        runtime.tick()  # notices are delivered on the pass after the job queued them
+        told = self.told()
+        self.assertEqual(len(told), 2)
+        self.assertTrue(any("hours" in text and "due for review on 2026-10-25" in text for text in told))
+        self.assertTrue(any("prices" in text and "stopped answering" in text for text in told))
+        self.assertFalse(any("far-future" in text or "no-review-date" in text for text in told))
+        self.clock[0] += 86_400
+        runtime.last_run.clear()
+        runtime.tick()
+        runtime.tick()
+        self.assertEqual(len(self.told()), 2)  # not repeated while the condition lasts
+
+    def test_the_same_source_is_announced_again_when_it_moves_from_due_soon_to_stale(self):
+        runtime = self.runtime({"hours": {"reviewBy": "2026-10-25"}})
+        runtime.tick()
+        self.clock[0] += 60
+        runtime.tick()
+        self.assertEqual(len(self.told()), 1)
+        self.clock[0] += 8 * 86_400  # past 2026-10-25
+        runtime.last_run.clear()
+        runtime.tick()
+        self.clock[0] += 60
+        runtime.tick()
+        told = self.told()
+        self.assertEqual(len(told), 2)
+        self.assertIn("stopped answering", told[1])
+
+    def test_a_draft_a_source_for_another_agent_an_invalid_date_and_a_non_text_source_are_not_announced(self):
+        runtime = self.runtime({"drafty": {"reviewBy": "2026-10-25", "status": "draft"}, "elsewhere": {"reviewBy": "2026-10-25", "audiences": ["sales"]},
+                                "garbled": {"reviewBy": "next week"}, "repo": {"reviewBy": "2026-10-25", "type": "repository"}})
+        report = runtime.run_knowledge(T0)
+        self.assertEqual(report, {"dueSoon": 0, "stale": 0})
+
+    def test_with_nobody_to_tell_it_says_so_and_remembers_nothing(self):
+        runtime = self.runtime({"hours": {"reviewBy": "2026-10-25"}}, config={})
+        self.assertEqual(runtime.run_knowledge(T0), {"skipped": "nobody-to-tell"})
+        self.assertFalse((self.data / "worker" / "told.json").exists())
+
+    def test_only_the_source_name_and_date_reach_the_notice(self):
+        runtime = self.runtime({"hours": {"reviewBy": "2026-10-10"}})
+        runtime.run_knowledge(T0)
+        (notice,) = [item for item in runtime.queue.pending() if item["kind"] == "knowledge-review"]
+        self.assertEqual(notice["to"], OWNER)
+        self.assertNotIn("Hargreaves", notice["text"])
+
+
 class CrmFilingTests(Case):
     """A handled customer email is filed to the built-in contact log by the worker, retried after an outage and never reported as filed unless acknowledged."""
 
@@ -340,6 +498,39 @@ class CrmFilingTests(Case):
         self.assertEqual([event["outcome"] for event in executed], ["succeeded"])
         self.assertEqual(executed[0]["ledger"]["externalObjectRef"], entry["providerRef"])
         self.assertEqual(runtime._crm_filing()[1].keys(), [])  # acknowledged, so nothing is kept for a retry
+
+    def interactions(self, runtime):
+        with runtime._sidecar().crm_store()._locked() as state:
+            return [dict(item) for item in state["interactions"].values()]
+
+    def test_a_verified_sender_is_filed_against_the_one_contact_holding_the_address(self):
+        runtime = self.runtime()
+        made = runtime._sidecar().crm_store().create_contact({"name": "Alex Customer", "email": "Alex@Customer.example"})
+        runtime._spool().ingest(raw(), now=T0 - 5)
+        runtime.tick()
+        (interaction,) = self.interactions(runtime)
+        self.assertEqual(interaction["contact"], made["objectId"])
+        self.assertEqual(runtime._sidecar().crm_store().review_queue()["unmatchedInteractions"], [])
+
+    def test_no_holder_or_several_holders_stay_in_the_unmatched_queue_for_a_person(self):
+        runtime = self.runtime()
+        runtime._spool().ingest(raw(), now=T0 - 5)  # nobody holds the address
+        runtime.tick()
+        store = runtime._sidecar().crm_store()
+        store.create_contact({"name": "Alex One", "email": "alex@customer.example"})
+        store.create_contact({"name": "Alex Two", "email": "alex@customer.example"})  # a possible duplicate: ambiguous, so not guessed
+        runtime._spool().ingest(raw("<c2@customer.example>"), now=T0 - 4)
+        self.clock[0] += 60  # past the mailbox job's interval
+        runtime.tick()
+        self.assertEqual([item["contact"] for item in self.interactions(runtime)], ["unmatched", "unmatched"])
+
+    def test_an_unverified_sender_is_never_matched_to_a_contact(self):
+        runtime = self.runtime()
+        runtime._sidecar().crm_store().create_contact({"name": "Alex Customer", "email": "alex@customer.example"})
+        forged = raw().replace(b"spf=pass; dkim=pass; dmarc=pass", b"spf=fail; dkim=fail; dmarc=fail")
+        runtime._spool().ingest(forged, now=T0 - 5)
+        runtime.tick()
+        self.assertEqual([item["contact"] for item in self.interactions(runtime)], ["unmatched"])
 
     def test_filing_is_off_without_the_built_in_contact_log_and_the_job_says_so(self):
         runtime = self.runtime(crm=False)
@@ -421,8 +612,9 @@ class CrmFilingTests(Case):
         runtime._spool().ingest(raw(), now=T0 - 5)
         runtime.tick()
         stored = "".join(path.read_text() for path in (self.data / "crm-sync").rglob("*.json"))
+        text = re.sub(r"[0-9a-f]{16,}|\d{2}:\d{2}:\d{2}\.\d+Z", "", stored + (self.data / "audit.jsonl").read_text())  # digests and ids are random hex that can contain "4111"
         for private in ("4111", "opening hours", "alex@customer.example"):
-            self.assertNotIn(private, stored + (self.data / "audit.jsonl").read_text())
+            self.assertNotIn(private, text)
 
 
 class LoopTests(Case):
@@ -457,6 +649,40 @@ class LoopTests(Case):
         self.assertEqual(sorted(event["details"]["kind"] for event in expired), ["decision", "request"])
         self.assertTrue(all(event["details"]["requestId"] == old for event in expired))
         self.assertNotIn("customer text", (self.data / "audit.jsonl").read_text())
+
+    def test_an_approval_that_expires_undecided_tells_the_contact_once_by_tool_name_only(self):
+        sent = []
+        runtime = self.make({"escalateTo": OWNER, "people": {OWNER: {"channel": "slack", "address": "D0OWNER"}}},
+                            senders={"slack": lambda address, text: sent.append((address, text))})
+        approvals = self.data / "approvals"
+        old, decided = "ab" * 32, "cd" * 32
+        (approvals / "pending").mkdir(parents=True)
+        (approvals / "decisions").mkdir(parents=True)
+        (approvals / "pending" / f"{old}.json").write_text(json.dumps({
+            "requestId": old, "tool": "crm.update", "requestedAt": T0 - 30 * 3600, "arguments": {"note": "customer text"}, "justification": "private reason"}))
+        (approvals / "decisions" / f"{decided}.json").write_text(json.dumps({"requestId": decided, "approved": True, "decidedAt": T0 - 30 * 3600}))
+        runtime.tick()  # retention runs after notices in a pass, so the notice goes out on the next one
+        self.clock[0] += 60
+        runtime.tick()
+        told = [text for address, text in sent if "expired" in text]
+        self.assertEqual(len(told), 1)  # the stale decision is dropped quietly: nothing was waiting
+        self.assertIn("crm.update", told[0])
+        self.assertIn(old[:12], told[0])
+        for private in ("customer text", "private reason"):
+            self.assertNotIn(private, told[0])
+        self.clock[0] += 7200
+        runtime.tick()
+        self.assertEqual(len([text for address, text in sent if "expired" in text]), 1)  # not repeated
+
+    def test_an_expired_request_with_nobody_to_tell_is_still_removed_and_ledgered(self):
+        runtime = self.make({})
+        pending = self.data / "approvals" / "pending"
+        pending.mkdir(parents=True)
+        (pending / f"{'ab' * 32}.json").write_text(json.dumps({"requestId": "ab" * 32, "tool": "BAD TOOL!", "requestedAt": T0 - 30 * 3600}))
+        runtime.tick()
+        self.assertEqual(list(pending.glob("*.json")), [])
+        self.assertEqual(len([event for event in self.events() if event.get("action") == "approval.expired"]), 1)
+        self.assertEqual(runtime.queue.pending(), [])
 
     def test_jobs_respect_their_interval(self):
         runtime = self.make({})

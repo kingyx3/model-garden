@@ -16,10 +16,16 @@ small, bounded amount of work:
 - **notices**: delivers hand-off, human-step, connection, grant, schedule and mailbox notices to the named person through the
   channel the people directory gives for them (``notice_delivery.py``). A person with no usable channel stays ``no-channel`` and
   is offered again on the next pass; nothing is marked delivered early.
-- **crm-sync**: files each handled customer email to the bound Tier 0 contact log through the governed ``crm.log-interaction`` boundary
+- **crm-sync**: files each handled customer email to the bound Tier 0 contact log (against the one contact holding a verified sender's address, else the unmatched queue) through the governed ``crm.log-interaction`` boundary
   (the support mailbox does the first attempt), retries the ones a transient outage left behind when their backoff has passed, and tells
   the mailbox owner once about any filing that is blocked and needs a person (``client-operator.py crm-sync``). Nothing is reported as
   filed unless the CRM acknowledged it.
+- **events**: the event sources the worker does not witness itself. It fires ``chat.message`` for each digest the channel gateway left
+  in the shared event outbox (``event_outbox.py``; no sender, id or text) and ``ticket.created`` for each Tier 0 ticket created since
+  its last pass by any route (the coworker through the sidecar, a person); a ticket the mailbox already announced is not run twice.
+- **knowledge**: tells the escalation contact (else the mailbox owner) once when an approved business-rules source is due for review
+  within two weeks and once when it has passed its ``reviewBy`` date (after which the coworker stops answering from it), naming only
+  the source and the date.
 - **retention**: purges expired artifacts and mail past the retention period.
 - **usage**: meters model usage from the Hermes session stores mounted read-only (``MODEL_GARDEN_USAGE_SOURCES``) and ledgers
   what changed since the last pass as ``usage.recorded`` (``platform/metering/usage.py``): tokens, API calls and cost per session,
@@ -37,6 +43,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import datetime as dt
 import fcntl
 import hashlib
 import importlib.util
@@ -52,12 +59,13 @@ from collections.abc import Callable, Mapping
 from typing import Any
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
-DEFAULT_INTERVALS = {"scheduler": 60, "mailbox": 30, "notices": 60, "retention": 3600, "usage": 300, "export": 300, "crm-sync": 120}
+DEFAULT_INTERVALS = {"scheduler": 60, "mailbox": 30, "notices": 60, "retention": 3600, "usage": 300, "export": 300, "crm-sync": 120, "events": 30, "knowledge": 21_600}
 MIN_INTERVAL, MAX_INTERVAL = 10, 86_400
 # A stalled export alerts the escalation contact when the ledger is this far ahead of it, or has waited this long.
 EXPORT_MAX_LAG_EVENTS = 100
 EXPORT_MAX_STALE_SECONDS = 6 * 3600
 MAX_QUEUE = 2_000
+MAX_EVENT_BATCH = 50
 IDENTITY = "runtime:worker"
 
 
@@ -94,6 +102,8 @@ MODULES = {
     "usage": "platform/metering/usage.py",
     "approval": "scripts/runtime-approval.py",
     "crm_sync": "platform/core/crm_sync.py",
+    "outbox": "platform/core/event_outbox.py",
+    "knowledge": "platform/core/knowledge.py",
     "crm_filing": "platform/core/crm_filing.py",
 }
 
@@ -315,6 +325,63 @@ class Worker:
             return {"failed": type(exc).__name__}
         return {"runs": len(outcome["runs"]), "limited": len(outcome["limited"]), "duplicate": len(outcome["duplicate"])}
 
+    def _events_state_path(self) -> pathlib.Path:
+        return self.data / "worker" / "events.json"
+
+    def _events_state(self) -> dict[str, Any]:
+        try:
+            state = json.loads(self._events_state_path().read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            state = {}
+        if not isinstance(state, dict):
+            state = {}
+        offset, since = state.get("offset"), state.get("ticketsSince")
+        at_since = state.get("ticketsAtSince")
+        return {
+            "offset": offset if isinstance(offset, int) and not isinstance(offset, bool) and offset >= 0 else 0,
+            "ticketsSince": since if isinstance(since, int) and not isinstance(since, bool) else None,
+            "ticketsAtSince": [item for item in at_since if isinstance(item, str)][:200] if isinstance(at_since, list) else [],
+        }
+
+    def _save_events_state(self, state: Mapping[str, Any]) -> None:
+        path = self._events_state_path()
+        path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        temporary = path.with_suffix(".tmp")
+        temporary.write_text(json.dumps(state, sort_keys=True) + "\n", encoding="utf-8")
+        os.replace(temporary, path)
+
+    def run_events(self, now: int) -> dict[str, Any]:
+        """Fire ``chat.message`` for what the gateway reported and ``ticket.created`` for tickets nobody announced; once per event."""
+        if self.coworker is None:
+            return {"skipped": "no-coworker-configured"}  # leave the events where they are until there is something to run them
+        state = self._events_state()
+        outbox = _module("outbox").EventOutbox(self.data / "events")
+        chat, tickets_fired = 0, 0
+        events, offset = outbox.read(state["offset"])
+        for event in events:
+            self.fire_event("chat.message", str(event["ref"]), now)
+            chat += 1
+        state["offset"] = outbox.compact(offset)
+        try:
+            store = self._sidecar().tickets_store()
+        except PermissionError:  # no built-in ticket store is bound
+            store = None
+        if store is not None:
+            if state["ticketsSince"] is None:
+                state["ticketsSince"], state["ticketsAtSince"] = now, []  # start now: tickets from before this worker watched are not replayed
+            else:
+                fresh = [item for item in store.created_since(state["ticketsSince"]) if item["ticketId"] not in state["ticketsAtSince"]][:MAX_EVENT_BATCH]
+                for item in fresh:
+                    self.fire_event("ticket.created", item["ticketId"], now)  # the mailbox path may have announced it already: the store skips a repeat
+                    tickets_fired += 1
+                if fresh:
+                    newest = fresh[-1]["createdAt"]
+                    carried = state["ticketsAtSince"] if newest == state["ticketsSince"] else []
+                    state["ticketsSince"] = newest
+                    state["ticketsAtSince"] = [*carried, *(item["ticketId"] for item in fresh if item["createdAt"] == newest)]
+        self._save_events_state(state)
+        return {"chat": chat, "tickets": tickets_fired}
+
     def _sidecar(self):
         environ = {
             **os.environ, "MODEL_GARDEN_INITIATING_IDENTITY": "runtime:support-mailbox",
@@ -370,6 +437,75 @@ class Worker:
             return result["result"]
 
         return ledger, store, executor
+
+    def _contact_for(self) -> Callable[[str], str]:
+        """Which contact a *verified* sender's email is filed against: the one contact holding that address, else the ``unmatched`` queue.
+
+        The mailbox only offers an address the receiving server verified. No holder, several holders (a possible duplicate a person has
+        to settle) and any store problem all mean ``unmatched``; a person assigns it (`client-operator.py contacts review|assign`).
+        """
+        sidecar = self._sidecar()
+
+        def contact_for(address: str) -> str:
+            try:
+                holders = sidecar.crm_store().find_by_email(address)
+            except (PermissionError, OSError, ValueError):
+                return "unmatched"
+            return holders[0] if len(holders) == 1 else "unmatched"
+
+        return contact_for
+
+    def _told_once(self, kind: str, reference: str) -> bool:
+        """True the first time this ``kind`` and ``reference`` is seen and remembers it, so a condition that lasts is announced once."""
+        path = self.data / "worker" / "told.json"
+        digest = hashlib.sha256(f"{kind}|{reference}".encode("utf-8")).hexdigest()[:24]
+        try:
+            known = [item for item in json.loads(path.read_text(encoding="utf-8")) if isinstance(item, str)]
+        except (OSError, ValueError, TypeError):
+            known = []
+        if digest in known:
+            return False
+        path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        temporary = path.with_suffix(".tmp")
+        temporary.write_text(json.dumps([*known, digest][-MAX_QUEUE:]) + "\n", encoding="utf-8")
+        os.replace(temporary, path)
+        return True
+
+    def run_knowledge(self, now: int) -> dict[str, Any]:
+        """Tell the contact when an approved business-rules source is due for review or has passed its ``reviewBy`` date (declared dates only)."""
+        to = self.config["escalateTo"] or (self.config["mailbox"] or {}).get("owner")
+        if not to:
+            return {"skipped": "nobody-to-tell"}
+        knowledge = _module("knowledge")
+        today = dt.datetime.fromtimestamp(now, dt.timezone.utc).date()
+        due = stale = 0
+        for item in self.desired_state.get("knowledge") or []:
+            spec = item.get("spec") if isinstance(item, Mapping) else None
+            name = (item.get("metadata") or {}).get("name") if isinstance(item, Mapping) else None
+            if not isinstance(spec, Mapping) or not isinstance(name, str) or not spec.get("reviewBy"):
+                continue
+            state = knowledge.source_state(spec, agent=self._agent(), today=today)
+            try:
+                days = (dt.date.fromisoformat(str(spec["reviewBy"])) - today).days
+            except ValueError:
+                continue
+            if state == "stale":
+                phase = "stale"
+            elif state == "usable" and days <= knowledge.REVIEW_SOON_DAYS:
+                phase = "due-soon"
+            else:
+                continue
+            if not self._told_once("knowledge-review", f"{name}|{spec['reviewBy']}|{phase}"):
+                continue
+            if phase == "stale":
+                stale += 1
+                text = (f"The business-rules source {name} passed its review date ({spec['reviewBy']}), so the coworker has stopped answering from it. "
+                        "Confirm the content is still right, set a later reviewBy and redeploy.")
+            else:
+                due += 1
+                text = f"The business-rules source {name} is due for review on {spec['reviewBy']} ({days} day(s) left). After that the coworker stops answering from it."
+            self.queue.add("knowledge-review", to, text, reference=f"{name}:{phase}"[:40])
+        return {"dueSoon": due, "stale": stale}
 
     def _blocked_notified(self) -> pathlib.Path:
         return self.data / "crm-sync" / "blocked-notified.json"
@@ -454,7 +590,7 @@ class Worker:
             return made
 
         crm = self._crm_filing()
-        filing = {"ledger": crm[0], "payloads": crm[1], "crm": crm[2]} if crm is not None else {}
+        filing = {"ledger": crm[0], "payloads": crm[1], "crm": crm[2], "contact_for": self._contact_for()} if crm is not None else {}
         mailbox = support.SupportMailbox(
             adapter, text.PrincipalDirectory(), {"mail.draft": draft}, classify=classify, answer=answer, escalate=escalate, ticket=open_ticket if tickets is not None else None,
             handled=support.MessageLog(self.data / "mail-handled"), audit=self.audit, conversations=self._conversation_recorder(), **filing,
@@ -514,8 +650,12 @@ class Worker:
         """Remove approval requests and decisions older than ``MODEL_GARDEN_APPROVAL_TTL_HOURS`` and ledger each (ids only)."""
         approval = _module("approval")
         removed = approval.sweep(self.data / "approvals", now=now, ttl=approval.ttl_seconds())
+        to = self.config["escalateTo"] or (self.config["mailbox"] or {}).get("owner")
         for item in removed:
             self.audit("approval.expired", IDENTITY, {"requestId": item["requestId"], "kind": item["kind"]})
+            if item["kind"] == "request" and to:  # an action was waiting for a person and will now never run: say so once, by Tool name only
+                self.queue.add("approval-expired", to, f"An approval request for {item.get('tool') or 'an action'} (ref {item['requestId'][:12]}) expired "
+                               "with no decision, so it was not done. Ask for it again if it is still needed.", reference=item["requestId"][:40])
         return len(removed)
 
     def run_usage(self, now: int) -> dict[str, Any]:
@@ -630,7 +770,7 @@ class Worker:
 
     def jobs(self) -> list[tuple[str, Callable[[int], dict[str, Any]]]]:
         return [
-            ("scheduler", self.run_scheduler), ("mailbox", self.run_mailbox), ("crm-sync", self.run_crm_sync),
+            ("scheduler", self.run_scheduler), ("mailbox", self.run_mailbox), ("crm-sync", self.run_crm_sync), ("events", self.run_events), ("knowledge", self.run_knowledge),
             ("notices", self.deliver_notices), ("retention", self.run_retention), ("usage", self.run_usage),
             ("export", self.run_export),
         ]

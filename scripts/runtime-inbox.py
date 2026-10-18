@@ -4,7 +4,7 @@
   runtime-inbox.py            # text
   runtime-inbox.py --json
 
-Lists pending approvals, open hand-offs (overdue first), open tickets and counts of contact records to review. It names
+Lists pending approvals, open hand-offs (overdue first), open tickets, CRM filings that blocked and need a person, and counts of contact records to review. It names
 Tools, assignees, deadlines and IDs but never action arguments, summaries or personal data; the `next`
 command on each line shows the exact content to the person allowed to act.
 """
@@ -34,7 +34,7 @@ def main(argv: list[str] | None = None) -> int:
         spec.loader.exec_module(module)
         inbox = module.collect(
             approvals=args.data_root / "approvals", handoffs=args.data_root / "handoffs", contacts=args.data_root / "contacts",
-            governance=args.data_root, tickets=args.data_root / "tickets",
+            governance=args.data_root, tickets=args.data_root / "tickets", crm_sync=args.data_root / "crm-sync",
         )
     except (OSError, ValueError, json.JSONDecodeError) as exc:
         print(f"Runtime inbox failed: {exc}", file=sys.stderr)
