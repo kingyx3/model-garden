@@ -239,7 +239,8 @@ class SupportMailbox:
         except email.ChannelVerificationError:
             return {"status": "ignored", "reason": "unreadable"}
         thread = message.thread_id or message.conversation_id
-        result: dict[str, Any] = {"threadRef": thread_reference(thread)}
+        # messageRef is a short digest of the message id: enough to say "this message" to a trigger or a ledger, never the id itself
+        result: dict[str, Any] = {"threadRef": thread_reference(thread), "messageRef": hashlib.sha256(message.message_id.encode("utf-8")).hexdigest()[:16]}
         principal = self._directory.principal_for(message)
         result["principalAccess"] = principal.access  # recorded for the ledger; it never widens what this handler does
 

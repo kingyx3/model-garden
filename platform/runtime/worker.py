@@ -262,18 +262,36 @@ class Worker:
         report = self._schedule_store().reconcile(definitions, by=by, now=now)
         return {"applied": True, **{key: len(value) for key, value in report.items()}}
 
-    def run_scheduler(self, now: int) -> dict[str, Any]:
-        if self.coworker is None:
-            return {"skipped": "no-coworker-configured"}
-        scheduler = _module("scheduler").Scheduler(
+    def _scheduler(self):
+        return _module("scheduler").Scheduler(
             self._schedule_store(), _module("coworker").schedule_runner(self.coworker),
             grants_for=self.grants_for, permissions_for=self.permissions_for, handoff_root=self.data / "handoffs",
             audit=self.audit,
             notify=lambda notice: self.queue.add(notice["kind"], notice.get("to"), notice["text"], reference=str(notice.get("taskId", ""))[:40]),
         )
+
+    def run_scheduler(self, now: int) -> dict[str, Any]:
+        if self.coworker is None:
+            return {"skipped": "no-coworker-configured"}
+        scheduler = self._scheduler()
         due = scheduler.run_due(now=now)
         resumed = scheduler.resume_waiting(now=now)
         return {"runs": len(due["runs"]), "resumed": len(resumed["runs"])}
+
+    def fire_event(self, event: str, reference: str, now: int) -> dict[str, Any]:
+        """Run the active triggers for one event the worker witnessed (``mail.received``, ``ticket.created``), once per event reference.
+
+        Only the event kind and a digest of the reference reach the runner (``scheduler.run_event``); a trigger that already ran for this
+        event, or is at its hourly limit, is skipped. A failure is ledgered by type and never stops the work that produced the event.
+        """
+        if self.coworker is None:
+            return {"skipped": "no-coworker-configured"}
+        try:
+            outcome = self._scheduler().run_event(event, reference, now=now)
+        except Exception as exc:  # noqa: BLE001 - the mail or ticket is already handled; say only what failed
+            self.audit("worker.event-failed", IDENTITY, {"event": event, "error": type(exc).__name__})
+            return {"failed": type(exc).__name__}
+        return {"runs": len(outcome["runs"]), "limited": len(outcome["limited"]), "duplicate": len(outcome["duplicate"])}
 
     def _sidecar(self):
         environ = {
@@ -335,6 +353,7 @@ class Worker:
                            f"A customer email needs a person (reason: {item['reason']}, thread {item['threadRef'][:12]}).",
                            reference=item["threadRef"][:40])
 
+        events: list[tuple[str, str]] = []  # what this message caused, announced to triggers once it has been handled
         try:
             tickets = sidecar.tickets_store()
         except PermissionError:  # no built-in ticket store is bound: a thread for a person stays a notice only
@@ -349,13 +368,23 @@ class Worker:
             if not made["duplicate"]:
                 self.audit("ticket.opened", "runtime:support-mailbox",
                            {"ticketId": made["ticketId"], "project": "support", "reason": item["reason"], "threadRef": item["threadRef"][:24]})
+                events.append(("ticket.created", made["ticketId"]))
             return made
 
         mailbox = support.SupportMailbox(
             adapter, text.PrincipalDirectory(), {"mail.draft": draft}, classify=classify, answer=answer, escalate=escalate, ticket=open_ticket if tickets is not None else None,
             handled=support.MessageLog(self.data / "mail-handled"), audit=self.audit, conversations=self._conversation_recorder(),
         )
-        return lambda raw, now: mailbox.handle(raw, now=now)
+        def handle(raw: bytes, now: int) -> dict[str, Any]:
+            del events[:]
+            result = mailbox.handle(raw, now=now)
+            if result.get("status") != "ignored":  # loops, spam and redeliveries are not events
+                events.append(("mail.received", f"{result.get('threadRef')}:{result.get('messageRef')}"))
+            for kind, reference in list(events):
+                self.fire_event(kind, reference, now)
+            return result
+
+        return handle
 
     def _spool(self):
         settings = self.config["mailbox"]
