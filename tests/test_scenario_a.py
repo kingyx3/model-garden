@@ -123,10 +123,12 @@ class ScenarioA(W.Case):
         # The transcript holds no caller number and a caller's own words prove nothing, so the call is not guessed onto a customer:
         # its CRM interaction waits in the unmatched queue for a named person (`client-operator.py contacts review|assign`).
         self.assertIsNone(store.link_of(store.conversation_id("voice", "call-1")))
-        # The worker also files the handled email, to the same unmatched queue (a sender is not matched to a contact for filing).
-        waiting = {item["transcriptRef"].split(":")[0]: item for item in self.contacts.review_queue()["unmatchedInteractions"]}
-        self.assertEqual(sorted(waiting), ["email", "transcript"])
-        self.assertEqual(waiting["transcript"]["transcriptRef"], "transcript:call-1")
+        # The worker also files the handled email, but to the customer: the sender was verified and exactly one contact holds the address.
+        (waiting,) = self.contacts.review_queue()["unmatchedInteractions"]
+        self.assertEqual(waiting["transcriptRef"], "transcript:call-1")
+        with self.contacts._locked() as state:
+            emailed = [item["contact"] for item in state["interactions"].values() if item["channel"] == "email"]
+        self.assertEqual(emailed, [self.customer])
         self.assertEqual([row["channel"] for row in store.list_conversations(unlinked_only=True)], ["voice"])
         # A named person recognises the call and links it: one history now spans both channels, and the decision is ledgered.
         voice = store.conversation_id("voice", "call-1")
@@ -163,7 +165,7 @@ class ScenarioA(W.Case):
         # a governed read and the platform's own filing of the handled email (to the unmatched queue); nothing the email asked for
         self.assertEqual({event["tool"] for event in executed}, {"kb.search", "crm.log-interaction"})
         filed = next(event for event in executed if event["tool"] == "crm.log-interaction")
-        self.assertEqual(filed["arguments"]["objectId"], "unmatched")
+        self.assertEqual(filed["arguments"]["objectId"], self.customer)  # the verified sender's own contact, whatever the email asks for
         self.assertEqual(self.contacts.review_queue()["contacts"], contacts_before)  # no contact was created for evil@attacker.example
         self.assertEqual(len(self.worker._artifacts().list()), 1)  # at most a draft for a person to read
         self.assertNotIn("attacker", json.dumps([e for e in self.ledger() if e.get("event") == "execution"]))

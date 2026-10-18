@@ -7,6 +7,7 @@ copying their contents:
 - pending approvals (an exact material action waiting for a mapped approver),
 - open Tier 4 hand-offs (an action the coworker prepared for a named person, with its deadline),
 - open Tier 0 tickets (work items the coworker or a person opened and nobody has finished), as a count and the oldest age,
+- CRM filings that blocked and need a person (the worker retries transient failures itself), as a count and the oldest age,
 - records that need a person's review in the Tier 0 contact log (unmatched interactions and possible
   duplicates), as counts only,
 - connections that are failed, revoked or degraded (a token that expired or was withdrawn is the commonest
@@ -142,6 +143,26 @@ def _tickets(root: pathlib.Path | None, now: int) -> list[dict[str, Any]]:
     return items
 
 
+def _crm_filings(root: pathlib.Path | None, now: int) -> list[dict[str, Any]]:
+    """CRM filings that blocked and need a person (the worker retries the transient ones itself); identifiers and ages only."""
+    if root is None or not pathlib.Path(root).is_dir():
+        return []
+    sync = _sibling("model_garden_inbox_crm_sync", "crm_sync.py")
+    blocked: list[dict[str, Any]] = []
+    for path in sorted(pathlib.Path(root).glob("*.crm-sync.json")):
+        try:
+            blocked.extend(sync.SyncLedger(pathlib.Path(root), tenant=path.name[: -len(".crm-sync.json")]).list(states=("blocked",)))
+        except (OSError, ValueError):
+            continue
+    if not blocked:
+        return []
+    return [{
+        "kind": "crm-filing", "count": len(blocked), "oldestWaitingSeconds": max(0, now - min(entry["createdAt"] for entry in blocked)),
+        "next": "python3 scripts/client-operator.py crm-sync list --project-name <env>  (shows why each did not reach the CRM; "
+                "`crm-sync retry <key> --by <you>` once the cause is fixed)",
+    }]
+
+
 def _connections(root: pathlib.Path | None) -> list[dict[str, Any]]:
     if root is None:
         return []
@@ -178,12 +199,13 @@ def collect(
     contacts: pathlib.Path | None = None,
     governance: pathlib.Path | None = None,
     tickets: pathlib.Path | None = None,
+    crm_sync: pathlib.Path | None = None,
     now: int | None = None,
 ) -> dict[str, Any]:
     """Everything waiting for a person, most urgent first.
 
     Order: failed or revoked connections, overdue hand-offs, approvals, other hand-offs, degraded
-    connections, open tickets, then records to review.
+    connections, open tickets, CRM filings that need a person, then records to review.
     """
     current = int(time.time()) if now is None else now
     open_handoffs = sorted(_handoffs(handoffs, current), key=lambda item: (not item["overdue"], item.get("deadline") or 0, item["id"]))
@@ -192,18 +214,20 @@ def collect(
     due = [item for item in open_handoffs if not item["overdue"]]
     reviews = _review(contacts)
     open_tickets = _tickets(tickets, current)
+    filings = _crm_filings(crm_sync, current)
     connections = _connections(governance)
     down = [item for item in connections if item["health"] in ("failed", "revoked")]
     degraded = [item for item in connections if item["health"] == "degraded"]
     return {
         "generatedAt": current,
-        "items": [*down, *overdue, *waiting, *due, *degraded, *open_tickets, *reviews],
+        "items": [*down, *overdue, *waiting, *due, *degraded, *open_tickets, *filings, *reviews],
         "counts": {
             "approvals": len(waiting),
             "handoffs": len(open_handoffs),
             "overdueHandoffs": len(overdue),
             "reviews": sum(item["count"] for item in reviews),
             "tickets": sum(item["count"] for item in open_tickets),
+            "crmFilings": sum(item["count"] for item in filings),
             "connections": len(connections),
         },
     }
@@ -224,7 +248,8 @@ def format_text(inbox: dict[str, Any]) -> str:
     lines = [
         f"Waiting for a person: {counts['approvals']} approval(s), {counts['handoffs']} hand-off(s)"
         f" ({counts['overdueHandoffs']} overdue), {counts['reviews']} record(s) to review,"
-        f" {counts['connections']} connection(s) not healthy, {counts['tickets']} open ticket(s)",
+        f" {counts['connections']} connection(s) not healthy, {counts['tickets']} open ticket(s),"
+        f" {counts['crmFilings']} CRM filing(s) blocked",
     ]
     for item in inbox["items"]:
         if item["kind"] == "approval":
@@ -234,6 +259,8 @@ def format_text(inbox: dict[str, Any]) -> str:
             lines.append(f"  CONNECTION  {item['family']} is {item['health'].upper()}{why}")
         elif item["kind"] == "tickets":
             lines.append(f"  TICKETS   {item['count']} open, oldest waiting {_age(item['oldestWaitingSeconds'])}")
+        elif item["kind"] == "crm-filing":
+            lines.append(f"  CRM       {item['count']} filing(s) blocked, oldest waiting {_age(item['oldestWaitingSeconds'])}")
         elif item["kind"] == "handoff":
             due = "OVERDUE" if item["overdue"] else "open"
             lines.append(f"  HAND-OFF  {item['tool']}  for {item['assignee']}  {due} ({item['reason']})  id {item['id']}")
@@ -255,7 +282,7 @@ def for_person(inbox: dict[str, Any], identity: str, *, everything: bool) -> dic
     return {
         "generatedAt": inbox["generatedAt"], "items": mine,
         "counts": {"approvals": 0, "handoffs": len(mine), "overdueHandoffs": sum(1 for item in mine if item["overdue"]), "reviews": 0,
-                   "tickets": 0, "connections": 0},
+                   "tickets": 0, "crmFilings": 0, "connections": 0},
     }
 
 
@@ -265,7 +292,7 @@ def format_chat(inbox: dict[str, Any]) -> str:
         return "Nothing is waiting for you."
     counts = inbox["counts"]
     parts = [f"{counts[key]} {label}" for key, label in (("approvals", "approval(s)"), ("handoffs", "hand-off(s)"), ("tickets", "open ticket(s)"),
-                                                          ("reviews", "record(s) to review"), ("connections", "connection(s) not healthy")) if counts[key]]
+                                                          ("crmFilings", "CRM filing(s) blocked"), ("reviews", "record(s) to review"), ("connections", "connection(s) not healthy")) if counts[key]]
     if counts["overdueHandoffs"]:
         parts.append(f"{counts['overdueHandoffs']} overdue")
     lines = ["Waiting: " + ", ".join(parts) + "."]
@@ -283,6 +310,9 @@ def format_chat(inbox: dict[str, Any]) -> str:
             lines.append(f"- Connection {item['family']} is {item['health'].upper()}{why}. Ask its owner to reconnect it.")
         elif item["kind"] == "tickets":
             lines.append(f"- {item['count']} open ticket(s), the oldest waiting {_age(item['oldestWaitingSeconds'])}. Ask the coworker to search tickets.")
+        elif item["kind"] == "crm-filing":
+            lines.append(f"- {item['count']} customer email(s) did not reach the CRM and need a person, the oldest waiting "
+                         f"{_age(item['oldestWaitingSeconds'])}. An operator can see why on the client host (`crm-sync list`).")
         else:
             lines.append(f"- {item['count']} {item['what'].replace('-', ' ')} to review. An operator can show them on the client host.")
     return "\n".join(lines)

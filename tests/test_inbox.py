@@ -26,6 +26,7 @@ def _load(name: str, relative: str):
 inbox = _load("inbox_under_test", "platform/core/inbox.py")
 handoff = _load("handoff_for_inbox", "platform/core/handoff.py")
 contacts = _load("contacts_for_inbox", "platform/core/contacts.py")
+crm_sync = _load("crm_sync_for_inbox", "platform/core/crm_sync.py")
 cli = _load("runtime_inbox_under_test", "scripts/runtime-inbox.py")
 operator = _load("client_operator_for_inbox", "scripts/client-operator.py")
 
@@ -89,7 +90,7 @@ class TicketsInInboxTests(InboxCase):
 class CollectTests(InboxCase):
     def test_an_empty_runtime_says_so(self):
         result = self.collect()
-        self.assertEqual((result["items"], result["counts"]), ([], {"approvals": 0, "handoffs": 0, "overdueHandoffs": 0, "reviews": 0, "tickets": 0, "connections": 0}))
+        self.assertEqual((result["items"], result["counts"]), ([], {"approvals": 0, "handoffs": 0, "overdueHandoffs": 0, "reviews": 0, "tickets": 0, "crmFilings": 0, "connections": 0}))
         self.assertEqual(inbox.format_text(result), "Nothing is waiting for a person.\n")
 
     def test_items_are_ordered_overdue_handoffs_then_oldest_approvals_then_open_handoffs_then_reviews(self):
@@ -105,7 +106,7 @@ class CollectTests(InboxCase):
         self.assertEqual([(item["kind"], item.get("id")) for item in result["items"][:4]],
                          [("handoff", late), ("approval", old), ("approval", recent), ("handoff", soon)])
         self.assertEqual([item["what"] for item in result["items"][4:]], ["unmatched-interactions", "possible-duplicate-contacts"])
-        self.assertEqual(result["counts"], {"approvals": 2, "handoffs": 2, "overdueHandoffs": 1, "reviews": 2, "tickets": 0, "connections": 0})
+        self.assertEqual(result["counts"], {"approvals": 2, "handoffs": 2, "overdueHandoffs": 1, "reviews": 2, "tickets": 0, "crmFilings": 0, "connections": 0})
         self.assertTrue(result["items"][0]["overdue"])
         self.assertFalse(result["items"][3]["overdue"])
 
@@ -132,6 +133,38 @@ class CollectTests(InboxCase):
         self.approval("fresh", age=3600)
         self.approval("stale", age=30 * 3600)
         self.assertEqual([item["id"] for item in self.collect()["items"]], [request_id("fresh")])
+
+    def blocked_filing(self, external_id="thread-1", *, created=NOW - 7200, error="unauthorized", tenant="acme-prod"):
+        ledger = crm_sync.SyncLedger(self.root / "crm-sync", tenant=tenant)
+        key = ledger.enqueue(channel="email", external_id=external_id, interaction_type="email", now=created)["key"]
+        ledger.record_failure(key, error_code=error, now=created)
+        return key
+
+    def test_a_blocked_crm_filing_waits_in_the_inbox_as_a_count_and_an_age_never_content(self):
+        self.blocked_filing("thread-1", created=NOW - 7200)
+        self.blocked_filing("thread-2", created=NOW - 600)
+        failed = crm_sync.SyncLedger(self.root / "crm-sync", tenant="acme-prod")
+        retrying = failed.enqueue(channel="email", external_id="thread-3", interaction_type="email", now=NOW)["key"]
+        failed.record_failure(retrying, error_code="outage", now=NOW)  # transient: the worker retries it, nobody is asked
+        done = failed.enqueue(channel="email", external_id="thread-4", interaction_type="email", now=NOW)["key"]
+        failed.record_success(done, provider_ref="built-in-crm:interaction/i-1", now=NOW)
+        result = inbox.collect(approvals=self.approvals, handoffs=self.handoffs, crm_sync=self.root / "crm-sync", now=NOW)
+        (item,) = result["items"]
+        self.assertEqual((item["kind"], item["count"], item["oldestWaitingSeconds"]), ("crm-filing", 2, 7200))
+        self.assertEqual(result["counts"]["crmFilings"], 2)
+        self.assertIn("crm-sync list", item["next"])
+        text = inbox.format_text(result)
+        self.assertIn("2 CRM filing(s) blocked", text)
+        chat = inbox.format_chat(result)
+        self.assertIn("2 customer email(s) did not reach the CRM", chat)
+        self.assertNotIn("thread-1", text + chat + json.dumps(result))
+
+    def test_no_blocked_filing_or_no_store_adds_nothing_and_a_member_does_not_see_it(self):
+        self.assertEqual(inbox.collect(approvals=self.approvals, handoffs=self.handoffs, crm_sync=self.root / "crm-sync", now=NOW)["items"], [])
+        self.blocked_filing()
+        snapshot = inbox.collect(approvals=self.approvals, handoffs=self.handoffs, crm_sync=self.root / "crm-sync", now=NOW)
+        self.assertEqual(inbox.for_person(snapshot, "someone@acme.example", everything=False)["items"], [])
+        self.assertEqual(len(inbox.for_person(snapshot, "approver@acme.example", everything=True)["items"]), 1)
 
     def test_unsafe_or_corrupt_records_are_skipped_rather_than_crashing_the_view(self):
         self.approval("good")
@@ -166,6 +199,13 @@ class CommandTests(InboxCase):
         self.assertIn("HAND-OFF", out)
         code, out, _ = self.run_cli("--json")
         self.assertEqual(json.loads(out)["counts"]["handoffs"], 1)
+
+    def test_the_runtime_command_reads_the_workers_crm_sync_directory(self):
+        crm = crm_sync.SyncLedger(self.root / "crm-sync", tenant="acme-prod")
+        key = crm.enqueue(channel="email", external_id="thread-9", interaction_type="email", now=NOW - 60)["key"]
+        crm.record_failure(key, error_code="rejected", now=NOW - 60)
+        code, out, _ = self.run_cli("--json")
+        self.assertEqual((code, json.loads(out)["counts"]["crmFilings"]), (0, 1))
 
     def test_an_empty_data_root_is_a_clean_no_op(self):
         code, out, _ = self.run_cli()

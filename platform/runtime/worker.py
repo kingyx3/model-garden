@@ -16,7 +16,7 @@ small, bounded amount of work:
 - **notices**: delivers hand-off, human-step, connection, grant, schedule and mailbox notices to the named person through the
   channel the people directory gives for them (``notice_delivery.py``). A person with no usable channel stays ``no-channel`` and
   is offered again on the next pass; nothing is marked delivered early.
-- **crm-sync**: files each handled customer email to the bound Tier 0 contact log through the governed ``crm.log-interaction`` boundary
+- **crm-sync**: files each handled customer email to the bound Tier 0 contact log (against the one contact holding a verified sender's address, else the unmatched queue) through the governed ``crm.log-interaction`` boundary
   (the support mailbox does the first attempt), retries the ones a transient outage left behind when their backoff has passed, and tells
   the mailbox owner once about any filing that is blocked and needs a person (``client-operator.py crm-sync``). Nothing is reported as
   filed unless the CRM acknowledged it.
@@ -365,6 +365,23 @@ class Worker:
 
         return ledger, store, executor
 
+    def _contact_for(self) -> Callable[[str], str]:
+        """Which contact a *verified* sender's email is filed against: the one contact holding that address, else the ``unmatched`` queue.
+
+        The mailbox only offers an address the receiving server verified. No holder, several holders (a possible duplicate a person has
+        to settle) and any store problem all mean ``unmatched``; a person assigns it (`client-operator.py contacts review|assign`).
+        """
+        sidecar = self._sidecar()
+
+        def contact_for(address: str) -> str:
+            try:
+                holders = sidecar.crm_store().find_by_email(address)
+            except (PermissionError, OSError, ValueError):
+                return "unmatched"
+            return holders[0] if len(holders) == 1 else "unmatched"
+
+        return contact_for
+
     def _blocked_notified(self) -> pathlib.Path:
         return self.data / "crm-sync" / "blocked-notified.json"
 
@@ -448,7 +465,7 @@ class Worker:
             return made
 
         crm = self._crm_filing()
-        filing = {"ledger": crm[0], "payloads": crm[1], "crm": crm[2]} if crm is not None else {}
+        filing = {"ledger": crm[0], "payloads": crm[1], "crm": crm[2], "contact_for": self._contact_for()} if crm is not None else {}
         mailbox = support.SupportMailbox(
             adapter, text.PrincipalDirectory(), {"mail.draft": draft}, classify=classify, answer=answer, escalate=escalate, ticket=open_ticket if tickets is not None else None,
             handled=support.MessageLog(self.data / "mail-handled"), audit=self.audit, conversations=self._conversation_recorder(), **filing,
