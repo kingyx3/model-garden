@@ -157,7 +157,7 @@ class GovernedToolRuntime:
         # A client's own REST API (a connection whose declaration carries ``api``) uses this transport instead; same governed path.
         self.upstream_rest_transport = upstream_rest_transport
         # A team runtime, never the model, supplies the delegated task this call runs under (see platform/runtime/team_runtime.py):
-        # ``{"governance": {...taskId, originatingPrincipal, delegationChain}, "authority": [Tools], "halt": reason or None}``.
+        # ``{"governance": {...taskId, originatingPrincipal, delegationChain}, "authority": [Tools], "halt": reason or None, "charge": callable}``.
         self.task_resolver = task_resolver
         self.read_policy = GOVERN.parse_read_policy(self.environ.get("MODEL_GARDEN_READ_AUDIT"))
         digest = hashlib.sha256(GOVERN._canonical_json(self.desired_state).encode("utf-8")).hexdigest()
@@ -307,6 +307,11 @@ class GovernedToolRuntime:
         if task is not None:
             # The task's authority is the delegation floor: a Tool outside it, or a task past its deadline or budget, never reaches policy.
             reason = task.get("halt") or (None if tool_name in task["authority"] else "outside-delegated-authority")
+            if reason is None and task.get("charge") is not None:
+                try:
+                    task["charge"]()  # one step of the task's budget, taken before the call can run
+                except PermissionError as exc:
+                    reason = str(exc)
             if reason is not None:
                 event = GOVERN.make_audit_event(
                     "authorization", request, outcome="deny", details={"reason": reason},

@@ -17,9 +17,19 @@ The governed sidecar serves one compiled Agent. A team keeps that property and a
   refused; budget and deadline only tighten). Every hop, and every refused hop, is ledgered. A governed call made under
   ``acting(agent, envelope)`` carries ``taskId``, ``originatingPrincipal`` and ``delegationChain`` and is denied and ledgered when
   the Tool is outside the task's authority, the deadline has passed, the budget is spent, or the envelope belongs to another Agent.
+- **One budget per task tree, charged as calls happen.** A task tree is a ``TaskBudgetTree`` (``platform/core/task_budget.py``),
+  saved under ``<base>/tasks/`` after every change so a restart neither resets spending nor fan-out. Delegating reserves the child's
+  budget from its parent; every governed call under a task is charged one ``steps`` before it runs (``charge`` adds tokens or cost the
+  host measured); past the budget the call is refused, ``task.budget-exhausted`` is ledgered, the branch and its descendants halt and
+  the originating principal is told once through the host's ``notify``.
+- **A person as a task step.** ``open_human_step`` and ``human_step`` put a step to a named person on the Agent's own Tier 4
+  hand-offs (``platform/core/human_step.py``): the pending hand-off is the durable pause, a timeout resolves to the configured
+  fallback and never resumes silently, and the opening, the person's answer (under their name) and a timeout are each ledgered once
+  against the task, so they appear in the task timeline.
 
-Nothing here holds a credential or reaches the network. Not covered: a model-callable delegation Tool, the runtime-native
-handoff/A2A decision, Docker/Hermes deployment of several Agents, and any live evidence.
+Nothing here holds a credential or reaches the network. The task state lives in one host process: sidecars launched from
+``launch_plan`` do not consult it. Not covered: a model-callable delegation Tool, the runtime-native handoff/A2A decision,
+Docker/Hermes deployment of several Agents, and any live evidence.
 """
 from __future__ import annotations
 
@@ -57,6 +67,8 @@ GOVERN = _load("model_garden_team_runtime_govern", "scripts/govern-action.py")
 TEAM = _load("model_garden_team_runtime_team", "platform/core/team.py")
 DELEGATION = _load("model_garden_team_runtime_delegation", "platform/core/delegation.py")
 CAPABILITIES = _load("model_garden_team_runtime_capabilities", "platform/core/capabilities.py")
+TASK_BUDGET = _load("model_garden_team_runtime_task_budget", "platform/core/task_budget.py")
+HUMAN_STEP = _load("model_garden_team_runtime_human_step", "platform/core/human_step.py")
 TeamError = TEAM.TeamError
 
 # The task a call is running under, set by ``acting`` for the duration of one call (thread- and task-local).
@@ -93,6 +105,7 @@ class TeamRuntime:
         max_depth: int = DELEGATION.DEFAULT_MAX_DEPTH,
         max_fan_out: int = DELEGATION.DEFAULT_MAX_FAN_OUT,
         runtime_kwargs: Mapping[str, Any] | None = None,
+        notify: Callable[[dict[str, Any]], Any] | None = None,
     ) -> None:
         copies = [copy.deepcopy(dict(state)) for state in states]
         # Raises TeamError for no Agents or two Agents with one name (the name identifies approvals, attribution and ledger records).
@@ -114,8 +127,13 @@ class TeamRuntime:
         self._states = {TEAM.agent_name(state): state for state in copies}
         self._runtimes: dict[str, Any] = {}
         self._lock = threading.Lock()
+        self._notify = notify
+        self._task_lock = threading.RLock()
+        self._trees: dict[str, Any] = {}
+        self._root_of: dict[str, str] = {}
         for name, state in self._states.items():
             self._prepare(name, state)
+        self._restore_tasks()
 
     # -- layout ----------------------------------------------------------------------------
 
@@ -201,7 +219,33 @@ class TeamRuntime:
             results[agent] = {"policy": policy, "knowledge": knowledge}
         return results
 
-    # -- tasks and delegation ---------------------------------------------------------------
+    # -- tasks, delegation and budget ---------------------------------------------------------
+
+    def _ledger_action(self, action: str, by: str, details: dict[str, Any]) -> None:
+        GOVERN.record_operator_action(self.audit_path, action, by, details)
+
+    def _tasks_dir(self) -> pathlib.Path:
+        return self.base / "tasks"
+
+    def _restore_tasks(self) -> None:
+        directory = self._tasks_dir()
+        if not directory.is_dir():
+            return
+        for path in sorted(directory.glob("*.json")):
+            tree = TASK_BUDGET.TaskBudgetTree.restore(json.loads(path.read_text(encoding="utf-8")), audit=self._ledger_action, notify=self._notify)
+            root = path.stem
+            self._trees[root] = tree
+            for row in tree.timeline():
+                self._root_of[row["taskId"]] = root
+
+    def _persist(self, root_id: str) -> None:
+        _write_private(self._tasks_dir() / f"{root_id}.json", self._trees[root_id].snapshot())
+
+    def _tree(self, task_id: Any) -> tuple[str, Any]:
+        root = self._root_of.get(task_id) if isinstance(task_id, str) else None
+        if root is None:
+            raise TeamError("that task was not started by this team")
+        return root, self._trees[root]
 
     def start_task(
         self,
@@ -218,11 +262,19 @@ class TeamRuntime:
     ) -> dict[str, Any]:
         """The root envelope: what the requester may ask for, narrowed to the Tools ``agent`` itself holds."""
         state = self._state(agent)
-        return DELEGATION.root_envelope(
+        envelope = DELEGATION.root_envelope(
             task_id=task_id, agent=agent, originating_principal=originating_principal, goal=goal,
             agent_grants=TEAM.tool_names(state), originator_permissions=originator_permissions,
             budget=budget, deadline=deadline, constraints=constraints, required_capabilities=required_capabilities,
         )
+        with self._task_lock:
+            if envelope["taskId"] in self._root_of:
+                raise TeamError("that task id is already in use")
+            tree = TASK_BUDGET.TaskBudgetTree(envelope, audit=self._ledger_action, notify=self._notify)
+            self._trees[envelope["taskId"]] = tree
+            self._root_of[envelope["taskId"]] = envelope["taskId"]
+            self._persist(envelope["taskId"])
+        return envelope
 
     def delegate(
         self,
@@ -239,43 +291,53 @@ class TeamRuntime:
         """Hand part of ``parent``'s task to another Agent of this team, ledgering the hop (or the refusal).
 
         The delegate's authority is its own compiled Tools, the delegator's authority for this task and the originator's permissions
-        (which the parent's authority already narrows), so a hop can only shrink what may be done.
+        (which the parent's authority already narrows), so a hop can only shrink what may be done. The child's budget is reserved
+        from the parent's, so siblings cannot together spend more than the parent had.
         """
         delegator = parent.get("agent")
         self._check_envelope(delegator, parent)
         delegate_state = self._state(to_agent)
-        with self._lock:  # fan-out is counted from the ledger, so it survives a restart and cannot be raced past
+        with self._task_lock:
+            root, tree = self._tree(parent["taskId"])
             try:
-                child = DELEGATION.delegate(
-                    parent, to_agent=to_agent, child_task_id=child_task_id, goal=goal,
+                child = tree.delegate(
+                    parent["taskId"], to_agent=to_agent, child_task_id=child_task_id, goal=goal,
                     delegate_grants=TEAM.tool_names(delegate_state), originator_permissions=parent["authority"],
                     required_capabilities=required_capabilities, budget=budget, deadline=deadline, constraints=constraints,
-                    children_so_far=self._hops_from(parent["taskId"]), max_depth=self.max_depth, max_fan_out=self.max_fan_out,
-                    now=int(self.now()),
+                    max_depth=self.max_depth, max_fan_out=self.max_fan_out, now=int(self.now()),
                 )
-            except DELEGATION.DelegationError as exc:
-                GOVERN.record_operator_action(
-                    self.audit_path, "delegation.refused", f"agent:{delegator}",
-                    {"fromTask": parent["taskId"], "toAgent": to_agent, "reason": str(exc)[:300]},
-                )
-                raise
-            DELEGATION.record_hop(GOVERN, self.audit_path, parent, child)
+            except TASK_BUDGET.TaskBudgetError as exc:
+                self._ledger_action("delegation.refused", f"agent:{delegator}",
+                                    {"fromTask": parent["taskId"], "toAgent": to_agent, "reason": str(exc)[:300]})
+                raise DELEGATION.DelegationError(str(exc)) from exc
+            self._root_of[child["taskId"]] = root
+            self._persist(root)
         return child
 
-    def _hops_from(self, task_id: str) -> int:
-        count = 0
-        try:
-            lines = self.audit_path.read_text(encoding="utf-8").splitlines()
-        except FileNotFoundError:
-            return 0
-        for line in lines:
+    def charge(self, envelope: Mapping[str, Any], **used: int) -> dict[str, int]:
+        """Charge usage the host measured (``tokens``, ``costCents``, ``steps``) to a task; returns what it has left.
+
+        Raises ``BudgetExhausted`` once a bound is passed: the branch halts, ``task.budget-exhausted`` is ledgered and the owner told.
+        """
+        with self._task_lock:
+            root, tree = self._tree(envelope.get("taskId"))
             try:
-                event = json.loads(line)
-            except ValueError:
-                continue
-            if event.get("action") == "delegation.hop" and (event.get("details") or {}).get("fromTask") == task_id:
-                count += 1
-        return count
+                return tree.charge(envelope["taskId"], **used)
+            finally:
+                self._persist(root)
+
+    def finish_task(self, envelope: Mapping[str, Any]) -> dict[str, int]:
+        """Complete a task: its unused reservation goes back to its parent. Calls under a finished task are refused."""
+        with self._task_lock:
+            root, tree = self._tree(envelope.get("taskId"))
+            try:
+                return tree.finish(envelope["taskId"])
+            finally:
+                self._persist(root)
+
+    def task_status(self, task_id: str) -> list[dict[str, Any]]:
+        """Every task in this task's tree with its Agent, state, budget, spend, reservation and what is left."""
+        return self._tree(task_id)[1].timeline()
 
     def _check_envelope(self, agent: Any, envelope: Mapping[str, Any]) -> None:
         state = self._state(agent)
@@ -285,6 +347,11 @@ class TeamRuntime:
         outside = sorted(set(envelope.get("authority", [])) - set(TEAM.tool_names(state)))
         if outside:  # a forged or stale envelope can never grant a Tool the Agent was not compiled with
             raise TeamError(f"the task envelope names Tools {agent} does not hold: {', '.join(outside)}")
+        _, tree = self._tree(envelope.get("taskId"))
+        known = tree.snapshot()["nodes"][envelope["taskId"]]["envelope"]  # what this team started; the caller's copy is never trusted
+        if known["agent"] != agent or sorted(known["authority"]) != sorted(envelope.get("authority", [])) \
+                or known["originatingPrincipal"] != envelope.get("originatingPrincipal") or known["delegationChain"] != chain:
+            raise TeamError("the task envelope does not match the task this team started")
 
     @contextlib.contextmanager
     def acting(self, agent: str, envelope: Mapping[str, Any]) -> Iterator[Any]:
@@ -308,11 +375,79 @@ class TeamRuntime:
             return {"governance": context, "authority": [], "halt": "task-bound-to-another-agent"}
         halt = None
         deadline = envelope.get("deadline")
+        with self._task_lock:
+            state = self._tree(envelope["taskId"])[1].state(envelope["taskId"])
         if deadline is not None and int(self.now()) >= deadline:
             halt = "task-deadline-passed"
-        elif DELEGATION.exhausted(envelope):
+        elif state == "halted":
             halt = "task-budget-exhausted"
-        return {"governance": context, "authority": list(envelope.get("authority", [])), "halt": halt}
+        elif state == "finished":
+            halt = "task-finished"
+        task_id = envelope["taskId"]
+
+        def charge_step() -> None:  # one step per governed call, taken before the call runs
+            try:
+                self.charge({"taskId": task_id}, steps=1)
+            except TASK_BUDGET.BudgetExhausted as exc:
+                raise PermissionError("task-budget-exhausted") from exc
+
+        return {"governance": context, "authority": list(envelope.get("authority", [])), "halt": halt, "charge": charge_step}
+
+    # -- a person as a task step --------------------------------------------------------------
+
+    def _handoff_root(self, envelope: Mapping[str, Any]) -> pathlib.Path:
+        self._check_envelope(envelope.get("agent"), envelope)
+        return self.agent_dir(envelope["agent"]) / "handoffs"
+
+    def _already_ledgered(self, action: str, handoff_id: str, outcome: str | None = None) -> bool:
+        try:
+            lines = self.audit_path.read_text(encoding="utf-8").splitlines()
+        except FileNotFoundError:
+            return False
+        for line in lines:
+            try:
+                event = json.loads(line)
+            except ValueError:
+                continue
+            details = event.get("details") or {}
+            if event.get("action") == action and details.get("handoffId") == handoff_id and (outcome is None or details.get("outcome") == outcome):
+                return True
+        return False
+
+    def open_human_step(
+        self,
+        envelope: Mapping[str, Any],
+        *,
+        step: str,
+        assignee: str,
+        ask: str,
+        context: str = "",
+        timeout_hours: int = 24,
+        fallback: str = "fail",
+        escalate_to: str | None = None,
+    ) -> dict[str, Any]:
+        """Pause the task on a named person: a Tier 4 hand-off on this Agent's own store, ledgered once against the task."""
+        root = self._handoff_root(envelope)
+        with self._task_lock:
+            document = HUMAN_STEP.open_step(
+                root, envelope, step=step, assignee=assignee, ask=ask, context=context, timeout_hours=timeout_hours,
+                fallback=fallback, escalate_to=escalate_to, now=int(self.now()),
+            )
+            if not self._already_ledgered("task.human-step.opened", document["id"]):
+                HUMAN_STEP.ledger_opened(GOVERN, self.audit_path, envelope, step, document)
+        return document
+
+    def human_step(self, envelope: Mapping[str, Any], step: str) -> dict[str, Any]:
+        """Where the step stands (waiting, resumed, declined, timed-out). The person's answer and a timeout are ledgered once each."""
+        root = self._handoff_root(envelope)
+        with self._task_lock:
+            result = HUMAN_STEP.resolution(root, envelope, step, now=int(self.now()))
+            handoff_id = result.get("handoffId")
+            if result["state"] in ("resumed", "declined") and not self._already_ledgered("task.human-step.resolved", handoff_id):
+                HUMAN_STEP.ledger_resolved(GOVERN, self.audit_path, envelope, step, HUMAN_STEP._handoff().find(root, handoff_id))
+            elif result["state"] == "timed-out" and not self._already_ledgered("task.human-step.timed-out", handoff_id):
+                HUMAN_STEP.ledger_timed_out(GOVERN, self.audit_path, envelope, step, HUMAN_STEP._handoff().find(root, handoff_id))
+        return result
 
 
 def load_states(path: pathlib.Path) -> list[dict[str, Any]]:

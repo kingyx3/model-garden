@@ -265,22 +265,16 @@ class TaskCallTests(Case):
         self.assertEqual(denial["governance"]["taskId"], "task-1.1")
         self.assertEqual(list((self.base / "agents" / "receptionist" / "approvals" / "pending").glob("*.json")), [])  # never even queued for approval
 
-    def test_a_task_past_its_deadline_or_budget_halts(self):
+    def test_a_task_past_its_deadline_halts(self):
         team = self.team()
-        child = self.child(team, deadline=T0 + 60, budget={"steps": 2})
+        child = self.child(team, deadline=T0 + 60)
         with team.acting("receptionist", child) as runtime:
             runtime.kb_search(query="opening hours")
         self.clock[0] = T0 + 60
         with team.acting("receptionist", child) as runtime:
             with self.assertRaises(PermissionError):
                 runtime.kb_search(query="opening hours")
-        spent = delegation.charge(child, steps=2)
-        self.clock[0] = T0
-        with team.acting("receptionist", spent) as runtime:
-            with self.assertRaises(PermissionError):
-                runtime.kb_search(query="opening hours")
-        reasons = [event["details"]["reason"] for event in self.events() if event.get("outcome") == "deny"]
-        self.assertEqual(reasons, ["task-deadline-passed", "task-budget-exhausted"])
+        self.assertEqual([event["details"]["reason"] for event in self.events() if event.get("outcome") == "deny"], ["task-deadline-passed"])
 
     def test_a_task_cannot_be_used_on_another_agents_runtime(self):
         team = self.team()
@@ -342,6 +336,168 @@ class CliTests(Case):
         code, _, err = self.run_cli("prepare", compiled, "--base", self.base, "--grants-root", self.base.parent / "grants")
         self.assertEqual(code, 1)
         self.assertIn("--tenant", err)
+
+
+class BudgetTests(Case):
+    def setUp(self) -> None:
+        super().setUp()
+        self.notices: list[dict] = []
+
+    def team(self, **kwargs):
+        return super().team(notify=self.notices.append, **kwargs)
+
+    def child(self, team, child_budget, task_id="task-1.1", **root):
+        parent = self.task(team, **root)
+        return parent, team.delegate(parent, to_agent="receptionist", child_task_id=task_id, goal="Answer", required_capabilities=["kb.search"], budget=child_budget)
+
+    def test_every_governed_call_under_a_task_is_charged_a_step_before_it_runs(self):
+        team = self.team()
+        _, child = self.child(team, {"steps": 2}, budget={"steps": 5})
+        for _ in range(2):
+            with team.acting("receptionist", child) as runtime:
+                runtime.kb_search(query="opening hours")
+        with team.acting("receptionist", child) as runtime:
+            with self.assertRaises(PermissionError):
+                runtime.kb_search(query="opening hours")
+        self.assertEqual(len([event for event in self.events() if event.get("event") == "execution"]), 2)  # the third never ran
+        exhausted = [event for event in self.events() if event.get("action") == "task.budget-exhausted"]
+        self.assertEqual([(event["details"]["taskId"], event["details"]["exceeded"]) for event in exhausted], [("task-1.1", ["steps"])])
+        self.assertEqual(self.events()[-1]["details"]["reason"], "task-budget-exhausted")
+        self.assertEqual([(notice["to"], notice["taskId"]) for notice in self.notices], [("alice@acme.example", "task-1.1")])
+        with team.acting("receptionist", child) as runtime:  # a halted branch stays halted, and the owner is not told twice
+            with self.assertRaises(PermissionError):
+                runtime.kb_search(query="opening hours")
+        self.assertEqual(len(self.notices), 1)
+
+    def test_siblings_cannot_together_spend_more_than_the_parent_had(self):
+        team = self.team()
+        parent = self.task(team, budget={"steps": 4})
+        team.delegate(parent, to_agent="receptionist", child_task_id="task-1.1", goal="One", required_capabilities=["kb.search"], budget={"steps": 3})
+        with self.assertRaises(delegation.DelegationError):
+            team.delegate(parent, to_agent="account-researcher", child_task_id="task-1.2", goal="Two", required_capabilities=["crm.read"], budget={"steps": 3})
+        team.delegate(parent, to_agent="account-researcher", child_task_id="task-1.2", goal="Two", required_capabilities=["crm.read"], budget={"steps": 1})
+        self.assertEqual({row["taskId"]: row["reserved"] for row in team.task_status("task-1")}["task-1"], {"steps": 4})
+
+    def test_spending_survives_a_restart(self):
+        team = self.team()
+        _, child = self.child(team, {"steps": 2}, budget={"steps": 5})
+        with team.acting("receptionist", child) as runtime:
+            runtime.kb_search(query="opening hours")
+        restarted = self.team()
+        self.assertEqual({row["taskId"]: row["spent"] for row in restarted.task_status("task-1.1")}["task-1.1"], {"steps": 1})
+        with restarted.acting("receptionist", child) as runtime:
+            runtime.kb_search(query="opening hours")
+            with self.assertRaises(PermissionError):
+                runtime.kb_search(query="opening hours")
+
+    def test_usage_the_host_measured_is_charged_and_halts_the_branch(self):
+        team = self.team()
+        _, child = self.child(team, {"tokens": 1000}, budget={"tokens": 5000})
+        self.assertEqual(team.charge(child, tokens=400)["tokens"], 600)
+        with self.assertRaises(team_runtime.TASK_BUDGET.BudgetExhausted):
+            team.charge(child, tokens=700)
+        with team.acting("receptionist", child) as runtime:
+            with self.assertRaises(PermissionError):
+                runtime.kb_search(query="opening hours")
+
+    def test_finishing_a_task_releases_its_reservation_and_stops_its_calls(self):
+        team = self.team()
+        parent, child = self.child(team, {"steps": 3}, budget={"steps": 4})
+        with team.acting("receptionist", child) as runtime:
+            runtime.kb_search(query="opening hours")
+        self.assertEqual(team.finish_task(child), {"steps": 1})
+        self.assertEqual({row["taskId"]: row["available"] for row in team.task_status("task-1")}["task-1"], {"steps": 3})
+        with team.acting("receptionist", child) as runtime:
+            with self.assertRaises(PermissionError):
+                runtime.kb_search(query="opening hours")
+        self.assertEqual([event["details"]["reason"] for event in self.events() if event.get("outcome") == "deny"], ["task-finished"])
+
+    def test_an_envelope_the_team_did_not_start_or_that_was_edited_is_refused(self):
+        team = self.team()
+        stranger = delegation.root_envelope(task_id="elsewhere", agent="receptionist", originating_principal="alice@acme.example", goal="x",
+                                            agent_grants=["kb.search"], originator_permissions=["kb.search"])
+        with self.assertRaises(team_runtime.TeamError):
+            with team.acting("receptionist", stranger):
+                self.fail("must not run")
+        _, child = self.child(team, {"steps": 2}, budget={"steps": 5})
+        with self.assertRaises(team_runtime.TeamError):
+            with team.acting("receptionist", {**child, "originatingPrincipal": "mallory@evil.example"}):
+                self.fail("must not run")
+        with self.assertRaises(team_runtime.TeamError):
+            team.start_task("coordinator", task_id="task-1", originating_principal="alice@acme.example", originator_permissions=["kb.search"], goal="again")
+
+
+class HumanStepTests(Case):
+    def child(self, team):
+        parent = self.task(team)
+        return team.delegate(parent, to_agent="receptionist", child_task_id="task-1.1", goal="Answer", required_capabilities=["kb.search"])
+
+    def test_a_step_waits_on_a_named_person_and_resumes_under_their_name(self):
+        team = self.team()
+        child = self.child(team)
+        document = team.open_human_step(child, step="approve-discount", assignee="jordan@acme.example", ask="Approve a 10% discount for Alex?")
+        self.assertEqual((document["assignee"], document["request"]["taskId"]), ("jordan@acme.example", "task-1.1"))
+        self.assertEqual(team.open_human_step(child, step="approve-discount", assignee="jordan@acme.example", ask="Approve a 10% discount for Alex?")["id"], document["id"])
+        self.assertEqual(team.human_step(child, "approve-discount")["state"], "waiting")
+        handoffs = team.agent_dir("receptionist") / "handoffs"  # the receptionist's own store, not another Agent's
+        self.assertTrue(handoffs.is_dir())
+        self.assertFalse((team.agent_dir("coordinator") / "handoffs").exists())
+        handoff = team_runtime.HUMAN_STEP._handoff()
+        handoff.complete(handoffs, document["id"], "done", "jordan@acme.example", note="Approved, tell Alex today", now=T0 + 30)
+        resumed = team.human_step(child, "approve-discount")
+        self.assertEqual((resumed["state"], resumed["resume"], resumed["by"], resumed["input"]), ("resumed", True, "jordan@acme.example", "Approved, tell Alex today"))
+        team.human_step(child, "approve-discount")  # asking again does not ledger again
+        actions = [(event["action"], event["performedBy"]) for event in self.events() if str(event.get("action", "")).startswith("task.human-step")]
+        self.assertEqual(actions, [("task.human-step.opened", "agent:receptionist"), ("task.human-step.resolved", "jordan@acme.example")])
+        self.assertNotIn("Approved, tell Alex today", json.dumps(self.events()))  # a digest of the note, never the note
+
+    def test_a_timeout_resolves_to_the_configured_fallback_and_never_resumes(self):
+        team = self.team()
+        child = self.child(team)
+        team.open_human_step(child, step="sign-off", assignee="jordan@acme.example", ask="Sign off?", timeout_hours=1, fallback="escalate", escalate_to="owner@acme.example")
+        self.clock[0] = T0 + 2 * 3600
+        result = team.human_step(child, "sign-off")
+        self.assertEqual((result["state"], result["resume"], result["next"], result["to"]), ("timed-out", False, "escalate", "owner@acme.example"))
+        team.human_step(child, "sign-off")
+        self.assertEqual([event["performedBy"] for event in self.events() if event.get("action") == "task.human-step.timed-out"], ["task:task-1.1"])
+
+    def test_the_answer_never_widens_the_tasks_authority(self):
+        team = self.team()
+        child = self.child(team)
+        document = team.open_human_step(child, step="grant", assignee="jordan@acme.example", ask="Allow crm.create?")
+        team_runtime.HUMAN_STEP._handoff().complete(team.agent_dir("receptionist") / "handoffs", document["id"], "done", "jordan@acme.example",
+                                                      note="yes, crm.create is fine", now=T0 + 5)
+        self.assertEqual(team.human_step(child, "grant")["state"], "resumed")
+        with team.acting("receptionist", child) as runtime:
+            with self.assertRaises(PermissionError):
+                runtime.crm_create(fields={"name": "Alex"})
+
+    def test_a_step_needs_an_envelope_the_team_started(self):
+        team = self.team()
+        child = self.child(team)
+        with self.assertRaises(team_runtime.TeamError):
+            team.open_human_step({**child, "taskId": "elsewhere"}, step="x", assignee="jordan@acme.example", ask="?")
+
+    def test_the_task_timeline_joins_hops_budget_and_the_persons_answer_across_agents(self):
+        team = self.team()
+        child = self.child(team)
+        with team.acting("receptionist", child) as runtime:
+            runtime.kb_search(query="opening hours")
+        document = team.open_human_step(child, step="approve", assignee="jordan@acme.example", ask="Approve?")
+        team_runtime.HUMAN_STEP._handoff().complete(team.agent_dir("receptionist") / "handoffs", document["id"], "declined", "jordan@acme.example",
+                                                      note="no", now=T0 + 5)
+        team.human_step(child, "approve")
+        audit_query = _load("audit_query_for_team_runtime", "platform/core/audit_query.py")
+        timeline = audit_query.timeline(self.events(), task="task-1.1")
+        actions = [step["action"] for step in timeline["steps"] if step.get("action")]
+        self.assertEqual(actions, ["delegation.hop", "task.human-step.opened", "task.human-step.resolved"])
+        resolved = [step for step in timeline["steps"] if step.get("action") == "task.human-step.resolved"][0]
+        self.assertEqual((resolved["by"], resolved["details"]["outcome"], resolved["details"]["step"]), ("jordan@acme.example", "declined", "approve"))
+        self.assertIn("kb.search", [step["tool"] for step in timeline["steps"]])
+        self.assertEqual(timeline["agents"], ["coordinator", "receptionist"])
+        self.assertNotIn("Answer", json.dumps([step.get("details") for step in timeline["steps"]]))  # no goal text
+        root = audit_query.timeline(self.events(), task="task-1")  # the root task sees the hop it made
+        self.assertEqual([step["action"] for step in root["steps"] if step.get("action")], ["delegation.hop"])
 
 
 class LoadTests(Case):
