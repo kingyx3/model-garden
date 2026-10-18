@@ -130,7 +130,7 @@ class CreateTests(Case):
         self.assertTrue(ledger["externalObjectRef"].startswith("tier0:acme/a-"))
         self.assertEqual(execution["arguments"]["content"], runtime_module.GOVERN.REDACTED)
         # chained digests are random hex and can contain "4111" by chance, so only look outside them
-        text = re.sub(r"[0-9a-f]{32,}", "", (self.root / "audit.jsonl").read_text())
+        text = re.sub(r"[0-9a-f]{16,}|\d{2}:\d{2}:\d{2}\.\d+Z", "", (self.root / "audit.jsonl").read_text())
         for private in ("Hargreaves", "Acacia", "4111", "Notes:"):
             self.assertNotIn(private, text)
         created = next(event for event in self.audit() if event.get("action") == "artifact.create")

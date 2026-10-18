@@ -187,7 +187,7 @@ class MailboxTests(Case):
         self.assertEqual(len(drafts), 1)
         self.assertEqual(sent[0][0], "D0OWNER")
         self.assertIn("reply draft", sent[0][1])
-        ledger = re.sub(r"[0-9a-f]{32,}", "", (self.data / "audit.jsonl").read_text())  # digests are random hex that can hold "4111"
+        ledger = re.sub(r"[0-9a-f]{16,}|\d{2}:\d{2}:\d{2}\.\d+Z", "", (self.data / "audit.jsonl").read_text())  # digests are random hex that can hold "4111"
         self.assertNotIn("4111", ledger)
         self.assertIn('"kb.search"', ledger)  # the knowledge read is a governed, ledgered read
 
@@ -254,7 +254,7 @@ class EventTriggerTests(Case):
         self.assertEqual([call[0] for call in fake.calls].count("complete"), 2)
         shown = json.dumps(self.events())
         self.assertNotIn("alex@customer.example", shown)
-        self.assertNotIn("4111", shown)  # only the kind and a digest of the reference reach the runner and the ledger
+        self.assertNotIn("4111", re.sub(r"[0-9a-f]{16,}|\d{2}:\d{2}:\d{2}\.\d+Z", "", shown))  # only the kind and a digest of the reference reach the runner and the ledger (hex ids are random)
 
     def test_a_redelivered_message_is_not_a_second_event(self):
         fake = FakeCoworker()
@@ -542,7 +542,7 @@ class CrmFilingTests(Case):
         runtime._spool().ingest(raw(), now=T0 - 5)
         runtime.tick()
         stored = "".join(path.read_text() for path in (self.data / "crm-sync").rglob("*.json"))
-        text = re.sub(r"[0-9a-f]{16,}", "", stored + (self.data / "audit.jsonl").read_text())  # digests and ids are random hex that can contain "4111"
+        text = re.sub(r"[0-9a-f]{16,}|\d{2}:\d{2}:\d{2}\.\d+Z", "", stored + (self.data / "audit.jsonl").read_text())  # digests and ids are random hex that can contain "4111"
         for private in ("4111", "opening hours", "alex@customer.example"):
             self.assertNotIn(private, text)
 
@@ -579,6 +579,40 @@ class LoopTests(Case):
         self.assertEqual(sorted(event["details"]["kind"] for event in expired), ["decision", "request"])
         self.assertTrue(all(event["details"]["requestId"] == old for event in expired))
         self.assertNotIn("customer text", (self.data / "audit.jsonl").read_text())
+
+    def test_an_approval_that_expires_undecided_tells_the_contact_once_by_tool_name_only(self):
+        sent = []
+        runtime = self.make({"escalateTo": OWNER, "people": {OWNER: {"channel": "slack", "address": "D0OWNER"}}},
+                            senders={"slack": lambda address, text: sent.append((address, text))})
+        approvals = self.data / "approvals"
+        old, decided = "ab" * 32, "cd" * 32
+        (approvals / "pending").mkdir(parents=True)
+        (approvals / "decisions").mkdir(parents=True)
+        (approvals / "pending" / f"{old}.json").write_text(json.dumps({
+            "requestId": old, "tool": "crm.update", "requestedAt": T0 - 30 * 3600, "arguments": {"note": "customer text"}, "justification": "private reason"}))
+        (approvals / "decisions" / f"{decided}.json").write_text(json.dumps({"requestId": decided, "approved": True, "decidedAt": T0 - 30 * 3600}))
+        runtime.tick()  # retention runs after notices in a pass, so the notice goes out on the next one
+        self.clock[0] += 60
+        runtime.tick()
+        told = [text for address, text in sent if "expired" in text]
+        self.assertEqual(len(told), 1)  # the stale decision is dropped quietly: nothing was waiting
+        self.assertIn("crm.update", told[0])
+        self.assertIn(old[:12], told[0])
+        for private in ("customer text", "private reason"):
+            self.assertNotIn(private, told[0])
+        self.clock[0] += 7200
+        runtime.tick()
+        self.assertEqual(len([text for address, text in sent if "expired" in text]), 1)  # not repeated
+
+    def test_an_expired_request_with_nobody_to_tell_is_still_removed_and_ledgered(self):
+        runtime = self.make({})
+        pending = self.data / "approvals" / "pending"
+        pending.mkdir(parents=True)
+        (pending / f"{'ab' * 32}.json").write_text(json.dumps({"requestId": "ab" * 32, "tool": "BAD TOOL!", "requestedAt": T0 - 30 * 3600}))
+        runtime.tick()
+        self.assertEqual(list(pending.glob("*.json")), [])
+        self.assertEqual(len([event for event in self.events() if event.get("action") == "approval.expired"]), 1)
+        self.assertEqual(runtime.queue.pending(), [])
 
     def test_jobs_respect_their_interval(self):
         runtime = self.make({})
