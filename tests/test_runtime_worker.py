@@ -403,6 +403,76 @@ class EventSourceTests(Case):
         self.assertFalse((self.data / "tickets").exists())
 
 
+class KnowledgeReviewTests(Case):
+    """An approved source due for review, or past its reviewBy date, is announced once to the contact (declared dates only) (#116, #111, #77)."""
+
+    def runtime(self, sources, *, config=None):
+        sent = []
+        runtime = self.make(config if config is not None else {"escalateTo": OWNER, "people": {OWNER: {"channel": "slack", "address": "D0OWNER"}}},
+                            senders={"slack": lambda address, text: sent.append(text)})
+        base = runtime.desired_state["knowledge"][0]
+        runtime.desired_state["knowledge"] = [
+            {**base, "metadata": {**base["metadata"], "name": name},
+             "spec": {"type": "text-file", "status": "approved", "effectiveDate": "2026-01-01", "audiences": ["receptionist"], **spec}}
+            for name, spec in sources.items()
+        ]
+        self.sent = sent
+        return runtime
+
+    def told(self):
+        return [text for text in self.sent if "business-rules source" in text]
+
+    def test_a_source_due_within_two_weeks_and_one_already_stale_are_each_announced_once(self):
+        runtime = self.runtime({"hours": {"reviewBy": "2026-10-25"}, "prices": {"reviewBy": "2026-10-10"},
+                                "far-future": {"reviewBy": "2027-06-01"}, "no-review-date": {}})
+        runtime.tick()
+        self.clock[0] += 60
+        runtime.tick()  # notices are delivered on the pass after the job queued them
+        told = self.told()
+        self.assertEqual(len(told), 2)
+        self.assertTrue(any("hours" in text and "due for review on 2026-10-25" in text for text in told))
+        self.assertTrue(any("prices" in text and "stopped answering" in text for text in told))
+        self.assertFalse(any("far-future" in text or "no-review-date" in text for text in told))
+        self.clock[0] += 86_400
+        runtime.last_run.clear()
+        runtime.tick()
+        runtime.tick()
+        self.assertEqual(len(self.told()), 2)  # not repeated while the condition lasts
+
+    def test_the_same_source_is_announced_again_when_it_moves_from_due_soon_to_stale(self):
+        runtime = self.runtime({"hours": {"reviewBy": "2026-10-25"}})
+        runtime.tick()
+        self.clock[0] += 60
+        runtime.tick()
+        self.assertEqual(len(self.told()), 1)
+        self.clock[0] += 8 * 86_400  # past 2026-10-25
+        runtime.last_run.clear()
+        runtime.tick()
+        self.clock[0] += 60
+        runtime.tick()
+        told = self.told()
+        self.assertEqual(len(told), 2)
+        self.assertIn("stopped answering", told[1])
+
+    def test_a_draft_a_source_for_another_agent_an_invalid_date_and_a_non_text_source_are_not_announced(self):
+        runtime = self.runtime({"drafty": {"reviewBy": "2026-10-25", "status": "draft"}, "elsewhere": {"reviewBy": "2026-10-25", "audiences": ["sales"]},
+                                "garbled": {"reviewBy": "next week"}, "repo": {"reviewBy": "2026-10-25", "type": "repository"}})
+        report = runtime.run_knowledge(T0)
+        self.assertEqual(report, {"dueSoon": 0, "stale": 0})
+
+    def test_with_nobody_to_tell_it_says_so_and_remembers_nothing(self):
+        runtime = self.runtime({"hours": {"reviewBy": "2026-10-25"}}, config={})
+        self.assertEqual(runtime.run_knowledge(T0), {"skipped": "nobody-to-tell"})
+        self.assertFalse((self.data / "worker" / "told.json").exists())
+
+    def test_only_the_source_name_and_date_reach_the_notice(self):
+        runtime = self.runtime({"hours": {"reviewBy": "2026-10-10"}})
+        runtime.run_knowledge(T0)
+        (notice,) = [item for item in runtime.queue.pending() if item["kind"] == "knowledge-review"]
+        self.assertEqual(notice["to"], OWNER)
+        self.assertNotIn("Hargreaves", notice["text"])
+
+
 class CrmFilingTests(Case):
     """A handled customer email is filed to the built-in contact log by the worker, retried after an outage and never reported as filed unless acknowledged."""
 
