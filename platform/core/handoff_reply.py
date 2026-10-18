@@ -33,11 +33,10 @@ import pathlib
 import re
 import sys
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Callable
 from typing import Any
 
 MAX_NOTE = 500
-MIN_REFERENCE = 8
 STATUSES = ("closed", "acknowledged", "not-a-reply", "unknown-sender", "not-direct", "no-match", "not-assignee", "already-closed")
 _REPLY = re.compile(r"^\s*(done|declined?|seen|ack(?:nowledged)?)[\s:]+([0-9a-f]{8,64})\b[\s:,-]*(.*)$", re.IGNORECASE | re.DOTALL)
 _NEUTRAL = "I could not match that to an open hand-off assigned to you. Use the reference from the notice."

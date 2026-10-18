@@ -34,7 +34,6 @@ import importlib.util
 import json
 import pathlib
 import re
-import shutil
 import sys
 import tempfile
 from typing import Any

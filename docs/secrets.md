@@ -108,19 +108,6 @@ Do not create a permanent cloud JSON key merely to make routine deployment easie
 
 Client-owned and Model Garden-owned cloud use the same contract. Ownership changes who controls the cloud account, billing and break-glass administration; it does not change the client workspace, runtime model or keyless deployment mechanics.
 
-## Self-hosted-runner fallback
-
-The private client-labelled self-hosted GitHub runner path remains a compatibility/exception option when cloud-native remote administration is unavailable or prohibited.
-
-When deliberately selected:
-
-| Variable / secret | Purpose |
-|---|---|
-| `MODEL_GARDEN_DOCKER_RUNNER` | Client-specific private self-hosted runner label. |
-| `MODEL_GARDEN_RUNTIME_SECRETS_JSON` | The same environment-scoped runtime secret map described above. |
-
-Do not provision a self-hosted runner for the preferred managed GCP path merely because the fallback exists.
-
 ## Rules that always apply
 
 - Never commit API keys, OAuth tokens, service-account JSON or runtime secret maps.

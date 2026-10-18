@@ -1,9 +1,9 @@
 """Approved upstream MCP operation execution, without a vendor-specific connector (#87, #158).
 
-This is an internal sidecar seam, NOT an HTTP client or a public model Tool. A vetted
-external MCP transport is injected by the deployment. It must dial the pinned public IP
-over HTTPS with TLS hostname verification and no redirect following. Until such a
-transport, owner consent and retained tenant proof are available, providers stay planned.
+This is an internal sidecar seam, NOT an HTTP client or a public model Tool. The transport
+is injected by the deployment (``platform/runtime/upstream_http.py`` for MCP and custom REST
+APIs); it dials the pinned public IP over HTTPS with TLS hostname verification and no redirect
+following. A registry provider stays planned until retained tenant proof exists.
 """
 from __future__ import annotations
 

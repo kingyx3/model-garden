@@ -36,7 +36,7 @@ import os
 import pathlib
 import re
 import secrets
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Callable, Iterator
 from typing import Any, Protocol
 
 SCHEMA_VERSION = 1

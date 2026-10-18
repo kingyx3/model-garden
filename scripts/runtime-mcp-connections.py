@@ -200,10 +200,11 @@ def _test(args, store, server, offered, approvals, grants, audit, *, environ, tr
         grant_id = route["grant"]["grantId"]
         transports = transports or _transports()
         environ = os.environ if environ is None else environ
-        transport = transports.transport_factory
         if "api" in server:
             def transport(url, pinned_ip, credential):  # noqa: E306 - the reviewed definition, never a typed URL
                 return transports.rest_transport_factory(server["api"], pinned_ip, credential, approvals)
+        else:
+            transport = transports.transport_factory
         try:
             result = EXECUTOR.invoke(route, arguments, approvals=approvals, transport_factory=transport,
                                      secret_resolver=transports.secret_resolver(environ), dns_resolver=transports.system_dns_resolver, recheck=check)

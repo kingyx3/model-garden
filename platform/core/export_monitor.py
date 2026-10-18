@@ -3,7 +3,9 @@
 ``ledger_export.verify_export`` already tells a person whether the exported audit trail is intact and current. Nothing told anyone
 when it stopped being so. This is the credential-free monitor: run it on a timer, it verifies the export, classifies what is
 wrong, and produces notices for the named owner in the shape ``notice_delivery`` delivers through that person's own channel. It
-sends nothing, schedules nothing itself and is not wired to a timer or the sidecar.
+sends nothing and schedules nothing itself. The runtime worker feeds ``evaluate`` the outcome of each export pass (the runtime
+cannot read the bucket back) and delivers the notices to ``escalateTo``; ``check`` runs a full verification for a verifier
+identity that can read the export.
 
 - **Three kinds of condition.** ``export-integrity`` (a broken or truncated chain, a gap, a local ledger that differs from the export,
   a missing or mismatched head manifest, an unreadable local ledger), ``export-lag`` (the local ledger is more events ahead than the

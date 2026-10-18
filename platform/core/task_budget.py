@@ -25,7 +25,7 @@ import copy
 import importlib.util
 import pathlib
 import sys
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Callable, Mapping
 from typing import Any
 
 Audit = Callable[[str, str, dict[str, Any]], Any]

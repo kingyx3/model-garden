@@ -3,6 +3,9 @@ from __future__ import annotations
 import importlib.util
 import json
 import pathlib
+import shutil
+import subprocess
+import sys
 import tempfile
 import unittest
 
@@ -343,6 +346,45 @@ class DeployClientDockerTests(unittest.TestCase):
             (bundle / "keep").write_text("keep\n", encoding="utf-8")
             with self.assertRaisesRegex(ValueError, "refusing to overwrite"):
                 deployer.render_bundle(profile, binding, bundle, "acme-dev")
+
+
+class RuntimeSourceClosureTests(unittest.TestCase):
+    """The sidecar image holds only RUNTIME_SOURCE_PATHS, so every runtime entry point must load from those files alone."""
+
+    def test_runtime_entry_points_load_from_the_shipped_files_alone(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            shipped = pathlib.Path(tmp)
+            for relative in deployer.RUNTIME_SOURCE_PATHS:
+                (shipped / relative).parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(ROOT / relative, shipped / relative)
+            modules = ["platform/runtime/governed_mcp.py", "platform/runtime/worker.py", "platform/runtime/gateway.py"]
+            for relative in modules:
+                with self.subTest(module=relative):
+                    loaded = subprocess.run(
+                        [sys.executable, "-P", "-c", LOAD_BY_PATH, relative],
+                        cwd=shipped, capture_output=True, text=True, timeout=60,
+                    )
+                    self.assertEqual(loaded.returncode, 0, loaded.stderr[-2000:])
+            worker_modules = subprocess.run(
+                [sys.executable, "-P", "-c", LOAD_BY_PATH + "for key in module.MODULES:\n    module._module(key)\n", "platform/runtime/worker.py"],
+                cwd=shipped, capture_output=True, text=True, timeout=60,
+            )
+            self.assertEqual(worker_modules.returncode, 0, worker_modules.stderr[-2000:])
+            for script in sorted(path for path in deployer.RUNTIME_SOURCE_PATHS if path.suffix == ".py" and path.parent.name == "scripts"):
+                with self.subTest(script=str(script)):
+                    shown = subprocess.run(
+                        [sys.executable, "-P", str(script), "--help"], cwd=shipped, capture_output=True, text=True, timeout=60,
+                    )
+                    self.assertEqual(shown.returncode, 0, shown.stderr[-2000:])
+
+
+LOAD_BY_PATH = """
+import importlib.util, sys
+spec = importlib.util.spec_from_file_location("shipped_module", sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+sys.modules["shipped_module"] = module
+spec.loader.exec_module(module)
+"""
 
 
 if __name__ == "__main__":

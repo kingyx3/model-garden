@@ -26,12 +26,14 @@ import contextlib
 import datetime as dt
 import fcntl
 import hashlib
+import importlib.util
 import json
 import os
 import pathlib
 import re
+import sys
 import secrets
-from collections.abc import Callable, Iterable, Iterator, Mapping
+from collections.abc import Callable, Iterable, Iterator
 from typing import Any
 
 SCHEMA_VERSION = 1
@@ -41,28 +43,25 @@ MAX_ENTRIES = 2000
 _TENANT = re.compile(r"^[a-z0-9][a-z0-9-]{0,62}$")
 _SCOPE = re.compile(r"^(client|agent:[A-Za-z0-9][A-Za-z0-9._-]{0,63}|conversation:[A-Za-z0-9][A-Za-z0-9._:-]{0,127})$")
 _PRINCIPAL = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:@/+-]{0,127}$")
-_CARD = re.compile(r"(?<![\d])(?:\d[ \-]?){12,18}\d(?![\d])")
 Audit = Callable[[str, str, dict[str, Any]], Any]
+
+
+def _sibling(name: str, filename: str):
+    module = sys.modules.get(name)
+    if module is None:
+        spec = importlib.util.spec_from_file_location(name, pathlib.Path(__file__).with_name(filename))
+        module = importlib.util.module_from_spec(spec)
+        assert spec.loader is not None
+        sys.modules[name] = module
+        spec.loader.exec_module(module)
+    return module
+
+
+_REDACTION = _sibling("model_garden_redaction", "redaction.py")
 
 
 class MemoryStoreError(ValueError):
     """Raised for an invalid request, a refused write or an operation outside the caller's rights."""
-
-
-def _luhn(digits: str) -> bool:
-    total = 0
-    for index, char in enumerate(reversed(digits)):
-        value = int(char) * (2 if index % 2 else 1)
-        total += value - 9 if value > 9 else value
-    return total % 10 == 0
-
-
-def redact_cards(text: str) -> str:
-    def replace(match: re.Match[str]) -> str:
-        digits = re.sub(r"\D", "", match.group(0))
-        return "[REDACTED:card]" if 13 <= len(digits) <= 19 and _luhn(digits) else match.group(0)
-
-    return _CARD.sub(replace, text)
 
 
 def digest(text: str) -> str:
@@ -147,7 +146,7 @@ class MemoryStore:
             raise MemoryStoreError("restricted data is not remembered unless this deployment's policy allows it")
         if not isinstance(text, str) or not text.strip():
             raise MemoryStoreError("a memory needs text")
-        cleaned = redact_cards(text.strip())
+        cleaned = _REDACTION.redact_cards(text.strip())
         if len(cleaned) > MAX_TEXT:
             raise MemoryStoreError(f"a memory is at most {MAX_TEXT} characters")
         if owner is not None:

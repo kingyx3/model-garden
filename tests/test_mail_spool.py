@@ -5,7 +5,6 @@ import contextlib
 import importlib.util
 import io
 import json
-import os
 import pathlib
 import stat
 import sys
@@ -90,7 +89,7 @@ class IntakeTests(Case):
         cases = {
             "to-display-name": raw(message_id="<a@x>", to=f"Support Team <{MAILBOX.upper()}>"),
             "cc": raw(message_id="<b@x>", to="someone@else.example", extra=f"Cc: {MAILBOX}\r\n"),
-            "delivered-to": raw(message_id="<c@x>", to="list@else.example", extra=f"Delivered-To: help@acme.example\r\n"),
+            "delivered-to": raw(message_id="<c@x>", to="list@else.example", extra="Delivered-To: help@acme.example\r\n"),
             "x-original-to": raw(message_id="<d@x>", to="", extra=f"X-Original-To: {MAILBOX}\r\n"),
         }
         for name, message in cases.items():

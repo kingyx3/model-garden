@@ -56,7 +56,7 @@ Credential ownership follows the target account/data/commercial relationship. Fo
 
 ## Connect the client's business stack
 
-- **Google Workspace or Microsoft 365 client:** use a verified third-party/vendor-maintained MCP server or integration platform, approved for that client's exact calendar/mail/files operations. Model Garden deliberately does not maintain native Google/Microsoft API clients; the upstream gateway and owner consent/identity lifecycle are still to be completed (#157–#159). Do not activate Calendar Skills until that evidence exists. Do not send credentials into Agent/Skill content.
+- **Google Workspace or Microsoft 365 client:** use a verified third-party/vendor-maintained MCP server or integration platform, approved for that client's exact calendar/mail/files operations. Model Garden deliberately does not maintain native Google/Microsoft API clients. The governed upstream route and owner OAuth consent are built ([`secrets.md`](secrets.md#provider-oauth-consent-google-microsoft-oidcoauth)) but not yet proven with a real Google or Microsoft tenant (#157–#159). Do not activate Calendar Skills until that evidence exists. Do not send credentials into Agent/Skill content.
 
 The upstream-only integration status and limitations live in [`governed-tools.md`](governed-tools.md). Broader business/provider intent is owned by the Google Workspace and Microsoft 365 Confluence integration guides.
 
@@ -133,7 +133,7 @@ No long-lived cloud deployment JSON is needed after bootstrap. Platform releases
 
 `scripts/launch.py` delegates to `scripts/launch-client.py`, which composes `scripts/client-operator.py` and `scripts/bootstrap-cloud.py`. Run those lower-level commands directly only for diagnostics, automation internals or an intentional non-default environment.
 
-The private self-hosted Docker-runner path remains a compatibility/exception option where cloud-native remote administration is unavailable or prohibited; it is not the preferred managed GCP path.
+Keyless cloud deployment is the only supported deployment path; there is no self-hosted runner option.
 
 ## Client/platform ownership boundary
 

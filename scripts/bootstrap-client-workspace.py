@@ -49,7 +49,7 @@ def _role_title(agent_slug: str, role_title: str | None) -> str:
     return title
 
 
-def _client_workflow(client_slug: str, agent_slug: str) -> str:
+def _client_workflow(agent_slug: str) -> str:
     return """name: Model Garden client runtime
 
 on:
@@ -135,50 +135,7 @@ jobs:
             ${{ runner.temp }}/environment-binding.json
           if-no-files-found: error
           retention-days: 7
-
-  deploy:
-    if: github.event_name == 'push' && vars.MODEL_GARDEN_DOCKER_RUNNER != ''
-    needs: materialize
-    runs-on:
-      - self-hosted
-      - ${{ vars.MODEL_GARDEN_DOCKER_RUNNER }}
-    environment:
-      name: ${{ github.ref_name == 'main' && 'prod' || 'dev' }}
-    env:
-      MODEL_GARDEN_RUNTIME_SECRETS_JSON: ${{ secrets.MODEL_GARDEN_RUNTIME_SECRETS_JSON }}
-    steps:
-      - uses: actions/checkout@v7
-      - name: Download reproducible deployment inputs
-        uses: actions/download-artifact@v4
-        with:
-          name: model-garden-deployment-${{ github.ref_name }}-${{ github.sha }}
-          path: ${{ runner.temp }}/model-garden-deployment
-      - name: Resolve locked Model Garden release
-        shell: bash
-        run: |
-          set -euo pipefail
-          rm -rf "$RUNNER_TEMP/model-garden" "$RUNNER_TEMP/model-garden-target" "$RUNNER_TEMP/model-garden-deploy-venv"
-          version="$(awk '$1 == \"modelgarden:\" { print $2; exit }' platform.lock.yaml)"
-          if [[ ! "$version" =~ ^[0-9]+[.][0-9]+[.][0-9]+$ ]]; then
-            echo "platform.lock.yaml must pin modelgarden as MAJOR.MINOR.PATCH" >&2
-            exit 1
-          fi
-          git clone --depth 1 --branch "v${version}" --single-branch \
-            https://github.com/kingyx3/model-garden.git "$RUNNER_TEMP/model-garden"
-          python3 -m venv "$RUNNER_TEMP/model-garden-deploy-venv"
-          "$RUNNER_TEMP/model-garden-deploy-venv/bin/python" -m pip install --disable-pip-version-check --quiet \
-            -r "$RUNNER_TEMP/model-garden/requirements-dev.txt"
-      - name: Deploy and verify isolated Docker runtime
-        shell: bash
-        run: >-
-          "$RUNNER_TEMP/model-garden-deploy-venv/bin/python"
-          "$RUNNER_TEMP/model-garden/scripts/deploy-client-docker.py"
-          "$RUNNER_TEMP/model-garden-deployment/hermes-profile"
-          "$RUNNER_TEMP/model-garden-deployment/environment-binding.json"
-          "$RUNNER_TEMP/model-garden-target"
-          --project-name "__CLIENT_SLUG__-${{ github.ref_name == 'main' && 'prod' || 'dev' }}"
-          --apply
-""".replace("__CLIENT_SLUG__", client_slug).replace("__AGENT_SLUG__", agent_slug)
+""".replace("__AGENT_SLUG__", agent_slug)
 
 
 def bootstrap(
@@ -207,8 +164,8 @@ def bootstrap(
     _write(output / "evals" / agent_slug / "scenarios.yaml", "scenarios: []\n")
     for environment in ("dev", "prod"):
         _write(output / "environments" / f"{environment}.yaml", f"""environment: {environment}\nruntime:\n  profile: {agent_slug}\n  model_credential_ref: secret://model/{environment}\n""")
-    _write(output / ".github" / "workflows" / "model-garden.yml", _client_workflow(client_slug, agent_slug))
-    _write(output / "README.md", f"""# {client_slug} AI workspace\n\nThis private repository is the portable source of truth for {client_slug}'s business-specific Model Garden desired state. The initial employee is `{agent_slug}` ({role}).\n\n## Bootstrap pins\n\n- Model Garden: `{modelgarden_version}`\n- Hermes: `{hermes_version}` (`{hermes_revision}`)\n- Contract: `v1`\n\n## GitHub delivery path\n\nThe generated `.github/workflows/model-garden.yml` validates pull requests against the exact Model Garden release pinned in `platform.lock.yaml`. Pushes to `dev` or `main` run through the corresponding GitHub Environment, render the selected non-secret environment binding, and materialize the reproducible Hermes profile for `{agent_slug}`. Both are uploaded together as short-lived deployment inputs.\n\nEach `dev`/`prod` GitHub Environment supplies one secret named `MODEL_GARDEN_RUNTIME_SECRETS_JSON`. It must be a JSON object whose keys exactly match the `secret://` references in that environment file; missing or extra keys fail closed. For the generated bootstrap the minimum shapes are `{{\"secret://model/dev\":\"<dev model credential>\"}}` and `{{\"secret://model/prod\":\"<prod model credential>\"}}`. These are runtime/provider secrets; they are separate from the cloud deployment identity.\n\n## Preferred managed cloud deployment\n\nFor GCP, the preferred path is one-time keyless cloud bootstrap from an approved Model Garden release. Supply one temporary service-account JSON from a local path to `scripts/bootstrap-cloud.py`; it provisions remote Terraform state, GitHub Workload Identity Federation, keyless deployment/runtime identities, and installs the cloud deployment workflow. After the first GitHub OIDC deployment succeeds, revoke that service-account key and delete the local JSON. The bootstrap credential must never be uploaded to this repository or GitHub Secrets.\n\nNormal GCP deployments then use GitHub-hosted Actions + short-lived OIDC credentials to reconcile the isolated Docker host with Terraform and invoke the existing Model Garden Docker deployment/health/rollback path remotely. The same process works whether the GCP project is client-owned or Model Garden-owned.\n\nThe older self-hosted Docker-runner path remains supported when cloud-native remote deployment is unavailable or a client requires deployment execution inside its network. Configure `MODEL_GARDEN_DOCKER_RUNNER` only for that path; when absent, the original workflow remains artifact-only and the keyless cloud workflow may own deployment.\n\n## Next steps\n\n1. Replace the {role} bootstrap instructions with business-owner-approved behaviour.\n2. Add approved knowledge references and representative evals.\n3. Select curated Skills/Tools only when the pinned Model Garden compiler can resolve them.\n4. Create protected GitHub `dev` and `prod` Environments and configure the environment-scoped runtime secret map; never store credentials in this repository.\n5. Preferred GCP hosting: run the one-time keyless cloud bootstrap, prove an OIDC deployment, revoke/delete the temporary bootstrap key, then verify a subsequent keyless deployment.\n6. Fallback/self-hosted hosting: configure a private client-specific Docker runner through `MODEL_GARDEN_DOCKER_RUNNER`.\n7. Use pull requests for validation, merge approved integration changes to `dev`, then promote the tested revision to `main` for production.\n\nDo not copy Model Garden platform code, generic connectors, generated Hermes state, raw runtime credentials, or cloud bootstrap credentials into this workspace.\n""")
+    _write(output / ".github" / "workflows" / "model-garden.yml", _client_workflow(agent_slug))
+    _write(output / "README.md", f"""# {client_slug} AI workspace\n\nThis private repository is the portable source of truth for {client_slug}'s business-specific Model Garden desired state. The initial employee is `{agent_slug}` ({role}).\n\n## Bootstrap pins\n\n- Model Garden: `{modelgarden_version}`\n- Hermes: `{hermes_version}` (`{hermes_revision}`)\n- Contract: `v1`\n\n## GitHub delivery path\n\nThe generated `.github/workflows/model-garden.yml` validates pull requests against the exact Model Garden release pinned in `platform.lock.yaml`. Pushes to `dev` or `main` run through the corresponding GitHub Environment, render the selected non-secret environment binding, and materialize the reproducible Hermes profile for `{agent_slug}`. Both are uploaded together as short-lived deployment inputs.\n\nEach `dev`/`prod` GitHub Environment supplies one secret named `MODEL_GARDEN_RUNTIME_SECRETS_JSON`. It must be a JSON object whose keys exactly match the `secret://` references in that environment file; missing or extra keys fail closed. For the generated bootstrap the minimum shapes are `{{\"secret://model/dev\":\"<dev model credential>\"}}` and `{{\"secret://model/prod\":\"<prod model credential>\"}}`. These are runtime/provider secrets; they are separate from the cloud deployment identity.\n\n## Preferred managed cloud deployment\n\nFor GCP, the preferred path is one-time keyless cloud bootstrap from an approved Model Garden release. Supply one temporary service-account JSON from a local path to `scripts/bootstrap-cloud.py`; it provisions remote Terraform state, GitHub Workload Identity Federation, keyless deployment/runtime identities, and installs the cloud deployment workflow. After the first GitHub OIDC deployment succeeds, revoke that service-account key and delete the local JSON. The bootstrap credential must never be uploaded to this repository or GitHub Secrets.\n\nNormal GCP deployments then use GitHub-hosted Actions + short-lived OIDC credentials to reconcile the isolated Docker host with Terraform and invoke the existing Model Garden Docker deployment/health/rollback path remotely. The same process works whether the GCP project is client-owned or Model Garden-owned.\n\nThis workflow only validates and materializes; the keyless cloud workflow installed by the bootstrap owns deployment.\n\n## Next steps\n\n1. Replace the {role} bootstrap instructions with business-owner-approved behaviour.\n2. Add approved knowledge references and representative evals.\n3. Select curated Skills/Tools only when the pinned Model Garden compiler can resolve them.\n4. Create protected GitHub `dev` and `prod` Environments and configure the environment-scoped runtime secret map; never store credentials in this repository.\n5. Preferred GCP hosting: run the one-time keyless cloud bootstrap, prove an OIDC deployment, revoke/delete the temporary bootstrap key, then verify a subsequent keyless deployment.\n6. Use pull requests for validation, merge approved integration changes to `dev`, then promote the tested revision to `main` for production.\n\nDo not copy Model Garden platform code, generic connectors, generated Hermes state, raw runtime credentials, or cloud bootstrap credentials into this workspace.\n""")
     return output
 
 

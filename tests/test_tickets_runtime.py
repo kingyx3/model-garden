@@ -87,7 +87,7 @@ class ServedTests(Case):
         self.approved(runtime, "tickets_update", ticket_id=created["result"]["ticketId"], status="waiting", comment=PRIVATE)
         runtime.tickets_search(query="Hargreaves")
         text = (self.root / "audit.jsonl").read_text()
-        for private in ("Hargreaves", "Acacia", "4111"):
+        for private in ("Hargreaves", "Acacia", "4111 1111"):  # spaced, so a hex digest can never match by chance
             self.assertNotIn(private, text)
         executions = {event["tool"]: event for event in self.audit() if event["event"] == "execution"}
         self.assertEqual(executions["tickets.create"]["arguments"]["project"], "support")

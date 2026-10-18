@@ -166,6 +166,3 @@ class CallSummarizer:
             cache[call_hash] = {"text": result["text"], "source": result["source"], "at": int(self._clock())}
             self._save_cache(cache)
         return {**record, "summary": result["text"], "summarySource": result["source"]}
-
-
-SummarizerFn = Callable[[Mapping[str, Any]], Mapping[str, Any]]

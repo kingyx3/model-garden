@@ -1,14 +1,13 @@
 """Approval policy applies to each Agent on its own, including calls made under a delegated task (#114, #95, #96)."""
 from __future__ import annotations
 
-import json
 import pathlib
 import sys
 import unittest
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 from test_docs_runtime import approval_module, principal_for  # noqa: E402 - shared fixtures
-from test_team_runtime import BINDING, T0, Case, delegation, states, team_runtime  # noqa: E402
+from test_team_runtime import BINDING, Case, states, team_runtime  # noqa: E402
 
 policy = team_runtime.GOVERN.POLICY
 OWNER = "owner@client.example"

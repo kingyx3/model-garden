@@ -283,7 +283,7 @@ class Case(unittest.TestCase):
         self.assertEqual(len(store.open_items()), 1)
         self.assertEqual(set(opened[0]), {"threadRef", "category", "reason"})
         stored = json.dumps(store.get(first["ticket"]))
-        for private in ("boiler", "4111", "furious", "alex@customer.example"):
+        for private in ("boiler", "4111 1111", "furious", "alex@customer.example"):
             self.assertNotIn(private, stored)
 
     def test_answered_spam_and_ignored_mail_open_no_ticket_and_a_failing_opener_never_loses_the_thread(self):

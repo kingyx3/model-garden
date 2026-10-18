@@ -135,7 +135,7 @@ class WriteTests(Case):
         entry = self.store().remember("client", "paid with 4111 1111 1111 1111 today", agent="a")
         self.assertEqual(entry["text"], "paid with [REDACTED:card] today")
         self.assertEqual(entry["digest"], memory.digest(entry["text"]))
-        self.assertNotIn("4111", self.store().path.read_text())
+        self.assertNotIn("4111 1111", self.store().path.read_text())  # spaced: digests are hex
         self.assertEqual(self.store().remember("client", "order 1234 5678", agent="a")["text"], "order 1234 5678")
 
     def test_invalid_input_is_refused(self):

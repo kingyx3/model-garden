@@ -51,7 +51,7 @@ class CreateTests(Case):
         made = self.create(description="Card 4111 1111 1111 1111 was declined")
         stored = self.store.get(made["ticketId"])
         self.assertNotIn("4111", stored["description"])
-        self.assertIn(tickets.REDACTED_CARD, stored["description"])
+        self.assertIn("[REDACTED:card]", stored["description"])
 
     def test_the_store_is_private_and_bounded(self):
         self.create()

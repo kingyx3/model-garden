@@ -21,6 +21,7 @@ Repository implementation docs:
 - [`docs/secrets.md`](docs/secrets.md) — credential ownership, storage and authorization mechanics.
 - [`docs/security.md`](docs/security.md) — production hardening for the supported deployment.
 - [`docs/governed-tools.md`](docs/governed-tools.md) — Tool/MCP authority, approvals and action audit.
+- [`docs/connector-discovery.md`](docs/connector-discovery.md) — untrusted upstream connector candidate review.
 - [`docs/channels.md`](docs/channels.md) — text channel adapter contract and verified principal mapping.
 - [`docs/metering.md`](docs/metering.md) — canonical usage/cost attribution and Lago integration.
 - [`docs/live-proof.md`](docs/live-proof.md) — executable live-proof/evidence collection.
@@ -70,7 +71,7 @@ python3 scripts/launch.py acme \
 assurance/                    enterprise DDQ/evidence registry and mappings
 contracts/v1/                 versioned portable resource contracts
 examples/workspace/           reference client desired state and evals
-platform/core/mcp_passthrough.py  pinned upstream operation approval (no vendor API clients)
+platform/core/                governance, Tier 0 stores, upstream connection approval (no vendor API clients)
 platform/channels/            replaceable channel adapters
 platform/runtime/             governed runtime/MCP boundary
 platform/metering/            external metering adapters

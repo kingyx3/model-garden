@@ -7,7 +7,6 @@ import pathlib
 import sys
 import tempfile
 import unittest
-from unittest import mock
 from urllib.parse import parse_qs, urlsplit
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
