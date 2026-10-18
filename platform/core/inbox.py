@@ -6,6 +6,7 @@ copying their contents:
 
 - pending approvals (an exact material action waiting for a mapped approver),
 - open Tier 4 hand-offs (an action the coworker prepared for a named person, with its deadline),
+- open Tier 0 tickets (work items the coworker or a person opened and nobody has finished), as a count and the oldest age,
 - records that need a person's review in the Tier 0 contact log (unmatched interactions and possible
   duplicates), as counts only,
 - connections that are failed, revoked or degraded (a token that expired or was withdrawn is the commonest
@@ -104,6 +105,24 @@ def _review(root: pathlib.Path | None) -> list[dict[str, Any]]:
     return items
 
 
+def _tickets(root: pathlib.Path | None, now: int) -> list[dict[str, Any]]:
+    if root is None or not pathlib.Path(root).is_dir():
+        return []
+    tickets = _sibling("model_garden_inbox_tickets", "tickets.py")
+    items: list[dict[str, Any]] = []
+    for path in sorted(pathlib.Path(root).glob("*.tickets.json")):
+        try:
+            open_items = tickets.TicketStore(pathlib.Path(root), tenant=path.name[: -len(".tickets.json")]).open_items()
+        except (OSError, ValueError):
+            continue
+        if open_items:
+            items.append({
+                "kind": "tickets", "count": len(open_items), "oldestWaitingSeconds": max(0, now - min(item["createdAt"] for item in open_items)),
+                "next": "python3 scripts/runtime-tickets.py list  (shows ids, projects and status; `show <id>` prints the text)",
+            })
+    return items
+
+
 def _connections(root: pathlib.Path | None) -> list[dict[str, Any]]:
     if root is None:
         return []
@@ -139,12 +158,13 @@ def collect(
     handoffs: pathlib.Path,
     contacts: pathlib.Path | None = None,
     governance: pathlib.Path | None = None,
+    tickets: pathlib.Path | None = None,
     now: int | None = None,
 ) -> dict[str, Any]:
     """Everything waiting for a person, most urgent first.
 
     Order: failed or revoked connections, overdue hand-offs, approvals, other hand-offs, degraded
-    connections, then records to review.
+    connections, open tickets, then records to review.
     """
     current = int(time.time()) if now is None else now
     open_handoffs = sorted(_handoffs(handoffs, current), key=lambda item: (not item["overdue"], item.get("deadline") or 0, item["id"]))
@@ -152,17 +172,19 @@ def collect(
     overdue = [item for item in open_handoffs if item["overdue"]]
     due = [item for item in open_handoffs if not item["overdue"]]
     reviews = _review(contacts)
+    open_tickets = _tickets(tickets, current)
     connections = _connections(governance)
     down = [item for item in connections if item["health"] in ("failed", "revoked")]
     degraded = [item for item in connections if item["health"] == "degraded"]
     return {
         "generatedAt": current,
-        "items": [*down, *overdue, *waiting, *due, *degraded, *reviews],
+        "items": [*down, *overdue, *waiting, *due, *degraded, *open_tickets, *reviews],
         "counts": {
             "approvals": len(waiting),
             "handoffs": len(open_handoffs),
             "overdueHandoffs": len(overdue),
             "reviews": sum(item["count"] for item in reviews),
+            "tickets": sum(item["count"] for item in open_tickets),
             "connections": len(connections),
         },
     }
@@ -183,7 +205,7 @@ def format_text(inbox: dict[str, Any]) -> str:
     lines = [
         f"Waiting for a person: {counts['approvals']} approval(s), {counts['handoffs']} hand-off(s)"
         f" ({counts['overdueHandoffs']} overdue), {counts['reviews']} record(s) to review,"
-        f" {counts['connections']} connection(s) not healthy",
+        f" {counts['connections']} connection(s) not healthy, {counts['tickets']} open ticket(s)",
     ]
     for item in inbox["items"]:
         if item["kind"] == "approval":
@@ -191,6 +213,8 @@ def format_text(inbox: dict[str, Any]) -> str:
         elif item["kind"] == "connection":
             why = f" ({item['reason']})" if item.get("reason") else ""
             lines.append(f"  CONNECTION  {item['family']} is {item['health'].upper()}{why}")
+        elif item["kind"] == "tickets":
+            lines.append(f"  TICKETS   {item['count']} open, oldest waiting {_age(item['oldestWaitingSeconds'])}")
         elif item["kind"] == "handoff":
             due = "OVERDUE" if item["overdue"] else "open"
             lines.append(f"  HAND-OFF  {item['tool']}  for {item['assignee']}  {due} ({item['reason']})  id {item['id']}")

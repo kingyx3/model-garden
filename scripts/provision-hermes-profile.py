@@ -31,6 +31,9 @@ MCP_TOOL_NAMES = {
     "files.search": "files_search",
     "files.read": "files_read",
     "files.write": "files_write",
+    "tickets.search": "tickets_search",
+    "tickets.create": "tickets_create",
+    "tickets.update": "tickets_update",
 }
 # Platform built-ins exposed whenever the governed Tool sidecar is present.
 PLATFORM_MCP_TOOLS = ("platform_capabilities", "handoff_request", "handoff_status")
