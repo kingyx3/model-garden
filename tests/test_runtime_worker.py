@@ -341,6 +341,39 @@ class CrmFilingTests(Case):
         self.assertEqual(executed[0]["ledger"]["externalObjectRef"], entry["providerRef"])
         self.assertEqual(runtime._crm_filing()[1].keys(), [])  # acknowledged, so nothing is kept for a retry
 
+    def interactions(self, runtime):
+        with runtime._sidecar().crm_store()._locked() as state:
+            return [dict(item) for item in state["interactions"].values()]
+
+    def test_a_verified_sender_is_filed_against_the_one_contact_holding_the_address(self):
+        runtime = self.runtime()
+        made = runtime._sidecar().crm_store().create_contact({"name": "Alex Customer", "email": "Alex@Customer.example"})
+        runtime._spool().ingest(raw(), now=T0 - 5)
+        runtime.tick()
+        (interaction,) = self.interactions(runtime)
+        self.assertEqual(interaction["contact"], made["objectId"])
+        self.assertEqual(runtime._sidecar().crm_store().review_queue()["unmatchedInteractions"], [])
+
+    def test_no_holder_or_several_holders_stay_in_the_unmatched_queue_for_a_person(self):
+        runtime = self.runtime()
+        runtime._spool().ingest(raw(), now=T0 - 5)  # nobody holds the address
+        runtime.tick()
+        store = runtime._sidecar().crm_store()
+        store.create_contact({"name": "Alex One", "email": "alex@customer.example"})
+        store.create_contact({"name": "Alex Two", "email": "alex@customer.example"})  # a possible duplicate: ambiguous, so not guessed
+        runtime._spool().ingest(raw("<c2@customer.example>"), now=T0 - 4)
+        self.clock[0] += 60  # past the mailbox job's interval
+        runtime.tick()
+        self.assertEqual([item["contact"] for item in self.interactions(runtime)], ["unmatched", "unmatched"])
+
+    def test_an_unverified_sender_is_never_matched_to_a_contact(self):
+        runtime = self.runtime()
+        runtime._sidecar().crm_store().create_contact({"name": "Alex Customer", "email": "alex@customer.example"})
+        forged = raw().replace(b"spf=pass; dkim=pass; dmarc=pass", b"spf=fail; dkim=fail; dmarc=fail")
+        runtime._spool().ingest(forged, now=T0 - 5)
+        runtime.tick()
+        self.assertEqual([item["contact"] for item in self.interactions(runtime)], ["unmatched"])
+
     def test_filing_is_off_without_the_built_in_contact_log_and_the_job_says_so(self):
         runtime = self.runtime(crm=False)
         runtime._spool().ingest(raw(), now=T0 - 5)
@@ -421,8 +454,9 @@ class CrmFilingTests(Case):
         runtime._spool().ingest(raw(), now=T0 - 5)
         runtime.tick()
         stored = "".join(path.read_text() for path in (self.data / "crm-sync").rglob("*.json"))
+        text = re.sub(r"[0-9a-f]{16,}", "", stored + (self.data / "audit.jsonl").read_text())  # digests and ids are random hex that can contain "4111"
         for private in ("4111", "opening hours", "alex@customer.example"):
-            self.assertNotIn(private, stored + (self.data / "audit.jsonl").read_text())
+            self.assertNotIn(private, text)
 
 
 class LoopTests(Case):

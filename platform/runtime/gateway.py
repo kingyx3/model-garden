@@ -495,7 +495,7 @@ class Gateway:
         inbox = _module("inbox")
         snapshot = inbox.collect(
             approvals=self.data / "approvals", handoffs=self.data / "handoffs", contacts=self.data / "contacts", governance=self.data,
-            tickets=self.data / "tickets", now=int(self.clock()),
+            tickets=self.data / "tickets", crm_sync=self.data / "crm-sync", now=int(self.clock()),
         )
         everything = bool({"approver", "admin"} & set(principal.roles))
         return inbox.format_chat(inbox.for_person(snapshot, principal.identity, everything=everything))
