@@ -587,8 +587,12 @@ class Worker:
         """Remove approval requests and decisions older than ``MODEL_GARDEN_APPROVAL_TTL_HOURS`` and ledger each (ids only)."""
         approval = _module("approval")
         removed = approval.sweep(self.data / "approvals", now=now, ttl=approval.ttl_seconds())
+        to = self.config["escalateTo"] or (self.config["mailbox"] or {}).get("owner")
         for item in removed:
             self.audit("approval.expired", IDENTITY, {"requestId": item["requestId"], "kind": item["kind"]})
+            if item["kind"] == "request" and to:  # an action was waiting for a person and will now never run: say so once, by Tool name only
+                self.queue.add("approval-expired", to, f"An approval request for {item.get('tool') or 'an action'} (ref {item['requestId'][:12]}) expired "
+                               "with no decision, so it was not done. Ask for it again if it is still needed.", reference=item["requestId"][:40])
         return len(removed)
 
     def run_export(self, now: int) -> dict[str, Any]:

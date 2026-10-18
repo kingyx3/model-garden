@@ -5,6 +5,7 @@ import contextlib
 import importlib.util
 import io
 import json
+import re
 import pathlib
 import sys
 import tempfile
@@ -69,7 +70,7 @@ class MailWiringTests(worker_tests.Case):
         conversation, _ = self.only_conversation(runtime)
         self.assertEqual(conversation["channel"], "email")
         self.assertEqual({item["kind"] for item in conversation["interactions"]}, {"message", "outcome"})
-        text = "".join(path.read_text() for path in (self.data / "conversations").iterdir() if path.suffix == ".json")
+        text = re.sub(r"[0-9a-f]{16,}|\d{2}:\d{2}:\d{2}\.\d+Z", "", "".join(path.read_text() for path in (self.data / "conversations").iterdir() if path.suffix == ".json"))  # ids are random hex
         for private in ("4111", "opening hours", ALEX, "customer.example", "Hours"):
             self.assertNotIn(private, text)
 
