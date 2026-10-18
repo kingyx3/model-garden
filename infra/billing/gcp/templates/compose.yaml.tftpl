@@ -12,6 +12,7 @@ x-backend: &backend
   env_file: /etc/lago/lago.env
   environment: &backend-env
     RAILS_ENV: production
+    DATABASE_URL: postgresql://lago@db:5432/lago?search_path=public
     RAILS_LOG_TO_STDOUT: "true"
     REDIS_URL: redis://redis:6379
     LAGO_REDIS_CACHE_URL: redis://redis:6379

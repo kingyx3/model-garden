@@ -6,7 +6,7 @@
   billing-sync.py report  --config billing.yaml --since 2026-10 [--until 2026-12] [--by channel] [--format csv]
 
 Runs as the billing host's own identity: it reads each client's export bucket as a verifier (GCE metadata token) and the Lago
-API key from ``LAGO_API_KEY``, which the host loads from Secret Manager. Nothing here holds a client runtime credential.
+API key from ``LAGO_API_KEY``, which the host takes from Lago's root-only env file. Nothing here holds a client runtime credential.
 """
 from __future__ import annotations
 

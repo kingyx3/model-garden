@@ -149,7 +149,7 @@ client runtime -> ledger export (usage facts) -> billing sync -> shared Lago -> 
 
 Billing must never become the source of truth for what the AI did or who authorized it.
 
-The host takes daily data-disk snapshots and nightly Postgres dumps to a create-only bucket. Before production billing, reconcile sample usage against provider statements and test a restore and a Lago upgrade on a `dev` host.
+The host keeps nightly Postgres dumps in a create-only bucket and runs on one small VM (about $30 a month at list price; see [metering](metering.md#running-the-shared-lago)). Before production billing, reconcile sample usage against provider statements and test a restore and a Lago upgrade on a `dev` host.
 
 ## Cloudflare Free: useful boundaries
 

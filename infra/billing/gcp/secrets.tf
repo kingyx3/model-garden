@@ -1,21 +1,23 @@
-# Lago's secrets, generated once as ephemeral values and written write-only: they never appear in plan output or Terraform state.
-# Each version is created when its secret is first created (secret_data_wo_version = 1) and is never regenerated afterwards, since
-# Lago encrypts data with the encryption keys and Postgres keeps the password it was initialised with.
+# Lago's secrets as one Secret Manager secret holding an env file, generated once from ephemeral values and written write-only, so
+# no value ever appears in plan output or Terraform state. One secret with one version is the cheapest Secret Manager footprint, and
+# the host reads it once per boot. The version is written once (write-only version 1) and never regenerated, since Lago encrypts data
+# with these keys and Postgres keeps the password it was initialised with.
 
 locals {
-  generated_secrets = {
-    postgres-password              = 32
-    secret-key-base                = 64
-    encryption-primary-key         = 32
-    encryption-deterministic-key   = 32
-    encryption-key-derivation-salt = 32
-    api-key                        = 48
-    admin-password                 = 24
+  # Env name => generated length. LAGO_RSA_PRIVATE_KEY is added from the TLS key below.
+  generated_env = {
+    POSTGRES_PASSWORD                   = 32
+    SECRET_KEY_BASE                     = 64
+    LAGO_ENCRYPTION_PRIMARY_KEY         = 32
+    LAGO_ENCRYPTION_DETERMINISTIC_KEY   = 32
+    LAGO_ENCRYPTION_KEY_DERIVATION_SALT = 32
+    LAGO_ORG_API_KEY                    = 48
+    LAGO_ORG_USER_PASSWORD              = 24
   }
 }
 
 ephemeral "random_password" "lago" {
-  for_each = local.generated_secrets
+  for_each = local.generated_env
 
   length  = each.value
   special = false
@@ -27,9 +29,7 @@ ephemeral "tls_private_key" "lago" {
 }
 
 resource "google_secret_manager_secret" "lago" {
-  for_each = toset(concat(keys(local.generated_secrets), ["rsa-private-key"]))
-
-  secret_id = "${local.name}-${each.value}"
+  secret_id = "${local.name}-env"
   labels    = local.labels
 
   replication {
@@ -39,19 +39,23 @@ resource "google_secret_manager_secret" "lago" {
   depends_on = [google_project_service.billing]
 }
 
-resource "google_secret_manager_secret_version" "lago" {
-  for_each = google_secret_manager_secret.lago
+locals {
+  # The env file: one NAME=value line per generated value, then the RSA key. Ephemeral, like its parts.
+  lago_env = join("\n", concat(
+    [for name in sort(keys(local.generated_env)) : "${name}=${ephemeral.random_password.lago[name].result}"],
+    ["LAGO_RSA_PRIVATE_KEY=${base64encode(ephemeral.tls_private_key.lago.private_key_pem)}", ""],
+  ))
+}
 
-  secret                 = each.value.id
-  secret_data_wo         = each.key == "rsa-private-key" ? base64encode(ephemeral.tls_private_key.lago.private_key_pem) : ephemeral.random_password.lago[each.key].result
+resource "google_secret_manager_secret_version" "lago" {
+  secret                 = google_secret_manager_secret.lago.id # pragma: allowlist secret (a Secret Manager resource id, not a value)
+  secret_data_wo         = local.lago_env                       # pragma: allowlist secret (a reference to the ephemeral env above, not a value)
   secret_data_wo_version = 1
 }
 
-# Only the billing host reads them.
+# Only the billing host reads it.
 resource "google_secret_manager_secret_iam_member" "billing_reads" {
-  for_each = google_secret_manager_secret.lago
-
-  secret_id = each.value.id
+  secret_id = google_secret_manager_secret.lago.id
   role      = "roles/secretmanager.secretAccessor"
   member    = "serviceAccount:${google_service_account.billing.email}"
 }

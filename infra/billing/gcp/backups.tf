@@ -1,5 +1,6 @@
-# Nightly Postgres dumps, on top of the daily data-disk snapshots. The host can add dumps but not read, replace or delete them; the
-# retention policy keeps each one for backup_retention_days.
+# Nightly Postgres dumps are the billing host's backup: a few megabytes a night, restorable anywhere, unlike disk snapshots. The host
+# can add dumps but not read, replace or delete them; the retention policy keeps each one for backup_retention_days and the lifecycle
+# rule deletes it the day after.
 
 resource "google_storage_bucket" "backups" {
   #checkov:skip=CKV_GCP_62:Access to the dumps is visible in project Data Access audit logs; a separate access-log bucket is added when required.

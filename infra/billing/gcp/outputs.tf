@@ -15,7 +15,7 @@ output "backup_bucket" {
   value = google_storage_bucket.backups.name
 }
 
-output "secrets" {
-  description = "Secret Manager ids of the generated Lago secrets (names only; read admin-password to sign in the first time)."
-  value       = { for key, secret in google_secret_manager_secret.lago : key => secret.secret_id }
+output "secret" {
+  description = "Secret Manager id of Lago's env secret (the first sign-in password is its LAGO_ORG_USER_PASSWORD line)."
+  value       = google_secret_manager_secret.lago.secret_id
 }

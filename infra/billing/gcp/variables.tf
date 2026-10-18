@@ -75,8 +75,9 @@ variable "billing_sources" {
     bucket       = string
     prefix       = optional(string, "")
     agents       = optional(list(string), [])
+    grant_access = optional(bool, true)
   }))
-  description = "One entry per client environment to bill: its ledger export bucket (the docker-host ledger_export_bucket output), the Lago external subscription id it bills to, and its Agents (each gets a Lago filter value). Add the billing_service_account output to that environment's export_verifier_members first."
+  description = "One entry per client environment to bill: its ledger export bucket (the docker-host ledger_export_bucket output), the Lago external subscription id it bills to, and its Agents (each gets a Lago filter value). This module grants the billing identity read access to the bucket unless grant_access is false, in which case add the billing_service_account output to that environment's export_verifier_members."
   default     = []
 
   validation {
@@ -101,30 +102,46 @@ variable "billing_sync_minutes" {
 variable "machine_type" {
   type        = string
   description = "Compute Engine machine type for the billing host."
-  default     = "e2-standard-2"
+  default     = "e2-medium"
+}
+
+variable "swap_gb" {
+  type        = number
+  description = "Swap file on the data disk, so the small default machine type absorbs memory peaks."
+  default     = 4
+
+  validation {
+    condition     = var.swap_gb >= 0 && var.swap_gb <= 16
+    error_message = "swap_gb must be between 0 and 16."
+  }
+}
+
+variable "operators" {
+  type        = list(string)
+  description = "IAM members (user: or group:) who may open the Lago UI and API through IAP and administer the host over OS Login."
+  default     = []
+
+  validation {
+    condition     = alltrue([for member in var.operators : can(regex("^(user|group):[^ ]+$", member))])
+    error_message = "operators must be user: or group: members."
+  }
 }
 
 variable "data_disk_gb" {
   type        = number
-  description = "Persistent disk for Postgres, Redis, Lago files and the billing sync's state."
-  default     = 50
+  description = "Persistent disk for Docker (Lago's images, Postgres, Redis, files), the swap file and the billing sync's state."
+  default     = 20
 
   validation {
-    condition     = var.data_disk_gb >= 20 && var.data_disk_gb <= 2000
-    error_message = "data_disk_gb must be between 20 and 2000."
+    condition     = var.data_disk_gb >= 15 && var.data_disk_gb <= 2000
+    error_message = "data_disk_gb must be between 15 and 2000."
   }
-}
-
-variable "snapshot_retention_days" {
-  type        = number
-  description = "Days each daily data-disk snapshot is kept."
-  default     = 14
 }
 
 variable "backup_retention_days" {
   type        = number
   description = "Days each nightly Postgres dump is kept (and cannot be deleted)."
-  default     = 35
+  default     = 30
 
   validation {
     condition     = var.backup_retention_days >= 7 && var.backup_retention_days <= 3650

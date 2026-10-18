@@ -30,10 +30,8 @@ from collections.abc import Iterator, Mapping
 from typing import Any
 
 COUNTERS = ("inputTokens", "outputTokens", "cacheReadTokens", "cacheWriteTokens", "reasoningTokens", "apiCalls", "costMicrosUsd")
-_COLUMNS = {
-    "inputTokens": "input_tokens", "outputTokens": "output_tokens", "cacheReadTokens": "cache_read_tokens",
-    "cacheWriteTokens": "cache_write_tokens", "reasoningTokens": "reasoning_tokens", "apiCalls": "api_call_count",
-}
+_COLUMNS = dict(zip(COUNTERS[:6], ("input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens", "reasoning_tokens",
+                                   "api_call_count")))
 _REQUIRED = ("id", "source", "input_tokens", "output_tokens")
 _OPTIONAL = ("model", "billing_provider", "cache_read_tokens", "cache_write_tokens", "reasoning_tokens", "api_call_count",
              "estimated_cost_usd", "actual_cost_usd", "last_activity_at")

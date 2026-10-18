@@ -13,6 +13,14 @@ grep -q " /var/lib/lago " /etc/fstab || echo "UUID=$(blkid -s UUID -o value "$de
 mountpoint -q /var/lib/lago || mount /var/lib/lago
 install -d -m 0700 /var/lib/lago/billing /var/lib/lago/docker
 
+# Swap on the data disk absorbs memory peaks (migrations, invoice runs) so the small default machine type is enough.
+if [ ! -f /var/lib/lago/swapfile ]; then
+  fallocate -l ${swap_gb}G /var/lib/lago/swapfile
+  chmod 0600 /var/lib/lago/swapfile
+  mkswap /var/lib/lago/swapfile
+fi
+swapon --show=NAME --noheadings | grep -qx /var/lib/lago/swapfile || swapon /var/lib/lago/swapfile
+
 # Docker keeps its images and Lago's volumes (Postgres, Redis, files) on the data disk, and never starts before it is mounted.
 install -d -m 0755 /etc/docker /etc/systemd/system/docker.service.d
 echo '{"data-root": "/var/lib/lago/docker", "log-driver": "local"}' > /etc/docker/daemon.json
@@ -33,30 +41,17 @@ if ! command -v docker >/dev/null; then
   systemctl enable --now docker
 fi
 
-secret() { gcloud secrets versions access latest --secret="$1" --quiet; }
-# Read every secret before writing anything, so a failed read stops the boot instead of leaving an empty value.
-postgres_password=$(secret ${secrets["postgres-password"]})
-secret_key_base=$(secret ${secrets["secret-key-base"]})
-rsa_private_key=$(secret ${secrets["rsa-private-key"]})
-encryption_primary_key=$(secret ${secrets["encryption-primary-key"]})
-encryption_deterministic_key=$(secret ${secrets["encryption-deterministic-key"]})
-encryption_salt=$(secret ${secrets["encryption-key-derivation-salt"]})
-admin_password=$(secret ${secrets["admin-password"]})
-api_key=$(secret ${secrets["api-key"]})
+# Lago's one secret is an env file. Postgres gets only its password; Lago gets the rest, with the same password as libpq's PGPASSWORD
+# so it stays out of the database URL. Read before writing, so a failed read stops the boot instead of leaving an empty file.
+environment=$(gcloud secrets versions access latest --secret=${secret_id} --quiet)
+postgres_password=$(printf '%s\n' "$environment" | sed -n 's/^POSTGRES_PASSWORD=//p')
+test -n "$postgres_password"
 install -d -m 0700 /etc/lago
-cat > /etc/lago/postgres.env <<ENV
-POSTGRES_PASSWORD=$postgres_password
-ENV
-cat > /etc/lago/lago.env <<ENV
-DATABASE_URL=postgresql://lago:$postgres_password@db:5432/lago?search_path=public
-SECRET_KEY_BASE=$secret_key_base
-LAGO_RSA_PRIVATE_KEY=$rsa_private_key
-LAGO_ENCRYPTION_PRIMARY_KEY=$encryption_primary_key
-LAGO_ENCRYPTION_DETERMINISTIC_KEY=$encryption_deterministic_key
-LAGO_ENCRYPTION_KEY_DERIVATION_SALT=$encryption_salt
-LAGO_ORG_USER_PASSWORD=$admin_password
-LAGO_ORG_API_KEY=$api_key
-ENV
+printf 'POSTGRES_PASSWORD=%s\n' "$postgres_password" > /etc/lago/postgres.env
+{
+  printf '%s\n' "$environment" | grep -v '^POSTGRES_PASSWORD='
+  printf 'PGPASSWORD=%s\n' "$postgres_password"
+} > /etc/lago/lago.env
 chmod 0600 /etc/lago/postgres.env /etc/lago/lago.env
 
 install -d -m 0755 /opt/lago
@@ -77,9 +72,9 @@ ${billing_config}
 CONFIG
 cat > /opt/model-garden-billing/run.sh <<RUN
 #!/bin/bash
-# Set up the billable metrics (idempotent), then send new usage. The API key is read per run and never written to disk.
+# Set up the billable metrics (idempotent), then send new usage, with the organization API key from Lago's root-only env file.
 set -euo pipefail
-LAGO_API_KEY="\$(gcloud secrets versions access latest --secret=${secrets["api-key"]} --quiet)"
+LAGO_API_KEY="\$(sed -n 's/^LAGO_ORG_API_KEY=//p' /etc/lago/lago.env)"
 export LAGO_API_KEY
 python3 /opt/model-garden-billing/scripts/billing-sync.py metrics --config /etc/model-garden-billing/billing.yaml
 python3 /opt/model-garden-billing/scripts/billing-sync.py sync --config /etc/model-garden-billing/billing.yaml
