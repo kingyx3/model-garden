@@ -215,6 +215,16 @@ class TicketStore:
             raise TicketError("no such ticket")
         return self._shape(ticket, detail=True)
 
+    def created_since(self, since: int) -> list[dict[str, Any]]:
+        """Identifiers and creation times of tickets created at or after ``since`` (oldest first), for the worker's ``ticket.created`` source.
+
+        Like ``open_items`` this holds no title, description or requester: a trigger is told that a ticket exists, not what it says.
+        """
+        with self._locked() as document:
+            tickets = list(document["tickets"].values())
+        found = [{"ticketId": ticket["id"], "createdAt": ticket["createdAt"]} for ticket in tickets if ticket["createdAt"] >= since]
+        return sorted(found, key=lambda item: (item["createdAt"], item["ticketId"]))
+
     def open_items(self) -> list[dict[str, Any]]:
         """Tickets still waiting for a person: identifiers, project, status and ages only (no title, description or comments)."""
         with self._locked() as document:
