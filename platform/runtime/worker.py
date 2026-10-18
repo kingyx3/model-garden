@@ -16,6 +16,10 @@ small, bounded amount of work:
 - **notices**: delivers hand-off, human-step, connection, grant, schedule and mailbox notices to the named person through the
   channel the people directory gives for them (``notice_delivery.py``). A person with no usable channel stays ``no-channel`` and
   is offered again on the next pass; nothing is marked delivered early.
+- **crm-sync**: files each handled customer email to the bound Tier 0 contact log through the governed ``crm.log-interaction`` boundary
+  (the support mailbox does the first attempt), retries the ones a transient outage left behind when their backoff has passed, and tells
+  the mailbox owner once about any filing that is blocked and needs a person (``client-operator.py crm-sync``). Nothing is reported as
+  filed unless the CRM acknowledged it.
 - **retention**: purges expired artifacts and mail past the retention period.
 - **export** (when configured): copies new ledger records to the retention-locked bucket; a local ledger that no longer matches
   the export, or one falling behind because exporting fails, is alerted to ``escalateTo`` through the notices job
@@ -45,7 +49,7 @@ from collections.abc import Callable, Mapping
 from typing import Any
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
-DEFAULT_INTERVALS = {"scheduler": 60, "mailbox": 30, "notices": 60, "retention": 3600, "export": 300}
+DEFAULT_INTERVALS = {"scheduler": 60, "mailbox": 30, "notices": 60, "retention": 3600, "export": 300, "crm-sync": 120}
 MIN_INTERVAL, MAX_INTERVAL = 10, 86_400
 # A stalled export alerts the escalation contact when the ledger is this far ahead of it, or has waited this long.
 EXPORT_MAX_LAG_EVENTS = 100
@@ -85,6 +89,8 @@ MODULES = {
     "ledger": "platform/core/ledger_export.py",
     "export_monitor": "platform/core/export_monitor.py",
     "approval": "scripts/runtime-approval.py",
+    "crm_sync": "platform/core/crm_sync.py",
+    "crm_filing": "platform/core/crm_filing.py",
 }
 
 
@@ -328,6 +334,66 @@ class Worker:
         # Rebuilt on each lookup so a contact a person adds while the worker runs can be matched by the next email.
         return recorder.ConversationRecorder(store, agent=self._agent(), directory=lambda kind, digest: recorder.contacts_directory(contacts)(kind, digest))
 
+    # -- CRM filing --------------------------------------------------------------------------------
+
+    def _crm_filing(self):
+        """``(sync ledger, payload store, executor)`` for filing handled emails to the Tier 0 contact log, or ``None`` when `crm` is not bound to it.
+
+        The executor is the governed ``crm.log-interaction`` boundary (policy, approval, ledger); a result that is not ``executed`` (an
+        approval is pending, a person has it, it was denied) is raised as ``PermissionError`` so the entry blocks for a person instead of
+        being reported as filed.
+        """
+        sidecar = self._sidecar()
+        try:
+            sidecar.crm_store()
+        except PermissionError:
+            return None
+        sync, filing = _module("crm_sync"), _module("crm_filing")
+        ledger = sync.SyncLedger(self.data / "crm-sync", tenant=self.tenant, audit=self.audit)
+        store = filing.PayloadStore(self.data / "crm-sync" / "payloads")
+
+        def executor(arguments: Mapping[str, Any]) -> Mapping[str, Any]:
+            result = sidecar.crm_log_interaction(
+                object_id=arguments["objectId"], interaction_type=arguments["interactionType"], channel=arguments["channel"],
+                direction=arguments["direction"], timestamp=arguments["timestamp"], summary=arguments["summary"],
+                outcome=arguments.get("outcome"), transcript_ref=arguments.get("transcriptRef"),
+                justification="support mailbox: file a handled customer email",
+            )
+            if result.get("status") != "executed":
+                raise PermissionError(f"filing was not allowed to run ({result.get('status')})")
+            return result["result"]
+
+        return ledger, store, executor
+
+    def _blocked_notified(self) -> pathlib.Path:
+        return self.data / "crm-sync" / "blocked-notified.json"
+
+    def run_crm_sync(self, now: int) -> dict[str, Any]:
+        filing = self._crm_filing()
+        if filing is None:
+            return {"skipped": "no-built-in-crm-bound"}
+        ledger, store, executor = filing
+        counts = _module("crm_filing").retry_due(ledger, executor, store, now=now)
+        blocked = ledger.list(states=("blocked",))
+        path = self._blocked_notified()
+        try:
+            known = set(json.loads(path.read_text(encoding="utf-8")))
+        except (OSError, ValueError, TypeError):
+            known = set()
+        owner = (self.config["mailbox"] or {}).get("owner") or self.config["escalateTo"]
+        fresh = [entry for entry in blocked if entry["key"] not in known]
+        for entry in fresh:
+            if owner:
+                self.queue.add("crm-filing-blocked", owner,
+                               f"A {entry['interactionType']} could not be filed to the CRM and needs a person (reason: {entry.get('lastError', 'attempts')}, "
+                               f"reference {entry['key'][:12]}). See `client-operator.py crm-sync list`.", reference=entry["key"][:40])
+        if fresh and owner:
+            path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+            temporary = path.with_suffix(".tmp")
+            temporary.write_text(json.dumps(sorted(known | {entry["key"] for entry in fresh})[-MAX_QUEUE:]) + "\n", encoding="utf-8")
+            os.replace(temporary, path)
+        return {**counts, "blocked": len(blocked), "notified": len(fresh) if owner else 0}
+
     def mailbox_handler(self) -> Callable[[bytes, int], dict[str, Any]]:
         settings = self.config["mailbox"]
         email, support, text = _module("email"), _module("support"), _module("text")
@@ -381,9 +447,11 @@ class Worker:
                 events.append(("ticket.created", made["ticketId"]))
             return made
 
+        crm = self._crm_filing()
+        filing = {"ledger": crm[0], "payloads": crm[1], "crm": crm[2]} if crm is not None else {}
         mailbox = support.SupportMailbox(
             adapter, text.PrincipalDirectory(), {"mail.draft": draft}, classify=classify, answer=answer, escalate=escalate, ticket=open_ticket if tickets is not None else None,
-            handled=support.MessageLog(self.data / "mail-handled"), audit=self.audit, conversations=self._conversation_recorder(),
+            handled=support.MessageLog(self.data / "mail-handled"), audit=self.audit, conversations=self._conversation_recorder(), **filing,
         )
         def handle(raw: bytes, now: int) -> dict[str, Any]:
             del events[:]
@@ -525,7 +593,7 @@ class Worker:
 
     def jobs(self) -> list[tuple[str, Callable[[int], dict[str, Any]]]]:
         return [
-            ("scheduler", self.run_scheduler), ("mailbox", self.run_mailbox),
+            ("scheduler", self.run_scheduler), ("mailbox", self.run_mailbox), ("crm-sync", self.run_crm_sync),
             ("notices", self.deliver_notices), ("retention", self.run_retention), ("export", self.run_export),
         ]
 

@@ -4,7 +4,8 @@ A finished call or email has to land in the client's CRM whichever CRM that is, 
 reported as filed unless the provider said so (#108, #115). This module is the runner for that: it takes the portable
 ``crm.log-interaction`` arguments and an *executor* (the Tier 0 contact log or an approved upstream MCP executor, all with
 the same ``arguments -> result`` shape), and records each attempt in ``crm_sync.SyncLedger``. It contains no provider code, is
-credential-free and is **not yet wired** to the voice or mail paths.
+credential-free. The runtime worker wires it to the support mailbox (``PayloadStore`` + the ``crm-sync`` job); the call path is still
+the operator-invoked ``file-calls`` command.
 
 - **One entry per call or message.** The ledger key comes from the channel, the call or message id and the interaction type, so
   redelivery, a retry and a restart all reach the same entry, and nothing is filed twice.
@@ -16,17 +17,27 @@ credential-free and is **not yet wired** to the voice or mail paths.
   ``rejected`` and waits for a person; anything else (timeouts, network errors) is a transient ``outage`` that backs off and, after
   the ceiling, blocks.
 - **No content in the ledger.** The sync ledger holds identifiers, states and error codes only. Retrying needs the interaction
-  again, so ``retry_due`` takes a ``payloads`` callable (a deployment would read it from its transcript or message store); an entry
-  whose payload is unavailable is skipped and counted, never invented.
+  again, so ``retry_due`` takes a ``payloads`` callable; an entry whose payload is unavailable is skipped and counted, never invented.
+- **A small payload store for retries.** ``PayloadStore`` keeps the portable ``crm.log-interaction`` arguments of an interaction that
+  has not been filed yet (contact id, channel, direction, time, a one-line summary and a reference, never a message body) in a 0700
+  directory next to the ledger, written atomically. It is passed to ``file_interaction`` so a failed attempt can be retried, and the
+  copy is deleted as soon as the provider acknowledges the record. It is bounded and only holds what the ledger still has to deliver.
 """
 from __future__ import annotations
 
+import contextlib
 import importlib.util
+import json
+import os
 import pathlib
+import re
 import sys
 from collections.abc import Callable, Mapping
 from typing import Any
 
+MAX_PAYLOADS = 5000
+MAX_PAYLOAD_BYTES = 8192
+_KEY = re.compile(r"^[0-9a-f]{64}$")
 Executor = Callable[[dict[str, Any]], Mapping[str, Any]]
 
 
@@ -39,6 +50,52 @@ def _sync():
         sys.modules[name] = module
         spec.loader.exec_module(module)
     return sys.modules[name]
+
+
+class PayloadStore:
+    """The arguments of interactions still waiting to be filed, by sync-ledger key (callable with a ledger entry, for ``retry_due``)."""
+
+    def __init__(self, root: pathlib.Path) -> None:
+        self.root = pathlib.Path(root)
+
+    def _path(self, key: str) -> pathlib.Path:
+        if not isinstance(key, str) or not _KEY.fullmatch(key):
+            raise ValueError("a payload is stored under a sync ledger key")
+        return self.root / f"{key}.json"
+
+    def put(self, key: str, arguments: Mapping[str, Any]) -> None:
+        path = self._path(key)
+        text = json.dumps(dict(arguments), sort_keys=True)
+        if len(text.encode("utf-8")) > MAX_PAYLOAD_BYTES:
+            raise ValueError("the interaction is too large to keep for a retry")
+        if not path.exists() and len(self.keys()) >= MAX_PAYLOADS:
+            raise ValueError("too many interactions are waiting to be filed")
+        self.root.mkdir(parents=True, exist_ok=True, mode=0o700)
+        with contextlib.suppress(OSError):
+            os.chmod(self.root, 0o700)
+        temporary = path.with_suffix(".tmp")
+        handle = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(handle, "w", encoding="utf-8") as stream:
+            stream.write(text + "\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+
+    def get(self, key: str) -> dict[str, Any] | None:
+        try:
+            value = json.loads(self._path(key).read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return None
+        return value if isinstance(value, dict) else None
+
+    def drop(self, key: str) -> None:
+        self._path(key).unlink(missing_ok=True)
+
+    def keys(self) -> list[str]:
+        return sorted(path.stem for path in self.root.glob("*.json") if _KEY.fullmatch(path.stem)) if self.root.is_dir() else []
+
+    def __call__(self, entry: Mapping[str, Any]) -> dict[str, Any] | None:
+        return self.get(entry["key"])
 
 
 def classify(exc: BaseException) -> str:
@@ -70,13 +127,21 @@ def file_interaction(
     external_id: str,
     interaction_type: str,
     now: int,
+    store: PayloadStore | None = None,
 ) -> dict[str, Any]:
-    """Attempt to file one interaction now, if its ledger entry allows an attempt; always returns where it stands."""
+    """Attempt to file one interaction now, if its ledger entry allows an attempt; always returns where it stands.
+
+    With a ``store`` the arguments are kept until the provider acknowledges the record, so a later ``retry_due`` can try again.
+    """
     sync = _sync()
     entry = ledger.enqueue(channel=channel, external_id=external_id, interaction_type=interaction_type, now=now)
     key = entry["key"]
     if entry["state"] in ("synced", "reconciled"):
+        if store is not None:
+            store.drop(key)
         return _outcome(ledger, key, False, duplicate=True)
+    if store is not None:
+        store.put(key, arguments)  # kept even if this attempt is not allowed yet, so the retry job has something to send
     if entry["state"] == "blocked" or entry["nextAttemptAt"] > now:
         return _outcome(ledger, key, False, duplicate=False)
     try:
@@ -93,6 +158,8 @@ def file_interaction(
             ledger.reconcile(key, provider_ref=reference, now=now)
         else:
             ledger.record_success(key, provider_ref=reference, now=now)
+        if store is not None:
+            store.drop(key)
     except sync.SyncError:
         ledger.record_failure(key, error_code="rejected", now=now)  # an unusable reference is a rejection
         return _outcome(ledger, key, True, duplicate=False)
@@ -108,6 +175,7 @@ def retry_due(
 ) -> dict[str, int]:
     """Attempt every entry whose backoff has passed, taking each interaction from ``payloads(entry)``."""
     counts = {"attempted": 0, "synced": 0, "failed": 0, "blocked": 0, "skipped": 0}
+    store = payloads if isinstance(payloads, PayloadStore) else None
     for entry in ledger.due(now=now):
         arguments = payloads(entry)
         if arguments is None:
@@ -115,7 +183,7 @@ def retry_due(
             continue
         outcome = file_interaction(
             ledger, executor, arguments, channel=entry["channel"], external_id=entry["externalId"],
-            interaction_type=entry["interactionType"], now=now,
+            interaction_type=entry["interactionType"], now=now, store=store,
         )
         counts["attempted"] += 1 if outcome["attempted"] else 0
         if outcome["state"] in ("synced", "reconciled"):

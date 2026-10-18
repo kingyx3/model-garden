@@ -645,6 +645,35 @@ def runtime_file_calls(project_name: str) -> int:
     return 0
 
 
+CRM_SYNC_COMMANDS = {"list", "retry"}
+SYNC_KEY = re.compile(r"^[0-9a-f]{8,64}$")
+
+
+def runtime_crm_sync(project_name: str, command: str, *, key: str | None = None, by: str | None = None, as_json: bool = False) -> int:
+    """Show which handled emails reached the CRM, or make a blocked one retry (identifiers only; changes are ledgered under the named person)."""
+    if command not in CRM_SYNC_COMMANDS:
+        raise ValueError("crm-sync command must be one of " + ", ".join(sorted(CRM_SYNC_COMMANDS)))
+    if command == "retry":
+        if not (isinstance(key, str) and SYNC_KEY.fullmatch(key)):
+            raise ValueError("a filing key (the 12-character prefix `crm-sync list` shows, or the full key) is required")
+        if not (isinstance(by, str) and ARTIFACT_PERSON.fullmatch(by.strip())):
+            raise ValueError("--by must name the person who repaired it")
+    elif key is not None:
+        raise ValueError("list takes no key")
+    container = _governed_tool_container(project_name)
+    inner = ["python", "/opt/model-garden-platform/scripts/runtime-crm-sync.py", "/opt/data/.modelgarden/crm-sync", command]
+    if command == "list" and as_json:
+        inner.append("--json")
+    if command == "retry":
+        inner.extend([key, "--by", by.strip()])
+    result = _run(["docker", "exec", container, *inner])
+    if result.returncode != 0:
+        raise ValueError(result.stderr.strip() or result.stdout.strip() or "runtime crm-sync command failed")
+    if result.stdout:
+        print(result.stdout.strip())
+    return 0
+
+
 def runtime_inbox(project_name: str, as_json: bool = False) -> int:
     """Show everything waiting for a person: approvals, hand-offs and records to review (no personal data)."""
     container = _governed_tool_container(project_name)
@@ -873,6 +902,14 @@ def main() -> int:
     artifacts.add_argument("--project-name", required=True)
     artifacts.add_argument("--by", help="the named administrator for delete")
     artifacts.add_argument("--requested-by", help="list only what this person asked for")
+    crm_sync = sub.add_parser(
+        "crm-sync", help="show which handled customer emails reached the CRM and retry the blocked ones (identifiers only; run on the client host)"
+    )
+    crm_sync.add_argument("action", choices=sorted(CRM_SYNC_COMMANDS))
+    crm_sync.add_argument("key", nargs="?", help="the filing key (or its shown prefix) for retry")
+    crm_sync.add_argument("--project-name", required=True)
+    crm_sync.add_argument("--json", action="store_true", help="with list: machine-readable output")
+    crm_sync.add_argument("--by", help="the named person who repaired the cause, for retry")
     conversations = sub.add_parser(
         "conversations", help="show or manage the cross-channel conversation timeline: review queue, timelines, erasure (references only; run on the client host)"
     )
@@ -1061,6 +1098,8 @@ def main() -> int:
             )
         if args.command == "memory":
             return runtime_memory(args.project_name, args.action, scopes=tuple(args.scope), memory_id=args.memory_id, by=args.by)
+        if args.command == "crm-sync":
+            return runtime_crm_sync(args.project_name, args.action, key=args.key, by=args.by, as_json=args.json)
         if args.command == "conversations":
             return runtime_conversations(
                 args.project_name, args.action, target=args.target, conversation=args.conversation, customer=args.customer,

@@ -154,6 +154,7 @@ class SupportMailbox:
         handled: MessageLog | None = None,
         audit: Audit | None = None,
         conversations: Any | None = None,
+        payloads: Any | None = None,
     ) -> None:
         if not callable(mail.get("mail.draft")):
             raise ValueError("the support mailbox needs a mail.draft executor")
@@ -171,6 +172,7 @@ class SupportMailbox:
         self._adapter, self._directory, self._draft = adapter, directory, mail["mail.draft"]
         self._classify, self._answer = classify, answer
         self._ledger, self._crm = ledger, crm
+        self._payloads = payloads  # a crm_filing.PayloadStore: the filing arguments are kept until the CRM acknowledges, so a retry can send them
         self._contact_for = contact_for or (lambda _address: "unmatched")
         self._request_send, self._send_categories = request_send, frozenset(chosen)
         self._escalate, self._handled, self._audit = escalate, handled, audit
@@ -216,7 +218,7 @@ class SupportMailbox:
         try:
             outcome = _filing().file_interaction(
                 self._ledger, self._crm, arguments, channel="email", external_id=f"thread-{reference}",
-                interaction_type="email", now=now,
+                interaction_type="email", now=now, store=self._payloads,
             )
         except Exception as exc:  # noqa: BLE001 - filing must never stop the handler
             return {"state": "unavailable", "errorType": type(exc).__name__}
