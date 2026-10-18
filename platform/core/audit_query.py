@@ -242,6 +242,57 @@ def timeline(events: Iterable[Mapping[str, Any]], *, task: str | None = None, co
     }
 
 
+def call_correlation(call_hash: str) -> str:
+    """The correlation id a call's governed Tool calls carry when the runtime tags them with the call (``call:<callHash>``)."""
+    return f"call:{call_hash}"
+
+
+def request_timeline(events: Iterable[Mapping[str, Any]], request_ids: Iterable[str] = (), *, call: str | None = None) -> dict[str, Any]:
+    """Every ledger event of one or more requests together: authorization, approval, execution, hand-off and the child requests.
+
+    A request is named by its full ``requestId`` or a prefix of at least 8 characters. ``call`` adds every event whose correlation
+    id is ``call:<callHash>``, so one phone call reads as one story whether its request ids were recorded on the transcript or not.
+    A requested id with no event is listed under ``missing`` rather than dropped, so a gap is visible.
+    """
+    wanted = [item for item in dict.fromkeys(request_ids) if isinstance(item, str) and item]
+    if not wanted and not call:
+        raise AuditQueryError("a request timeline needs at least one request id or a call hash")
+    for item in wanted:
+        if len(item) < 8:
+            raise AuditQueryError("a request id (or prefix) is at least 8 characters")
+    correlation = call_correlation(call) if call else None
+    found: set[str] = set()
+    selected: list[Mapping[str, Any]] = []
+    for event in events:
+        governance = event.get("governance") if isinstance(event.get("governance"), Mapping) else {}
+        request_id, parent = event.get("requestId"), governance.get("parentRequestId")
+        hits = [w for w in wanted if (isinstance(request_id, str) and request_id.startswith(w)) or (isinstance(parent, str) and parent.startswith(w))]
+        if hits or (correlation is not None and governance.get("correlationId") == correlation):
+            selected.append(event)
+            found.update(hits)
+    selected.sort(key=lambda item: (item.get("sequence") or item.get("_line") or 0))
+    requests: dict[str, dict[str, Any]] = {}
+    steps: list[dict[str, Any]] = []
+    for event in selected:
+        governance = event.get("governance") if isinstance(event.get("governance"), Mapping) else {}
+        kind = event.get("event")
+        step = {
+            "sequence": event.get("sequence"), "timestamp": event.get("timestamp"), "event": kind, "outcome": event.get("outcome"),
+            "agent": event.get("agent"), "tool": event.get("tool"), "requestId": event.get("requestId"),
+            "parentRequestId": governance.get("parentRequestId"),
+            **({"approver": sorted(_approvers(event))[0]} if _approvers(event) else {}),
+        }
+        steps.append(step)
+        request_id = event.get("requestId")
+        if isinstance(request_id, str):
+            entry = requests.setdefault(request_id, {"requestId": request_id, "tool": event.get("tool"), "events": [], "final": None})
+            entry["events"].append(kind)
+            if kind in ("execution", "handoff") or (kind == "authorization" and event.get("outcome") == "deny"):
+                entry["final"] = f"{kind}:{event.get('outcome')}"
+    return {"call": call, "requested": wanted, "missing": [w for w in wanted if w not in found], "requests": list(requests.values()),
+            "steps": steps, "events": len(steps)}
+
+
 # -- policy replay ----------------------------------------------------------------------------------------
 
 def _tool_spec(desired_state: Mapping[str, Any], name: Any) -> Mapping[str, Any] | None:

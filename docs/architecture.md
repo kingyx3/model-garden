@@ -42,7 +42,7 @@ Terraform -> isolated client Docker host
 | Usage/cost attribution | Canonical non-secret attribution events emitted to the external Lago metering/billing seam. |
 | Infrastructure | Terraform-managed keyless GCP bootstrap and isolated Compute Engine Docker host. |
 | Delivery control | GitHub PR validation plus generated keyless environment deployment workflow. |
-| Skills and coworker identities | Individual Skill selection, disablement, dependency readiness **and first-class reusable Skillsets** ([#128, completed](https://github.com/kingyx3/model-garden/issues/128)) are implemented. Multi-Agent deployment (#95), fully separate downstream provider identities for each coworker (#129) and client self-service Studio (#130) remain gated, unfinished work. |
+| Skills and coworker identities | Individual Skill selection, disablement, dependency readiness **and first-class reusable Skillsets** ([#128, completed](https://github.com/kingyx3/model-garden/issues/128)) are implemented. Multi-Agent bundle rendering (`scripts/deploy-team-docker.py`, one runtime and attested identity per Agent) and the in-process team runtime with attenuated delegation, a per-task budget charged as calls happen and human steps (`platform/runtime/team_runtime.py`; see [contracts](contracts.md#team-of-agents)) are implemented credential-free and unproven against a live client (#95, #96, #97, #98). Fully separate downstream provider identities for each coworker (#129) and client self-service Studio (#130) remain gated, unfinished work. |
 
 ## Deployment contract
 

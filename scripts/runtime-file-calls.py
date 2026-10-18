@@ -14,6 +14,11 @@ Each call is also put on the cross-channel conversation timeline (`platform/core
 email from the same verified sender can join the same customer's history; see `client-operator.py conversations`. That is
 best-effort and never changes how a call was filed.
 
+Before filing, each call not yet filed gets a post-call summary (`platform/channels/call_summary.py`): written by the coworker through
+the Hermes API when `MODEL_GARDEN_COWORKER_API_KEY` and a coworker URL (`MODEL_GARDEN_COWORKER_API_URL`, else `coworker.url` in the worker
+config) are present, otherwise a deterministic extractive fallback. The summary is what `crm.log-interaction` carries, so an approval shows
+it exactly, and the timeline records its digest and source. `--no-summary` files the plain outcome-and-size line instead.
+
 The same input may also hold the worker's lifecycle events: each `TranscriptWriteFailed` (a call whose transcript
 could not be stored) is ledgered once as `transcript.write-failed` with the error type and time only.
 """
@@ -79,6 +84,27 @@ def _recorder(runtime_module, runtime, crm_store, args) -> _CountingRecorder:
     return _CountingRecorder(module.ConversationRecorder(store, agent=agent, directory=module.contacts_directory(crm_store)))
 
 
+def _summarizer(args):
+    """A CallSummarizer using the coworker when one is configured, else the deterministic fallback (None with --no-summary)."""
+    if args.no_summary:
+        return None
+    module = _load("runtime_file_calls_summary", ROOT / "platform" / "channels" / "call_summary.py")
+    client = None
+    key = os.environ.get("MODEL_GARDEN_COWORKER_API_KEY", "").strip()
+    url = os.environ.get("MODEL_GARDEN_COWORKER_API_URL", "").strip()
+    if not url and args.worker_config.is_file():
+        try:
+            url = str((json.loads(args.worker_config.read_text(encoding="utf-8")).get("coworker") or {}).get("url") or "")
+        except (OSError, ValueError, AttributeError):
+            url = ""
+    if key and url:
+        try:
+            client = _load("runtime_file_calls_coworker", ROOT / "platform" / "runtime" / "coworker_client.py").CoworkerClient(url, key)
+        except Exception:  # noqa: BLE001 - a bad coworker setting means the fallback, never a failed filing
+            client = None
+    return module.CallSummarizer(client, cache_path=args.conversations_root.with_name("call-summaries.json"))
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--transcripts", required=True, help="transcripts JSONL path, or - for standard input")
@@ -90,6 +116,9 @@ def main(argv: list[str] | None = None) -> int:
         os.environ.get("MODEL_GARDEN_APPROVAL_ROOT", "/opt/data/.modelgarden/approvals")))
     parser.add_argument("--conversations-root", type=pathlib.Path, default=pathlib.Path(
         os.environ.get("MODEL_GARDEN_CONVERSATIONS_ROOT", "/opt/data/.modelgarden/conversations")))
+    parser.add_argument("--worker-config", type=pathlib.Path, default=pathlib.Path(
+        os.environ.get("MODEL_GARDEN_WORKER_CONFIG", "/opt/profile-seed/.modelgarden/worker.json")))
+    parser.add_argument("--no-summary", action="store_true", help="file the outcome-and-size line without a post-call summary")
     args = parser.parse_args(argv)
     try:
         runtime_module = _load("runtime_file_calls_governed_mcp", ROOT / "platform" / "runtime" / "governed_mcp.py")
@@ -110,14 +139,16 @@ def main(argv: list[str] | None = None) -> int:
             records = filing.read_call_transcripts(pathlib.Path(args.transcripts))
             write_failures = filing.read_transcript_failures(pathlib.Path(args.transcripts))
         failures: list[str] = []
-        totals = filing.file_call_transcripts(runtime, store, records, log=failures.append, recorder=recorder)
+        summarizer = _summarizer(args)
+        totals = filing.file_call_transcripts(runtime, store, records, log=failures.append, recorder=recorder, summarizer=summarizer)
         ledgered = filing.ledger_transcript_failures(runtime_module.GOVERN, args.audit_path, write_failures)
     except (OSError, ValueError, PermissionError, json.JSONDecodeError) as exc:
         print(f"Runtime file-calls failed: {exc}", file=sys.stderr)
         return 1
     for failure in failures:
         print(f"failed to file {failure}", file=sys.stderr)
-    print(json.dumps({"records": len(records), **totals, "writeFailures": ledgered, "timeline": recorder.counts}, sort_keys=True))
+    print(json.dumps({"records": len(records), **totals, "writeFailures": ledgered, "timeline": recorder.counts,
+                      "summaries": summarizer.counts if summarizer is not None else {}}, sort_keys=True))
     return 1 if totals["failed"] else 0
 
 

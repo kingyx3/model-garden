@@ -152,10 +152,10 @@ class ConnectorActivationGateTests(unittest.TestCase):
                     "calendar": {"provider": "google", "tier": 1}
                 }})
 
-    def test_legacy_calendar_binding_keeps_backward_compatibility(self):
-        for key, expected in (("google_calendar", "google"), ("microsoft_calendar", "microsoft")):
+    def test_vendor_keyed_calendar_bindings_are_not_a_binding(self):
+        for key in ("google_calendar", "microsoft_calendar"):
             binding = {"connectors": {key: {"token_ref": "secret://calendar/dev"}}}
-            self.assertNotIn("calendar", capabilities.bound_providers(binding))
+            self.assertEqual(capabilities.bound_providers(binding), {})
 
 
 if __name__ == "__main__":

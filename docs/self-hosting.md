@@ -49,6 +49,8 @@ worker:
   intervals: {scheduler: 60, mailbox: 30, notices: 60, retention: 3600}
 ```
 
+The worker and the gateway keep separate `people` and `escalate_to` settings, but when both are enabled a side that omits them takes the other's, so filling in either list is enough for notices to reach people. If both give `people` and one person has a different channel or address in each, the deploy fails with an error naming that person.
+
 Customer email answered by the worker is drafted from approved knowledge only and kept as a Tier 0 draft; the mailbox owner is told it is ready and sends it. Inbound mail still reaches the spool through the mail server's pipe (`scripts/runtime-mailbox.py ingest`).
 
 ## Channel gateway
@@ -62,7 +64,7 @@ Customer email answered by the worker is drafted from approved knowledge only an
 - Hand-off replies (`done <ref>`) and schedule commands (`schedule create ...`) typed in a verified direct conversation are routed to their modules under the channel identity; anything else goes to the coworker with the sender's access level. Pending approvals are announced once as buttons in each `approvals.notify` conversation.
 - With `mailbox`, an SMTP listener (port 2525) feeds the mail spool. It is not a relay (recipients outside the configured addresses get 550), strips any `Authentication-Results` it did not get from a configured `trusted_relays` address, and has no TLS or AUTH: put the client's MTA or a TLS proxy in front.
 
-Ports are published on loopback by default (`bind`, `smtp_bind`); a TLS reverse proxy is the public listener. Secrets are `secret://` references injected at apply time, never rendered into the bundle.
+Ports are published on loopback by default (`bind`, `smtp_bind`); a TLS reverse proxy is the public listener. On the GCP reference target that listener is the opt-in load balancer in `infra/docker-host/gcp/gateway-ingress.tf` (see "Public gateway ingress" below); set `bind: 0.0.0.0` in the binding when you enable it, because the load balancer reaches the VM's interface and the firewall rule (Google front-end ranges only, tcp:8080) is what keeps the port private. Secrets are `secret://` references injected at apply time, never rendered into the bundle.
 
 ```yaml
 gateway:
@@ -79,6 +81,20 @@ gateway:
 ```
 
 It is not live-proven: no real Slack app, Teams bot, mail provider or browser session has exercised it.
+
+### Public gateway ingress (GCP)
+
+`infra/docker-host/gcp/gateway-ingress.tf` is off by default. With `gateway_ingress_enabled = true` it adds a static global IP, a Google-managed certificate for `gateway_domain`, a global external HTTPS load balancer to the VM on port 8080 (health check `GET /healthz`), an HTTP to HTTPS redirect, and a firewall rule allowing only `130.211.0.0/22` and `35.191.0.0/16` to tcp:8080 on the runtime tag. The VM still has no external IP.
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `gateway_ingress_enabled` | `false` | Create the load balancer and its firewall rule. |
+| `gateway_domain` | `""` | Required when enabled; the public hostname (also the certificate name). |
+| `gateway_dns_zone` | `""` | Optional Cloud DNS managed zone in the project; when set, the A record is created. Needs the bootstrap's `enable_gateway_dns`. |
+| `gateway_smtp_enabled` | `false` | Also expose public tcp:25 to the container's 2525 through a TCP proxy load balancer. |
+| `gateway_smtp_source_ranges` | `[]` | Required non-empty when SMTP is enabled (at most 10 CIDRs, never `0.0.0.0/0`); enforced by a Cloud Armor allow-list with default deny. |
+
+Outputs: `gateway_public_ip`, `gateway_url` (use as `gateway.public_origin`) and `gateway_smtp_ip`. The deployer already accepts `bind: 0.0.0.0` (any IPv4), so no deployer change is needed; set `gateway.bind: 0.0.0.0` and, for mail, `gateway.smtp_bind: 0.0.0.0`. Slack and Teams callbacks are not IP-restricted: their signature and token checks are the control. The SMTP path is unauthenticated and plaintext, so allow-list only your MTA's addresses. See `docs/cloud-bootstrap.md` for the DNS and certificate walkthrough.
 
 ## Component decisions
 

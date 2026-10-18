@@ -5,6 +5,7 @@
   runtime-conversations.py ROOT list [--unlinked]
   runtime-conversations.py ROOT review
   runtime-conversations.py ROOT timeline --conversation cv-0123456789abcdef0123
+  runtime-conversations.py ROOT timeline --conversation cv-0123456789abcdef0123 --ledger
   runtime-conversations.py ROOT timeline --customer c-1
   runtime-conversations.py ROOT confirm rv-0123456789abcdef --customer c-1 --by jordan@client.example
   runtime-conversations.py ROOT dismiss rv-0123456789abcdef --by jordan@client.example
@@ -54,6 +55,17 @@ def default_tenant(desired_state: pathlib.Path) -> str:
     return re.sub(r"[^a-z0-9-]+", "-", str(client or "").lower()).strip("-")[:63] or "default"
 
 
+def ledger_for(timeline: list[dict], audit_path: pathlib.Path) -> dict:
+    """All ledger events of one conversation's requests together: the request ids on its timeline plus its call (``call:<hash>``)."""
+    audit = _load("runtime_conversations_audit", ROOT / "platform" / "core" / "audit_query.py")
+    ids = [item["requestId"] for item in timeline if item.get("kind") == "action" and isinstance(item.get("requestId"), str)]
+    call = next((item["ref"].split(":", 1)[1] for item in timeline if item.get("kind") == "call" and str(item.get("ref", "")).startswith("transcript:")), None)
+    if not ids and not call:
+        return {"requested": [], "missing": [], "requests": [], "steps": [], "events": 0}
+    document = audit.request_timeline(audit.read_ledger(audit_path), ids, call=call)
+    return json.loads(audit.to_json(document))
+
+
 def main(argv: list[str] | None = None, *, now: int | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("root", type=pathlib.Path, help="the conversation store directory")
@@ -68,6 +80,7 @@ def main(argv: list[str] | None = None, *, now: int | None = None) -> int:
     listing.add_argument("--unlinked", action="store_true", help="only conversations no customer is linked to")
     commands.add_parser("review")
     timeline = commands.add_parser("timeline")
+    timeline.add_argument("--ledger", action="store_true", help="with --conversation: add every ledger event of its requests and call, together")
     group = timeline.add_mutually_exclusive_group(required=True)
     group.add_argument("--conversation")
     group.add_argument("--customer")
@@ -114,8 +127,12 @@ def main(argv: list[str] | None = None, *, now: int | None = None) -> int:
             result = [{key: item[key] for key in ("id", "conversationId", "reason", "candidates", "createdAt")} for item in store.review_queue()]
         elif args.command == "timeline":
             result = store.conversation_timeline(args.conversation) if args.conversation else store.customer_timeline(args.customer)
+            if args.ledger and not args.conversation:
+                raise ValueError("--ledger needs --conversation")
             result = [{key: item[key] for key in ("at", "kind", "ref", "speaker", "label", "requestId", "conversationId", "channel") if key in item}
                       for item in result]
+            if args.ledger:
+                result = {"timeline": result, "ledger": ledger_for(result, args.audit_path)}
         elif args.command == "confirm":
             result = store.confirm(args.review_id, args.customer, by=args.by, now=clock)
         elif args.command == "dismiss":

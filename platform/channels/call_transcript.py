@@ -197,6 +197,7 @@ class CallTranscript:
         self._disclosure_played = False
         self._suppressed = False
         self._outcome: str | None = None
+        self._transfer_offset: float | None = None
 
     @property
     def disclosure_text(self) -> str | None:
@@ -213,6 +214,14 @@ class CallTranscript:
         noted = self._outcome
         if noted is None or OUTCOMES_BY_STRENGTH.index(outcome) < OUTCOMES_BY_STRENGTH.index(noted):
             self._outcome = outcome
+
+    def note_transfer(self, *, offset: float | None = None) -> None:
+        """Mark the moment a human transfer was requested (#115). The outcome becomes ``transferred`` and any turn the worker still hears
+        afterwards is flagged ``afterTransfer``. A cold transfer takes the caller out of the room, so usually nothing follows and the
+        record says so (``transfer.captured: false``) instead of looking complete."""
+        if self._transfer_offset is None:
+            self._transfer_offset = round(max(0.0, (self._clock() - self._origin) if offset is None else offset), 2)
+        self.note_outcome("transferred")
 
     def _derived_outcome(self) -> str:
         """Outcome when nothing stronger was observed: a two-sided exchange counts as resolved,
@@ -265,6 +274,8 @@ class CallTranscript:
             turn["confidence"] = round(confidence, 3)
         if interrupted:
             turn["interrupted"] = True
+        if self._transfer_offset is not None and turn["offsetSeconds"] >= self._transfer_offset:
+            turn["afterTransfer"] = True
         if truncated:
             turn["truncated"] = True
         if any(counts.values()):
@@ -294,6 +305,9 @@ class CallTranscript:
         if agents:
             parts.append(f'The agent\'s last reply: "{quote(agents[-1])}"')
         parts.append(f"{len(callers)} caller and {len(agents)} agent turns. Outcome: {final}.")
+        if self._transfer_offset is not None:
+            after = sum(1 for turn in ordered if turn.get("afterTransfer"))
+            parts.append("The call was transferred to a person; " + (f"{after} later turns are recorded." if after else "what followed is not recorded."))
         return " ".join(parts)
 
     def build(
@@ -349,6 +363,9 @@ class CallTranscript:
             record["summarySource"] = summary_source
         if self._dropped:
             record["droppedTurns"] = self._dropped
+        if self._transfer_offset is not None:
+            after = sum(1 for turn in turns if turn.get("afterTransfer"))
+            record["transfer"] = {"offsetSeconds": self._transfer_offset, "turnsAfter": after, "captured": after > 0}
         return record
 
     @property

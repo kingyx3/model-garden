@@ -80,6 +80,7 @@ RUNTIME_SOURCE_PATHS = (
     pathlib.Path("platform/core/grant_readiness.py"),
     pathlib.Path("platform/core/secret_enrollment.py"),
     pathlib.Path("platform/core/sealed_vault.py"),
+    pathlib.Path("platform/core/oauth_consent.py"),
     pathlib.Path("platform/core/knowledge_deploy.py"),
     pathlib.Path("platform/core/team.py"),
     pathlib.Path("platform/core/mcp_passthrough.py"),
@@ -96,6 +97,9 @@ RUNTIME_SOURCE_PATHS = (
     pathlib.Path("platform/channels/web_chat.py"),
     pathlib.Path("platform/channels/conversation_filing.py"),
     pathlib.Path("platform/channels/conversation_recorder.py"),
+    pathlib.Path("platform/core/audit_query.py"),
+    pathlib.Path("platform/channels/call_summary.py"),
+    pathlib.Path("platform/channels/call_transcript.py"),
     pathlib.Path("platform/core/conversations.py"),
     pathlib.Path("platform/channels/support_mailbox.py"),
     pathlib.Path("platform/channels/mail_spool.py"),
@@ -349,6 +353,31 @@ def _worker_settings(binding: dict[str, Any]) -> tuple[dict[str, Any] | None, st
     return config, key_ref
 
 
+def _share_notice_routing(worker_config: dict[str, Any] | None, gateway_config: dict[str, Any] | None) -> None:
+    """Make the worker and the gateway agree on who is reached how (``people``) and who is escalated to (``escalate_to``).
+
+    Each keeps its own list, so a list filled in on only one side would leave the other's notices going nowhere. A side that
+    omits ``people`` or ``escalate_to`` takes the other's; when both give ``people`` and one person is reached differently, the
+    deploy fails instead of guessing which is right.
+    """
+    if worker_config is None or gateway_config is None:
+        return
+    for person in sorted(set(worker_config["people"]) & set(gateway_config["people"])):
+        w, g = worker_config["people"][person], gateway_config["people"][person]
+        if not isinstance(w, dict) or not isinstance(g, dict):
+            continue
+        if (w.get("channel"), w.get("address", "")) != (g.get("channel"), g.get("address", "")):
+            raise ValueError(f"Docker target failed: worker.people and gateway.people disagree about {person}; give them the same channel and address")
+    if not worker_config["people"]:
+        worker_config["people"] = dict(gateway_config["people"])
+    elif not gateway_config["people"]:
+        gateway_config["people"] = dict(worker_config["people"])
+    if not worker_config.get("escalateTo") and gateway_config.get("escalateTo"):
+        worker_config["escalateTo"] = gateway_config["escalateTo"]
+    elif not gateway_config.get("escalateTo") and worker_config.get("escalateTo"):
+        gateway_config["escalateTo"] = worker_config["escalateTo"]
+
+
 def _upstream_settings(binding: dict[str, Any]) -> list[str] | None:
     """``EnvironmentBinding.spec.upstream.mcp`` (opt-in): the ``secret://`` references the governed sidecar may resolve for approved upstream MCP.
 
@@ -430,6 +459,46 @@ GATEWAY_SECRET_ENV = dict([
 ])
 
 
+OAUTH_PROVIDER_KEYS = {"preset": "preset", "client_id": "clientId", "authorize_url": "authorizeUrl", "token_url": "tokenUrl", "revoke_url": "revokeUrl",
+                       "allowed_hosts": "allowedHosts", "scopes_by_tool": "scopesByTool", "auth_params": "authParams",
+                       "implicit_scopes": "implicitScopes", "benign_scopes": "benignScopes", "scope_prefixes": "scopePrefixes"}
+
+
+def _gateway_oauth(oauth: Any, config: dict[str, Any]) -> tuple[dict[str, Any], dict[str, str]]:
+    """``gateway.oauth``: provider OAuth consent (#66). Non-secret provider declarations plus one client-secret reference each.
+
+    Opt-in. It needs the sealed vault (``gateway.enrollment``), web sign-in and ``public_origin`` (the redirect URI is
+    ``<public_origin>/connections/oauth/callback``). Each provider is a ``preset`` (``google``, ``microsoft``) or a generic provider with
+    exact ``allowed_hosts``; all endpoints are validated against that allow-list here and again by the gateway. Each client secret is a
+    ``secret://`` reference injected into the gateway and the governed sidecar (which refreshes tokens), never rendered into the bundle.
+    """
+    if not isinstance(oauth, dict) or set(oauth) != {"providers"} or not isinstance(oauth["providers"], dict) or not oauth["providers"]:
+        raise ValueError("Docker target failed: gateway.oauth holds only providers (a non-empty object)")
+    if "enrollment" not in config or not config.get("publicOrigin"):
+        raise ValueError("Docker target failed: gateway.oauth needs gateway.enrollment (the sealed vault), web sign-in and public_origin")
+    spec = importlib.util.spec_from_file_location("model_garden_deploy_oauth_consent", ROOT / "platform" / "core" / "oauth_consent.py")
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    sys.modules["model_garden_deploy_oauth_consent"] = module
+    spec.loader.exec_module(module)
+    providers: dict[str, Any] = {}
+    env: dict[str, str] = {}
+    for name, raw in oauth["providers"].items():
+        allowed = set(OAUTH_PROVIDER_KEYS) | {"client_secret_ref"}
+        if not isinstance(raw, dict) or set(raw) - allowed:
+            raise ValueError(f"Docker target failed: gateway.oauth.providers.{name} holds only: {', '.join(sorted(allowed))}")
+        ref = raw.get("client_secret_ref")
+        if not isinstance(ref, str) or not ref.startswith("secret://") or len(ref) <= len("secret://"):
+            raise ValueError(f"Docker target failed: gateway.oauth.providers.{name}.client_secret_ref must be a secret:// reference")
+        providers[name] = {OAUTH_PROVIDER_KEYS[key]: value for key, value in raw.items() if key in OAUTH_PROVIDER_KEYS}
+        env[module.client_secret_env(name)] = ref
+    try:
+        module.load_providers(providers)
+    except module.OAuthError as exc:
+        raise ValueError(f"Docker target failed: gateway.oauth: {exc}") from None
+    return {"providers": providers}, env
+
+
 def _gateway_settings(binding: dict[str, Any]) -> tuple[dict[str, Any] | None, dict[str, str], dict[str, str]]:
     """``EnvironmentBinding.spec.gateway`` as the non-secret gateway configuration.
 
@@ -446,7 +515,7 @@ def _gateway_settings(binding: dict[str, Any]) -> tuple[dict[str, Any] | None, d
     if not isinstance(gateway, dict):
         raise ValueError("Docker target failed: EnvironmentBinding gateway must be an object")
     allowed = {"enabled", "public_origin", "agent", "directory", "people", "escalate_to", "web", "slack", "teams", "approvals", "mailbox",
-               "coworker_api_key_ref", "secrets", "smtp_user", "bind", "smtp_bind", "enrollment"}
+               "coworker_api_key_ref", "secrets", "smtp_user", "bind", "smtp_bind", "enrollment", "oauth"}
     unknown = sorted(set(gateway) - allowed)
     if unknown:
         raise ValueError(f"Docker target failed: unknown gateway settings: {', '.join(unknown)}")
@@ -507,6 +576,9 @@ def _gateway_settings(binding: dict[str, Any]) -> tuple[dict[str, Any] | None, d
             # Without the sidecar's private key an owner's entry would be saved and never usable.
             raise ValueError("Docker target failed: gateway.enrollment needs upstream.mcp enabled with vault_key_ref")
         config["enrollment"] = {"vaultPublicKey": enrollment["vault_public_key"]}
+    if gateway.get("oauth") is not None:
+        config["oauth"], oauth_env = _gateway_oauth(gateway["oauth"], config)
+        secret_env.update(oauth_env)
     missing = sorted(required - set(secret_env))
     if missing:
         raise ValueError(f"Docker target failed: gateway needs secrets for its channels: {', '.join(missing)}")
@@ -710,6 +782,10 @@ def _compose(
             **({"depends_on": depends} if depends else {}),
         }
         volumes["governance-data"] = {}
+        if "oauth" in config and "governed-tools" in services:  # the sidecar refreshes tokens on use, so it holds the client secrets too
+            sidecar = services["governed-tools"]["environment"]
+            sidecar["MODEL_GARDEN_OAUTH_CONFIG"] = f"/opt/profile-seed/{GATEWAY_CONFIG_PATH.as_posix()}"
+            sidecar.update({name: f"${{{name}:?{name} is required}}" for name in sorted(secret_env) if name.endswith("_CLIENT_SECRET")})
         if worker and "MODEL_GARDEN_SLACK_BOT_TOKEN" in secret_env:  # the worker delivers notices to Slack direct messages
             services["governed-worker"]["environment"]["MODEL_GARDEN_SLACK_BOT_TOKEN"] = "${MODEL_GARDEN_SLACK_BOT_TOKEN:?MODEL_GARDEN_SLACK_BOT_TOKEN is required}"
     document = {"services": services, "volumes": volumes}
@@ -780,6 +856,7 @@ def render_bundle(
     manifest = _capability_manifest(_desired_state(profile_dir), binding)
     worker_config, coworker_key_ref = _worker_settings(binding)
     gateway = _gateway_settings(binding)
+    _share_notice_routing(worker_config, gateway[0])
     if gateway[0] is not None and gateway[1].get("MODEL_GARDEN_COWORKER_API_KEY"):
         if coworker_key_ref not in (None, gateway[1]["MODEL_GARDEN_COWORKER_API_KEY"]):
             raise ValueError("Docker target failed: worker and gateway must share one coworker API key reference")
@@ -917,9 +994,6 @@ def apply_bundle(
     _check_vault_pair(gateway_config, resolved[vault_ref] if vault_ref is not None else None)
     for name, ref in gateway_secrets.items():
         runtime_env[name] = resolved[ref]
-    # Retired vendor-token environment variables never reach the replacement runtime.
-    runtime_env.pop("MODEL_GARDEN_GOOGLE_CALENDAR_TOKEN", None)
-    runtime_env.pop("MODEL_GARDEN_MICROSOFT_CALENDAR_TOKEN", None)
 
     compose = ["docker", "compose", "-p", project_name, "-f", str(bundle_dir / "compose.yaml")]
     image = f"model-garden-{project_name}:current"
