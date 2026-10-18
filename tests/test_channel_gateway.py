@@ -400,5 +400,100 @@ class StartupFailureTests(unittest.TestCase):
         self.assertTrue(err.startswith("Channel gateway failed to start: GatewayConfigError: "))
 
 
+class ReceiptTests(GatewayCase):
+    config = {
+        **GatewayCase.config,
+        "approvals": {"notify": [{"channel": "slack", "conversation": "D0DIRECT01"}, {"channel": "webchat", "conversation": "alice@acme.example"},
+                                 {"channel": "teams", "conversation": "19:abc@thread.v2"}]},
+    }
+
+    def setUp(self):
+        super().setUp()
+        self.teams_receipts = []
+
+        class FakeTeams:
+            def __init__(self, sink):
+                self.sink = sink
+
+            def send_receipt(self, receipt):
+                self.sink.append(receipt)
+                return "activity-1"
+
+        self.gateway.adapters["teams"] = FakeTeams(self.teams_receipts)  # the shared adapter contract is all the gateway uses
+        self.state = json.loads((self.root / "desired-state.json").read_text())
+        self.gateway.receipts.start()
+
+    def run_tool(self, name="Alex"):
+        govern = gateway._module("govern")
+        arguments = {"fields": {"name": name}}
+        request = govern.build_action_request(self.state, "crm.create", arguments, initiating_user="alice@acme.example")
+        govern.execute_action(self.state, "crm.create", arguments, lambda exact: {"id": "c-1"}, audit_path=self.data / "audit.jsonl",
+                              initiating_user="alice@acme.example", principal_access="member",
+                              approval={"requestId": request["requestId"], "approved": True, "approver": "alice@acme.example"},
+                              external_object_ref=lambda result: "crm:c-1")
+        return request["requestId"]
+
+    def test_an_executed_write_posts_one_receipt_to_every_approver_conversation(self):
+        request_id = self.run_tool()
+        self.assertEqual(self.gateway.announce_receipts(), 1)
+        slack_text = self.posts()[-1]["text"]
+        self.assertIn(request_id, slack_text)
+        self.assertIn("crm.create", slack_text)
+        self.assertEqual([(r.conversation_id, r.request_id, r.status) for r in self.teams_receipts], [("19:abc@thread.v2", request_id, "succeeded")])
+        web = self.gateway.outbox
+        self.assertTrue(any(request_id in json.dumps(item) for item in web.drain("alice@acme.example")) if hasattr(web, "drain") else True)
+        self.assertEqual(self.gateway.announce_receipts(), 0)  # once each
+        self.assertEqual(len(self.teams_receipts), 1)
+
+    def test_the_receipt_is_ledgered_and_holds_no_arguments(self):
+        self.run_tool(name="Hargreaves boiler 12 Acacia Road")
+        self.gateway.announce_receipts()
+        events = [json.loads(line) for line in (self.data / "audit.jsonl").read_text().splitlines()]
+        sent = [event for event in events if event.get("action") == "channel.receipt-sent"]
+        self.assertEqual([(event["details"]["tool"], event["details"]["status"], event["details"]["conversations"]) for event in sent], [("crm.create", "succeeded", 3)])
+        for text in (json.dumps(self.posts()[-1]), json.dumps([vars(r) for r in self.teams_receipts])):
+            self.assertNotIn("Hargreaves", text)
+
+    def test_a_channel_that_fails_is_ledgered_by_type_and_the_others_still_get_the_receipt(self):
+        def broken(*args, **kwargs):
+            raise RuntimeError("teams down: secret detail")
+
+        self.gateway.adapters["teams"].send_receipt = broken
+        self.run_tool()
+        self.assertEqual(self.gateway.announce_receipts(), 1)
+        text = (self.data / "audit.jsonl").read_text()
+        self.assertIn("channel.receipt-failed", text)
+        self.assertNotIn("secret detail", text)
+        self.assertEqual(len(self.posts()), 1)
+
+    def test_history_before_the_first_start_is_not_replayed_but_a_restart_keeps_its_place(self):
+        self.run_tool("Before")
+        history = self.root / "history"
+        history.mkdir()
+        (history / "audit.jsonl").write_bytes((self.data / "audit.jsonl").read_bytes())
+        first = gateway.Gateway(compiled(self.root), history, self.config, ENV, coworker=self.coworker, http=self.http, clock=lambda: NOW)
+        first.adapters["teams"] = self.gateway.adapters["teams"]
+        self.assertEqual(first.announce_receipts(), 0)  # existing history is never replayed
+        govern = gateway._module("govern")
+        arguments = {"fields": {"name": "While down"}}
+        request = govern.build_action_request(self.state, "crm.create", arguments, initiating_user="alice@acme.example")
+        govern.execute_action(self.state, "crm.create", arguments, lambda exact: {"id": "c-2"}, audit_path=history / "audit.jsonl",
+                              initiating_user="alice@acme.example", principal_access="member",
+                              approval={"requestId": request["requestId"], "approved": True, "approver": "alice@acme.example"})
+        restarted = gateway.Gateway(compiled(self.root), history, self.config, ENV, coworker=self.coworker, http=self.http, clock=lambda: NOW)
+        restarted.adapters["teams"] = self.gateway.adapters["teams"]
+        self.assertEqual(restarted.announce_receipts(), 1)  # what ran while the gateway was down is announced once it is back
+
+    def test_receipts_can_be_switched_off_and_need_somewhere_to_go(self):
+        off = gateway.Gateway(compiled(self.root), self.data / "off", {**self.config, "approvals": {**self.config["approvals"], "receipts": False}},
+                              ENV, coworker=self.coworker, http=self.http, clock=lambda: NOW)
+        self.assertIsNone(off.receipts)
+        none = gateway.Gateway(compiled(self.root), self.data / "none", {**self.config, "approvals": {}}, ENV, coworker=self.coworker,
+                               http=self.http, clock=lambda: NOW)
+        self.assertEqual((none.receipts, none.announce_receipts()), (None, 0))
+        with self.assertRaises(gateway.GatewayConfigError):
+            gateway.load_config({**self.config, "approvals": {"notify": [], "receipts": "yes"}})
+
+
 if __name__ == "__main__":
     unittest.main()

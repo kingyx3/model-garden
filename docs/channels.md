@@ -126,6 +126,17 @@ The same module can file an email once an adapter exists: a sender verified by t
 - **Scoped sessions.** Sessions are signed under a different label from sign-in links, expire (8 hours by default, at most 24), name the `client-environment` scope they were issued for, and are revoked by removing the address from the allow-list. A token from another client, environment or key is refused.
 - **Authority from the session only.** `parse_inbound` and `parse_approval_response` take the sender from the `Authorization: Bearer` session; identities, names or approver claims in the JSON body are ignored. The identity is then mapped through `channels.directory.webchat`, so a signed-in but unmapped address is still public and read-only. There is no endpoint here that changes policy or approves for someone else.
 
+## Action receipts
+
+`send_receipt` is now used (`platform/channels/receipts.py`, `Gateway.announce_receipts`, #82, #83, #84). When `approvals.notify` names conversations, the gateway follows the Action Ledger and posts **one receipt per executed write, privileged or external-communication Tool call** to each of them, through whichever adapter (Slack, Teams, web chat) the conversation uses: the Agent, the Tool, `succeeded` or `failed`, an opaque object reference when the ledger holds a short safe one, and the ledger `requestId`. Reads, pending approvals, denials and other Agents' events make no receipt.
+
+- **From the ledger, not the model.** A receipt is built from an `execution` event the governed boundary wrote, so it can only describe what really ran. It never carries arguments, results, titles, message text or an error message.
+- **Once each, retried, restart-safe.** The gateway saves how far into the ledger it has delivered (`gateway/receipts.json`), starting at the end of the ledger the first time so history is never replayed. A receipt that reached no conversation is offered again, in order; what ran while the gateway was down is announced when it returns.
+- **Ledgered.** Each delivered receipt is a `channel.receipt-sent` event (request id, Tool, outcome, how many conversations); a failed send is `channel.receipt-failed` with the channel and error type only.
+- **Switch.** `gateway.approvals.receipts: false` turns them off (on by default whenever `approvals.notify` is set).
+
+Not done: replying in the thread where the request began (the ledger does not record the originating conversation, so receipts go to the approver conversations), and any live Slack, Teams or web-chat run.
+
 ## One contract, every surface
 
 `tests/test_channel_contract.py` runs one compiled receptionist behind the email, Slack, Teams and web chat adapters and checks the same outcomes on each: the same mapped person gets the same identity and approval rights, a stranger is public and read-only whatever their text claims, a mapped member's write needs approval and names them and the surface, and only a mapped approver's structured click decides. The Agent definition is not modified by the surface. The Teams adapter passes the same suite, which is the "same Agent on Slack and Teams without changes" evidence; Teams file upload, bot registration and live-tenant proof remain open (#83).
