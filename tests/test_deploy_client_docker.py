@@ -361,19 +361,19 @@ class RuntimeSourceClosureTests(unittest.TestCase):
             for relative in modules:
                 with self.subTest(module=relative):
                     loaded = subprocess.run(
-                        [sys.executable, "-I", "-c", LOAD_BY_PATH, relative],
+                        [sys.executable, "-P", "-c", LOAD_BY_PATH, relative],
                         cwd=shipped, capture_output=True, text=True, timeout=60,
                     )
                     self.assertEqual(loaded.returncode, 0, loaded.stderr[-2000:])
             worker_modules = subprocess.run(
-                [sys.executable, "-I", "-c", LOAD_BY_PATH + "for key in module.MODULES:\n    module._module(key)\n", "platform/runtime/worker.py"],
+                [sys.executable, "-P", "-c", LOAD_BY_PATH + "for key in module.MODULES:\n    module._module(key)\n", "platform/runtime/worker.py"],
                 cwd=shipped, capture_output=True, text=True, timeout=60,
             )
             self.assertEqual(worker_modules.returncode, 0, worker_modules.stderr[-2000:])
             for script in sorted(path for path in deployer.RUNTIME_SOURCE_PATHS if path.suffix == ".py" and path.parent.name == "scripts"):
                 with self.subTest(script=str(script)):
                     shown = subprocess.run(
-                        [sys.executable, "-I", str(script), "--help"], cwd=shipped, capture_output=True, text=True, timeout=60,
+                        [sys.executable, "-P", str(script), "--help"], cwd=shipped, capture_output=True, text=True, timeout=60,
                     )
                     self.assertEqual(shown.returncode, 0, shown.stderr[-2000:])
 

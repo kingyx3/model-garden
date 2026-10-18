@@ -84,7 +84,7 @@ class ReceiptTests(Case):
         self.run_tool()
         (receipt,) = self.collect()
         shown = json.dumps(receipt)
-        for private in ("Hargreaves", "Acacia", "4111", "Alex", "alice@acme.example"):
+        for private in ("Hargreaves", "Acacia", "4111 1111", "Alex", "alice@acme.example"):
             self.assertNotIn(private, shown)
 
     def test_reads_other_agents_pending_approvals_and_denials_make_no_receipt(self):
