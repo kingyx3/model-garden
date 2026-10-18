@@ -46,9 +46,11 @@ def compiled(root: pathlib.Path, *, schedules=None, client=None) -> pathlib.Path
     return path
 
 
-def manifest(root: pathlib.Path, *, tickets: bool = False) -> pathlib.Path:
+def manifest(root: pathlib.Path, *, tickets: bool = False, crm: bool = False) -> pathlib.Path:
     path = root / "manifest.json"
     entries = [{"family": "kb", "status": "available", "provider": "text-knowledge", "tier": 0}]
+    if crm:
+        entries.append({"family": "crm", "status": "available", "provider": "built-in-crm", "tier": 0})
     if tickets:
         entries.append({"family": "tickets", "status": "available", "provider": "built-in-tickets", "tier": 0})
     path.write_text(json.dumps({"capabilities": entries}))
@@ -95,9 +97,9 @@ class Case(unittest.TestCase):
         self.data.mkdir()
         self.clock = [T0]
 
-    def make(self, config=None, *, schedules=None, coworker=None, senders=None, tickets=False):
+    def make(self, config=None, *, schedules=None, coworker=None, senders=None, tickets=False, crm=False):
         import os
-        os.environ["MODEL_GARDEN_CAPABILITY_MANIFEST"] = str(manifest(self.root, tickets=tickets))
+        os.environ["MODEL_GARDEN_CAPABILITY_MANIFEST"] = str(manifest(self.root, tickets=tickets, crm=crm))
         self.addCleanup(os.environ.pop, "MODEL_GARDEN_CAPABILITY_MANIFEST", None)
         return worker.Worker(compiled(self.root, schedules=schedules, client="acme" if tickets else None), self.data, config or {}, coworker=coworker,
                              senders=senders, clock=lambda: self.clock[0])
@@ -311,6 +313,116 @@ class EventTriggerTests(Case):
     def test_without_a_coworker_events_are_not_run(self):
         runtime = self.make(self.config(), senders={"slack": lambda address, text: None})
         self.assertEqual(runtime.fire_event("mail.received", "ref", T0), {"skipped": "no-coworker-configured"})
+
+
+class CrmFilingTests(Case):
+    """A handled customer email is filed to the built-in contact log by the worker, retried after an outage and never reported as filed unless acknowledged."""
+
+    def config(self):
+        return {"mailbox": {"addresses": [MAILBOX], "trustedAuthservId": MX, "owner": OWNER}, "owners": {OWNER: ["kb.search"]},
+                "people": {OWNER: {"channel": "slack", "address": "D0OWNER"}}}
+
+    def runtime(self, crm=True):
+        self.sent: list[tuple[str, str]] = []
+        return self.make(self.config(), coworker=FakeCoworker(), senders={"slack": lambda address, text: self.sent.append((address, text))}, crm=crm)
+
+    def entries(self, runtime):
+        return runtime._crm_filing()[0].list()
+
+    def test_a_handled_email_is_filed_through_the_governed_boundary_and_ledgered(self):
+        runtime = self.runtime()
+        runtime._spool().ingest(raw(), now=T0 - 5)
+        runtime.tick()
+        (entry,) = self.entries(runtime)
+        self.assertEqual((entry["channel"], entry["state"], entry["attempts"]), ("email", "synced", 1))
+        self.assertTrue(entry["providerRef"].startswith("built-in-crm:interaction/"))
+        executed = [event for event in self.events() if event.get("event") == "execution" and event.get("tool") == "crm.log-interaction"]
+        self.assertEqual([event["outcome"] for event in executed], ["succeeded"])
+        self.assertEqual(executed[0]["ledger"]["externalObjectRef"], entry["providerRef"])
+        self.assertEqual(runtime._crm_filing()[1].keys(), [])  # acknowledged, so nothing is kept for a retry
+
+    def test_filing_is_off_without_the_built_in_contact_log_and_the_job_says_so(self):
+        runtime = self.runtime(crm=False)
+        runtime._spool().ingest(raw(), now=T0 - 5)
+        report = runtime.tick()
+        self.assertEqual(report["crm-sync"], {"skipped": "no-built-in-crm-bound"})
+        self.assertFalse((self.data / "crm-sync").exists())
+
+    def test_a_redelivered_message_is_filed_once(self):
+        runtime = self.runtime()
+        runtime._spool().ingest(raw(), now=T0 - 5)
+        runtime.tick()
+        runtime._spool().ingest(raw(), now=T0 - 4)
+        self.clock[0] += 3600
+        runtime.tick()
+        self.assertEqual(len(self.entries(runtime)), 1)
+        self.assertEqual(len([event for event in self.events() if event.get("tool") == "crm.log-interaction" and event.get("event") == "execution"]), 1)
+
+    def test_an_outage_is_retried_after_its_backoff_and_then_filed_without_a_second_record(self):
+        runtime = self.runtime()
+        filing = runtime._crm_filing()
+        real = runtime._crm_filing
+        calls = []
+
+        def flaky():
+            ledger, store, executor = real()
+
+            def maybe(arguments):
+                calls.append(1)
+                if len(calls) == 1:
+                    raise TimeoutError("crm unreachable")
+                return executor(arguments)
+
+            return ledger, store, maybe
+
+        runtime._crm_filing = flaky
+        runtime._spool().ingest(raw(), now=T0 - 5)
+        runtime.tick()
+        (entry,) = self.entries(runtime)
+        self.assertEqual((entry["state"], entry["lastError"]), ("failed", "outage"))
+        self.assertEqual(len(filing[1].keys()), 1)  # kept for the retry
+        self.clock[0] += 5  # still inside the backoff
+        runtime.last_run.clear()
+        self.assertEqual(runtime.run_crm_sync(int(self.clock[0]))["attempted"], 0)
+        self.clock[0] += 120
+        outcome = runtime.run_crm_sync(int(self.clock[0]))
+        self.assertEqual((outcome["attempted"], outcome["synced"]), (1, 1))
+        (entry,) = self.entries(runtime)
+        self.assertEqual(entry["state"], "synced")
+        self.assertEqual(filing[1].keys(), [])
+        self.assertEqual(len([event for event in self.events() if event.get("tool") == "crm.log-interaction" and event.get("event") == "execution"]), 1)
+
+    def test_a_filing_that_needs_approval_blocks_for_a_person_who_is_told_once(self):
+        runtime = self.runtime()
+        real = runtime._crm_filing
+
+        def pending():
+            ledger, store, _ = real()
+
+            def refuse(arguments):
+                raise PermissionError("filing was not allowed to run (pending-approval)")
+
+            return ledger, store, refuse
+
+        runtime._crm_filing = pending
+        runtime._spool().ingest(raw(), now=T0 - 5)
+        runtime.tick()
+        (entry,) = self.entries(runtime)
+        self.assertEqual((entry["state"], entry["lastError"]), ("blocked", "unauthorized"))
+        told = [text for address, text in self.sent if "could not be filed to the CRM" in text]  # the same pass's crm-sync job told the owner
+        self.assertEqual(len(told), 1)
+        self.assertNotIn("alex@customer.example", told[0])
+        self.assertIn("crm-sync list", told[0])
+        again = runtime.run_crm_sync(T0 + 2)
+        self.assertEqual((again["blocked"], again["notified"], again["attempted"]), (1, 0, 0))  # already told, and a blocked entry is not retried
+
+    def test_what_is_kept_and_ledgered_holds_no_message_text(self):
+        runtime = self.runtime()
+        runtime._spool().ingest(raw(), now=T0 - 5)
+        runtime.tick()
+        stored = "".join(path.read_text() for path in (self.data / "crm-sync").rglob("*.json"))
+        for private in ("4111", "opening hours", "alex@customer.example"):
+            self.assertNotIn(private, stored + (self.data / "audit.jsonl").read_text())
 
 
 class LoopTests(Case):
