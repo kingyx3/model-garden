@@ -31,7 +31,7 @@ import os
 import pathlib
 import re
 import secrets
-from collections.abc import Callable, Iterable, Iterator, Mapping
+from collections.abc import Callable, Iterable, Iterator
 from typing import Any
 
 SCHEMA_VERSION = 1

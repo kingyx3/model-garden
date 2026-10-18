@@ -18,7 +18,7 @@ grant registry (``provider_grants.py``, #129); it changes nothing; ``platform/ru
 """
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Mapping, Sequence
 from typing import Any
 
 

@@ -36,7 +36,6 @@ import sys
 from collections.abc import Iterable, Mapping
 from typing import Any
 
-GRANT_STATUSES = ("no-grant", "grant-unavailable", "grant-scope")
 REGISTRY_DIR = "provider-grants"
 _TENANT = re.compile(r"^[a-z0-9][a-z0-9-]{0,62}$")
 

@@ -98,9 +98,9 @@ class InboxCommandTests(Case):
         self.assertEqual(self.asked, [])  # answered by the command, not by the coworker
         self.assertIn("Waiting: 1 approval(s), 2 hand-off(s), 1 open ticket(s), 1 overdue.", reply)
         self.assertIn("Use the Approve or Reject buttons", reply)
-        self.assertIn(f"Hand-off for alice@acme.example: calendar.book, open", reply)
+        self.assertIn("Hand-off for alice@acme.example: calendar.book, open", reply)
         self.assertIn(f"Reply `done {alice[:12]}`", reply)
-        self.assertIn(f"Hand-off for bob@acme.example: mail.send, OVERDUE", reply)
+        self.assertIn("Hand-off for bob@acme.example: mail.send, OVERDUE", reply)
         self.assertIn(f"`declined {bob[:12]} <reason>`", reply)
         self.assertIn("1 open ticket(s)", reply)
         self.assertNotIn("client-operator.py", reply)  # chat form: no shell commands

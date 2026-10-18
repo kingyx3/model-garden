@@ -79,7 +79,7 @@ class SenderVerificationTests(unittest.TestCase):
             self.assertNotIn("@", user, label)
 
     def test_a_forged_header_cannot_make_a_forged_sender_verified_even_alongside_a_genuine_one(self):
-        forged = f"Authentication-Results: evil.example; dmarc=pass header.from=ceo.example\r\n"
+        forged = "Authentication-Results: evil.example; dmarc=pass header.from=ceo.example\r\n"
         genuine = f"Authentication-Results: {MX}; dmarc=fail header.from=ceo.example\r\n"
         self.assertTrue(self.sender(raw(sender="ceo@ceo.example", auth=forged + genuine)).startswith("unverified:"))
 

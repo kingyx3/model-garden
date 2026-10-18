@@ -465,11 +465,12 @@ class GovernedToolRuntime:
         route = check()
         def execute(exact):
             approvals = MCP_EXECUTOR._mcp().SchemaApprovals(self.governance_root / "mcp-schema-approvals", tenant=tenant)
-            transport = self.upstream_transport
             if "api" in route["server"]:
                 api = route["server"]["api"]
                 def transport(url, pinned_ip, credential):  # noqa: E306 - the reviewed definition, never a caller-supplied URL
                     return self.upstream_rest_transport(api, pinned_ip, credential, approvals)
+            else:
+                transport = self.upstream_transport
             return MCP_EXECUTOR.invoke(
                 route, exact, approvals=approvals, transport_factory=transport, secret_resolver=self.upstream_secret_resolver,
                 dns_resolver=self.upstream_dns_resolver, recheck=check,

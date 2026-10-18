@@ -34,7 +34,7 @@ import re
 import socket
 import ssl
 import sys
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Callable, Mapping
 from typing import Any
 
 PROTOCOL_VERSION = "2025-06-18"

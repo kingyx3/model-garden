@@ -22,7 +22,7 @@ import json
 import os
 import pathlib
 import re
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Callable, Mapping
 from typing import Any
 
 MATERIAL_RISKS = ("write", "privileged", "external-communication")

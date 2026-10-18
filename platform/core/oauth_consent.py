@@ -388,10 +388,6 @@ class OAuthConsentStore:
     def _base(self, agent: str, connection_id: str) -> str:
         return f"secret://{self.tenant}/{agent}/{connection_id}.oauth"
 
-    def stable_ref(self, agent: str, connection_id: str) -> str:
-        """The reference a grant and a connection declaration name; it resolves to the current access token in the sidecar."""
-        return self._base(agent, connection_id)
-
     @staticmethod
     def _key(agent: str, connection_id: str) -> str:
         return f"{agent}/{connection_id}"
@@ -572,7 +568,6 @@ class OAuthConsentStore:
         if reason:
             raise self._refuse(session_user, reason, None)
         config = self._provider(record["provider"])
-        agent, connection_id = record["agent"], record["connectionId"]
         try:
             status, payload = self._post(config["tokenUrl"], {
                 "grant_type": "authorization_code", "code": code, "redirect_uri": self._redirect, "client_id": config["clientId"],

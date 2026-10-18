@@ -698,7 +698,7 @@ class SidecarResolverTests(unittest.TestCase):
     def test_the_sidecar_refreshes_a_consented_token_on_use_and_fails_closed(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = pathlib.Path(tmp)
-            provider, events = FakeProvider(), []
+            provider = FakeProvider()
             vault = vault_module.SealedVault(root / "vault", public_key=KEYS["public"])
             store = oauth.OAuthConsentStore(
                 root / "oauth-consents", tenant=TENANT, vault=vault, providers=oauth.load_providers(PROVIDERS),

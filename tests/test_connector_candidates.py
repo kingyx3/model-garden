@@ -1,7 +1,6 @@
 """Credential-free checks that a public listing is only a candidate: vetting, gates, deny-list, soft-failing feeds and private separation (#157)."""
 from __future__ import annotations
 
-import copy
 import importlib.util
 import json
 import pathlib

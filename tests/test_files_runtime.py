@@ -13,7 +13,7 @@ import yaml
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 from test_docs_runtime import (  # noqa: E402 - shared fixtures
-    ROOT, approval_module, compiler, principal_for, runtime_module,
+    ROOT, approval_module, compiler, runtime_module,
 )
 
 BINDING = {"environment": "dev", "connectors": {

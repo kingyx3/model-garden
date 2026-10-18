@@ -128,7 +128,6 @@ class ReceiptTests(Case):
         self.feed.start()
         self.run_tool()
         whole = self.audit.read_bytes()
-        last = whole.rstrip(b"\n").rsplit(b"\n", 1)
         self.audit.write_bytes(whole[: len(whole) - 20])  # cut inside the last line
         self.assertEqual(self.collect(), [])
         self.audit.write_bytes(whole)

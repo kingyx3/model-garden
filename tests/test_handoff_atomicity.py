@@ -6,7 +6,6 @@ protects a whole read/modify/write transaction, not only the final os.replace.
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import ExitStack
 import importlib.util
 import os
 import pathlib

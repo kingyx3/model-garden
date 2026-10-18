@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import asyncio
-import copy
 import datetime as dt
 import importlib.util
 import json
@@ -50,8 +49,6 @@ class FakeConnection:
 
     def getresponse(self):
         status, headers, body = self._current
-        outer = self
-
         class Response:
             def __init__(self):
                 self.status = status

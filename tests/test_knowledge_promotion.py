@@ -11,8 +11,6 @@ import sys
 import tempfile
 import unittest
 
-import yaml
-
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 
 
