@@ -88,9 +88,11 @@ class ChannelIngress:
         audit: Audit | None = None,
         deliverables: Callable[[Any, Any, str], Any] | None = None,
         inbox: Callable[[Any, Any], str] | None = None,
+        observed: Callable[[Any], None] | None = None,
     ) -> None:
         self._adapters = dict(adapters)
         self._inbox = inbox
+        self._observed = observed  # told once about each fresh conversational message (not a command or a redelivery), e.g. to raise an event
         self._deliverables = deliverables
         self._directory = directory
         self._respond = respond
@@ -195,6 +197,11 @@ class ChannelIngress:
                     reply = "I can show what is waiting only to a team member in a direct message."
                 self._send(adapter, inbound, reply)
                 return "inbox-command"
+            if self._observed is not None:
+                try:
+                    self._observed(inbound)
+                except Exception as exc:  # noqa: BLE001 - announcing the message must never stop it being answered
+                    self._note("channel.event-failed", "runtime:gateway", {"channel": inbound.channel, "error": type(exc).__name__})
             answer = self._respond(inbound, principal)
             if answer:
                 self._send(adapter, inbound, answer, self._attachments(inbound, principal, answer))

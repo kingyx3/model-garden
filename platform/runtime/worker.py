@@ -20,6 +20,9 @@ small, bounded amount of work:
   (the support mailbox does the first attempt), retries the ones a transient outage left behind when their backoff has passed, and tells
   the mailbox owner once about any filing that is blocked and needs a person (``client-operator.py crm-sync``). Nothing is reported as
   filed unless the CRM acknowledged it.
+- **events**: the event sources the worker does not witness itself. It fires ``chat.message`` for each digest the channel gateway left
+  in the shared event outbox (``event_outbox.py``; no sender, id or text) and ``ticket.created`` for each Tier 0 ticket created since
+  its last pass by any route (the coworker through the sidecar, a person); a ticket the mailbox already announced is not run twice.
 - **retention**: purges expired artifacts and mail past the retention period.
 - **export** (when configured): copies new ledger records to the retention-locked bucket; a local ledger that no longer matches
   the export, or one falling behind because exporting fails, is alerted to ``escalateTo`` through the notices job
@@ -49,12 +52,13 @@ from collections.abc import Callable, Mapping
 from typing import Any
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
-DEFAULT_INTERVALS = {"scheduler": 60, "mailbox": 30, "notices": 60, "retention": 3600, "export": 300, "crm-sync": 120}
+DEFAULT_INTERVALS = {"scheduler": 60, "mailbox": 30, "notices": 60, "retention": 3600, "export": 300, "crm-sync": 120, "events": 30}
 MIN_INTERVAL, MAX_INTERVAL = 10, 86_400
 # A stalled export alerts the escalation contact when the ledger is this far ahead of it, or has waited this long.
 EXPORT_MAX_LAG_EVENTS = 100
 EXPORT_MAX_STALE_SECONDS = 6 * 3600
 MAX_QUEUE = 2_000
+MAX_EVENT_BATCH = 50
 IDENTITY = "runtime:worker"
 
 
@@ -90,6 +94,7 @@ MODULES = {
     "export_monitor": "platform/core/export_monitor.py",
     "approval": "scripts/runtime-approval.py",
     "crm_sync": "platform/core/crm_sync.py",
+    "outbox": "platform/core/event_outbox.py",
     "crm_filing": "platform/core/crm_filing.py",
 }
 
@@ -308,6 +313,63 @@ class Worker:
             self.audit("worker.event-failed", IDENTITY, {"event": event, "error": type(exc).__name__})
             return {"failed": type(exc).__name__}
         return {"runs": len(outcome["runs"]), "limited": len(outcome["limited"]), "duplicate": len(outcome["duplicate"])}
+
+    def _events_state_path(self) -> pathlib.Path:
+        return self.data / "worker" / "events.json"
+
+    def _events_state(self) -> dict[str, Any]:
+        try:
+            state = json.loads(self._events_state_path().read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            state = {}
+        if not isinstance(state, dict):
+            state = {}
+        offset, since = state.get("offset"), state.get("ticketsSince")
+        at_since = state.get("ticketsAtSince")
+        return {
+            "offset": offset if isinstance(offset, int) and not isinstance(offset, bool) and offset >= 0 else 0,
+            "ticketsSince": since if isinstance(since, int) and not isinstance(since, bool) else None,
+            "ticketsAtSince": [item for item in at_since if isinstance(item, str)][:200] if isinstance(at_since, list) else [],
+        }
+
+    def _save_events_state(self, state: Mapping[str, Any]) -> None:
+        path = self._events_state_path()
+        path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        temporary = path.with_suffix(".tmp")
+        temporary.write_text(json.dumps(state, sort_keys=True) + "\n", encoding="utf-8")
+        os.replace(temporary, path)
+
+    def run_events(self, now: int) -> dict[str, Any]:
+        """Fire ``chat.message`` for what the gateway reported and ``ticket.created`` for tickets nobody announced; once per event."""
+        if self.coworker is None:
+            return {"skipped": "no-coworker-configured"}  # leave the events where they are until there is something to run them
+        state = self._events_state()
+        outbox = _module("outbox").EventOutbox(self.data / "events")
+        chat, tickets_fired = 0, 0
+        events, offset = outbox.read(state["offset"])
+        for event in events:
+            self.fire_event("chat.message", str(event["ref"]), now)
+            chat += 1
+        state["offset"] = outbox.compact(offset)
+        try:
+            store = self._sidecar().tickets_store()
+        except PermissionError:  # no built-in ticket store is bound
+            store = None
+        if store is not None:
+            if state["ticketsSince"] is None:
+                state["ticketsSince"], state["ticketsAtSince"] = now, []  # start now: tickets from before this worker watched are not replayed
+            else:
+                fresh = [item for item in store.created_since(state["ticketsSince"]) if item["ticketId"] not in state["ticketsAtSince"]][:MAX_EVENT_BATCH]
+                for item in fresh:
+                    self.fire_event("ticket.created", item["ticketId"], now)  # the mailbox path may have announced it already: the store skips a repeat
+                    tickets_fired += 1
+                if fresh:
+                    newest = fresh[-1]["createdAt"]
+                    carried = state["ticketsAtSince"] if newest == state["ticketsSince"] else []
+                    state["ticketsSince"] = newest
+                    state["ticketsAtSince"] = [*carried, *(item["ticketId"] for item in fresh if item["createdAt"] == newest)]
+        self._save_events_state(state)
+        return {"chat": chat, "tickets": tickets_fired}
 
     def _sidecar(self):
         environ = {
@@ -610,7 +672,7 @@ class Worker:
 
     def jobs(self) -> list[tuple[str, Callable[[int], dict[str, Any]]]]:
         return [
-            ("scheduler", self.run_scheduler), ("mailbox", self.run_mailbox), ("crm-sync", self.run_crm_sync),
+            ("scheduler", self.run_scheduler), ("mailbox", self.run_mailbox), ("crm-sync", self.run_crm_sync), ("events", self.run_events),
             ("notices", self.deliver_notices), ("retention", self.run_retention), ("export", self.run_export),
         ]
 

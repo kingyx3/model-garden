@@ -24,6 +24,7 @@ def _load(name: str, relative: str):
 
 
 worker = _load("runtime_worker_under_test", "platform/runtime/worker.py")
+outbox_module = worker._module("outbox")
 coworker_client = worker._module("coworker")
 T0 = calendar.timegm((2026, 10, 19, 8, 0, 0))  # Monday 08:00 UTC
 OWNER = "jordan@acme.example"
@@ -313,6 +314,93 @@ class EventTriggerTests(Case):
     def test_without_a_coworker_events_are_not_run(self):
         runtime = self.make(self.config(), senders={"slack": lambda address, text: None})
         self.assertEqual(runtime.fire_event("mail.received", "ref", T0), {"skipped": "no-coworker-configured"})
+
+
+class EventSourceTests(Case):
+    """The sources the worker does not witness itself: chat messages the gateway reported and tickets opened by any route (#99, #77)."""
+
+    config, trigger, make_runtime, runs = (EventTriggerTests.config, EventTriggerTests.trigger, EventTriggerTests.make_runtime, EventTriggerTests.runs)
+
+    def outbox(self):
+        return outbox_module.EventOutbox(self.data / "events")
+
+    def event_runs(self, runtime, kind):
+        return [run for run in self.runs(runtime) if run["trigger"] == f"event:{kind}"]
+
+    def test_each_chat_message_the_gateway_reported_runs_a_chat_trigger_once_and_only_a_digest_reaches_the_runner(self):
+        fake = FakeCoworker()
+        runtime = self.make_runtime(fake)
+        self.trigger(runtime, event="chat.message", goal="Note the new message")
+        ref = "ab" * 16
+        self.outbox().append("chat.message", ref, at=T0)
+        self.outbox().append("chat.message", ref, at=T0)  # the same event reported twice
+        self.outbox().append("chat.message", "cd" * 16, at=T0)
+        report = runtime.tick()
+        self.assertEqual(report["events"]["chat"], 3)
+        self.assertEqual(len(self.event_runs(runtime, "chat.message")), 2)  # once per distinct event
+        self.clock[0] += 60
+        self.assertEqual(runtime.tick()["events"]["chat"], 0)  # consumed: nothing runs again
+        self.assertEqual(len(self.event_runs(runtime, "chat.message")), 2)
+        shown = json.dumps(self.events())
+        self.assertNotIn(ref, shown)  # the ledger and the runner see a digest of the digest, never the reference
+
+    def test_a_trigger_for_another_event_stays_quiet_on_chat_and_nothing_is_lost_without_a_coworker(self):
+        runtime = self.make(self.config(), coworker=None, senders={"slack": lambda address, text: None})
+        self.outbox().append("chat.message", "ab" * 16, at=T0)
+        self.assertEqual(runtime.tick()["events"], {"skipped": "no-coworker-configured"})
+        self.assertEqual(len(self.outbox().read(0)[0]), 1)  # left for when a coworker is configured
+        quiet = self.make_runtime(FakeCoworker())
+        self.trigger(quiet, event="mail.received")
+        self.outbox().append("chat.message", "cd" * 16, at=T0)
+        quiet.tick()
+        self.assertEqual(self.runs(quiet), [])
+
+    def test_a_ticket_opened_by_any_route_after_the_worker_started_runs_a_ticket_trigger_once(self):
+        runtime = self.make_runtime(FakeCoworker(), tickets=True)
+        store = runtime._sidecar().tickets_store()
+        store.create(project="support", title="Before the worker watched", requested_by="runtime:old", now=T0 - 500)
+        self.trigger(runtime, event="ticket.created", goal="Look at the new ticket")
+        self.assertEqual(runtime.tick()["events"], {"chat": 0, "tickets": 0})  # first pass starts now: history is not replayed
+        self.clock[0] += 60
+        made = store.create(project="support", title="Boiler is leaking, card 4111 1111 1111 1111", requested_by="alex@customer.example", now=int(self.clock[0]) - 5)
+        report = runtime.tick()
+        self.assertEqual(report["events"]["tickets"], 1)
+        self.assertEqual(len(self.event_runs(runtime, "ticket.created")), 1)
+        self.clock[0] += 60
+        self.assertEqual(runtime.tick()["events"]["tickets"], 0)  # seen: not run again
+        self.assertEqual(len(self.event_runs(runtime, "ticket.created")), 1)
+        self.assertNotIn("Boiler", json.dumps(self.events()))
+        self.assertNotIn(made["ticketId"], json.dumps(self.events()))
+
+    def test_a_ticket_the_mailbox_already_announced_is_not_run_a_second_time_by_the_poll(self):
+        runtime = self.make_runtime(FakeCoworker(answer=False), tickets=True)
+        self.trigger(runtime, event="ticket.created", goal="Look at the new ticket")
+        runtime.tick()  # the poll starts
+        self.clock[0] += 60
+        runtime._spool().ingest(raw(), now=int(self.clock[0]) - 5)
+        runtime.tick()  # the mailbox opens a ticket and announces it; the poll sees it in the same pass
+        self.clock[0] += 60
+        runtime.tick()
+        self.assertEqual(len(self.event_runs(runtime, "ticket.created")), 1)
+
+    def test_tickets_created_in_the_same_second_are_each_run_once_across_passes(self):
+        runtime = self.make_runtime(FakeCoworker(), tickets=True)
+        store = runtime._sidecar().tickets_store()
+        self.trigger(runtime, event="ticket.created", goal="Look at the new ticket", max_per_hour=20)
+        runtime.tick()
+        for number in (1, 2):
+            self.clock[0] += 31
+            store.create(project="support", title=f"Ticket {number}", requested_by="a@x.example", now=int(self.clock[0]))
+            runtime.tick()
+        self.clock[0] += 31
+        store.create(project="support", title="Ticket 3", requested_by="a@x.example", now=int(self.clock[0]) - 31)  # same second as ticket 2
+        runtime.tick()
+        self.assertEqual(len(self.event_runs(runtime, "ticket.created")), 3)
+
+    def test_without_a_ticket_store_only_chat_events_are_handled(self):
+        runtime = self.make_runtime(FakeCoworker())
+        self.assertEqual(runtime.tick()["events"], {"chat": 0, "tickets": 0})
+        self.assertFalse((self.data / "tickets").exists())
 
 
 class CrmFilingTests(Case):

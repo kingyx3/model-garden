@@ -35,7 +35,7 @@ The current GCP reference intentionally does not deploy Kubernetes, a shared con
 
 `EnvironmentBinding.spec.worker` (opt-in, `enabled: true`) adds two services to the Docker bundle:
 
-- `governed-worker` (`platform/runtime/worker.py`) shares the governance volume with the governed sidecar and is the clock for work nobody prompts: it applies the workspace's `Schedule` definitions on start under `MODEL_GARDEN_DEPLOYED_BY`, runs due schedules and resumes tasks whose human step was answered, drains the built-in inbound mail spool into the support mailbox (files each handled email to the built-in contact log when `crm` is bound to it, retries outages and tells the owner about a blocked filing, and fires `mail.received` and `ticket.created` event triggers for what it handled), delivers hand-off, human-step, connection, grant, schedule and mailbox notices through each person's own channel, and purges expired artifacts and mail. A failing job is ledgered as `worker.job-failed` (job and error type only) and never stops the others; `worker.py --health` is the container health check and `--once` runs one pass for an operator.
+- `governed-worker` (`platform/runtime/worker.py`) shares the governance volume with the governed sidecar and is the clock for work nobody prompts: it applies the workspace's `Schedule` definitions on start under `MODEL_GARDEN_DEPLOYED_BY`, runs due schedules and resumes tasks whose human step was answered, drains the built-in inbound mail spool into the support mailbox (files each handled email to the built-in contact log when `crm` is bound to it, retries outages and tells the owner about a blocked filing, and fires `mail.received` and `ticket.created` event triggers for what it handled, plus `ticket.created` for tickets opened any other way and `chat.message` for the conversational messages the gateway reports through a digest-only outbox), delivers hand-off, human-step, connection, grant, schedule and mailbox notices through each person's own channel, and purges expired artifacts and mail. A failing job is ledgered as `worker.job-failed` (job and error type only) and never stops the others; `worker.py --health` is the container health check and `--once` runs one pass for an operator.
 - `coworker-api`, present when `coworker_api_key_ref` is set, is a second Hermes process (`hermes gateway run`) serving only its OpenAI-compatible API server on the private Compose network with `API_SERVER_KEY`. The worker asks the coworker through it (`platform/runtime/coworker_client.py`) and never holds a model credential; the client refuses any non-private URL.
 
 ```yaml
@@ -46,7 +46,7 @@ worker:
   people: {jordan@client.example: {channel: slack, address: D0123}}  # where each named person is told things
   escalate_to: ops@client.example
   mailbox: {addresses: [support@client.example], trusted_authserv_id: mx.client.example, owner: jordan@client.example}
-  intervals: {scheduler: 60, mailbox: 30, crm-sync: 120, notices: 60, retention: 3600}
+  intervals: {scheduler: 60, mailbox: 30, crm-sync: 120, events: 30, notices: 60, retention: 3600}
 ```
 
 The worker and the gateway keep separate `people` and `escalate_to` settings, but when both are enabled a side that omits them takes the other's, so filling in either list is enough for notices to reach people. If both give `people` and one person has a different channel or address in each, the deploy fails with an error naming that person.
