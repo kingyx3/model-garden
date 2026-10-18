@@ -335,8 +335,24 @@ class Worker:
                            f"A customer email needs a person (reason: {item['reason']}, thread {item['threadRef'][:12]}).",
                            reference=item["threadRef"][:40])
 
+        try:
+            tickets = sidecar.tickets_store()
+        except PermissionError:  # no built-in ticket store is bound: a thread for a person stays a notice only
+            tickets = None
+
+        def open_ticket(item: Mapping[str, Any]) -> Mapping[str, Any]:
+            made = tickets.create(
+                project="support", title=f"Customer email needs a person ({item['reason']})",
+                description=f"Category {item['category']}; thread {item['threadRef'][:24]}. Open the thread in the mailbox; this ticket holds no message text.",
+                requested_by="runtime:support-mailbox", agent=self._agent(),
+            )
+            if not made["duplicate"]:
+                self.audit("ticket.opened", "runtime:support-mailbox",
+                           {"ticketId": made["ticketId"], "project": "support", "reason": item["reason"], "threadRef": item["threadRef"][:24]})
+            return made
+
         mailbox = support.SupportMailbox(
-            adapter, text.PrincipalDirectory(), {"mail.draft": draft}, classify=classify, answer=answer, escalate=escalate,
+            adapter, text.PrincipalDirectory(), {"mail.draft": draft}, classify=classify, answer=answer, escalate=escalate, ticket=open_ticket if tickets is not None else None,
             handled=support.MessageLog(self.data / "mail-handled"), audit=self.audit, conversations=self._conversation_recorder(),
         )
         return lambda raw, now: mailbox.handle(raw, now=now)

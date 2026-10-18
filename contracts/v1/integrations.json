@@ -309,6 +309,26 @@
         "files.read": [],
         "files.write": []
       }
+    },
+    {
+      "id": "built-in-tickets",
+      "name": "Built-in work items",
+      "family": "tickets",
+      "method": "built-in",
+      "tier": 0,
+      "status": "built-credential-free",
+      "tools": [
+        "tickets.search",
+        "tickets.create",
+        "tickets.update"
+      ],
+      "issue": 77,
+      "adapter": "platform/core/tickets.py",
+      "scopeByTool": {
+        "tickets.search": [],
+        "tickets.create": [],
+        "tickets.update": []
+      }
     }
   ]
 }

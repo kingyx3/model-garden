@@ -32,20 +32,26 @@ MAILBOX = "support@acme.example"
 SECRET_BODY = "What are your opening hours? My card 4111 1111 1111 1111."
 
 
-def compiled(root: pathlib.Path, *, schedules=None) -> pathlib.Path:
+def compiled(root: pathlib.Path, *, schedules=None, client=None) -> pathlib.Path:
     path = root / "desired-state.json"
     subprocess.run([sys.executable, str(ROOT / "scripts" / "compile-workspace.py"), str(ROOT / "examples" / "workspace"),
                     "--agent", "receptionist", "--output", str(path)], check=True, capture_output=True)
-    if schedules is not None:
+    if schedules is not None or client is not None:
         state = json.loads(path.read_text())
-        state["schedules"] = schedules
+        if schedules is not None:
+            state["schedules"] = schedules
+        if client is not None:
+            state["source"]["client"] = client
         path.write_text(json.dumps(state))
     return path
 
 
-def manifest(root: pathlib.Path) -> pathlib.Path:
+def manifest(root: pathlib.Path, *, tickets: bool = False) -> pathlib.Path:
     path = root / "manifest.json"
-    path.write_text(json.dumps({"capabilities": [{"family": "kb", "status": "available", "provider": "text-knowledge", "tier": 0}]}))
+    entries = [{"family": "kb", "status": "available", "provider": "text-knowledge", "tier": 0}]
+    if tickets:
+        entries.append({"family": "tickets", "status": "available", "provider": "built-in-tickets", "tier": 0})
+    path.write_text(json.dumps({"capabilities": entries}))
     return path
 
 
@@ -89,11 +95,11 @@ class Case(unittest.TestCase):
         self.data.mkdir()
         self.clock = [T0]
 
-    def make(self, config=None, *, schedules=None, coworker=None, senders=None):
+    def make(self, config=None, *, schedules=None, coworker=None, senders=None, tickets=False):
         import os
-        os.environ["MODEL_GARDEN_CAPABILITY_MANIFEST"] = str(manifest(self.root))
+        os.environ["MODEL_GARDEN_CAPABILITY_MANIFEST"] = str(manifest(self.root, tickets=tickets))
         self.addCleanup(os.environ.pop, "MODEL_GARDEN_CAPABILITY_MANIFEST", None)
-        return worker.Worker(compiled(self.root, schedules=schedules), self.data, config or {}, coworker=coworker,
+        return worker.Worker(compiled(self.root, schedules=schedules, client="acme" if tickets else None), self.data, config or {}, coworker=coworker,
                              senders=senders, clock=lambda: self.clock[0])
 
     def events(self):
@@ -189,6 +195,31 @@ class MailboxTests(Case):
         self.assertEqual(runtime._artifacts().list(), [])
         self.assertEqual(runtime.queue.pending(), [])  # delivered in the same pass
         self.assertIn("support-mailbox.handled", (self.data / "audit.jsonl").read_text())
+
+
+    def test_mail_for_a_person_also_opens_one_ticket_when_the_built_in_store_is_bound(self):
+        runtime = self.make(self.config(), coworker=FakeCoworker(answer=False), senders={"slack": lambda address, text: None}, tickets=True)
+        runtime._spool().ingest(raw(), now=T0 - 5)
+        runtime.tick()
+        store = runtime._sidecar().tickets_store()
+        (item,) = store.open_items()
+        shown = json.dumps(store.get(item["ticketId"]))
+        for private in ("4111", "alex@customer.example", "opening hours"):
+            self.assertNotIn(private, shown)
+        opened = [event for event in self.events() if event.get("action") == "ticket.opened"]
+        self.assertEqual([(event["performedBy"], event["details"]["ticketId"], event["details"]["reason"]) for event in opened],
+                         [("runtime:support-mailbox", item["ticketId"], "no-approved-answer")])
+        runtime._spool().ingest(raw("<c2@customer.example>"), now=T0 - 4)  # a different thread is its own ticket
+        self.clock[0] += 3600
+        runtime.tick()
+        self.assertEqual(len(store.open_items()), 2)
+
+    def test_without_a_bound_ticket_store_mail_for_a_person_opens_nothing(self):
+        runtime = self.make(self.config(), coworker=FakeCoworker(answer=False), senders={"slack": lambda address, text: None})
+        runtime._spool().ingest(raw(), now=T0 - 5)
+        runtime.tick()
+        self.assertFalse((self.data / "tickets").exists())
+        self.assertNotIn("ticket.opened", (self.data / "audit.jsonl").read_text())
 
 
 class LoopTests(Case):

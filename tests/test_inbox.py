@@ -68,10 +68,28 @@ class InboxCase(unittest.TestCase):
         return inbox.collect(approvals=self.approvals, handoffs=self.handoffs, contacts=self.contacts, now=NOW)
 
 
+class TicketsInInboxTests(InboxCase):
+    def test_open_tickets_show_as_a_count_and_age_and_never_as_text(self):
+        tickets = _load("tickets_for_inbox", "platform/core/tickets.py")
+        store = tickets.TicketStore(self.root / "tickets", tenant="acme")
+        made = store.create(project="support", title=SECRET_ARGUMENT, description=SECRET_ARGUMENT, requested_by="unmapped:slack:x", now=NOW - 3600)
+        store.create(project="support", title="Second", requested_by="unmapped:slack:x", now=NOW - 60)
+        closed = store.create(project="support", title="Closed", requested_by="unmapped:slack:x", now=NOW - 10)
+        store.update(ticket_id=closed["ticketId"], status="done", requested_by="jordan@client.example", principal_access="member")
+        result = inbox.collect(approvals=self.approvals, handoffs=self.handoffs, tickets=self.root / "tickets", now=NOW)
+        self.assertEqual(result["counts"]["tickets"], 2)
+        (item,) = [item for item in result["items"] if item["kind"] == "tickets"]
+        self.assertEqual((item["count"], item["oldestWaitingSeconds"]), (2, 3600))
+        self.assertNotIn("Hargreaves", json.dumps(result))
+        self.assertIn("2 open, oldest waiting 1 h", inbox.format_text(result))
+        self.assertNotIn(made["ticketId"], json.dumps(result))
+        self.assertEqual(inbox.collect(approvals=self.approvals, handoffs=self.handoffs, now=NOW)["counts"]["tickets"], 0)
+
+
 class CollectTests(InboxCase):
     def test_an_empty_runtime_says_so(self):
         result = self.collect()
-        self.assertEqual((result["items"], result["counts"]), ([], {"approvals": 0, "handoffs": 0, "overdueHandoffs": 0, "reviews": 0, "connections": 0}))
+        self.assertEqual((result["items"], result["counts"]), ([], {"approvals": 0, "handoffs": 0, "overdueHandoffs": 0, "reviews": 0, "tickets": 0, "connections": 0}))
         self.assertEqual(inbox.format_text(result), "Nothing is waiting for a person.\n")
 
     def test_items_are_ordered_overdue_handoffs_then_oldest_approvals_then_open_handoffs_then_reviews(self):
@@ -87,7 +105,7 @@ class CollectTests(InboxCase):
         self.assertEqual([(item["kind"], item.get("id")) for item in result["items"][:4]],
                          [("handoff", late), ("approval", old), ("approval", recent), ("handoff", soon)])
         self.assertEqual([item["what"] for item in result["items"][4:]], ["unmatched-interactions", "possible-duplicate-contacts"])
-        self.assertEqual(result["counts"], {"approvals": 2, "handoffs": 2, "overdueHandoffs": 1, "reviews": 2, "connections": 0})
+        self.assertEqual(result["counts"], {"approvals": 2, "handoffs": 2, "overdueHandoffs": 1, "reviews": 2, "tickets": 0, "connections": 0})
         self.assertTrue(result["items"][0]["overdue"])
         self.assertFalse(result["items"][3]["overdue"])
 

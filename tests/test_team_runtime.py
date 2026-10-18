@@ -39,6 +39,7 @@ def states() -> list[dict]:
     compiled = {state["agent"]["metadata"]["name"]: state for state in compiler.compile_workspace(ROOT / "examples" / "workspace", None)}
     coordinator = copy.deepcopy(compiled["receptionist"])
     coordinator["agent"]["metadata"]["name"] = "coordinator"
+    coordinator["source"]["name"] = "coordinator"
     coordinator["tools"] = [tool for tool in coordinator["tools"] if tool["metadata"]["name"] != "crm.log-interaction"] + compiled["account-researcher"]["tools"]
     for state in (*compiled.values(), coordinator):
         state["source"]["client"] = "acme"
@@ -122,6 +123,14 @@ class LayoutTests(Case):
             self.assertEqual(entry["env"], {"MODEL_GARDEN_CAPABILITY_MANIFEST": str(self.base / "agents" / entry["agent"] / "capabilities.json")})
         with self.assertRaises(team_runtime.TeamError):
             self.team().launch_plan(base_port=65535)
+
+    def test_an_agent_the_ledger_would_attribute_to_another_name_is_refused(self):
+        mismatched = states()
+        mismatched[0]["source"]["name"] = "receptionist"  # would be counted, approved and ledgered as the receptionist
+        with self.assertRaises(team_runtime.TeamError) as caught:
+            team_runtime.TeamRuntime(mismatched, self.base, now=lambda: T0)
+        self.assertIn("source.name", str(caught.exception))
+        self.assertFalse((self.base / "agents").exists())
 
     def test_agent_names_become_directories_so_unsafe_ones_are_refused(self):
         bad = states()

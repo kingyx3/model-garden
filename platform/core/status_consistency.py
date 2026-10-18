@@ -16,7 +16,7 @@ import yaml
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 DOCS = ("README.md", "docs/*.md")
 # Statuses that mean credential-free build evidence only; nothing here may be called live from unit tests.
-TIER_ZERO_PROVIDERS = {"built-in-crm": "crm", "text-knowledge": "kb", "built-in-artifacts": "docs", "built-in-files": "files"}
+TIER_ZERO_PROVIDERS = {"built-in-crm": "crm", "text-knowledge": "kb", "built-in-artifacts": "docs", "built-in-files": "files", "built-in-tickets": "tickets"}
 NOT_BUILT = re.compile(r"\b(unimplemented|not (yet )?(implemented|built|shipped)|proposed|planned|NEXT)\b", re.IGNORECASE)
 LIVE_CLAIM = re.compile(r"\b(production[- ]live|live tenant[- ]proven|is live|are live|now live)\b", re.IGNORECASE)
 RECEPTIONIST_GAP = re.compile(r"receptionist\s+(does not|doesn't|has not)\s+(yet\s+)?(declare|select|use)", re.IGNORECASE)
