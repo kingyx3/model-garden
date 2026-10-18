@@ -457,3 +457,55 @@ class ExportJobTests(Case):
                 worker.load_config({"export": bad})
         good = worker.load_config({"export": {"gcsBucket": "ok-bucket", "impersonate": "mg-exp-1234abcd@acme-proj.iam.gserviceaccount.com"}})
         self.assertEqual(good["export"]["gcsBucket"], "ok-bucket")
+
+
+class ExportAlertTests(Case):
+    """A stalled or broken export reaches the escalation contact through the notice channel, once, then a recovery (#80)."""
+
+    def make_exporting(self, sink):
+        sent: list[tuple[str, str]] = []
+        runtime = self.make({"export": {"gcsBucket": "acme-ledger-export"}, "escalateTo": OWNER,
+                             "people": {OWNER: {"channel": "slack", "address": "D0OWNER"}}},
+                            senders={"slack": lambda address, text: sent.append((address, text))})
+        runtime.export_sink = sink
+        runtime.audit("worker.test", "runtime:worker", {"n": 1})
+        return runtime, sent
+
+    def test_a_healthy_export_raises_no_alert(self):
+        runtime, sent = self.make_exporting(worker._module("ledger").DirectorySink(self.root / "sink"))
+        self.assertGreaterEqual(runtime.run_export(T0)["exported"], 1)
+        runtime.deliver_notices(T0)
+        self.assertEqual(sent, [])
+
+    def test_an_unreachable_sink_alerts_once_the_export_is_stale_then_reports_recovery(self):
+        good = worker._module("ledger").DirectorySink(self.root / "sink")
+
+        class Down:
+            def put_records(self, records):
+                raise worker._module("ledger").LedgerExportError("sink unreachable")
+
+            put_head = put_records
+
+        runtime, sent = self.make_exporting(Down())
+        self.assertEqual(runtime._guard("export", runtime.run_export, T0), {"failed": "LedgerExportError"})
+        runtime.deliver_notices(T0)
+        self.assertEqual(len(sent), 1)
+        self.assertEqual(sent[0][0], "D0OWNER")
+        self.assertIn("Ledger export stale problem", sent[0][1])
+        runtime.deliver_notices(T0 + 60)
+        self.assertEqual(len(sent), 1)  # delivered once, not every pass
+        runtime.export_sink = good
+        runtime.run_export(T0 + 120)
+        runtime.deliver_notices(T0 + 120)
+        self.assertEqual(len(sent), 2)
+        self.assertIn("healthy again", sent[1][1])
+        self.assertNotIn("4111", json.dumps(sent))
+
+    def test_a_ledger_shorter_than_the_export_is_an_integrity_alert(self):
+        runtime, sent = self.make_exporting(worker._module("ledger").DirectorySink(self.root / "sink"))
+        runtime.run_export(T0)
+        runtime.audit_path.write_text("", encoding="utf-8")
+        self.assertEqual(runtime._guard("export", runtime.run_export, T0 + 60), {"failed": "LedgerTruncated"})
+        runtime.deliver_notices(T0 + 60)
+        self.assertEqual(len(sent), 1)
+        self.assertIn("cannot be trusted", sent[0][1])

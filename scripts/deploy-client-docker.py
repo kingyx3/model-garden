@@ -72,6 +72,7 @@ RUNTIME_SOURCE_PATHS = (
     pathlib.Path("platform/core/tickets.py"),
     pathlib.Path("platform/core/redaction.py"),
     pathlib.Path("platform/core/ledger_export.py"),
+    pathlib.Path("platform/core/export_monitor.py"),
     pathlib.Path("platform/core/connection_notices.py"),
     pathlib.Path("platform/core/notice_delivery.py"),
     pathlib.Path("platform/core/crm_filing.py"),

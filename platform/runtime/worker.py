@@ -17,6 +17,9 @@ small, bounded amount of work:
   channel the people directory gives for them (``notice_delivery.py``). A person with no usable channel stays ``no-channel`` and
   is offered again on the next pass; nothing is marked delivered early.
 - **retention**: purges expired artifacts and mail past the retention period.
+- **export** (when configured): copies new ledger records to the retention-locked bucket; a local ledger that no longer matches
+  the export, or one falling behind because exporting fails, is alerted to ``escalateTo`` through the notices job
+  (``export_monitor.py``): once when it starts, a reminder while it lasts, and once when it recovers.
 
 A failing job is ledgered as ``worker.job-failed`` with the job name and error type only and never stops the other jobs. A
 heartbeat file records the last pass for the container health check. The worker holds no provider credential and no model
@@ -44,6 +47,9 @@ from typing import Any
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 DEFAULT_INTERVALS = {"scheduler": 60, "mailbox": 30, "notices": 60, "retention": 3600, "export": 300}
 MIN_INTERVAL, MAX_INTERVAL = 10, 86_400
+# A stalled export alerts the escalation contact when the ledger is this far ahead of it, or has waited this long.
+EXPORT_MAX_LAG_EVENTS = 100
+EXPORT_MAX_STALE_SECONDS = 6 * 3600
 MAX_QUEUE = 2_000
 IDENTITY = "runtime:worker"
 
@@ -59,28 +65,31 @@ def _load(name: str, relative: str):
     return module
 
 
+MODULES = {
+    "govern": "scripts/govern-action.py",
+    "schedules": "platform/core/schedules.py",
+    "scheduler": "platform/core/scheduler.py",
+    "delivery": "platform/core/notice_delivery.py",
+    "notices": "platform/core/connection_notices.py",
+    "capabilities": "platform/core/capabilities.py",
+    "grants": "platform/core/provider_grants.py",
+    "artifacts": "platform/core/artifacts.py",
+    "spool": "platform/channels/mail_spool.py",
+    "recorder": "platform/channels/conversation_recorder.py",
+    "support": "platform/channels/support_mailbox.py",
+    "email": "platform/channels/email_channel.py",
+    "text": "platform/channels/text_channel.py",
+    "coworker": "platform/runtime/coworker_client.py",
+    "sidecar": "platform/runtime/governed_mcp.py",
+    "transports": "platform/channels/transports.py",
+    "ledger": "platform/core/ledger_export.py",
+    "export_monitor": "platform/core/export_monitor.py",
+    "approval": "scripts/runtime-approval.py",
+}
+
+
 def _module(key: str):
-    paths = {
-        "govern": "scripts/govern-action.py",
-        "schedules": "platform/core/schedules.py",
-        "scheduler": "platform/core/scheduler.py",
-        "delivery": "platform/core/notice_delivery.py",
-        "notices": "platform/core/connection_notices.py",
-        "capabilities": "platform/core/capabilities.py",
-        "grants": "platform/core/provider_grants.py",
-        "artifacts": "platform/core/artifacts.py",
-        "spool": "platform/channels/mail_spool.py",
-        "recorder": "platform/channels/conversation_recorder.py",
-        "support": "platform/channels/support_mailbox.py",
-        "email": "platform/channels/email_channel.py",
-        "text": "platform/channels/text_channel.py",
-        "coworker": "platform/runtime/coworker_client.py",
-        "sidecar": "platform/runtime/governed_mcp.py",
-        "transports": "platform/channels/transports.py",
-        "ledger": "platform/core/ledger_export.py",
-        "approval": "scripts/runtime-approval.py",
-    }
-    return _load(f"model_garden_worker_{key}", paths[key])
+    return _load(f"model_garden_worker_{key}", MODULES[key])
 
 
 class WorkerConfigError(ValueError):
@@ -412,6 +421,8 @@ class Worker:
         sources.append(delivery.connection_source(
             store, capabilities.read_connection_health(self.data), self.config["connectors"], grants, now=now, escalate_to=escalate_to,
         ))
+        if self.config["export"] is not None:
+            sources.append(self._export_alert_source(now))
         results = delivery.deliver(sources, directory, {"inbox": inbox_sender, **self.senders}, audit=self.audit)
         counts: dict[str, int] = {}
         for result in results:
@@ -434,18 +445,81 @@ class Worker:
         return len(removed)
 
     def run_export(self, now: int) -> dict[str, Any]:
-        """Copy new ledger records and a head manifest to the retention-locked bucket, as the separate export identity."""
+        """Copy new ledger records and a head manifest to the retention-locked bucket, as the separate export identity.
+
+        The runtime cannot read the bucket back (only the verifier identity can), so the alert it can raise is about its own side:
+        a local ledger that no longer matches what was exported (integrity), or one that is falling behind because exporting fails
+        (lag, staleness). Each outcome is saved for ``deliver_notices``, which tells the escalation contact through the export monitor.
+        """
         settings = self.config["export"]
         if settings is None:
             return {"skipped": "no-export-configured"}
-        ledger = _module("ledger")
-        token = ledger.metadata_token()
-        if settings.get("impersonate"):
-            token = ledger.impersonated_token(settings["impersonate"], token, scope="https://www.googleapis.com/auth/devstorage.read_write")
-        sink = self.export_sink or ledger.GcsSink(settings["gcsBucket"], token, prefix=settings.get("prefix") or "")
         if not self.audit_path.is_file():
             return {"skipped": "no-ledger-yet"}
-        return ledger.export_ledger(self.audit_path, sink, self.data / "worker" / "export-state.json")
+        ledger = _module("ledger")
+        health = self._export_health()
+        try:
+            sink = self.export_sink
+            if sink is None:
+                token = ledger.metadata_token()
+                if settings.get("impersonate"):
+                    token = ledger.impersonated_token(settings["impersonate"], token, scope="https://www.googleapis.com/auth/devstorage.read_write")
+                sink = ledger.GcsSink(settings["gcsBucket"], token, prefix=settings.get("prefix") or "")
+            result = ledger.export_ledger(self.audit_path, sink, self._export_state_path())
+        except ledger.LedgerTruncated:
+            self._save_export_health({**health, "report": {"problems": ["local ledger no longer matches the export"], "lagEvents": 0}})
+            raise
+        except Exception:
+            lag = self._export_lag()
+            problems = []
+            if lag > EXPORT_MAX_LAG_EVENTS:
+                problems.append(f"export lag: {lag} event(s) waiting")
+            last = health.get("lastSuccessAt")
+            if lag and (last is None or now - last > EXPORT_MAX_STALE_SECONDS):
+                problems.append("export stale: events are waiting and the export is failing")
+            self._save_export_health({**health, "report": {"problems": problems, "lagEvents": lag}})
+            raise
+        self._save_export_health({"lastSuccessAt": now, "report": {"problems": [], "lagEvents": 0}})
+        return result
+
+    def _export_state_path(self) -> pathlib.Path:
+        return self.data / "worker" / "export-state.json"
+
+    def _export_health(self) -> dict[str, Any]:
+        try:
+            health = json.loads((self.data / "worker" / "export-health.json").read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return {}
+        return health if isinstance(health, dict) else {}
+
+    def _save_export_health(self, health: Mapping[str, Any]) -> None:
+        path = self.data / "worker" / "export-health.json"
+        path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        temporary = path.with_suffix(".tmp")
+        temporary.write_text(json.dumps(health, sort_keys=True) + "\n", encoding="utf-8")
+        os.replace(temporary, path)
+
+    def _export_lag(self) -> int:
+        ledger = _module("ledger")
+        try:
+            events = ledger.read_chained_events(self.audit_path)
+            cursor = json.loads(self._export_state_path().read_text(encoding="utf-8"))["sequence"] if self._export_state_path().is_file() else 0
+        except (OSError, ValueError, KeyError, TypeError, ledger.LedgerExportError):
+            return 0
+        return max(0, (events[-1]["sequence"] if events else 0) - int(cursor))
+
+    def _export_alert_source(self, now: int):
+        """Due export alerts (from the last export outcome) as a notice source; delivery is recorded in the monitor's state."""
+        delivery = _module("delivery")
+        report = self._export_health().get("report")
+        monitor = _module("export_monitor").ExportMonitor(self.data / "worker", audit=self.audit)
+        escalate_to = self.config["escalateTo"]
+        notices = monitor.evaluate(report, now=now, owner=escalate_to, escalate_to=escalate_to) if isinstance(report, Mapping) else []
+
+        def mark(item: Mapping[str, Any], via: str) -> None:
+            monitor.mark_notified(item["notice"], via=via, now=now)
+
+        return delivery.source("export", notices, mark, reference=lambda notice: f"{str(notice['key'])[:12]}:{notice['kind']}")
 
     # -- loop ------------------------------------------------------------------------------------------
 
