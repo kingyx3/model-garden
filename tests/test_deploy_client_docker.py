@@ -177,6 +177,25 @@ class DeployClientDockerTests(unittest.TestCase):
             self.assertTrue((root / "bundle" / "model-garden-platform" / "platform" / "channels" / "ingress.py").is_file())
             self.assertTrue((root / "bundle" / "model-garden-platform" / "platform" / "core" / "schedule_commands.py").is_file())
 
+    def test_action_receipts_follow_the_approver_conversations_and_can_be_switched_off(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            profile = self._profile(root, tools=("kb.search",))
+            base = {"enabled": True, "public_origin": "https://chat.acme.example", "coworker_api_key_ref": "secret://coworker-api/dev",
+                    "secrets": {"slack_signing_secret_ref": "secret://slack/signing", "slack_bot_token_ref": "secret://slack/bot"},
+                    "directory": {"slack": {"T01/U01": {"identity": "alice@acme.example", "roles": ["approver"]}}},
+                    "slack": {"bot_user_id": "U0BOT0001"}}
+            for name, approvals, expected in (("a", {"notify": [{"channel": "slack", "conversation": "D0123"}]}, None),
+                                              ("b", {"notify": [{"channel": "slack", "conversation": "D0123"}], "receipts": False}, False)):
+                binding = self._binding(root, {"gateway": {**base, "approvals": approvals}, "worker": {"enabled": True, "coworker_api_key_ref": "secret://coworker-api/dev"}})
+                deployer.render_bundle(profile, binding, root / name, "acme-dev")
+                config = json.loads((root / name / "profile" / ".modelgarden" / "gateway.json").read_text(encoding="utf-8"))
+                self.assertEqual(config["approvals"].get("receipts"), expected)
+            self.assertTrue((root / "a" / "model-garden-platform" / "platform" / "channels" / "receipts.py").is_file())
+            with self.assertRaisesRegex(ValueError, "receipts must be true or false"):
+                binding = self._binding(root, {"gateway": {**base, "approvals": {"receipts": "yes"}}})
+                deployer.render_bundle(profile, binding, root / "c", "acme-dev")
+
     def test_gateway_rejects_missing_secrets_unknown_settings_and_public_binds_that_are_not_addresses(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = pathlib.Path(tmp)

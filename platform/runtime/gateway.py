@@ -91,7 +91,7 @@ def _module(key: str):
         "handoff_reply": "platform/core/handoff_reply.py", "schedules": "platform/core/schedules.py",
         "artifacts": "platform/core/artifacts.py", "coworker": "platform/runtime/coworker_client.py",
         "enrollment": "platform/core/secret_enrollment.py", "vault": "platform/core/sealed_vault.py",
-        "oauth": "platform/core/oauth_consent.py", "readiness": "platform/core/grant_readiness.py", "studio": "platform/runtime/studio.py",
+        "receipts": "platform/channels/receipts.py", "oauth": "platform/core/oauth_consent.py", "readiness": "platform/core/grant_readiness.py", "studio": "platform/runtime/studio.py",
     }
     # Shared names, so an error class raised in one module is the class another module catches.
     shared = {"text": "model_garden_text_channel", "schedules": "model_garden_schedule_commands_store"}
@@ -131,6 +131,8 @@ def load_config(document: Mapping[str, Any]) -> dict[str, Any]:
         sections[name] = dict(section)
     if "slack" in sections and sections["slack"].get("uploadFiles") not in (None, True, False):
         raise GatewayConfigError("slack.uploadFiles must be true or false")
+    if "approvals" in sections and sections["approvals"].get("receipts") not in (None, True, False):
+        raise GatewayConfigError("approvals.receipts must be true or false")
     if "web" in sections:
         web = sections["web"]
         if not origin:
@@ -395,6 +397,14 @@ class Gateway:
                     client_secret=lambda name: self._secret(oauth.client_secret_env(name)),
                     http=oauth_http or oauth.GuardedHttp(sorted({host for item in providers.values() for host in item["allowedHosts"]})),
                     audit=self.audit, grants=oauth.LazyGrants(self.data / "provider-grants", enrollment_tenant, self.audit))
+        self.receipts = None
+        if (approvals or {}).get("notify") and (approvals or {}).get("receipts", True) is not False:
+            receipts = _module("receipts")
+            self.receipts = receipts.ReceiptFeed(
+                self.audit_path, self.data / "gateway" / "receipts.json", agent=str(self.desired_state.get("source", {}).get("name") or ""),
+                risks=receipts.risks_of(self.desired_state),
+            )
+            self.receipts.start()
         self.studio = _module("studio").Studio(self, self.config["studio"]) if self.config["studio"] else None
         self.executor = executor
         self.ingress = _module("ingress").ChannelIngress(
@@ -549,6 +559,37 @@ class Gateway:
                 mark.write_text("1", encoding="utf-8")
                 sent += 1
         return sent
+
+    def announce_receipts(self) -> int:
+        """Post one receipt (Tool, outcome, ledger requestId) to the approver conversations for each executed material action, once each.
+
+        Receipts come from the ledger's execution events, never from the coworker, and carry identifiers only. A receipt that reached no
+        conversation is offered again on the next pass; a failed send is ledgered by channel and error type.
+        """
+        if self.receipts is None:
+            return 0
+        targets = (self.config["approvals"] or {}).get("notify") or []
+        text = _module("text")
+
+        def send(receipt: dict[str, str]) -> int:
+            reached = 0
+            for target in targets:
+                adapter = self.adapters.get(target.get("channel"))
+                if adapter is None:
+                    continue
+                try:
+                    adapter.send_receipt(text.ActionReceipt(
+                        conversation_id=target["conversation"], thread_id=target.get("thread"), request_id=receipt["requestId"],
+                        tool=receipt["tool"], status=receipt["status"], summary=receipt["summary"],
+                    ))
+                    reached += 1
+                except Exception as exc:  # noqa: BLE001
+                    self.audit("channel.receipt-failed", IDENTITY, {"channel": target.get("channel"), "error": type(exc).__name__})
+            if reached:
+                self.audit("channel.receipt-sent", IDENTITY, {"requestId": receipt["requestId"], "tool": receipt["tool"], "status": receipt["status"], "conversations": reached})
+            return reached
+
+        return self.receipts.deliver(send)
 
     # -- HTTP ---------------------------------------------------------------------------------------------
 
@@ -827,13 +868,14 @@ def main(argv: list[str] | None = None) -> int:
         signal.signal(sig, lambda *_: stop.set())
     threading.Thread(target=server.serve_forever, daemon=True).start()
     while not stop.wait(ANNOUNCE_EVERY):
-        try:
-            gateway.announce_approvals()
-        except Exception as exc:  # noqa: BLE001
+        for announce in (gateway.announce_approvals, gateway.announce_receipts):
             try:
-                gateway.audit("gateway.announce-failed", IDENTITY, {"error": type(exc).__name__})
-            except Exception:  # noqa: BLE001
-                pass
+                announce()
+            except Exception as exc:  # noqa: BLE001
+                try:
+                    gateway.audit("gateway.announce-failed", IDENTITY, {"error": type(exc).__name__})
+                except Exception:  # noqa: BLE001
+                    pass
     server.shutdown()
     if smtp:
         smtp.shutdown()

@@ -76,7 +76,7 @@ gateway:
   people: {jordan@client.example: {channel: slack, address: D0123, identity: U123}}
   slack: {bot_user_id: U0BOT0001, allowed_channels: [C0123]}
   web: {allowed_addresses: [jordan@client.example], mail: {from: chat@client.example, host: smtp.client.example}}
-  approvals: {notify: [{channel: slack, conversation: D0123}]}
+  approvals: {notify: [{channel: slack, conversation: D0123}]}   # also where action receipts go; receipts: false turns them off
   mailbox: {addresses: [support@client.example], trusted_relays: [10.0.0.5]}
 ```
 

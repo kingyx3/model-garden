@@ -49,6 +49,7 @@ RUNTIME_SOURCE_PATHS = (
     pathlib.Path("platform/runtime/gateway.py"),
     pathlib.Path("platform/runtime/upstream_http.py"),
     pathlib.Path("platform/channels/ingress.py"),
+    pathlib.Path("platform/channels/receipts.py"),
     pathlib.Path("platform/channels/transports.py"),
     pathlib.Path("platform/channels/smtp_intake.py"),
     pathlib.Path("platform/core/schedule_commands.py"),
@@ -561,6 +562,10 @@ def _gateway_settings(binding: dict[str, Any]) -> tuple[dict[str, Any] | None, d
     approvals = gateway.get("approvals")
     if approvals is not None:
         config["approvals"] = {"emailLinks": bool(approvals.get("email_links")), "notify": approvals.get("notify") or []}
+        if approvals.get("receipts") is not None:
+            if not isinstance(approvals["receipts"], bool):
+                raise ValueError("Docker target failed: gateway.approvals.receipts must be true or false")
+            config["approvals"]["receipts"] = approvals["receipts"]
         if approvals.get("email_links"):
             required |= {"MODEL_GARDEN_APPROVAL_LINK_KEY"}
     mailbox = gateway.get("mailbox")
