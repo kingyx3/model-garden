@@ -101,7 +101,43 @@ def secret_resolver(environ: Mapping[str, str]) -> Callable[[str], str]:
     if not private:
         return EnvSecretResolver(environ)
     vault = _sealed_vault().SealedResolver(pathlib.Path(environ.get("MODEL_GARDEN_VAULT_ROOT") or DEFAULT_VAULT_ROOT), private_key=private)
-    return VaultThenEnvResolver(vault, environ)
+    return _with_oauth_refresh(VaultThenEnvResolver(vault, environ), vault, private, environ)
+
+
+def _with_oauth_refresh(inner: Callable[[str], str], vault: Any, private: str, environ: Mapping[str, str]) -> Callable[[str], str]:
+    """When provider OAuth consent is configured (``MODEL_GARDEN_OAUTH_CONFIG``), refresh a consented access token on use (#66)."""
+    if not environ.get("MODEL_GARDEN_OAUTH_CONFIG", "").strip():
+        return inner
+    import time
+
+    core = pathlib.Path(__file__).resolve().parents[1] / "core"
+    modules = {}
+    for key, path in (("oauth", core / "oauth_consent.py"), ("govern", pathlib.Path(__file__).resolve().parents[2] / "scripts" / "govern-action.py")):
+        name = f"model_garden_upstream_{key}"
+        if name not in sys.modules:
+            spec = importlib.util.spec_from_file_location(name, path)
+            module = importlib.util.module_from_spec(spec)
+            assert spec.loader is not None
+            sys.modules[name] = module
+            spec.loader.exec_module(module)
+        modules[key] = sys.modules[name]
+    sealed = _sealed_vault()
+    writer = sealed.SealedVault(pathlib.Path(environ.get("MODEL_GARDEN_VAULT_ROOT") or DEFAULT_VAULT_ROOT), public_key=sealed.public_key_of(private))
+    audit_path = pathlib.Path(environ.get("MODEL_GARDEN_AUDIT_PATH", "/opt/data/.modelgarden/audit.jsonl"))
+    store = modules["oauth"].store_from_environment(
+        environ, vault=writer, audit=lambda action, by, details: modules["govern"].record_operator_action(audit_path, action, by, details))
+    if store is None:
+        return inner
+    refreshing = modules["oauth"].RefreshingResolver(inner, store, vault, time.time)
+
+    def resolve(reference: str) -> str:
+        try:
+            return refreshing(reference)
+        except UpstreamTransportError:
+            raise
+        except Exception:  # noqa: BLE001 - a revoked, failed or unreachable consent is unavailable, never a stale or shared fallback
+            raise UpstreamTransportError("credential unavailable") from None
+    return resolve
 
 
 def system_dns_resolver(host: str) -> list[str]:

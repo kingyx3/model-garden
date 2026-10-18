@@ -20,6 +20,9 @@ Routes (everything else is 404):
   enrollment link (``secret_enrollment``). The enrollment token sits in the fragment; the owner signs in with the web chat's magic
   link (which returns to this page), and the submission is accepted only from the named owner's verified session. The value goes
   only to the sealed vault (``sealed_vault.SealedVault``, which holds the sidecar's public key and can never read it back).
+- ``GET|POST /connections/oauth/start`` and ``GET|POST /connections/oauth/callback`` (when ``oauth`` is configured) provider OAuth
+  consent (``oauth_consent``). The owner signs in with the same web sign-in, sees the provider, Tools and scopes, and is sent to the
+  pinned provider; the callback page posts the code and state back with the owner's session, and tokens go only to the sealed vault.
 
 Every channel request is verified by its adapter first; the principal is the verified sender mapped through the people directory,
 never the text. Hand-off replies and schedule commands typed in a channel are routed to their modules; other messages are put to the
@@ -85,7 +88,7 @@ def _module(key: str):
         "handoff_reply": "platform/core/handoff_reply.py", "schedules": "platform/core/schedules.py",
         "artifacts": "platform/core/artifacts.py", "coworker": "platform/runtime/coworker_client.py",
         "enrollment": "platform/core/secret_enrollment.py", "vault": "platform/core/sealed_vault.py",
-        "readiness": "platform/core/grant_readiness.py",
+        "oauth": "platform/core/oauth_consent.py", "readiness": "platform/core/grant_readiness.py",
     }
     # Shared names, so an error class raised in one module is the class another module catches.
     shared = {"text": "model_garden_text_channel", "schedules": "model_garden_schedule_commands_store"}
@@ -105,7 +108,7 @@ def load_config(document: Mapping[str, Any]) -> dict[str, Any]:
     """Validate the non-secret configuration rendered from ``EnvironmentBinding.spec.gateway``."""
     if not isinstance(document, Mapping):
         raise GatewayConfigError("gateway configuration must be an object")
-    allowed = {"publicOrigin", "directory", "people", "escalateTo", "web", "slack", "teams", "approvals", "mailbox", "coworker", "agent", "enrollment"}
+    allowed = {"publicOrigin", "directory", "people", "escalateTo", "web", "slack", "teams", "approvals", "mailbox", "coworker", "agent", "enrollment", "oauth"}
     unknown = sorted(set(document) - allowed)
     if unknown:
         raise GatewayConfigError(f"unknown gateway settings: {', '.join(unknown)}")
@@ -116,7 +119,7 @@ def load_config(document: Mapping[str, Any]) -> dict[str, Any]:
     _module("text").PrincipalDirectory(document.get("directory") or {})
     sections: dict[str, Any] = {}
     for name, required in (("web", {"allowedAddresses"}), ("slack", {"botUserId"}), ("teams", {"appId", "tenants"}),
-                           ("approvals", set()), ("mailbox", {"addresses"}), ("coworker", {"url"}), ("enrollment", {"vaultPublicKey"})):
+                           ("approvals", set()), ("mailbox", {"addresses"}), ("coworker", {"url"}), ("enrollment", {"vaultPublicKey"}), ("oauth", {"providers"})):
         section = document.get(name)
         if section is None:
             continue
@@ -140,10 +143,19 @@ def load_config(document: Mapping[str, Any]) -> dict[str, Any]:
             _module("vault").SealedVault(pathlib.Path("."), public_key=sections["enrollment"]["vaultPublicKey"])
         except _module("vault").VaultError as exc:
             raise GatewayConfigError(str(exc)) from None
+    if "oauth" in sections:
+        if "enrollment" not in sections or not origin:
+            raise GatewayConfigError("provider OAuth consent needs enrollment (the sealed vault), web sign-in and publicOrigin")
+        if set(sections["oauth"]) - {"providers"}:
+            raise GatewayConfigError("oauth holds only providers")
+        try:
+            _module("oauth").load_providers(sections["oauth"]["providers"])
+        except _module("oauth").OAuthError as exc:
+            raise GatewayConfigError(str(exc)) from None
     return {
         "publicOrigin": origin, "directory": dict(document.get("directory") or {}), "people": dict(document.get("people") or {}),
         "escalateTo": document.get("escalateTo"), "agent": document.get("agent") or "coworker", **{k: sections.get(k) for k in
-        ("web", "slack", "teams", "approvals", "mailbox", "coworker", "enrollment")},
+        ("web", "slack", "teams", "approvals", "mailbox", "coworker", "enrollment", "oauth")},
     }
 
 
@@ -201,6 +213,57 @@ else ready();
 })();
 """
 
+OAUTH_HTML = """<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex">
+<title>Connect your account for your coworker</title><link rel="stylesheet" href="/chat/app.css"></head>
+<body><main>
+<h1>Connect your account for your coworker</h1>
+<p id="note" role="status"></p>
+<section id="signin" hidden><p>This link is for the owner it was sent to. Enter your work email address and we will send you a sign-in link that brings you back here.</p>
+<form id="login"><input id="address" type="email" autocomplete="email" required><button>Send link</button></form></section>
+<section id="consent" hidden><p id="who"></p><p>Your coworker will be able to use only the access below, through this connection. You can withdraw it at the provider at any time.</p>
+<ul id="scopes"></ul><button id="approve">Continue to the provider</button> <button id="cancel">Cancel</button></section>
+</main><script src="/connections/oauth/app.js"></script></body></html>
+"""
+
+OAUTH_JS = r"""(function(){
+var S=window.sessionStorage,$=function(i){return document.getElementById(i)},p={},q={},cb=location.pathname==='/connections/oauth/callback';
+function parse(text,into,plus){text.split('&').forEach(function(kv){var i=kv.indexOf('=');if(i>0){var v=kv.slice(i+1);if(plus)v=v.split('+').join(' ');into[kv.slice(0,i)]=decodeURIComponent(v)}})}
+parse(location.hash.slice(1),p,false);parse(location.search.slice(1),q,true);
+history.replaceState(null,'',location.pathname);
+function say(t){$('note').textContent=t}
+function show(id){['signin','consent'].forEach(function(s){$(s).hidden=s!==id})}
+function post(path,body){var h={'Content-Type':'application/json'},s=S.getItem('mg-session');if(s)h.Authorization='Bearer '+s;
+return fetch(path,{method:'POST',headers:h,body:JSON.stringify(body)}).then(function(r){return r.json().then(function(j){return [r.status,j]})})}
+function expired(x){S.removeItem('mg-session');show('signin');say(x[1].error)}
+function sessionFirst(then){if(p.login){post('/channels/web/session',{login:p.login}).then(function(x){
+if(x[1].session){S.setItem('mg-session',x[1].session);S.setItem('mg-prefix',x[1].prefix)}else{say('That sign-in link is not valid or was already used.')}then()})
+.catch(function(){say('Sign-in did not complete. Check your connection and try again.');then()})}else then()}
+if(cb){
+if(!q.state){say('This page is used by the provider when it sends you back.');return}
+if(!S.getItem('mg-session')){say('Your sign-in did not survive the redirect. Ask for a new link and open it in one browser tab.');return}
+post('/connections/oauth/callback',q.error?{state:q.state,error:q.error}:{state:q.state,code:q.code}).then(function(x){
+if(x[0]===200){say('Connected. Your coworker can now use '+x[1].scopes.length+' permission(s) at '+x[1].provider+'. You can close this page.')}
+else if(x[0]===401){expired(x)}else{say((x[1].error||'That did not work.')+' Ask for a new link if this one has expired or was used.')}})
+.catch(function(){say('Nothing was saved. Check your connection and try again.')});return}
+if(p.consent)S.setItem('mg-consent',p.consent);
+var link=S.getItem('mg-consent');
+if(!link){say('Open the link exactly as it was sent to you.');return}
+$('login').onsubmit=function(e){e.preventDefault();post('/channels/web/login',{address:$('address').value,oauth:link}).then(function(){
+say('If that address is allowed, a sign-in link is on its way.')})};
+$('cancel').onclick=function(){S.removeItem('mg-consent');show('');say('Nothing was connected.')};
+$('approve').onclick=function(){post('/connections/oauth/start',{token:link,action:'authorize'}).then(function(x){
+if(x[0]===200){S.removeItem('mg-consent');location.assign(x[1].redirect)}else if(x[0]===401){expired(x)}else{say(x[1].error||'That did not work.')}})};
+function preview(){post('/connections/oauth/start',{token:link,action:'preview'}).then(function(x){
+if(x[0]===401){expired(x);return}
+if(x[0]!==200){say((x[1].error||'That did not work.')+' Ask for a new link if this one has expired or was used.');return}
+var d=x[1];$('who').textContent=d.agent+' asks to use your '+d.provider+' account ('+d.host+') for '+d.connectionId+', to run: '+d.tools.join(', ')+'.';
+$('scopes').textContent='';d.scopes.forEach(function(s){var li=document.createElement('li');li.textContent=s;$('scopes').appendChild(li)});show('consent')})
+.catch(function(){say('Check your connection and try again.')})}
+sessionFirst(function(){if(S.getItem('mg-session'))preview();else show('signin')});
+})();
+"""
+
 CHAT_CSS = """body{font:16px system-ui,sans-serif;margin:0;background:#f6f6f4;color:#1b1b1b}main{max-width:40rem;margin:0 auto;padding:1rem}
 #log{min-height:50vh;border:1px solid #ccc;background:#fff;padding:.5rem;overflow-y:auto;max-height:70vh}
 .m{margin:.4rem 0;white-space:pre-wrap}.me{text-align:right}.card{border:1px solid #888;padding:.4rem;margin:.4rem 0}
@@ -242,7 +305,8 @@ class Gateway:
 
     def __init__(self, desired_state_path: pathlib.Path, data_root: pathlib.Path, config: Mapping[str, Any], environ: Mapping[str, str],
                  *, coworker: Any | None = None, http: Any | None = None, mail_sender: Callable[[str, str, str], None] | None = None,
-                 executor: Any | None = None, clock: Callable[[], float] = time.time, verify_teams_token: Callable[[str], Any] | None = None) -> None:
+                 executor: Any | None = None, clock: Callable[[], float] = time.time, verify_teams_token: Callable[[str], Any] | None = None,
+                 oauth_http: Callable[..., Any] | None = None) -> None:
         self.config = load_config(config)
         self.desired_state_path = pathlib.Path(desired_state_path)
         self.desired_state = json.loads(self.desired_state_path.read_text(encoding="utf-8"))
@@ -292,6 +356,7 @@ class Gateway:
         else:
             self.confirm = None
         self.enrollments = None
+        self.oauth = None
         if self.config["enrollment"]:
             # One store per <client>-<environment>, the tenant the grant registry and the operator command use.
             manifest_path = environ.get("MODEL_GARDEN_CAPABILITY_MANIFEST", "")
@@ -304,6 +369,17 @@ class Gateway:
                 raise GatewayConfigError("credential enrollment needs the capability manifest to name the client and environment")
             vault = _module("vault").SealedVault(self.data / "vault", public_key=self.config["enrollment"]["vaultPublicKey"])
             self.enrollments = _module("enrollment").EnrollmentStore(self.data / "secret-enrollments", tenant=enrollment_tenant, vault=vault, audit=self.audit)
+            if self.config["oauth"]:
+                oauth = _module("oauth")
+                providers = oauth.load_providers(self.config["oauth"]["providers"])
+                for name in providers:
+                    self._secret(oauth.client_secret_env(name))
+                self.oauth = oauth.OAuthConsentStore(
+                    self.data / "oauth-consents", tenant=enrollment_tenant, vault=vault, providers=providers,
+                    redirect_uri=f"{self.config['publicOrigin']}/connections/oauth/callback",
+                    client_secret=lambda name: self._secret(oauth.client_secret_env(name)),
+                    http=oauth_http or oauth.GuardedHttp(sorted({host for item in providers.values() for host in item["allowedHosts"]})),
+                    audit=self.audit, grants=oauth.LazyGrants(self.data / "provider-grants", enrollment_tenant, self.audit))
         self.executor = executor
         self.ingress = _module("ingress").ChannelIngress(
             self.adapters, self.directory, respond=self._respond, decide=self._decide, handoff_replies=self._handoff_replies(),
@@ -458,6 +534,8 @@ class Gateway:
             return Response(200, CHAT_JS.encode("utf-8"), "text/javascript; charset=utf-8", _PAGE_HEADERS)
         if route == "/chat/app.css" and method == "GET" and self.auth is not None:
             return Response(200, CHAT_CSS.encode("utf-8"), "text/css; charset=utf-8", _PAGE_HEADERS)
+        if route.startswith("/connections/oauth/") and self.oauth is not None:
+            return self._oauth(route, method, headers, body, json_response)
         if route.startswith("/connections/enroll") and self.enrollments is not None:
             return self._enroll(route, method, headers, body, json_response)
         if route == "/approvals/confirm" and self.confirm is not None:
@@ -506,19 +584,55 @@ class Gateway:
             return json_response(400, {"error": str(exc)[:200]})
         return json_response(200, {"ok": True, "version": stored["version"], "masked": stored["masked"]})
 
+    def _oauth(self, route: str, method: str, headers: Mapping[str, str], body: bytes, json_response: Callable[..., Any]) -> Any:
+        """The owner's consent page, its approval and the provider callback; the code and tokens never reach a log or the ledger."""
+        Response = _module("ingress").Response
+        pages = ("/connections/oauth/start", "/connections/oauth/callback")
+        if method == "GET" and route in pages:
+            return Response(200, OAUTH_HTML.encode("utf-8"), "text/html; charset=utf-8", _PAGE_HEADERS)
+        if method == "GET" and route == "/connections/oauth/app.js":
+            return Response(200, OAUTH_JS.encode("utf-8"), "text/javascript; charset=utf-8", _PAGE_HEADERS)
+        if method != "POST" or route not in pages:
+            return json_response(404, {"error": "not found"})
+        try:
+            identity = self._web_identity(headers)
+        except _module("text").ChannelVerificationError:
+            return json_response(401, {"error": "Sign in with the owner's address first."})
+        try:
+            request = json.loads(body or b"{}")
+            if not isinstance(request, dict):
+                raise ValueError("object")
+        except ValueError:
+            return json_response(400, {"error": "This link is not valid."})
+        user, now = identity.channel_user_id, int(self.clock())
+        try:
+            if route == pages[0]:
+                if request.get("action") == "authorize":
+                    return json_response(200, self.oauth.start(request.get("token"), session_user=user, now=now))
+                return json_response(200, self.oauth.preview(request.get("token"), session_user=user, now=now))
+            if request.get("error"):
+                self.oauth.decline(request.get("state"), request.get("error"), session_user=user, now=now)
+            done = self.oauth.complete(request.get("state"), request.get("code"), session_user=user, now=now)
+        except _module("oauth").OAuthError as exc:
+            return json_response(400, {"error": str(exc)[:200]})
+        return json_response(200, {"ok": True, "provider": done["provider"], "scopes": done["scopes"]})
+
     def _web(self, route: str, method: str, query: Mapping[str, list[str]], headers: Mapping[str, str], body: bytes, json_response: Callable[..., Any]) -> Any:
         if route == "/channels/web/login":
             try:
                 request = json.loads(body or b"{}")
                 address = str(request.get("address", ""))
                 enroll = str(request.get("enroll", ""))
+                consent = str(request.get("oauth", ""))
             except (ValueError, AttributeError):
-                address, enroll = "", ""
+                address, enroll, consent = "", "", ""
             token = self.auth.issue_login(address)
             if token is not None:
                 # From a credential enrollment page, the sign-in link returns there with the enrollment token still in the fragment.
                 link = (f"{self.config['publicOrigin']}/connections/enroll#login={urllib.parse.quote(token)}&enroll={enroll}"
                         if self.enrollments is not None and _ENROLL_TOKEN.fullmatch(enroll) else f"{self.config['publicOrigin']}/chat#login={urllib.parse.quote(token)}")
+                if self.oauth is not None and _ENROLL_TOKEN.fullmatch(consent):  # the same for a provider consent link
+                    link = f"{self.config['publicOrigin']}/connections/oauth/start#login={urllib.parse.quote(token)}&consent={consent}"
                 try:
                     self._login_mail(address.strip(), link)
                 except Exception as exc:  # noqa: BLE001 - the page says the same thing either way

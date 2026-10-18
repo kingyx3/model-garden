@@ -39,6 +39,15 @@ credential from the vault.
 
   runtime-connection.py /opt/data/.modelgarden credential open --agent receptionist --connection orders-api \
       --kind bearer --owner owner@client.example --actor jordan@client.example --origin https://chat.client.example
+
+``oauth open|status|revoke`` manage provider OAuth consent (#66, #86, #110). ``open`` starts a single-use consent request for one
+coworker's connection, the named owner and the approved Tools; the owner signs in, reviews the scopes and consents at the provider
+(Google, Microsoft or a declared OIDC/OAuth provider). Tokens go only to the sealed vault; the consent is recorded as attested by the
+owner's own session. Run ``revoke`` (and ``offboard``) where the vault private key is injected (the governed sidecar) to also revoke the
+refresh token at the provider; without it the tokens are only deleted locally and the output says so.
+
+  runtime-connection.py /opt/data/.modelgarden oauth open --agent receptionist --connection calendar --provider google \
+      --tool calendar.read --owner owner@client.example --actor jordan@client.example --origin https://chat.client.example
 """
 from __future__ import annotations
 
@@ -78,6 +87,7 @@ GRANTS = _load("model_garden_connection_grants", ROOT / "platform" / "core" / "p
 READINESS = _load("model_garden_connection_grant_readiness", ROOT / "platform" / "core" / "grant_readiness.py")
 ENROLLMENT = _load("model_garden_connection_enrollment", ROOT / "platform" / "core" / "secret_enrollment.py")
 VAULT = _load("model_garden_connection_vault", ROOT / "platform" / "core" / "sealed_vault.py")
+OAUTH = _load("model_garden_connection_oauth", ROOT / "platform" / "core" / "oauth_consent.py")
 
 
 def external_families(manifest: dict) -> list[str]:
@@ -124,6 +134,29 @@ def _registry(args: argparse.Namespace, manifest: dict, audit_path: pathlib.Path
     return GRANTS.GrantRegistry(
         root, tenant=tenant, audit=lambda action, by, details: GOVERN.record_operator_action(audit_path, action, by, details)
     )
+
+
+def _oauth_store(args: argparse.Namespace, manifest_path: pathlib.Path | None, audit_path: pathlib.Path, *, required: bool = True):
+    """The OAuth consent store for this environment, or ``None`` when OAuth is not configured and ``required`` is false."""
+    environ = dict(os.environ)
+    config = args.gateway_config or environ.get("MODEL_GARDEN_OAUTH_CONFIG") or environ.get("MODEL_GARDEN_GATEWAY_CONFIG") or ""
+    if not config or not pathlib.Path(config).is_file():
+        if required:
+            raise ValueError("pass --gateway-config (the gateway's rendered gateway.json, which declares gateway.oauth)")
+        return None
+    environ["MODEL_GARDEN_OAUTH_CONFIG"] = str(config)
+    environ["MODEL_GARDEN_OAUTH_ROOT"] = str(args.store)
+    if manifest_path is not None:
+        environ["MODEL_GARDEN_CAPABILITY_MANIFEST"] = str(manifest_path)
+    vault_root = pathlib.Path(environ.get("MODEL_GARDEN_VAULT_ROOT") or args.store / "vault")
+    store = OAUTH.store_from_environment(environ, vault=VAULT.SealedVault(vault_root), audit=lambda action, by, details: GOVERN.record_operator_action(audit_path, action, by, details))
+    if store is None:
+        if required:
+            raise ValueError("the gateway configuration declares no gateway.oauth")
+        return None
+    private = environ.get("MODEL_GARDEN_VAULT_PRIVATE_KEY", "").strip()
+    read = VAULT.SealedResolver(vault_root, private_key=private) if private else None
+    return store, read
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -182,7 +215,25 @@ def main(argv: list[str] | None = None) -> int:
         each.add_argument("--connection", required=True)
     for each in (credential_open, credential_revoke):
         each.add_argument("--actor", required=True, help="the named person doing this")
-    for each in (off, grant_list, grant_revoke, grant_create, grant_rotate, grant_health, credential_open, credential_status, credential_revoke):
+    oauth = sub.add_parser("oauth", help="provider OAuth consent: open a consent link for the owner, show status, revoke")
+    oauth_sub = oauth.add_subparsers(dest="oauth_command", required=True)
+    oauth_open = oauth_sub.add_parser("open", help="start a single-use consent request and print the owner's link")
+    oauth_open.add_argument("--provider", required=True, help="a provider declared in gateway.oauth, such as google")
+    oauth_open.add_argument("--tool", action="append", required=True, help="an approved Tool this consent is for; repeat. Scopes are only what these need")
+    oauth_open.add_argument("--owner", required=True, help="the client owner who must consent (they must sign in as this address)")
+    oauth_open.add_argument("--origin", required=True, help="the gateway's public https origin")
+    oauth_open.add_argument("--minutes", type=int, default=15, help="how long the link works (1 to 60)")
+    oauth_status = oauth_sub.add_parser("status", help="whether consent is held (no token, reference or scope secrets)")
+    oauth_revoke = oauth_sub.add_parser("revoke", help="revoke at the provider (if the vault key is here) and delete the tokens")
+    for each in (oauth_open, oauth_status, oauth_revoke):
+        each.add_argument("--agent", required=True)
+        each.add_argument("--connection", required=True)
+    for each in (oauth_open, oauth_revoke):
+        each.add_argument("--actor", required=True, help="the named person doing this")
+    for each in (oauth_open, oauth_status, oauth_revoke, off):
+        each.add_argument("--gateway-config", type=pathlib.Path, help="gateway.json declaring gateway.oauth (default: MODEL_GARDEN_OAUTH_CONFIG or MODEL_GARDEN_GATEWAY_CONFIG)")
+    for each in (off, grant_list, grant_revoke, grant_create, grant_rotate, grant_health, credential_open, credential_status, credential_revoke,
+                 oauth_open, oauth_status, oauth_revoke):
         each.add_argument("--manifest", type=pathlib.Path, help="capability manifest (default: MODEL_GARDEN_CAPABILITY_MANIFEST)")
         each.add_argument("--tenant", help="grant registry tenant <client>-<environment> (default: from the manifest)")
     args = parser.parse_args(argv)
@@ -232,6 +283,28 @@ def main(argv: list[str] | None = None) -> int:
                 return 0
             print(json.dumps(store.revoke(args.agent, args.connection, by=args.actor, now=now), indent=2, sort_keys=True))
             return 0
+        if args.command == "oauth":
+            manifest_text = args.manifest or (pathlib.Path(os.environ["MODEL_GARDEN_CAPABILITY_MANIFEST"]) if os.environ.get("MODEL_GARDEN_CAPABILITY_MANIFEST") else None)
+            store, read = _oauth_store(args, manifest_text, audit_path)
+            now = int(time.time())
+            if args.oauth_command == "open":
+                if not args.origin.startswith("https://") or args.origin.count("/") != 2:
+                    raise ValueError("--origin must be the gateway's https origin, such as https://chat.client.example")
+                if not 1 <= args.minutes <= 60:
+                    raise ValueError("--minutes must be 1 to 60")
+                opened = store.request(agent=args.agent, connection_id=args.connection, provider=args.provider, tools=args.tool, owner=args.owner,
+                                       requested_by=args.actor, now=now, ttl_seconds=args.minutes * 60)
+                print(json.dumps({
+                    "requestId": opened["requestId"], "expiresAt": opened["expiresAt"], "owner": args.owner, "scopes": opened["scopes"],
+                    "link": f"{args.origin}/connections/oauth/start#consent={opened['token']}", "secretRef": opened["secretRef"],
+                    "next": "Send the link to the owner only. Use secretRef in the coworker's grant and the connection declaration.",
+                }, indent=2, sort_keys=True))
+                return 0
+            if args.oauth_command == "status":
+                print(json.dumps(store.status(args.agent, args.connection, now=now), indent=2, sort_keys=True))
+                return 0
+            print(json.dumps(store.revoke(args.agent, args.connection, by=args.actor, now=now, read=read), indent=2, sort_keys=True))
+            return 0
         if args.command == "grants":
             manifest = _manifest(args, required=False)
             registry = _registry(args, manifest, audit_path, required=True, create=args.grants_command == "create")
@@ -280,6 +353,14 @@ def main(argv: list[str] | None = None) -> int:
                 )
         registry = _registry(args, manifest, audit_path, required=agent is not None)
         revoked_grants = registry.revoke_all(by=args.actor, now=int(time.time()), agent=agent) if registry is not None else []
+        oauth_revoked: list = []
+        if (args.store / "oauth-consents").is_dir():
+            try:
+                oauth_loaded = _oauth_store(args, args.manifest, audit_path, required=False)
+                if oauth_loaded is not None:
+                    oauth_revoked = oauth_loaded[0].revoke_all(by=args.actor, now=int(time.time()), agent=agent, read=oauth_loaded[1])
+            except (OAUTH.OAuthError, ValueError, OSError) as exc:
+                oauth_revoked = [{"state": "error", "error": str(exc)}]
         details: dict = {"families": families}
         if registry is not None:
             details["grantsRevoked"] = len(revoked_grants)
@@ -292,10 +373,11 @@ def main(argv: list[str] | None = None) -> int:
             "revoked": families,
             "grantsRevoked": [{key: item[key] for key in ("id", "agent", "family", "provider")} for item in revoked_grants],
             "secretRefsToDelete": sorted({item["secretRef"] for item in revoked_grants}),
+            **({"oauthConsentsRevoked": oauth_revoked} if oauth_revoked else {}),
             "manualSteps": list(OFFBOARDING_CHECKLIST),
         }, indent=2, sort_keys=True))
         return 0
-    except (OSError, ValueError, json.JSONDecodeError, ENROLLMENT.EnrollmentError, VAULT.VaultError) as exc:
+    except (OSError, ValueError, json.JSONDecodeError, ENROLLMENT.EnrollmentError, VAULT.VaultError, OAUTH.OAuthError) as exc:
         print(f"Runtime connection failed: {exc}", file=sys.stderr)
         return 1
 
