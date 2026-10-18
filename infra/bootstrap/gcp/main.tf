@@ -32,7 +32,7 @@ locals {
 }
 
 resource "google_project_service" "bootstrap" {
-  for_each = toset([
+  for_each = toset(concat([
     "compute.googleapis.com",
     "iam.googleapis.com",
     "iamcredentials.googleapis.com",
@@ -40,7 +40,7 @@ resource "google_project_service" "bootstrap" {
     "serviceusage.googleapis.com",
     "sts.googleapis.com",
     "storage.googleapis.com",
-  ])
+  ], var.enable_gateway_dns ? ["dns.googleapis.com"] : []))
 
   project            = var.project_id
   service            = each.value
@@ -160,6 +160,16 @@ resource "google_project_iam_member" "deployer_ledger_export_roles" {
   member  = "serviceAccount:${google_service_account.deployer.email}"
 }
 
+# Only for clients that let docker-host/gcp create the gateway's Cloud DNS A record (gateway_dns_zone). The load balancer, certificate and
+# firewall rule need nothing beyond roles/compute.admin.
+resource "google_project_iam_member" "deployer_gateway_dns_roles" {
+  for_each = var.enable_gateway_dns ? toset(["roles/dns.admin"]) : toset([])
+
+  project = var.project_id
+  role    = each.value
+  member  = "serviceAccount:${google_service_account.deployer.email}"
+}
+
 resource "google_project_iam_member" "runtime_roles" {
   for_each = toset([
     "roles/logging.logWriter",
@@ -186,6 +196,12 @@ resource "google_storage_bucket_iam_member" "deployer_bucket_metadata" {
 variable "enable_ledger_export" {
   type        = bool
   description = "Let the deployment identity create the retention-locked ledger export bucket and its separate export identity."
+  default     = false
+}
+
+variable "enable_gateway_dns" {
+  type        = bool
+  description = "Enable the Cloud DNS API and let the deployment identity manage the gateway's A record (docker-host gateway_dns_zone)."
   default     = false
 }
 
