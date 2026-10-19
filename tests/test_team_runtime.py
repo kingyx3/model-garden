@@ -732,3 +732,50 @@ class StudioProposalTests(Case):
         envelope["originatingPrincipal"] = self.OWNER
         with self.assertRaises(team_runtime.TeamError):
             team.propose_change(envelope, self.store(team), "skill", self.PARAMS)
+
+
+class StudioProposalToolTests(Case):
+    """The model-callable form: the person and task come from the attested task, and the answer tells the model what to say."""
+
+    OWNER, PARAMS, store = StudioProposalTests.OWNER, StudioProposalTests.PARAMS, StudioProposalTests.store
+
+    def team_with_store(self):
+        holder = {}
+        team = self.team(change_store=lambda agent: self.store(holder["team"]))
+        holder["team"] = team
+        return team
+
+    def tool_names(self, team, agent="coordinator"):
+        import asyncio
+        server = team_runtime._governed().build_server(team.runtime(agent))
+        return {item.name for item in asyncio.run(server.list_tools())}
+
+    def test_the_tool_is_offered_only_when_the_team_can_prepare_changes(self):
+        self.assertNotIn("studio_propose_change", self.tool_names(self.team()))
+        self.assertIn("studio_propose_change", self.tool_names(self.team_with_store()))
+
+    def test_a_proposal_through_the_tool_is_for_the_person_and_says_nothing_is_applied(self):
+        team = self.team_with_store()
+        envelope = self.task(team, budget={"steps": 5})
+        with team.acting("coordinator", envelope) as runtime:
+            result = runtime.studio_propose_change(kind="skill", params=self.PARAMS)
+        self.assertEqual((result["status"], result["kind"]), ("proposed", "skill"))
+        self.assertIn("Nothing has changed", result["next"])
+        change = self.store(team).get(result["changeId"])
+        self.assertEqual((change["proposedBy"], change["proposedVia"]["taskId"]), ("alice@acme.example", "task-1"))
+
+    def test_outside_a_task_or_for_a_person_without_author_it_is_refused_and_nothing_is_written(self):
+        team = self.team_with_store()
+        refused = team.runtime("coordinator").studio_propose_change(kind="skill", params=self.PARAMS)
+        self.assertEqual((refused["status"], refused["reason"]), ("refused", "not-working-for-a-person"))
+        envelope = self.task(team, originating_principal="mallory@acme.example")
+        with team.acting("coordinator", envelope) as runtime:
+            self.assertEqual(runtime.studio_propose_change(kind="skill", params=self.PARAMS)["status"], "refused")
+        self.assertEqual(self.store(team).list(), [])
+
+    def test_a_malformed_proposal_is_explained_not_raised(self):
+        team = self.team_with_store()
+        with team.acting("coordinator", self.task(team)) as runtime:
+            result = runtime.studio_propose_change(kind="skill", params={"skill": "no-such-skill", "enabled": False})
+        self.assertEqual(result["status"], "invalid")
+        self.assertTrue(result["reason"])
