@@ -340,6 +340,51 @@ class CliTests(Case):
         self.assertTrue(json.loads(out)["deployments"]["receptionist"]["knowledge"]["changed"])
         self.assertTrue(any(event.get("action") == "knowledge.change" for event in self.events()))
 
+    def assign_args(self, **overrides):
+        compiled = self.write("compiled.json", {"schemaVersion": 1, "agents": states()})
+        binding = self.write("binding.json", json.dumps(BINDING))
+        owners = self.write("owners.json", {"owners": {"alice@acme.example": ["kb.search", "crm.read", "crm.create"], "bob@acme.example": ["kb.search"]}})
+        common = [compiled, "--base", self.base, "--environment-binding", binding]
+        return compiled, common, owners
+
+    def test_a_person_assigns_a_task_from_the_command_line_and_the_running_team_finds_it(self):
+        _, common, owners = self.assign_args()
+        host = team_runtime.TeamRuntime(states(), self.base, environment_binding=BINDING, now=lambda: self.clock[0])  # already running
+        code, out, err = self.run_cli("assign", *common, "--owners", owners, "--person", "alice@acme.example", "--agent", "account-researcher",
+                                      "--goal", "Find the open enquiries", "--task-id", "t1", "--budget-steps", 6)
+        self.assertEqual((code, err), (0, ""))
+        self.assertEqual((json.loads(out)["authority"], json.loads(out)["budget"]), (["crm.read"], {"steps": 6}))
+        waiting = host.inbox("account-researcher")  # the process that runs the Agents sees it without a restart
+        self.assertEqual([(row["taskId"], row["from"]) for row in waiting], [("t1", "person:alice@acme.example")])
+        host.report_task("account-researcher", "t1", "done", "Two enquiries.")
+        code, out, _ = self.run_cli("result", *common, "--person", "alice@acme.example", "--task", "t1")
+        self.assertEqual((code, json.loads(out)["report"]), (0, "Two enquiries."))
+        code, out, err = self.run_cli("result", *common, "--person", "bob@acme.example", "--task", "t1")
+        self.assertEqual((code, out), (1, ""))
+        self.assertIn("no such task", err.lower())
+        code, out, _ = self.run_cli("inbox", *common, "--agent", "account-researcher")
+        self.assertEqual((code, json.loads(out)), (0, []))
+
+    def test_the_command_refuses_more_than_the_person_may_ask_for_and_saves_nothing(self):
+        _, common, owners = self.assign_args()
+        code, out, err = self.run_cli("assign", *common, "--owners", owners, "--person", "bob@acme.example", "--agent", "account-researcher",
+                                      "--goal", "Read the CRM", "--task-id", "t1")
+        self.assertEqual((code, out), (1, ""))
+        self.assertIn("Task not assigned", err)
+        code, out, err = self.run_cli("assign", *common, "--owners", owners, "--person", "stranger@acme.example", "--agent", "coordinator", "--goal", "Anything")
+        self.assertEqual(code, 1)
+        code, out, _ = self.run_cli("inbox", *common, "--agent", "account-researcher")
+        self.assertEqual(json.loads(out), [])
+
+    def test_a_worker_config_with_owners_is_accepted_and_a_bad_file_is_refused(self):
+        _, common, _ = self.assign_args()
+        worker_config = self.write("worker.json", {"deployedBy": "x", "owners": {"alice@acme.example": ["kb.search", "crm.read"]}})
+        code, _, err = self.run_cli("assign", *common, "--owners", worker_config, "--person", "alice@acme.example", "--agent", "coordinator", "--goal", "Look up", "--task-id", "t1")
+        self.assertEqual((code, err), (0, ""))
+        bad = self.write("bad.json", json.dumps({"alice@acme.example": "everything"}))
+        code, _, err = self.run_cli("assign", *common, "--owners", bad, "--person", "alice@acme.example", "--agent", "coordinator", "--goal", "x")
+        self.assertEqual(code, 1)
+
     def test_grants_root_needs_a_tenant(self):
         compiled = self.write("compiled.json", {"schemaVersion": 1, "agents": states()})
         code, _, err = self.run_cli("prepare", compiled, "--base", self.base, "--grants-root", self.base.parent / "grants")
