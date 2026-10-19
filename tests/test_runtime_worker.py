@@ -617,6 +617,81 @@ class CrmFilingTests(Case):
             self.assertNotIn(private, text)
 
 
+def call_record(call_hash="a" * 64, start=T0 - 600, end=T0 - 540):
+    return {"type": "CallTranscript", "callHash": call_hash, "timestamp": start, "endedAt": end, "outcome": "completed",
+            "turns": [{"index": 0, "speaker": "caller", "text": "Hi, what are your hours?", "offsetSeconds": 0},
+                      {"index": 1, "speaker": "agent", "text": "We are open 9 to 6.", "offsetSeconds": 4}]}
+
+
+class CallFilingTests(Case):
+    """Finished phone calls are read from the voice transcript volume and filed by the worker, with a summary and ledger request ids."""
+
+    def runtime(self, records, *, crm=True, coworker=None, extra_lines=()):
+        self.transcripts = self.root / "voice" / "transcripts.jsonl"
+        self.transcripts.parent.mkdir()
+        self.transcripts.write_text("".join(json.dumps(item) + "\n" for item in [*records, *extra_lines]), encoding="utf-8")
+        runtime = self.make(crm=crm, coworker=coworker)
+        runtime.voice_transcripts = self.transcripts
+        return runtime
+
+    def interactions(self, runtime):
+        with runtime._sidecar().crm_store()._locked() as state:
+            return [dict(item) for item in state["interactions"].values()]
+
+    def test_a_call_is_filed_unmatched_with_a_model_summary_once(self):
+        coworker = FakeCoworker()
+        runtime = self.runtime([call_record()], coworker=coworker)
+        report = runtime.tick()["calls"]
+        self.assertEqual((report["filed"], report["notFiled"]), (1, 0))
+        self.assertEqual(report["summaries"]["model"], 1)
+        (interaction,) = self.interactions(runtime)
+        self.assertEqual((interaction["contact"], interaction["summary"], interaction["channel"]), ("unmatched", "done", "voice"))
+        executed = [event for event in self.events() if event.get("tool") == "crm.log-interaction" and event.get("event") == "execution"]
+        self.assertEqual({event["initiatingUser"] for event in executed}, {"runtime:conversation-filing"})
+        self.clock[0] += 120
+        again = runtime.tick()["calls"]
+        self.assertEqual((again["filed"], again["duplicate"]), (0, 1))
+        self.assertEqual([call for call in coworker.calls if call[0] == "complete"], [("complete", "call-summary:" + "a" * 64)])
+
+    def test_without_a_coworker_the_fallback_summary_is_filed(self):
+        runtime = self.runtime([call_record()])
+        report = runtime.tick()["calls"]
+        self.assertEqual((report["filed"], report["summaries"]["fallback"]), (1, 1))
+        self.assertIn("Outcome: completed", self.interactions(runtime)[0]["summary"])
+
+    def test_the_job_is_off_without_the_volume_or_a_bound_contact_log(self):
+        self.assertEqual(self.make().tick()["calls"], {"skipped": "no-voice-transcripts"})
+        runtime = self.runtime([call_record()], crm=False)
+        self.assertEqual(runtime.tick()["calls"], {"skipped": "no-crm-bound"})
+
+    def test_a_transcript_write_failure_is_ledgered_once(self):
+        failure = {"type": "TranscriptWriteFailed", "timestamp": T0 - 30, "roomHash": "b" * 64, "errorType": "OSError"}
+        runtime = self.runtime([], extra_lines=[failure])
+        self.assertEqual(runtime.tick()["calls"]["writeFailures"], {"ledgered": 1, "known": 0})
+        self.clock[0] += 120
+        self.assertEqual(runtime.tick()["calls"]["writeFailures"], {"ledgered": 0, "known": 1})
+
+    def test_request_ids_from_the_ledger_reach_the_conversation_timeline(self):
+        import datetime as dt
+        runtime = self.runtime([])
+        sidecar = runtime._sidecar("runtime:hermes")
+        sidecar.crm_create(fields={"name": "Pat Caller"}, justification="during the call")
+        authorized = [event for event in self.events() if event.get("event") == "authorization" and event.get("initiatingUser") == "runtime:hermes"]
+        self.assertTrue(authorized)
+        at = int(dt.datetime.fromisoformat(authorized[0]["timestamp"].replace("Z", "+00:00")).timestamp())
+        runtime.voice_transcripts.write_text(json.dumps(call_record(start=at - 20, end=at + 20)) + "\n", encoding="utf-8")
+        runtime.tick()
+        store = runtime._conversation_recorder()._store
+        timeline = store.conversation_timeline(store.conversation_id("voice", "a" * 64))
+        self.assertEqual([item["requestId"] for item in timeline if item["kind"] == "action"], [authorized[0]["requestId"]])
+
+    def test_the_transcript_path_comes_from_the_environment(self):
+        args = type("Args", (), {"config": None, "desired_state": compiled(self.root), "data_root": self.data})()
+        self.assertEqual(worker.build(args, {"MODEL_GARDEN_VOICE_TRANSCRIPTS": "/opt/voice/transcripts.jsonl"}).voice_transcripts,
+                         pathlib.Path("/opt/voice/transcripts.jsonl"))
+        self.assertIsNone(worker.build(args, {}).voice_transcripts)
+
+
 class LoopTests(Case):
     def test_a_failing_job_is_ledgered_by_type_and_does_not_stop_the_others(self):
         runtime = self.make({})
