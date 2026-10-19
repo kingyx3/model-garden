@@ -200,5 +200,37 @@ class Case(unittest.TestCase):
         self.assertTrue(govern.verify_audit_chain(audit)["valid"])
 
 
+CONVERSATION = "cv-0123456789abcdef0123"
+
+
+class ConversationIdTests(Case):
+    def test_the_entry_carries_the_conversation_and_can_be_listed_by_it(self):
+        ledger = self.ledger()
+        entry = self.enqueue(ledger, conversation_id=CONVERSATION)
+        self.assertEqual(entry["conversationId"], CONVERSATION)
+        self.enqueue(ledger, external_id="CA-other")
+        self.assertEqual([e["key"] for e in ledger.list(conversation_id=CONVERSATION)], [entry["key"]])
+        self.assertEqual(sync.describe(ledger.get(entry["key"]))["conversationId"], CONVERSATION)
+        self.assertIn(CONVERSATION, json.dumps(self.events[0][2]))
+
+    def test_a_redelivery_attaches_a_missing_id_but_never_replaces_one(self):
+        ledger = self.ledger()
+        first = self.enqueue(ledger)
+        self.assertNotIn("conversationId", first)
+        again = self.enqueue(ledger, conversation_id=CONVERSATION)
+        self.assertEqual(again["conversationId"], CONVERSATION)
+        other = self.enqueue(ledger, conversation_id="cv-ffffffffffffffffffff")
+        self.assertEqual(other["conversationId"], CONVERSATION)
+        self.assertEqual(ledger.get(first["key"])["conversationId"], CONVERSATION)
+
+    def test_a_malformed_id_is_refused(self):
+        for bad in ("cv-xyz", "conv-0123456789abcdef0123", "cv-0123456789abcdef0123; drop", 5):
+            with self.assertRaises(Error):
+                self.enqueue(conversation_id=bad)
+
+    def test_the_id_is_not_part_of_the_idempotency_key(self):
+        self.assertEqual(self.enqueue(conversation_id=CONVERSATION)["key"], sync.idempotency_key("acme-prod", "voice", CALL, "call"))
+
+
 if __name__ == "__main__":
     unittest.main()

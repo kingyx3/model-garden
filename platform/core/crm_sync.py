@@ -17,6 +17,9 @@ written twice).
 - **Backoff and a ceiling.** Transient errors (``rate-limited``, ``outage``) retry after 30 s, doubling to 1 h;
   after 8 attempts the entry is ``blocked``. ``rejected`` and ``unauthorized`` block at once.
 - **A repair action** in plain language accompanies every state that needs a person.
+- **Linked to its conversation.** An entry can carry the ``cv-…`` id of the cross-channel conversation (``conversations.py``) it
+  filed, so a failed or blocked filing is found from the timeline and the other way round (``list(conversation_id=...)``). The id
+  is a reference, not part of the idempotency key; a redelivery can attach a missing one but never replaces one already there.
 - **Digests in the ledger.** Every transition calls the audit hook with identifiers, state, attempt count and the
   error code, never interaction content. One tenant per private file, bounded in size.
 
@@ -48,6 +51,7 @@ INTERACTION_TYPES = ("call", "email", "chat")
 _TENANT = re.compile(r"^[a-z0-9][a-z0-9-]{0,62}$")
 _EXTERNAL = re.compile(r"^[A-Za-z0-9][A-Za-z0-9:._/#@<>+=-]{0,255}$")
 _REF = re.compile(r"^[A-Za-z0-9][A-Za-z0-9:._/#@-]{0,255}$")
+_CONVERSATION = re.compile(r"^cv-[0-9a-f]{20}$")
 _PERSON = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:@/+-]{0,127}$")
 Audit = Callable[[str, str, dict[str, Any]], Any]
 REPAIRS = {
@@ -87,6 +91,7 @@ def describe(entry: dict[str, Any]) -> dict[str, Any]:
     return {
         "key": entry["key"], "channel": entry["channel"], "interactionType": entry["interactionType"], "state": state,
         "attempts": entry["attempts"], "providerRef": entry.get("providerRef"),
+        **({"conversationId": entry["conversationId"]} if entry.get("conversationId") else {}),
         "repair": None if synced else REPAIRS[repair_key],
         "message": (f"Filed to the CRM (reference {entry['providerRef']})." if synced else "Not confirmed by the CRM yet; I cannot say it was filed."),
     }
@@ -141,19 +146,28 @@ class SyncLedger:
     def _record(self, action: str, by: str, entry: dict[str, Any], **extra: Any) -> None:
         if self._audit is not None:
             self._audit(action, by, {"key": entry["key"], "channel": entry["channel"], "state": entry["state"],
-                                     "attempts": entry["attempts"], **({"error": entry["lastError"]} if entry.get("lastError") else {}), **extra})
+                                     "attempts": entry["attempts"], **({"conversationId": entry["conversationId"]} if entry.get("conversationId") else {}),
+                                     **({"error": entry["lastError"]} if entry.get("lastError") else {}), **extra})
 
-    def enqueue(self, *, channel: str, external_id: str, interaction_type: str, now: int) -> dict[str, Any]:
-        """Register an interaction for filing; the same call or message returns the existing entry, unchanged."""
+    def enqueue(self, *, channel: str, external_id: str, interaction_type: str, now: int, conversation_id: str | None = None) -> dict[str, Any]:
+        """Register an interaction for filing; the same call or message returns the existing entry, unchanged.
+
+        ``conversation_id`` links the entry to its conversation; a repeat attaches it only if the entry has none yet.
+        """
         key = idempotency_key(self.tenant, channel, external_id, interaction_type)
+        if conversation_id is not None and (not isinstance(conversation_id, str) or not _CONVERSATION.match(conversation_id)):
+            raise SyncError("a conversation id is the cv- identifier from the conversation store")
         with self._locked() as state:
             entries = state["entries"]
             if key in entries:
+                if conversation_id and not entries[key].get("conversationId"):
+                    entries[key]["conversationId"] = conversation_id
                 return {**entries[key], "duplicate": True}
             if len(entries) >= MAX_ENTRIES:
                 raise SyncError("the sync ledger is full")
             entry = {"key": key, "tenant": self.tenant, "channel": channel, "interactionType": interaction_type,
-                     "externalId": external_id, "state": "pending", "attempts": 0, "createdAt": now, "nextAttemptAt": now}
+                     "externalId": external_id, "state": "pending", "attempts": 0, "createdAt": now, "nextAttemptAt": now,
+                     **({"conversationId": conversation_id} if conversation_id else {})}
             entries[key] = entry
         self._record("crm-sync.enqueue", "runtime:crm-sync", entry)
         return {**entry, "duplicate": False}
@@ -163,11 +177,13 @@ class SyncLedger:
             entry = state["entries"].get(key)
             return dict(entry) if entry else None
 
-    def list(self, *, states: tuple[str, ...] | None = None) -> list[dict[str, Any]]:
+    def list(self, *, states: tuple[str, ...] | None = None, conversation_id: str | None = None) -> list[dict[str, Any]]:
         with self._locked() as state:
             entries = [dict(entry) for entry in state["entries"].values()]
         if states is not None:
             entries = [entry for entry in entries if entry["state"] in states]
+        if conversation_id is not None:
+            entries = [entry for entry in entries if entry.get("conversationId") == conversation_id]
         return sorted(entries, key=lambda entry: (entry["createdAt"], entry["key"]))
 
     def due(self, *, now: int) -> list[dict[str, Any]]:
