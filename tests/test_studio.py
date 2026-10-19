@@ -116,6 +116,16 @@ class ChangeRequestTests(Base):
         self.assertEqual(self.actions(), ["studio.change-proposed"])
         self.assertEqual(oct((self.data / "studio" / "changes" / f"{change['id']}.json").stat().st_mode & 0o777), "0o600")
 
+    def test_a_change_prepared_through_an_agent_records_it_and_a_malformed_via_is_refused(self):
+        store = self.store()
+        change = store.propose("skill", {"skill": "take-message", "enabled": False}, by=OWNER, via={"agent": "coordinator", "taskId": "task-1"})
+        self.assertEqual(store.summary(change)["proposedVia"], {"agent": "coordinator", "taskId": "task-1"})
+        self.assertEqual(self.events[-1][2]["via"], {"agent": "coordinator", "taskId": "task-1"})
+        self.assertNotIn("proposedVia", json.dumps({k: change[k] for k in ("kind", "agent", "owner", "params", "diff", "baseVersion")}))  # not part of the digest
+        for bad in ({"agent": "Coordinator!", "taskId": "t"}, {"agent": "coordinator"}, {"agent": "coordinator", "taskId": "../x"}, "coordinator"):
+            with self.assertRaises(core.ChangeError):
+                store.propose("skill", {"skill": "take-message", "enabled": True}, by=OWNER, via=bad)
+
     def test_only_the_named_owner_can_act(self):
         store = self.store()
         with self.assertRaises(core.ChangeRefused) as caught:

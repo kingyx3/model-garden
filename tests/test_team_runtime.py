@@ -650,3 +650,85 @@ class LoadTests(Case):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class StudioProposalTests(Case):
+    """An Agent prepares a Studio change for the person whose task it is; only a person can approve it."""
+
+    OWNER = "owner@acme.example"
+
+    def store(self, team, *, people=None):
+        core = _load("change_requests_for_team_runtime", "platform/core/change_requests.py")
+        return core.ChangeStore(
+            self.base / "data", tenant="acme", desired_state=team.runtime("coordinator").desired_state, manifest=None, owner=self.OWNER,
+            audit=team._ledger_action, clock=lambda: self.clock[0],  # noqa: SLF001
+            people={"alice@acme.example": ["author"]} if people is None else people, signin=lambda: ["alice@acme.example"])
+
+    PARAMS = {"skill": "take-message", "enabled": False}
+
+    def test_a_person_with_author_gets_a_proposal_that_names_the_agent_and_task(self):
+        team = self.team()
+        envelope = self.task(team, budget={"steps": 5})
+        store = self.store(team)
+        change = team.propose_change(envelope, store, "skill", self.PARAMS)
+        self.assertEqual((change["state"], change["proposedBy"], change["proposedVia"]), ("proposed", "alice@acme.example", {"agent": "coordinator", "taskId": "task-1"}))
+        self.assertEqual(store.overlay()["version"], 0)  # nothing is changed until the owner approves
+        self.assertEqual(next(row for row in team.task_status("task-1") if row["taskId"] == "task-1")["spent"]["steps"], 1)
+        audit_query = _load("audit_query_for_studio_proposal", "platform/core/audit_query.py")
+        steps = audit_query.timeline(self.events(), task="task-1")["steps"]
+        proposed = next(step for step in steps if step.get("action") == "studio.change-proposed")
+        self.assertEqual((proposed["by"], proposed["details"]["id"]), ("alice@acme.example", change["id"]))
+
+    def test_an_agent_has_no_more_authority_than_the_person(self):
+        team = self.team()
+        for principal, people in (("alice@acme.example", {}), ("mallory@acme.example", {"alice@acme.example": ["author"]})):
+            envelope = self.task(team, task_id=f"task-{principal[:3]}", originating_principal=principal)
+            with self.assertRaises(PermissionError):
+                team.propose_change(envelope, self.store(team, people=people), "skill", self.PARAMS)
+
+    def test_an_agent_never_changes_roles_even_for_the_owner(self):
+        team = self.team()
+        envelope = self.task(team, originating_principal=self.OWNER)
+        store = self.store(team)
+        with self.assertRaises(PermissionError):
+            team.propose_change(envelope, store, "access", {"person": "alice@acme.example", "roles": ["author", "approver"]})
+        self.assertEqual(store.list(), [])
+
+    def test_an_agent_identity_cannot_approve(self):
+        team = self.team()
+        envelope = self.task(team)
+        store = self.store(team)
+        change = team.propose_change(envelope, store, "skill", self.PARAMS)
+        for who in ("agent:coordinator", "alice@acme.example"):
+            with self.assertRaises(PermissionError):
+                store.approve(change["id"], by=who, digest=change["digest"])
+        self.assertEqual(store.get(change["id"])["state"], "proposed")
+        self.assertEqual(store.approve(change["id"], by=self.OWNER, digest=change["digest"])["state"], "applied")
+
+    def test_the_proposal_is_charged_to_the_task_and_refused_when_it_cannot_run(self):
+        team = self.team()
+        store = self.store(team)
+        envelope = self.task(team, budget={"steps": 1})
+        team.propose_change(envelope, store, "skill", self.PARAMS)
+        with self.assertRaises(PermissionError):
+            team.propose_change(envelope, store, "skill", {"skill": "book-appointment", "enabled": False})
+        finished = self.task(team, task_id="task-2")
+        team.finish_task(finished)
+        with self.assertRaises(PermissionError):
+            team.propose_change(finished, store, "skill", self.PARAMS)
+        self.assertEqual(len(store.list()), 1)
+
+    def test_a_task_cannot_change_another_agents_configuration(self):
+        team = self.team()
+        envelope = self.task(team)
+        other = self.store(team)
+        other.desired = team.runtime("receptionist").desired_state
+        with self.assertRaises(PermissionError):
+            team.propose_change(envelope, other, "skill", self.PARAMS)
+
+    def test_a_forged_envelope_is_refused(self):
+        team = self.team()
+        envelope = dict(self.task(team))
+        envelope["originatingPrincipal"] = self.OWNER
+        with self.assertRaises(team_runtime.TeamError):
+            team.propose_change(envelope, self.store(team), "skill", self.PARAMS)
