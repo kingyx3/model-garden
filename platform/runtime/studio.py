@@ -16,7 +16,12 @@ requests); only the configured owner can propose, approve, reject or roll back a
 Not done: the live runtime does not read the overlay; applying records the decision and produces the workspace patch the operator
 merges (see ``change_requests.py``).
 
-Configuration (``gateway.studio``): ``{"owner": "alice@client.example", "ownerKeys": {"alice@client.example": "<base64 Ed25519 public key>"}}``.
+Colleagues can hold roles (``platform/core/change_requests.ACCESS_ROLES``): the owner gives and takes them away through an ``access``
+change request. A colleague with the ``author`` role may *propose* changes (never an ``access`` change) and still cannot approve, reject
+or roll back; everyone else on the allow-list reads.
+
+Configuration (``gateway.studio``): ``{"owner": "alice@client.example", "ownerKeys": {"alice@client.example": "<base64 Ed25519 public key>"},
+"people": {"bob@client.example": ["author"]}}`` (``people`` is optional: the roles in place when the Studio starts).
 """
 from __future__ import annotations
 
@@ -69,8 +74,8 @@ def _assets():
 
 def check_config(section: Any) -> dict[str, Any]:
     """Validate ``gateway.studio``; keys are public only."""
-    if not isinstance(section, Mapping) or set(section) - {"owner", "ownerKeys"}:
-        raise StudioConfigError("studio holds only owner and ownerKeys")
+    if not isinstance(section, Mapping) or set(section) - {"owner", "ownerKeys", "people"}:
+        raise StudioConfigError("studio holds only owner, ownerKeys and people")
     owner = section.get("owner")
     if not isinstance(owner, str) or not _PERSON.match(owner.strip()):
         raise StudioConfigError("studio.owner must name the owner (their web sign-in address)")
@@ -84,7 +89,16 @@ def check_config(section: Any) -> dict[str, Any]:
             valid = False
         if not valid:
             raise StudioConfigError("studio.ownerKeys maps an owner identity to a base64 Ed25519 public key")
-    return {"owner": owner.strip(), "ownerKeys": {k.strip().lower(): v for k, v in keys.items()}}
+    people = section.get("people") or {}
+    roles = _core().ACCESS_ROLES
+    if not isinstance(people, Mapping) or not all(
+        isinstance(person, str) and _PERSON.match(person.strip()) and person.strip().lower() != owner.strip().lower()
+        and isinstance(held, list) and held and all(isinstance(role, str) and role in roles for role in held)
+        for person, held in people.items()
+    ):
+        raise StudioConfigError("studio.people maps a colleague (not the owner) to roles from: " + ", ".join(sorted(roles)))
+    return {"owner": owner.strip(), "ownerKeys": {k.strip().lower(): v for k, v in keys.items()},
+            "people": {k.strip().lower(): sorted(set(v)) for k, v in people.items()}}
 
 
 class Studio:
@@ -102,6 +116,7 @@ class Studio:
         return _core().load_store(
             gateway.data, gateway.desired_state, tenant=gateway.tenant, studio=self.config, manifest_path=manifest_path or None,
             audit=gateway.audit, clock=gateway.clock, schedules=gateway._schedule_store().list,  # noqa: SLF001
+            signin=lambda: ((gateway.config.get("web") or {}).get("allowedAddresses") or []),
         )
 
     def csrf_token(self, session: str) -> str:
@@ -173,7 +188,7 @@ class Studio:
         user = identity.channel_user_id
         store = self._store()
         is_owner = user.strip().lower() == store.owner.lower()
-        role = "owner" if is_owner else "viewer"
+        role = "owner" if is_owner else "author" if "author" in store.roles_of(user) else "viewer"
         if method == "GET":
             return self._read(route, store, reply, user, role, session)
         return self._write(route, store, reply, lowered, body, user, role, session)
@@ -182,7 +197,9 @@ class Studio:
         if route == "/studio/api/state":
             changes = [store.summary(c) for c in store.list()[:100]]
             return reply(200, {"user": user, "role": role, "owner": store.owner, "csrf": self.csrf_token(session), "coworkers": store.coworkers(),
-                               "changes": changes, "activity": self._activity(store.agent)})
+                               "changes": changes, "activity": self._activity(store.agent),
+                               "access": [{"person": person, "roles": roles} for person, roles in store.effective_access().items()],
+                               "roles": _core().ACCESS_ROLES})
         match = _CHANGE.match(route)
         if match and not match.group(2):
             try:
@@ -207,8 +224,9 @@ class Studio:
             return reply(415, {"error": "JSON only."})
         if len(body) > MAX_BODY:
             return reply(413, {"error": "That request is too large."})
-        if role != "owner":
-            return reply(403, {"error": "Only the owner can change things here. You can read everything."})
+        if role == "viewer" or (role == "author" and route != "/studio/api/changes"):
+            return reply(403, {"error": "Only the owner can approve or change things here. You can read everything"
+                                        + (" and propose changes." if role == "author" else ".")})
         try:
             request = json.loads(body or b"{}")
         except ValueError:

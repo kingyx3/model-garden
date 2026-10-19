@@ -53,7 +53,7 @@ function coworker(c){var card=el('div','card');card.appendChild(el('h3','',c.nam
 var t=el('table'),hr=el('tr');['Skill','On','Ready','Next step',''].forEach(function(h){hr.appendChild(el('th','',h))});t.appendChild(hr);
 c.skills.forEach(function(s){var r=el('tr');r.appendChild(el('td','',s.name));r.appendChild(el('td',s.enabled?'ok':'muted',s.enabled?'on':'off'));
 r.appendChild(el('td',s.ready?'ok':'bad',s.ready?'ready':'blocked'));r.appendChild(el('td','muted',s.next||''));var a=el('td');
-if(role==='owner'&&c.deployed){var b=el('button','',s.enabled?'Propose switch off':'Propose switch on');
+if(role!=='viewer'&&c.deployed){var b=el('button','',s.enabled?'Propose switch off':'Propose switch on');
 b.onclick=function(){propose('skill',{skill:s.name,enabled:!s.enabled})};a.appendChild(b)}r.appendChild(a);t.appendChild(r)});card.appendChild(t);
 card.appendChild(dep('Tools',c.tools));
 card.appendChild(dep('Access (grants)',c.grants.map(function(g){return g.family+': '+g.provider+' (tier '+g.tier+', '+g.status+(g.grant?', grant '+(g.grant.state||g.grant):'')+')'})));
@@ -61,7 +61,7 @@ card.appendChild(dep('Blockers',c.blockers.map(function(b){return b.skill+': '+b
 card.appendChild(dep('Schedules',c.schedules.map(function(s){return s.id+' '+(s.cron||s.event||'')+' budget '+JSON.stringify(s.budget||{})+(s.pendingWorkspaceChange?' (edited, awaiting workspace change)':'')})));
 card.appendChild(dep('Approval policy rules',c.policyRules));return card}
 function field(form,name,ph,type){var i=el(type||'input');i.name=name;i.placeholder=ph;form.appendChild(i);return i}
-function forms(){var box=$('forms');clear(box);$('actions').hidden=role!=='owner';if(role!=='owner')return;
+function forms(){var box=$('forms');clear(box);$('actions').hidden=role==='viewer';if(role==='viewer')return;
 var f=el('form');f.appendChild(el('strong','','Edit a schedule'));var s=field(f,'id','schedule id'),c=field(f,'cron','cron, e.g. 0 9 * * 1-5'),b=field(f,'budget','budget JSON, e.g. {"steps":20}');
 var go=el('button','','Propose');go.type='submit';f.appendChild(go);f.onsubmit=function(e){e.preventDefault();var p={schedule:s.value};if(c.value)p.cron=c.value;
 if(b.value){try{p.budget=JSON.parse(b.value)}catch(x){say('The budget is not valid JSON.');return}}propose('schedule',p)};box.appendChild(f);
@@ -72,7 +72,11 @@ var rid=field(f,'ruleId','rule id (to remove)'),rule=field(f,'rule','rule JSON (
 f.onsubmit=function(e){e.preventDefault();if(a.value==='remove'){propose('policy',{action:'remove',ruleId:rid.value});return}
 var p;try{p=JSON.parse(rule.value)}catch(x){say('The rule is not valid JSON.');return}propose('policy',{action:'set',rule:p})};box.appendChild(f);
 f=el('form');f.appendChild(el('strong','','Business knowledge'));go=el('button','','Propose promoting the changed knowledge');go.type='submit';f.appendChild(go);
-f.onsubmit=function(e){e.preventDefault();propose('knowledge',{action:'promote'})};box.appendChild(f)}
+f.onsubmit=function(e){e.preventDefault();propose('knowledge',{action:'promote'})};box.appendChild(f);
+if(role!=='owner')return;
+f=el('form');f.appendChild(el('strong','','Colleague access'));var pe=field(f,'person','colleague email'),ac=el('select');['grant','revoke'].forEach(function(v){var o=el('option','',v);o.value=v;ac.appendChild(o)});f.appendChild(ac);
+var ro=field(f,'roles','roles, comma separated: '+Object.keys(state.roles||{}).join(', '));go=el('button','','Propose');go.type='submit';f.appendChild(go);
+f.onsubmit=function(e){e.preventDefault();propose('access',{person:pe.value,action:ac.value,roles:ro.value.split(',').map(function(x){return x.trim()}).filter(Boolean)})};box.appendChild(f)}
 function changes(list){var box=$('changes');clear(box);if(!list.length)box.appendChild(el('p','muted','No change requests yet.'));
 list.forEach(function(c){var card=el('div','card');card.appendChild(el('span','state',c.state+' '));card.appendChild(el('span','',c.summary+' ('+c.id+')'));
 var b=el('button','','Review');b.onclick=function(){load(c.id)};card.appendChild(b);box.appendChild(card)})}
@@ -94,8 +98,9 @@ var no=el('button','','Reject');no.onclick=function(){act('reject',{})};d.append
 if(c.state==='applied'){var rb=el('button','','Roll back');rb.onclick=function(){act('rollback',{})};d.appendChild(rb);
 d.appendChild(el('p','muted','Applied here. The workspace change still has to be merged by your operator before the live coworker changes.'))}}
 function load(id){api('GET','/studio/api/changes/'+encodeURIComponent(id)).then(function(x){if(x.status===200)detail(x.body.change);else say(x.body.error||'Not found.')})}
-function render(){role=state.role;csrf=state.csrf;$('who').textContent='Signed in as '+state.user+' ('+(role==='owner'?'owner: you can propose and approve changes':'read-only')+')';
+function render(){role=state.role;csrf=state.csrf;$('who').textContent='Signed in as '+state.user+' ('+(role==='owner'?'owner: you can propose and approve changes':role==='author'?'author: you can propose changes, the owner approves them':'read-only')+')';
 var box=$('coworkers');clear(box);state.coworkers.forEach(function(c){box.appendChild(coworker(c))});
+var pc=el('div','card');pc.appendChild(dep('People and roles (the owner can always do everything)',(state.access||[]).map(function(a){return a.person+': '+a.roles.join(', ')})));box.appendChild(pc);
 var act=el('div','card');act.appendChild(dep('Recent activity (ledger)',state.activity.map(function(a){return a.timestamp+' '+(a.action||a.event)+' '+(a.outcome||'')+' '+(a.tool||'')+' '+(a.by||'')})));box.appendChild(act);
 forms();changes(state.changes)}
 function refresh(){api('GET','/studio/api/state').then(function(x){if(x.status===401){S.removeItem('mg-session');session=null;show('signin');say('Sign in to continue.');return}

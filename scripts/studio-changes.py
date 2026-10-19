@@ -62,6 +62,7 @@ def _store(args: argparse.Namespace):
     audit_path = args.data_root / "audit.jsonl"
     return CORE.load_store(
         args.data_root, desired, tenant=tenant, studio=studio, manifest_path=args.manifest or None,
+        signin=(lambda: (config.get("web") or {}).get("allowedAddresses") or []) if "web" in config else None,
         audit=lambda action, by, details: govern.record_operator_action(audit_path, action, by, details),
         schedules=schedules.ScheduleStore(args.data_root / "schedules", tenant=tenant).list,
     )

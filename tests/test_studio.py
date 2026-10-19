@@ -76,13 +76,13 @@ class Base(unittest.TestCase):
         self.events = []
         self.now = NOW
 
-    def store(self, *, owner=OWNER, keys="default", catalog=None, manifest="default"):
+    def store(self, *, owner=OWNER, keys="default", catalog=None, manifest="default", **extra):
         if keys == "default":
             keys = {OWNER: self.owner_key["public"]}
         return core.ChangeStore(
             self.data, tenant="acme", desired_state=self.desired, manifest=self.manifest if manifest == "default" else manifest, owner=owner,
             owner_keys=keys, catalog=catalog, audit=lambda action, by, details: self.events.append((action, by, details)),
-            clock=lambda: self.now, schedules=self.schedules,
+            clock=lambda: self.now, schedules=self.schedules, **extra,
         )
 
     def schedules(self):
@@ -436,6 +436,113 @@ class ChangeRequestTests(Base):
         self.assertNotIn("secret", json.dumps(view).lower())
 
 
+class AccessTests(Base):
+    """The owner gives colleagues roles through an ordinary change request; only ``author`` is enforced by the Studio itself."""
+
+    def access_store(self, **extra):
+        extra.setdefault("signin", lambda: [OWNER, VIEWER])
+        return self.store(**extra)
+
+    def grant(self, store, roles=("author",), person=VIEWER, action="grant"):
+        return store.propose("access", {"person": person, "action": action, "roles": list(roles)}, by=OWNER)
+
+    def test_a_grant_is_an_exact_diff_approved_by_digest_and_rolled_back(self):
+        store = self.access_store()
+        change = self.grant(store, ("author", "approver"))
+        self.assertEqual(change["diff"], [{"field": f"access.{VIEWER}", "before": [], "after": ["approver", "author"]}])
+        self.assertEqual(store.roles_of(VIEWER), [])  # proposing changes nothing
+        applied = store.approve(change["id"], by=OWNER, digest=change["digest"])
+        self.assertEqual(applied["state"], "applied")
+        self.assertEqual(store.roles_of(VIEWER), ["approver", "author"])
+        self.assertEqual(store.effective_access(), {VIEWER: ["approver", "author"]})
+        store.rollback(change["id"], by=OWNER)
+        self.assertEqual(store.roles_of(VIEWER), [])
+        self.assertIn("studio.change-approved", self.actions())
+
+    def test_the_owner_holds_every_role_and_their_access_is_never_changed_here(self):
+        store = self.access_store()
+        self.assertEqual(store.roles_of(OWNER.upper()), sorted(core.ACCESS_ROLES))
+        with self.assertRaises(core.ChangeError):
+            self.grant(store, person=OWNER)
+        with self.assertRaises(core.ChangeError):
+            self.grant(store, person=OWNER.upper(), action="revoke")
+
+    def test_bad_requests_are_refused_before_anything_is_recorded(self):
+        store = self.access_store()
+        for params in ({"person": VIEWER, "action": "grant", "roles": ["root"]}, {"person": VIEWER, "action": "grant", "roles": []},
+                       {"person": VIEWER, "action": "give", "roles": ["author"]}, {"person": "not an address", "action": "grant", "roles": ["author"]},
+                       {"person": VIEWER, "action": "revoke", "roles": ["author"]}):  # revoking a role nobody holds changes nothing
+            with self.assertRaises(core.ChangeError):
+                store.propose("access", params, by=OWNER)
+        self.assertEqual(store.list(), [])
+        store.approve(self.grant(store)["id"], by=OWNER, digest=store.list()[0]["digest"])
+        with self.assertRaises(core.ChangeError):
+            self.grant(store)  # already held
+
+    def test_a_role_is_only_given_to_someone_who_can_sign_in(self):
+        store = self.access_store(signin=lambda: [OWNER])
+        change = self.grant(store)
+        with self.assertRaises(core.ChangeRefused) as caught:
+            store.approve(change["id"], by=OWNER, digest=change["digest"])
+        self.assertEqual(caught.exception.reasons, ["evidence:can-sign-in"])
+        self.assertEqual(store.roles_of(VIEWER), [])
+        host = self.access_store(signin=None)  # the host has no sign-in list: checked by the gateway instead, not required here
+        item = next(item for item in host.evidence(self.grant(host)) if item["id"] == "can-sign-in")
+        self.assertEqual((item["required"], item["met"]), (False, True))
+
+    def test_revoking_takes_the_role_away_and_a_configured_role_can_be_revoked_too(self):
+        store = self.access_store(people={VIEWER: ["author", "data-viewer"]})
+        self.assertEqual(store.roles_of(VIEWER), ["author", "data-viewer"])
+        change = self.grant(store, ("author",), action="revoke")
+        store.approve(change["id"], by=OWNER, digest=change["digest"])
+        self.assertEqual(store.roles_of(VIEWER), ["data-viewer"])
+        change = self.grant(store, ("data-viewer",), action="revoke")
+        store.approve(change["id"], by=OWNER, digest=change["digest"])
+        self.assertEqual((store.roles_of(VIEWER), store.effective_access()), ([], {}))
+
+    def test_an_author_proposes_but_never_approves_or_changes_who_holds_roles(self):
+        store = self.access_store(people={VIEWER: ["author"]})
+        change = store.propose("skill", {"skill": "take-message", "enabled": False}, by=VIEWER.upper())
+        self.assertEqual(change["proposedBy"], VIEWER.upper())
+        self.assertEqual(self.events[-1][:2], ("studio.change-proposed", VIEWER.upper()))
+        for attempt in (lambda: store.approve(change["id"], by=VIEWER, digest=change["digest"]), lambda: store.reject(change["id"], by=VIEWER),
+                        lambda: store.rollback(change["id"], by=VIEWER),
+                        lambda: store.propose("access", {"person": VIEWER, "action": "grant", "roles": ["approver"]}, by=VIEWER)):
+            with self.assertRaises(core.ChangeRefused):
+                attempt()
+        self.assertEqual(store.get(change["id"])["state"], "proposed")
+
+    def test_only_an_author_may_propose_and_other_roles_do_not_count(self):
+        store = self.access_store(people={VIEWER: ["approver", "provisioner"]})
+        with self.assertRaises(core.ChangeRefused):
+            store.propose("skill", {"skill": "take-message", "enabled": False}, by=VIEWER)
+        with self.assertRaises(core.ChangeRefused):
+            store.propose("skill", {"skill": "take-message", "enabled": False}, by="mallory@evil.example")
+
+    def test_the_workspace_patch_names_the_person_and_roles_for_the_operator(self):
+        store = self.access_store()
+        change = self.grant(store, ("approver",))
+        store.approve(change["id"], by=OWNER, digest=change["digest"])
+        patch = store.export_patch(change["id"])
+        self.assertEqual(patch["access"], {"person": VIEWER, "roles": ["approver"], "studioPeople": {VIEWER: ["approver"]}, "approverInGatewayDirectory": True})
+
+    def test_a_stale_grant_is_refused_after_the_person_changed(self):
+        store = self.access_store()
+        first, second = self.grant(store, ("author",)), self.grant(store, ("promoter",))
+        store.approve(first["id"], by=OWNER, digest=first["digest"])
+        with self.assertRaises(core.ChangeRefused) as caught:
+            store.approve(second["id"], by=OWNER, digest=second["digest"])
+        self.assertIn("stale-base", caught.exception.reasons)
+
+    def test_studio_people_in_the_configuration_are_validated(self):
+        check = _load("studio_config_under_test", "platform/runtime/studio.py").check_config
+        base = {"owner": OWNER}
+        self.assertEqual(check({**base, "people": {"Bob@Acme.example": ["author", "author"]}})["people"], {"bob@acme.example": ["author"]})
+        for people in ({OWNER: ["author"]}, {VIEWER: []}, {VIEWER: ["root"]}, {VIEWER: "author"}, {"": ["author"]}):
+            with self.assertRaises(Exception):
+                check({**base, "people": people})
+
+
 class Session:
     def __init__(self, token, csrf=None):
         self.token, self.csrf = token, csrf
@@ -635,6 +742,42 @@ class StudioHttpTests(Base):
         self.call("POST", f"/studio/api/changes/{created['change']['id']}/approve", owner, {"digest": created["change"]["digest"]})
         names = [c["name"] for c in self.call("GET", "/studio/api/state", owner)[1]["coworkers"]]
         self.assertEqual(names, ["receptionist", "night-desk"])
+
+    def test_the_owner_gives_a_colleague_the_author_role_over_http_and_they_can_then_propose_only(self):
+        owner, viewer = self.sign_in(OWNER), self.sign_in(VIEWER)
+        self.assertEqual(self.propose(viewer)[0], 403)  # not an author yet
+        status, created = self.call("POST", "/studio/api/changes", owner, {"kind": "access", "params": {"person": VIEWER, "action": "grant", "roles": ["author"]}})
+        self.assertEqual(status, 200)
+        change = created["change"]
+        self.assertEqual(self.call("POST", f"/studio/api/changes/{change['id']}/approve", viewer, {"digest": change["digest"]})[0], 403)
+        self.assertEqual(self.call("POST", f"/studio/api/changes/{change['id']}/approve", owner, {"digest": change["digest"]})[0], 200)
+        status, state = self.call("GET", "/studio/api/state", viewer)
+        self.assertEqual((state["role"], state["access"]), ("author", [{"person": VIEWER, "roles": ["author"]}]))
+        self.assertIn("author", state["roles"])
+        status, mine = self.propose(viewer)  # a skill change
+        self.assertEqual((status, mine["change"]["proposedBy"]), (200, VIEWER))
+        status, refused = self.propose(viewer, "access", {"person": VIEWER, "action": "grant", "roles": ["approver"]})
+        self.assertEqual(status, 403)
+        for action, body in (("approve", {"digest": mine["change"]["digest"]}), ("reject", {}), ("rollback", {})):
+            status, document = self.call("POST", f"/studio/api/changes/{mine['change']['id']}/{action}", viewer, body)
+            self.assertEqual(status, 403)
+            self.assertIn("propose changes", document["error"])
+        self.assertEqual(self.gateway.studio._store().get(mine["change"]["id"])["state"], "proposed")
+
+    def test_an_author_still_needs_the_same_origin_and_token(self):
+        self.write_gateway(studio={"owner": OWNER, "people": {VIEWER: ["author"]}})
+        viewer = self.sign_in(VIEWER)
+        self.assertEqual(self.propose(viewer)[0], 200)
+        self.assertEqual(self.call("POST", "/studio/api/changes", viewer, {"kind": "skill", "params": {}}, origin="https://evil.example")[0], 403)
+        self.assertEqual(self.call("POST", "/studio/api/changes", viewer, {"kind": "skill", "params": {}}, csrf="wrong")[0], 403)
+
+    def test_a_role_cannot_be_given_to_someone_off_the_sign_in_list(self):
+        owner = self.sign_in(OWNER)
+        _, created = self.call("POST", "/studio/api/changes", owner, {"kind": "access", "params": {"person": "carol@acme.example", "action": "grant", "roles": ["author"]}})
+        change = created["change"]
+        status, document = self.call("POST", f"/studio/api/changes/{change['id']}/approve", owner, {"digest": change["digest"]})
+        self.assertEqual(status, 409)
+        self.assertIn("evidence:can-sign-in", document["reasons"])
 
     def test_unknown_and_malformed_routes(self):
         owner = self.sign_in(OWNER)

@@ -86,6 +86,11 @@ RUNTIME_SOURCE_PATHS = (
     pathlib.Path("platform/core/secret_enrollment.py"),
     pathlib.Path("platform/core/sealed_vault.py"),
     pathlib.Path("platform/core/oauth_consent.py"),
+    pathlib.Path("platform/runtime/studio.py"),
+    pathlib.Path("platform/runtime/studio_assets.py"),
+    pathlib.Path("platform/core/change_requests.py"),
+    pathlib.Path("platform/core/knowledge_promotion.py"),
+    pathlib.Path("platform/core/onboarding_pack.py"),
     pathlib.Path("platform/core/knowledge_deploy.py"),
     pathlib.Path("platform/core/team.py"),
     pathlib.Path("platform/core/mcp_passthrough.py"),
@@ -118,6 +123,7 @@ RUNTIME_SOURCE_PATHS = (
     pathlib.Path("scripts/runtime-mailbox.py"),
     pathlib.Path("scripts/runtime-contacts.py"),
     pathlib.Path("scripts/runtime-file-calls.py"),
+    pathlib.Path("scripts/studio-changes.py"),
     pathlib.Path("scripts/runtime-inbox.py"),
     pathlib.Path("scripts/runtime-memory.py"),
     pathlib.Path("scripts/runtime-artifacts.py"),
@@ -522,6 +528,27 @@ def _gateway_oauth(oauth: Any, config: dict[str, Any]) -> tuple[dict[str, Any], 
     return {"providers": providers}, env
 
 
+def _gateway_studio(studio: Any, has_web: bool) -> dict[str, Any]:
+    """``gateway.studio`` as the gateway's ``studio`` section: the owner, their public Ed25519 key(s) and the colleagues' starting roles.
+
+    Everything in it is public (an address, a public key, a role name). The Studio is served behind web sign-in, so it needs ``web``.
+    """
+    if not isinstance(studio, dict) or set(studio) - {"owner", "owner_keys", "people"}:
+        raise ValueError("Docker target failed: gateway.studio holds owner, owner_keys and people")
+    if not has_web:
+        raise ValueError("Docker target failed: gateway.studio needs web sign-in and public_origin")
+    section = {"owner": studio.get("owner"), "ownerKeys": studio.get("owner_keys") or {}, "people": studio.get("people") or {}}
+    spec = importlib.util.spec_from_file_location("model_garden_deploy_studio", ROOT / "platform" / "runtime" / "studio.py")
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+    try:
+        module.check_config(section)
+    except module.StudioConfigError as exc:
+        raise ValueError(f"Docker target failed: gateway.studio: {exc}") from exc
+    return {key: value for key, value in section.items() if value or key == "owner"}
+
+
 def _gateway_settings(binding: dict[str, Any]) -> tuple[dict[str, Any] | None, dict[str, str], dict[str, str]]:
     """``EnvironmentBinding.spec.gateway`` as the non-secret gateway configuration.
 
@@ -538,7 +565,7 @@ def _gateway_settings(binding: dict[str, Any]) -> tuple[dict[str, Any] | None, d
     if not isinstance(gateway, dict):
         raise ValueError("Docker target failed: EnvironmentBinding gateway must be an object")
     allowed = {"enabled", "public_origin", "agent", "directory", "people", "escalate_to", "web", "slack", "teams", "approvals", "mailbox",
-               "coworker_api_key_ref", "secrets", "smtp_user", "bind", "smtp_bind", "enrollment", "oauth"}
+               "coworker_api_key_ref", "secrets", "smtp_user", "bind", "smtp_bind", "enrollment", "oauth", "studio"}
     unknown = sorted(set(gateway) - allowed)
     if unknown:
         raise ValueError(f"Docker target failed: unknown gateway settings: {', '.join(unknown)}")
@@ -606,6 +633,8 @@ def _gateway_settings(binding: dict[str, Any]) -> tuple[dict[str, Any] | None, d
     if gateway.get("oauth") is not None:
         config["oauth"], oauth_env = _gateway_oauth(gateway["oauth"], config)
         secret_env.update(oauth_env)
+    if gateway.get("studio") is not None:
+        config["studio"] = _gateway_studio(gateway["studio"], web is not None and bool(gateway.get("public_origin")))
     missing = sorted(required - set(secret_env))
     if missing:
         raise ValueError(f"Docker target failed: gateway needs secrets for its channels: {', '.join(missing)}")
