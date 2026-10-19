@@ -46,7 +46,7 @@ worker:
   people: {jordan@client.example: {channel: slack, address: D0123}}  # where each named person is told things
   escalate_to: ops@client.example
   mailbox: {addresses: [support@client.example], trusted_authserv_id: mx.client.example, owner: jordan@client.example}
-  intervals: {scheduler: 60, mailbox: 30, crm-sync: 120, calls: 120, events: 30, knowledge: 21600, notices: 60, retention: 3600}
+  intervals: {scheduler: 60, mailbox: 30, crm-sync: 120, calls: 120, changes: 60, events: 30, knowledge: 21600, notices: 60, retention: 3600}
 ```
 
 The worker and the gateway keep separate `people` and `escalate_to` settings, but when both are enabled a side that omits them takes the other's, so filling in either list is enough for notices to reach people. If both give `people` and one person has a different channel or address in each, the deploy fails with an error naming that person.

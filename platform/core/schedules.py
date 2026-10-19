@@ -331,6 +331,41 @@ class ScheduleStore:
         self._record(action, who, {**self._details(entry), "admin": bool(admin)})
         return now_state or {"deleted": schedule_id}
 
+    def edit(self, schedule_id: str, *, by: str, cron: str | None = None, budget: Mapping[str, Any] | None = None, now: int | None = None) -> bool:
+        """Set a timed schedule's cron and/or per-run budget to approved values (the Studio's approved edit); False when nothing differs.
+
+        The values are checked with the same rules a new schedule gets. A changed cron moves the next fire; the owner, goal and state
+        are untouched. A trigger has no cron to edit.
+        """
+        who = _principal(by, "by")
+        stamp = int(dt.datetime.now(dt.timezone.utc).timestamp()) if now is None else now
+        new_cron = None
+        if cron is not None:
+            if not isinstance(cron, str):
+                raise ScheduleError("cron must be a string")
+            parse_cron(cron)
+            _check_interval(cron)
+            new_cron = " ".join(cron.split())
+            if next_fire(new_cron, stamp) is None:
+                raise ScheduleError("this cron expression never fires")
+        new_budget = _budget(budget) if budget is not None else None
+        with self._locked() as state:
+            entry = state["schedules"].get(schedule_id)
+            if entry is None:
+                raise ScheduleError("no such schedule")
+            if new_cron is not None and entry.get("kind") == "trigger":
+                raise ScheduleError("an event trigger has no cron to edit")
+            changed = False
+            if new_cron is not None and entry.get("cron") != new_cron:
+                entry["cron"], changed = new_cron, True
+                entry["nextFire"] = next_fire(new_cron, stamp)
+            if new_budget is not None and entry.get("budget") != new_budget:
+                entry["budget"], changed = new_budget, True
+            snapshot = dict(entry)
+        if changed:
+            self._record("schedule.update", who, {**self._details(snapshot), "managedBy": snapshot.get("managedBy")})
+        return changed
+
     def pause(self, schedule_id: str, *, requested_by: str, admin: bool = False) -> dict[str, Any]:
         return self._change(schedule_id, requested_by, admin, "schedule.pause", "paused")
 
