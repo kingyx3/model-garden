@@ -572,7 +572,7 @@ class FanOutTests(Case):
         joined = team.fan_out(parent, self.branches(3), runner=runner, policy="fail-fast", max_concurrency=1)
         self.assertEqual([item["outcome"] for item in joined["branches"]], ["failed", "cancelled", "cancelled"])
         self.assertEqual(joined["branches"][0]["error"], "RuntimeError")
-        self.assertNotIn("4111", json.dumps(self.events()))  # the error type only
+        self.assertNotIn("declined", json.dumps(self.events()))  # the error type only
         rows = team.task_status("task-1")  # a cancelled branch was delegated but never ran: it spent nothing and its reservation came back
         self.assertEqual([(row["state"], row["spent"].get("steps", 0)) for row in rows if row["taskId"] != "task-1"], [("finished", 0)] * 3)
         self.assertEqual(next(row for row in rows if row["taskId"] == "task-1")["reserved"].get("steps", 0), 0)
