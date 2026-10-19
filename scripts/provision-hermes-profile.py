@@ -82,17 +82,40 @@ def _selected_mcp_tools(desired_state: dict[str, Any]) -> list[str]:
 
 def _model_config(desired_state: dict[str, Any]) -> dict[str, Any]:
     profile = _require_mapping(desired_state.get("modelProfile"), "modelProfile")
-    candidates = profile.get("spec", {}).get("candidates")
+    spec = _require_mapping(profile.get("spec"), "modelProfile.spec")
+    candidates = spec.get("candidates")
     if not isinstance(candidates, list) or not candidates:
         raise ValueError("Hermes provisioning failed: modelProfile has no candidates")
-    candidate = _require_mapping(candidates[0], "first model candidate")
-    provider = candidate.get("provider")
-    model = candidate.get("model")
-    if not isinstance(provider, str) or not provider:
-        raise ValueError("Hermes provisioning failed: first model candidate has no provider")
-    if not isinstance(model, str) or not model:
-        raise ValueError("Hermes provisioning failed: first model candidate has no model")
-    config: dict[str, Any] = {"model": {"provider": provider, "default": model}}
+
+    routing = _require_mapping(spec.get("routing", {}), "modelProfile.spec.routing")
+    strategy = routing.get("strategy")
+    if len(candidates) > 1 and strategy != "ordered-fallback":
+        raise ValueError(
+            "Hermes provisioning failed: multiple model candidates require routing.strategy "
+            "'ordered-fallback'; other routing strategies are not implemented"
+        )
+
+    models: list[dict[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    for index, value in enumerate(candidates):
+        candidate = _require_mapping(value, f"model candidate {index + 1}")
+        provider, model = candidate.get("provider"), candidate.get("model")
+        if not isinstance(provider, str) or not provider.strip():
+            raise ValueError(f"Hermes provisioning failed: model candidate {index + 1} has no provider")
+        if not isinstance(model, str) or not model.strip():
+            raise ValueError(f"Hermes provisioning failed: model candidate {index + 1} has no model")
+        key = (provider.strip().lower(), model.strip().lower())
+        if key in seen:
+            raise ValueError(f"Hermes provisioning failed: duplicate model candidate {index + 1}")
+        seen.add(key)
+        models.append({"provider": provider.strip(), "model": model.strip()})
+
+    primary, *fallbacks = models
+    config: dict[str, Any] = {"model": {"provider": primary["provider"], "default": primary["model"]}}
+    # Hermes v0.21.2 reads fallback_providers in this order. Never emit credentials
+    # in the profile: provider secrets are resolved by the runtime's own identity.
+    if fallbacks:
+        config["fallback_providers"] = fallbacks
     tools = _selected_mcp_tools(desired_state)
     if tools:
         config["mcp_servers"] = {
