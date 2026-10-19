@@ -128,13 +128,14 @@ def file_interaction(
     interaction_type: str,
     now: int,
     store: PayloadStore | None = None,
+    conversation_id: str | None = None,
 ) -> dict[str, Any]:
     """Attempt to file one interaction now, if its ledger entry allows an attempt; always returns where it stands.
 
     With a ``store`` the arguments are kept until the provider acknowledges the record, so a later ``retry_due`` can try again.
     """
     sync = _sync()
-    entry = ledger.enqueue(channel=channel, external_id=external_id, interaction_type=interaction_type, now=now)
+    entry = ledger.enqueue(channel=channel, external_id=external_id, interaction_type=interaction_type, now=now, conversation_id=conversation_id)
     key = entry["key"]
     if entry["state"] in ("synced", "reconciled"):
         if store is not None:
@@ -183,7 +184,7 @@ def retry_due(
             continue
         outcome = file_interaction(
             ledger, executor, arguments, channel=entry["channel"], external_id=entry["externalId"],
-            interaction_type=entry["interactionType"], now=now, store=store,
+            interaction_type=entry["interactionType"], now=now, store=store, conversation_id=entry.get("conversationId"),
         )
         counts["attempted"] += 1 if outcome["attempted"] else 0
         if outcome["state"] in ("synced", "reconciled"):

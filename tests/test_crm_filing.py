@@ -221,6 +221,17 @@ class Case(unittest.TestCase):
         self.assertEqual(len(self.fake.notes), 2)
         self.assertEqual(self.ledger.get(self.ledger.list(states=("failed",))[0]["key"])["externalId"], "CA-3")
 
+    def test_the_conversation_id_rides_with_the_entry_through_a_retry(self):
+        conversation = "cv-0123456789abcdef0123"
+        self.fake.fail_with = [503]
+        outcome = filing.file_interaction(self.ledger, self.upstream.log_interaction, self.hs(), channel="voice", external_id="CA-1",
+                                          interaction_type="call", now=T0, conversation_id=conversation)
+        self.assertEqual(outcome["state"], "failed")
+        self.assertEqual([e["externalId"] for e in self.ledger.list(conversation_id=conversation)], ["CA-1"])
+        filing.retry_due(self.ledger, self.upstream.log_interaction, lambda entry: self.hs(), now=T0 + 60)
+        entry = self.ledger.list(conversation_id=conversation)[0]
+        self.assertEqual((entry["state"], entry["conversationId"]), ("synced", conversation))
+
     def test_the_sync_ledger_and_its_events_hold_no_interaction_content(self):
         self.fake.fail_with = [429]
         self.file(self.upstream.log_interaction, self.hs())
