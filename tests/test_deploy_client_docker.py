@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import importlib.util
 import json
 import pathlib
@@ -182,6 +183,34 @@ class DeployClientDockerTests(unittest.TestCase):
             self.assertNotIn("secret://", json.dumps(config))
             self.assertTrue((root / "bundle" / "model-garden-platform" / "platform" / "channels" / "ingress.py").is_file())
             self.assertTrue((root / "bundle" / "model-garden-platform" / "platform" / "core" / "schedule_commands.py").is_file())
+
+    def test_the_studio_is_deployable_from_the_binding_with_public_settings_only(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            profile = self._profile(root, tools=("kb.search",))
+            key = base64.b64encode(bytes(range(32))).decode()
+            base = {"enabled": True, "public_origin": "https://chat.acme.example", "coworker_api_key_ref": "secret://coworker-api/dev",
+                    "secrets": {"webchat_key_ref": "secret://webchat/key"},
+                    "web": {"allowed_addresses": ["alice@acme.example", "bob@acme.example"], "mail": {"from": "chat@acme.example", "host": "smtp.acme.example"}}}
+            studio = {"owner": "alice@acme.example", "owner_keys": {"alice@acme.example": key}, "people": {"bob@acme.example": ["author"]}}
+            deployer.render_bundle(profile, self._binding(root, {"gateway": {**base, "studio": studio}}), root / "a", "acme-dev")
+            config = json.loads((root / "a" / "profile" / ".modelgarden" / "gateway.json").read_text(encoding="utf-8"))
+            self.assertEqual(config["studio"], {"owner": "alice@acme.example", "ownerKeys": {"alice@acme.example": key}, "people": {"bob@acme.example": ["author"]}})
+            self.assertNotIn("secret://", json.dumps(config))
+            for name in ("platform/runtime/studio.py", "platform/runtime/studio_assets.py", "platform/core/change_requests.py", "scripts/studio-changes.py"):
+                self.assertTrue((root / "a" / "model-garden-platform" / name).is_file(), name)
+            deployer.render_bundle(profile, self._binding(root, {"gateway": {**base, "studio": {"owner": "alice@acme.example"}}}), root / "b", "acme-dev")
+            minimal = json.loads((root / "b" / "profile" / ".modelgarden" / "gateway.json").read_text(encoding="utf-8"))
+            self.assertEqual(minimal["studio"], {"owner": "alice@acme.example"})
+            bad = (({**studio, "token": "x"}, "holds owner"), ({**studio, "people": {"bob@acme.example": ["root"]}}, "roles"),
+                   ({**studio, "people": {"alice@acme.example": ["author"]}}, "not the owner"), ({"owner_keys": {}}, "owner"),
+                   ({**studio, "owner_keys": {"alice@acme.example": "not-a-key"}}, "public key"))
+            for index, (value, message) in enumerate(bad):
+                with self.subTest(message=message), self.assertRaisesRegex(ValueError, message):
+                    deployer.render_bundle(profile, self._binding(root, {"gateway": {**base, "studio": value}}), root / f"bad{index}", "acme-dev")
+            without_web = {k: v for k, v in base.items() if k not in ("web", "secrets")}
+            with self.assertRaisesRegex(ValueError, "web sign-in"):
+                deployer.render_bundle(profile, self._binding(root, {"gateway": {**without_web, "secrets": {}, "studio": studio, "mailbox": {"addresses": ["s@acme.example"]}}}), root / "nw", "acme-dev")
 
     def test_action_receipts_follow_the_approver_conversations_and_can_be_switched_off(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -373,6 +402,36 @@ class RuntimeSourceClosureTests(unittest.TestCase):
                 cwd=shipped, capture_output=True, text=True, timeout=60,
             )
             self.assertEqual(worker_modules.returncode, 0, worker_modules.stderr[-2000:])
+    def test_the_studio_runs_from_the_shipped_files_alone(self):
+        """Every module the Studio loads lazily (change kinds, readiness, policy, knowledge promotion, onboarding pack) must be in the image."""
+        exercise = """
+import importlib.util, json, pathlib, sys, tempfile
+def load(name, relative):
+    spec = importlib.util.spec_from_file_location(name, relative); module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module; spec.loader.exec_module(module); return module
+studio = load("studio_shipped", "platform/runtime/studio.py")
+config = studio.check_config({"owner": "a@b.example", "people": {"c@d.example": ["author"]}})
+assert studio._assets().STUDIO_JS
+core = studio._core()
+desired = {"source": {"name": "r", "client": "acme"}, "agent": {"metadata": {"name": "r"}, "spec": {"tools": ["kb.search"], "skills": ["faq"], "disabledSkills": []}}, "tools": []}
+store = core.load_store(pathlib.Path(tempfile.mkdtemp()), desired, tenant="acme", studio=config)
+for key in ("policy", "promotion", "schedules", "skillsets", "readiness", "pack"):
+    core._mod(key)
+store.coworkers()
+change = store.propose("access", {"person": "c@d.example", "action": "grant", "roles": ["approver"]}, by="a@b.example")
+store.approve(change["id"], by="a@b.example", digest=change["digest"])
+assert store.roles_of("c@d.example") == ["approver", "author"], store.roles_of("c@d.example")
+"""
+        with tempfile.TemporaryDirectory() as tmp:
+            shipped = pathlib.Path(tmp)
+            for relative in deployer.RUNTIME_SOURCE_PATHS:
+                (shipped / relative).parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(ROOT / relative, shipped / relative)
+            run = subprocess.run([sys.executable, "-P", "-c", exercise], cwd=shipped, capture_output=True, text=True, timeout=60)
+            self.assertEqual(run.returncode, 0, run.stderr[-2000:])
+            cli = subprocess.run([sys.executable, "-P", str(shipped / "scripts" / "studio-changes.py"), "--help"], cwd=shipped, capture_output=True, text=True, timeout=60)
+            self.assertEqual(cli.returncode, 0, cli.stderr[-2000:])
+
             for script in sorted(path for path in deployer.RUNTIME_SOURCE_PATHS if path.suffix == ".py" and path.parent.name == "scripts"):
                 with self.subTest(script=str(script)):
                     shown = subprocess.run(

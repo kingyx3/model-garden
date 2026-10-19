@@ -18,8 +18,13 @@ ledger events. This module is pure of HTTP and holds no credential; ``platform/r
   not rewrite the client's workspace repository or restart the runtime. ``export_patch`` produces the workspace change (Agent
   ``disabledSkills``, Schedule, Policy rule with its sign-off, promotion record, new Agent resource + pack) that the operator
   commits through the normal pull-request flow. Nothing here silently mutates a live client.
-- **Authority.** Only the configured owner (the verified web session or the host operator naming that owner) may propose, approve,
-  reject or roll back. On the host the identity is as asserted (like ``knowledge-promotion.py``); the owner's Ed25519 signature is
+- **Access.** An owner can give a signed-in colleague roles (``author``, ``approver``, ``provisioner``, ``data-viewer``, ``promoter``) or
+  take them away, as an ``access`` change like any other (exact diff, approved by digest, rolled back from a snapshot). The owner's own
+  roles are never changed here, and a role is granted only to someone on the web sign-in list. Of these, only ``author`` is enforced by
+  the Studio itself (an author may *propose* any change except an ``access`` one; approving, rejecting and rolling back stay with the
+  owner); the others are recorded and exported in the workspace patch for the operator to merge. A role never carries a credential.
+- **Authority.** Only the configured owner (the verified web session or the host operator naming that owner) may approve,
+  reject or roll back, and propose an ``access`` change; an ``author`` may propose the other kinds. On the host the identity is as asserted (like ``knowledge-promotion.py``); the owner's Ed25519 signature is
   what authenticates a relaxing Policy change.
 - **Safe to retry.** The ledger event is written before state; an approval interrupted after the rollback snapshot is stored is
   completed, not repeated; rollback is allowed only for the latest applied change and restores the exact earlier overlay.
@@ -38,11 +43,18 @@ import re
 import secrets
 import sys
 import time
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Callable, Iterable, Iterator, Mapping
 from typing import Any
 
 SCHEMA_VERSION = 1
-KINDS = ("skill", "skillset", "schedule", "policy", "knowledge", "new-coworker")
+KINDS = ("skill", "skillset", "schedule", "policy", "knowledge", "new-coworker", "access")
+ACCESS_ROLES = {
+    "author": "propose changes to the coworker in the Studio (only the owner can approve them)",
+    "approver": "approve the coworker's actions in chat",
+    "provisioner": "start provider connections for the coworker",
+    "data-viewer": "view customer data the coworker handles",
+    "promoter": "promote an approved change to the live coworker",
+}
 PROPOSAL_TTL = 7 * 86400
 MAX_OPEN = 50
 MAX_RULE_BYTES = 8192
@@ -98,7 +110,7 @@ def _iso(now: int) -> str:
 
 def empty_overlay() -> dict[str, Any]:
     return {"schemaVersion": SCHEMA_VERSION, "version": 0, "lastChange": None, "agents": {}, "schedules": {}, "policyRules": {},
-            "coworkers": {}, "knowledgePromotion": None}
+            "coworkers": {}, "knowledgePromotion": None, "access": {}}
 
 
 def _text(value: Any, label: str, *, pattern: re.Pattern[str] | None = None) -> str:
@@ -119,6 +131,7 @@ class ChangeStore:
         owner: str, owner_keys: Mapping[str, str] | None = None, catalog: Mapping[str, Any] | None = None,
         schedules: Callable[[], list[dict[str, Any]]] | None = None, audit: Audit | None = None,
         clock: Callable[[], float] = time.time,
+        people: Mapping[str, Iterable[str]] | None = None, signin: Callable[[], Iterable[str]] | None = None,
     ) -> None:
         self.data = pathlib.Path(data_root)
         self.root = self.data / "studio"
@@ -131,6 +144,8 @@ class ChangeStore:
         self._schedules = schedules
         self._audit = audit
         self.clock = clock
+        self._people = {person.strip().lower(): sorted(set(roles)) for person, roles in (people or {}).items()}
+        self._signin = signin
 
     # -- storage ------------------------------------------------------------------------------------------
 
@@ -335,6 +350,61 @@ class ChangeStore:
         if not isinstance(params, Mapping):
             raise ChangeError("the change needs its details")
         return getattr(self, "_draft_" + kind.replace("-", "_"))(params, overlay)
+
+    # -- people and roles ---------------------------------------------------------------------------------
+
+    def effective_access(self, overlay: Mapping[str, Any] | None = None) -> dict[str, list[str]]:
+        """Each colleague's roles: the configured ones, replaced for anyone the owner has since changed here (the owner is implicit)."""
+        roles = {person: list(held) for person, held in self._people.items()}
+        for person, held in ((overlay or self.overlay()).get("access") or {}).items():
+            roles[person] = list(held)
+        return {person: held for person, held in sorted(roles.items()) if held and person != self.owner.lower()}
+
+    def roles_of(self, person: Any, overlay: Mapping[str, Any] | None = None) -> list[str]:
+        """The roles ``person`` holds; the named owner holds every role."""
+        if not isinstance(person, str):
+            return []
+        key = person.strip().lower()
+        if key == self.owner.lower():
+            return sorted(ACCESS_ROLES)
+        return self.effective_access(overlay).get(key, [])
+
+    def _draft_access(self, params: Mapping[str, Any], overlay: Mapping[str, Any]) -> dict[str, Any]:
+        person = _text(params.get("person"), "person", pattern=_PERSON).lower()
+        action = params.get("action")
+        if action not in ("grant", "revoke"):
+            raise ChangeError("action must be grant or revoke")
+        roles = params.get("roles")
+        if not isinstance(roles, list) or not roles or not all(isinstance(role, str) for role in roles) or set(roles) - set(ACCESS_ROLES):
+            raise ChangeError("roles must be a list of: " + ", ".join(sorted(ACCESS_ROLES)))
+        if person == self.owner.lower():
+            raise ChangeError("the owner's access is not changed here")
+        wanted = sorted(set(roles))
+        before = self.effective_access(overlay).get(person, [])
+        after = sorted(set(before) | set(wanted)) if action == "grant" else sorted(set(before) - set(wanted))
+        if after == before:
+            raise ChangeError("that does not change anything")
+        verb = "Give" if action == "grant" else "Take from"
+        return {
+            "params": {"person": person, "action": action, "roles": wanted},
+            "diff": [{"field": f"access.{person}", "before": before, "after": after}],
+            "summary": f"{verb} {person} the role{'s' if len(wanted) > 1 else ''} {', '.join(wanted)}",
+        }
+
+    def _access_items(self, change: Mapping[str, Any], overlay: Mapping[str, Any]) -> list[dict[str, Any]]:
+        params, (row,) = change["params"], change["diff"]
+        person = params["person"]
+        items = [_item("owner-unchanged", "The owner's own access is not what is being changed", person != self.owner.lower()),
+                 _item("access-unchanged", "The person still holds the roles this change was written against",
+                       self.effective_access(overlay).get(person, []) == row["before"])]
+        if params["action"] == "grant":
+            if self._signin is None:
+                items.append(_item("can-sign-in", "The person can sign in to the Studio", True,
+                                   "The sign-in list is not available on the host; the gateway checks it when it applies the change.", required=False))
+            else:
+                items.append(_item("can-sign-in", "The person is on the web sign-in list", person in {a.strip().lower() for a in self._signin()},
+                                   "Add their address to the web sign-in list first; a role is never given to someone who cannot sign in."))
+        return items
 
     def _draft_skill(self, params: Mapping[str, Any], overlay: Mapping[str, Any]) -> dict[str, Any]:
         skill = _text(params.get("skill"), "skill", pattern=_NAME)
@@ -595,6 +665,8 @@ class ChangeStore:
                 return self._policy_items(change, overlay, attachments.get("signoff"))
             if kind == "knowledge":
                 return [self._knowledge_item(overlay, label="Evals ran against the exact content being promoted, by a named owner")]
+            if kind == "access":
+                return self._access_items(change, overlay)
             return self._new_coworker_items(change, overlay)
         except ChangeError as exc:
             return [_item("proposal-valid", "The proposal can still be made", False, str(exc))]
@@ -610,8 +682,17 @@ class ChangeStore:
             raise ChangeRefused(["not-the-owner"])
         return who
 
+    def _require_author(self, by: Any, kind: str) -> str:
+        """The owner, or a colleague holding ``author`` for any kind but ``access`` (who may hold which role is the owner's alone)."""
+        try:
+            return self._require_owner(by)
+        except ChangeRefused:
+            if kind != "access" and isinstance(by, str) and "author" in self.roles_of(by):
+                return by.strip()
+            raise
+
     def propose(self, kind: str, params: Mapping[str, Any], *, by: str) -> dict[str, Any]:
-        who = self._require_owner(by)
+        who = self._require_author(by, kind)
         now = int(self.clock())
         with self._locked():
             overlay = self.overlay()
@@ -653,6 +734,8 @@ class ChangeStore:
             new["knowledgePromotion"] = _mod("promotion").promote(
                 self.desired, overlay.get("knowledgePromotion"), self._read_json(self.root / "knowledge-evidence.json"),
                 by=self.owner, now=now, owners=[self.owner])
+        elif kind == "access":
+            new["access"][params["person"]] = change["diff"][0]["after"]
         else:
             new["coworkers"][params["name"]] = {"resource": params["resource"], "template": params["template"], "packDigest": params["packDigest"], "createdAt": _iso(now)}
         new["version"] = overlay["version"] + 1
@@ -766,6 +849,10 @@ class ChangeStore:
             patch["removeRule"] = params.get("ruleId")
         elif kind == "knowledge":
             patch["promotionRecord"] = after["knowledgePromotion"]
+        elif kind == "access":
+            roles = change["diff"][0]["after"]
+            patch["access"] = {"person": params["person"], "roles": roles, "studioPeople": {params["person"]: roles},
+                               "approverInGatewayDirectory": "approver" in roles}
         else:
             patch.update(agentResource=params["resource"], onboardingPack=change["pack"])
         return patch
@@ -774,6 +861,7 @@ class ChangeStore:
 def load_store(
     data_root: pathlib.Path, desired_state: Mapping[str, Any], *, tenant: str, studio: Mapping[str, Any], manifest_path: str | None = None,
     audit: Audit | None = None, clock: Callable[[], float] = time.time, schedules: Callable[[], list[dict[str, Any]]] | None = None,
+    signin: Callable[[], Iterable[str]] | None = None,
 ) -> ChangeStore:
     """Build the store the gateway and the operator command share: manifest with the coworker's own grants applied, owner and keys from config."""
     manifest = None
@@ -785,4 +873,5 @@ def load_store(
     if isinstance(manifest, dict):
         manifest = _mod("readiness").overlay_from_root(manifest, pathlib.Path(data_root) / "provider-grants", now=int(clock()))
     return ChangeStore(data_root, tenant=tenant, desired_state=desired_state, manifest=manifest, owner=studio["owner"],
-                       owner_keys=studio.get("ownerKeys"), audit=audit, clock=clock, schedules=schedules)
+                       owner_keys=studio.get("ownerKeys"), audit=audit, clock=clock, schedules=schedules,
+                       people=studio.get("people"), signin=signin)
