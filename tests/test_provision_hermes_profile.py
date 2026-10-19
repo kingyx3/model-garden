@@ -68,6 +68,42 @@ class ProvisionHermesProfileTests(unittest.TestCase):
         skill_path = pathlib.Path("skills/model-garden/book-appointment/SKILL.md")
         self.assertNotIn(skill_path, files)  # retired until upstream execution is approved
 
+    def test_ordered_candidates_are_provisioned_as_real_hermes_fallbacks(self) -> None:
+        desired = self.receptionist_desired_state()
+        config = yaml.safe_load(adapter.build_profile_files(desired)[pathlib.Path("config.yaml")])
+        self.assertEqual(config["model"], {"provider": "openai", "default": "approved-openai-model"})
+        self.assertEqual(
+            config["fallback_providers"],
+            [
+                {"provider": "anthropic", "model": "approved-anthropic-model"},
+                {"provider": "internal", "model": "approved-open-weight-model"},
+            ],
+        )
+        self.assertNotIn("api_key", json.dumps(config))
+        self.assertNotIn("key_env", json.dumps(config))
+
+    def test_single_candidate_does_not_install_a_fallback_chain(self) -> None:
+        desired = copy.deepcopy(self.receptionist_desired_state())
+        desired["modelProfile"]["spec"]["candidates"] = desired["modelProfile"]["spec"]["candidates"][:1]
+        config = yaml.safe_load(adapter.build_profile_files(desired)[pathlib.Path("config.yaml")])
+        self.assertNotIn("fallback_providers", config)
+
+    def test_invalid_or_duplicate_fallbacks_fail_closed(self) -> None:
+        initial = self.receptionist_desired_state()
+        for bad in ({"provider": "anthropic", "model": ""}, {"provider": " ", "model": "ok"},
+                    {"provider": "openai", "model": "approved-openai-model"}):
+            with self.subTest(candidate=bad):
+                desired = copy.deepcopy(initial)
+                desired["modelProfile"]["spec"]["candidates"][1] = bad
+                with self.assertRaisesRegex(ValueError, "model candidate|duplicate model"):
+                    adapter.build_profile_files(desired)
+
+    def test_unimplemented_multi_candidate_routing_strategies_are_rejected(self) -> None:
+        desired = copy.deepcopy(self.receptionist_desired_state())
+        desired["modelProfile"]["spec"]["routing"] = {"strategy": "quality-first"}
+        with self.assertRaisesRegex(ValueError, "ordered-fallback"):
+            adapter.build_profile_files(desired)
+
     def test_profile_without_tools_has_no_mcp_server(self) -> None:
         desired_state = self.receptionist_desired_state()
         desired_state["tools"] = []
