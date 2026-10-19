@@ -70,7 +70,7 @@ class AdversarialReceptionistTests(unittest.TestCase):
                     incoming = mail.raw(
                         message_id=f"<{attack['id']}@customer.example>",
                         body=attack["input"],
-                        extra="Reply-To: attacker@evil.example\\r\\nCc: attacker@evil.example\\r\\n",
+                        extra="Reply-To: attacker@evil.example\r\nCc: attacker@evil.example\r\n",
                     )
                     result = helper.build().handle(incoming, now=mail.T0)
                     self.assertEqual(result["status"], "drafted")
