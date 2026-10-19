@@ -509,6 +509,131 @@ class HumanStepTests(Case):
         self.assertEqual([step["action"] for step in root["steps"] if step.get("action")], ["delegation.hop"])
 
 
+class FanOutTests(Case):
+    """Independent sub-tasks run in parallel under the parent's budget and are joined with a per-branch outcome and spend."""
+
+    def branches(self, count=3, agent="receptionist", capability="kb.search"):
+        return [{"agent": agent, "taskId": f"task-1.{n}", "goal": f"Branch {n}", "requiredCapabilities": [capability], "budget": {"steps": 2}}
+                for n in range(1, count + 1)]
+
+    @staticmethod
+    def search(agent, envelope, runtime):
+        runtime.kb_search(query="opening hours")
+        return envelope["taskId"]
+
+    def test_branches_run_under_their_own_envelopes_and_the_join_reports_each_with_its_spend(self):
+        team = self.team()
+        parent = self.task(team, budget={"steps": 10})
+        joined = team.fan_out(parent, self.branches(), runner=self.search)
+        self.assertTrue(joined["complete"])
+        self.assertEqual([(item["taskId"], item["outcome"], item["value"], item["usage"]["steps"]) for item in joined["branches"]],
+                         [(f"task-1.{n}", "succeeded", f"task-1.{n}", 1) for n in (1, 2, 3)])
+        executions = [event for event in self.events() if event.get("event") == "execution"]
+        self.assertEqual(sorted(event["governance"]["taskId"] for event in executions), ["task-1.1", "task-1.2", "task-1.3"])
+        self.assertTrue(govern.verify_audit_chain(self.base / "audit.jsonl")["valid"])  # parallel appends keep one valid chain
+        self.assertEqual([row["state"] for row in team.task_status("task-1") if row["taskId"] != "task-1"], ["finished"] * 3)
+
+    def test_the_task_timeline_shows_the_fan_out_each_branch_and_the_join(self):
+        team = self.team()
+        parent = self.task(team, budget={"steps": 10})
+        team.fan_out(parent, self.branches(2), runner=self.search, policy="fail-fast")
+        audit_query = _load("audit_query_for_fan_out", "platform/core/audit_query.py")
+        timeline = audit_query.timeline(self.events(), task="task-1")
+        actions = [step["action"] for step in timeline["steps"] if step.get("action")]
+        self.assertEqual(actions.count("task.branch.finished"), 2)
+        self.assertEqual((actions[0], actions[-1]), ("task.fan-out", "task.join"))
+        join = [step for step in timeline["steps"] if step.get("action") == "task.join"][0]
+        self.assertEqual((join["details"]["policy"], join["details"]["succeeded"]), ("fail-fast", 2))
+        self.assertEqual(timeline["usage"]["steps"], 2)
+        self.assertNotIn("Branch 1", json.dumps(self.events()))  # goal text is never ledgered
+
+    def test_a_branch_over_its_budget_halts_alone_and_best_effort_still_runs_the_others(self):
+        team = self.team()
+        parent = self.task(team, budget={"steps": 10})
+        branches = self.branches(3)
+        branches[1]["budget"] = {"steps": 1}
+
+        def runner(agent, envelope, runtime):
+            for _ in range(2 if envelope["taskId"] == "task-1.2" else 1):
+                runtime.kb_search(query="opening hours")
+
+        joined = team.fan_out(parent, branches, runner=runner)
+        self.assertEqual([item["outcome"] for item in joined["branches"]], ["succeeded", "budget-exhausted", "succeeded"])
+        self.assertFalse(joined["complete"])
+        self.assertEqual(joined["branches"][1]["error"], "PermissionError")
+
+    def test_fail_fast_starts_no_branch_after_the_first_failure(self):
+        team = self.team()
+        parent = self.task(team, budget={"steps": 10})
+
+        def runner(agent, envelope, runtime):
+            raise RuntimeError("card 4111 1111 1111 1111 declined")
+
+        joined = team.fan_out(parent, self.branches(3), runner=runner, policy="fail-fast", max_concurrency=1)
+        self.assertEqual([item["outcome"] for item in joined["branches"]], ["failed", "cancelled", "cancelled"])
+        self.assertEqual(joined["branches"][0]["error"], "RuntimeError")
+        self.assertNotIn("4111", json.dumps(self.events()))  # the error type only
+        rows = team.task_status("task-1")  # a cancelled branch was delegated but never ran: it spent nothing and its reservation came back
+        self.assertEqual([(row["state"], row["spent"].get("steps", 0)) for row in rows if row["taskId"] != "task-1"], [("finished", 0)] * 3)
+        self.assertEqual(next(row for row in rows if row["taskId"] == "task-1")["reserved"].get("steps", 0), 0)
+
+    def test_a_refused_hop_is_a_join_outcome_and_fail_fast_stops_after_it(self):
+        team = self.team()
+        parent = self.task(team, budget={"steps": 10})
+        branches = [{"agent": "receptionist", "taskId": "task-1.1", "goal": "Needs a Tool it does not hold", "requiredCapabilities": ["crm.create"]},
+                    *self.branches(1)[:1]]
+        branches[1]["taskId"] = "task-1.2"
+        joined = team.fan_out(parent, branches, runner=self.search, policy="fail-fast")
+        self.assertEqual([item["outcome"] for item in joined["branches"]], ["refused", "cancelled"])
+        self.assertIn("delegation.refused", [event.get("action") for event in self.events()])
+
+    def test_best_effort_runs_the_branches_that_could_be_delegated(self):
+        team = self.team()
+        parent = self.task(team, budget={"steps": 10})
+        branches = [{"agent": "receptionist", "taskId": "task-1.1", "goal": "x", "requiredCapabilities": ["crm.create"]}, *self.branches(2)[1:]]
+        joined = team.fan_out(parent, branches, runner=self.search)
+        self.assertEqual([item["outcome"] for item in joined["branches"]], ["refused", "succeeded"])
+
+    def test_concurrency_never_exceeds_the_call_or_the_environment_limit(self):
+        import threading
+        import time
+        team = self.team(max_parallel=2)
+        parent = self.task(team, budget={"steps": 50})
+        running, peak, lock = [0], [0], threading.Lock()
+
+        def runner(agent, envelope, runtime):
+            with lock:
+                running[0] += 1
+                peak[0] = max(peak[0], running[0])
+            time.sleep(0.05)
+            with lock:
+                running[0] -= 1
+
+        branches = [{"agent": "receptionist", "taskId": f"task-1.{n}", "goal": "w", "requiredCapabilities": ["kb.search"], "budget": {"steps": 1}} for n in range(1, 6)]
+        joined = team.fan_out(parent, branches, runner=runner, max_concurrency=8)  # asking for more than the environment allows
+        self.assertEqual((joined["concurrency"], peak[0]), (2, 2))
+        self.assertTrue(joined["complete"])
+        for bad in (0, 33):
+            with self.assertRaises(team_runtime.TeamError):
+                self.team(max_parallel=bad)
+
+    def test_the_branches_share_the_parents_budget_and_cannot_overspend_it(self):
+        team = self.team()
+        parent = self.task(team, budget={"steps": 3})
+        joined = team.fan_out(parent, self.branches(3), runner=self.search)  # each reserves 2 of the parent's 3
+        self.assertEqual([item["outcome"] for item in joined["branches"]], ["succeeded", "refused", "refused"])
+
+    def test_bad_requests_are_refused_before_anything_is_started(self):
+        team = self.team()
+        parent = self.task(team)
+        for kwargs in ({"policy": "whenever"}, {"max_concurrency": 0}):
+            with self.assertRaises(team_runtime.TeamError):
+                team.fan_out(parent, self.branches(1), runner=self.search, **kwargs)
+        with self.assertRaises(team_runtime.TeamError):
+            team.fan_out(parent, [], runner=self.search)
+        self.assertNotIn("task.fan-out", [event.get("action") for event in self.events()])
+
+
 class LoadTests(Case):
     def test_load_states_reads_single_and_multi_agent_output(self):
         multi = self.base / "multi.json"

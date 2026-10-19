@@ -27,6 +27,13 @@ The governed sidecar serves one compiled Agent. A team keeps that property and a
   fallback and never resumes silently, and the opening, the person's answer (under their name) and a timeout are each ledgered once
   against the task, so they appear in the task timeline.
 
+- **Parallel branches under one budget.** ``fan_out`` delegates several independent sub-tasks of one task at once (each reserves its
+  share of the parent's budget, so branches together never spend more than the parent had), runs them on a bounded pool, and joins:
+  every branch ends ``succeeded``, ``failed``, ``budget-exhausted``, ``refused`` (the hop itself was refused) or ``cancelled``
+  (``fail-fast`` stops starting branches after the first failure; ``best-effort`` runs them all). Concurrency is capped per call and
+  per environment (``max_parallel``), the fan-out, each branch's outcome and spend, and the join are each ledgered against the
+  task, so the task timeline shows the cost and actions of every branch. Error text from a branch is never recorded: its type only.
+
 Nothing here holds a credential or reaches the network. The task state lives in one host process: sidecars launched from
 ``launch_plan`` do not consult it. Not covered: a model-callable delegation Tool, the runtime-native handoff/A2A decision,
 Docker/Hermes deployment of several Agents, and any live evidence.
@@ -45,11 +52,15 @@ import sys
 import threading
 import time
 from collections.abc import Callable, Iterable, Iterator, Mapping
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 AGENT_NAME = re.compile(r"^[a-z0-9][a-z0-9-]{0,62}$")
 DEFAULT_PORT = 9120
+DEFAULT_MAX_PARALLEL = 4
+MAX_PARALLEL = 32
+FAN_OUT_POLICIES = ("fail-fast", "best-effort")
 
 
 def _load(name: str, relative: str):
@@ -106,7 +117,10 @@ class TeamRuntime:
         max_fan_out: int = DELEGATION.DEFAULT_MAX_FAN_OUT,
         runtime_kwargs: Mapping[str, Any] | None = None,
         notify: Callable[[dict[str, Any]], Any] | None = None,
+        max_parallel: int = DEFAULT_MAX_PARALLEL,
     ) -> None:
+        if not isinstance(max_parallel, int) or isinstance(max_parallel, bool) or not 1 <= max_parallel <= MAX_PARALLEL:
+            raise TeamError(f"max_parallel must be 1 to {MAX_PARALLEL}")
         copies = [copy.deepcopy(dict(state)) for state in states]
         # Raises TeamError for no Agents or two Agents with one name (the name identifies approvals, attribution and ledger records).
         report = TEAM.plan(copies, environment_binding=environment_binding, registry=registry, now=int(now()))
@@ -131,6 +145,8 @@ class TeamRuntime:
         self._runtimes: dict[str, Any] = {}
         self._lock = threading.Lock()
         self._notify = notify
+        self.max_parallel = max_parallel
+        self._parallel = threading.BoundedSemaphore(max_parallel)  # the environment-wide limit, shared by every fan-out
         self._task_lock = threading.RLock()
         self._trees: dict[str, Any] = {}
         self._root_of: dict[str, str] = {}
@@ -316,6 +332,98 @@ class TeamRuntime:
             self._root_of[child["taskId"]] = root
             self._persist(root)
         return child
+
+    def fan_out(
+        self,
+        parent: Mapping[str, Any],
+        branches: Iterable[Mapping[str, Any]],
+        *,
+        runner: Callable[[str, dict[str, Any], Any], Any],
+        policy: str = "best-effort",
+        max_concurrency: int | None = None,
+    ) -> dict[str, Any]:
+        """Run independent sub-tasks of ``parent`` in parallel under its budget and join them.
+
+        Each branch is a mapping with ``agent``, ``taskId`` and ``goal`` (optionally ``requiredCapabilities``, ``budget``, ``deadline``,
+        ``constraints``). ``runner(agent, envelope, runtime)`` does the branch's work on that Agent's governed runtime, under its
+        envelope, so every call it makes is attributed, charged and bounded as for any delegated task. The join returns each branch's
+        outcome, value (what the runner returned, never ledgered), error type and spend. ``fail-fast`` starts no further branch once one
+        has failed or been refused (a branch already running finishes); ``best-effort`` runs every branch it could delegate.
+        """
+        if policy not in FAN_OUT_POLICIES:
+            raise TeamError(f"policy must be one of {', '.join(FAN_OUT_POLICIES)}")
+        plan = [dict(branch) for branch in branches]
+        if not plan:
+            raise TeamError("a fan-out needs at least one branch")
+        concurrency = min(self.max_parallel, max_concurrency if max_concurrency is not None else self.max_parallel)
+        if not isinstance(concurrency, int) or isinstance(concurrency, bool) or concurrency < 1:
+            raise TeamError("max_concurrency must be at least 1")
+        self._check_envelope(parent.get("agent"), parent)
+        parent_id = parent["taskId"]
+        by = f"agent:{parent['agent']}"
+        self._ledger_action("task.fan-out", by, {"taskId": parent_id, "branches": len(plan), "policy": policy, "concurrency": concurrency})
+        stop = threading.Event()
+        results: list[dict[str, Any]] = [{"taskId": item.get("taskId"), "agent": item.get("agent"), "outcome": "cancelled"} for item in plan]
+        children: dict[int, dict[str, Any]] = {}
+        for index, item in enumerate(plan):
+            if stop.is_set():
+                break
+            try:
+                children[index] = self.delegate(
+                    parent, to_agent=item.get("agent"), child_task_id=item.get("taskId"), goal=item.get("goal", ""),
+                    required_capabilities=item.get("requiredCapabilities"), budget=item.get("budget"), deadline=item.get("deadline"),
+                    constraints=item.get("constraints"),
+                )
+            except (DELEGATION.DelegationError, TeamError, ValueError) as exc:
+                results[index].update(outcome="refused", error=type(exc).__name__)
+                if policy == "fail-fast":
+                    stop.set()
+
+        def run(index: int) -> None:
+            child, agent = children[index], children[index]["agent"]
+            with self._parallel:  # the environment-wide cap, whatever else is fanning out
+                if stop.is_set():
+                    return
+                try:
+                    with self.acting(agent, child) as runtime:
+                        results[index]["value"] = runner(agent, child, runtime)
+                    results[index]["outcome"] = "succeeded"
+                except Exception as exc:  # noqa: BLE001 - a branch failing is a join outcome; only the type is kept
+                    halted = self._tree(child["taskId"])[1].state(child["taskId"]) == "halted"
+                    results[index].update(outcome="budget-exhausted" if halted else "failed", error=type(exc).__name__)
+                    if policy == "fail-fast":
+                        stop.set()
+                    return
+                if self._tree(child["taskId"])[1].state(child["taskId"]) == "halted":  # a refused call is not an exception to the runner
+                    results[index]["outcome"] = "budget-exhausted"
+                    if policy == "fail-fast":
+                        stop.set()
+
+        with ThreadPoolExecutor(max_workers=concurrency) as pool:
+            for future in [pool.submit(run, index) for index in children]:
+                future.result()
+        counts = {"succeeded": 0, "failed": 0, "cancelled": 0, "refused": 0, "budgetExhausted": 0}
+        for index, item in enumerate(plan):
+            result = results[index]
+            usage: dict[str, int] = {}
+            if index in children:
+                task_id = children[index]["taskId"]
+                with self._task_lock:
+                    root, tree = self._tree(task_id)
+                    row = next(row for row in tree.timeline() if row["taskId"] == task_id)
+                    if row["state"] == "running":
+                        tree.finish(task_id)  # the unused reservation goes back to the parent
+                        self._persist(root)
+                        row = next(row for row in tree.timeline() if row["taskId"] == task_id)
+                usage = {key: int(row["spent"].get(key, 0)) for key in ("tokens", "costCents", "steps")}
+            result["usage"] = usage
+            counts["budgetExhausted" if result["outcome"] == "budget-exhausted" else result["outcome"]] += 1
+            self._ledger_action("task.branch.finished", by, {
+                "taskId": parent_id, "toTask": result["taskId"], "toAgent": result["agent"], "outcome": result["outcome"],
+                **({"usage": usage} if usage else {}),
+            })
+        self._ledger_action("task.join", by, {"taskId": parent_id, "policy": policy, **counts})
+        return {"policy": policy, "concurrency": concurrency, "complete": counts["succeeded"] == len(plan), "branches": results}
 
     def charge(self, envelope: Mapping[str, Any], **used: int) -> dict[str, int]:
         """Charge usage the host measured (``tokens``, ``costCents``, ``steps``) to a task; returns what it has left.
