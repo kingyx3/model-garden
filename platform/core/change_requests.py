@@ -15,7 +15,8 @@ ledger events. This module is pure of HTTP and holds no credential; ``platform/r
   and verified against ``studio.ownerKeys``; with no key configured it fails closed. A new coworker starts with every Skill that
   needs its own access switched off and an owner-readable onboarding pack (``onboarding_pack``) that the owner approves by digest.
 - **What "applied" means.** Applying writes the Studio *overlay* (``studio/overlay.json``) and keeps the rollback snapshot; it does
-  not rewrite the client's workspace repository or restart the runtime. ``export_patch`` produces the workspace change (Agent
+  not rewrite the client's workspace repository or restart the runtime. The live sidecar and worker take up only the part that cannot
+  widen authority (stricter Policy rules, schedule cron/budget; ``studio_overlay.py``). ``export_patch`` produces the workspace change (Agent
   ``disabledSkills``, Schedule, Policy rule with its sign-off, promotion record, new Agent resource + pack) that the operator
   commits through the normal pull-request flow. Nothing here silently mutates a live client.
 - **Access.** An owner can give a signed-in colleague roles (``author``, ``approver``, ``provisioner``, ``data-viewer``, ``promoter``) or

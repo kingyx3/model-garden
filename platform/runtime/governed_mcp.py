@@ -69,6 +69,7 @@ FILES = _load_module("model_garden_runtime_builtin_files", ROOT / "platform" / "
 TICKETS = _load_module("model_garden_runtime_tickets", ROOT / "platform" / "core" / "tickets.py")
 APPROVAL = _load_module("model_garden_runtime_approval", ROOT / "scripts" / "runtime-approval.py")
 UPSTREAM_HTTP = _load_module("model_garden_runtime_upstream_http", ROOT / "platform" / "runtime" / "upstream_http.py")
+STUDIO_OVERLAY = _load_module("model_garden_runtime_studio_overlay", ROOT / "platform" / "core" / "studio_overlay.py")
 AUTH_FAILURE = re.compile(r"\((401|403)\)")
 
 
@@ -122,6 +123,16 @@ def _request_path(approval_root: pathlib.Path, state: str, request_id: str) -> p
 class GovernedToolRuntime:
     """Execute the small supported Tool set through Model Garden governance."""
 
+    @property
+    def desired_state(self) -> Mapping[str, Any]:
+        """The compiled desired state with the live-safe part of an approved Studio change applied (see ``studio_overlay.py``)."""
+        live = getattr(self, "_live_overlay", None)
+        return self._base_state if live is None else live.apply(self._base_state)
+
+    @desired_state.setter
+    def desired_state(self, value: Mapping[str, Any]) -> None:
+        self._base_state = value
+
     def __init__(
         self,
         desired_state_path: pathlib.Path,
@@ -138,12 +149,13 @@ class GovernedToolRuntime:
         task_resolver=None,
         clock=time.time,
     ) -> None:
-        self.desired_state = _load_json_object(desired_state_path, "compiled desired state")
-        if self.desired_state.get("schemaVersion") != 1:
+        self._base_state = _load_json_object(desired_state_path, "compiled desired state")
+        if self._base_state.get("schemaVersion") != 1:
             raise ValueError("compiled desired state schemaVersion must be 1")
         self.audit_path = audit_path
         self.approval_root = approval_root
         self.governance_root = audit_path.parent
+        self._live_overlay = STUDIO_OVERLAY.LiveOverlay(self.governance_root)
         self.handoff_root = approval_root.parent / "handoffs"
         self.memory_root = approval_root.parent / "memory"
         self.artifact_root = approval_root.parent / "artifacts"

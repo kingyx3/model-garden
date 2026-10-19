@@ -65,7 +65,7 @@ from collections.abc import Callable, Mapping
 from typing import Any
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
-DEFAULT_INTERVALS = {"scheduler": 60, "mailbox": 30, "notices": 60, "retention": 3600, "usage": 300, "export": 300, "crm-sync": 120, "calls": 120, "events": 30, "knowledge": 21_600}
+DEFAULT_INTERVALS = {"scheduler": 60, "mailbox": 30, "notices": 60, "retention": 3600, "usage": 300, "export": 300, "crm-sync": 120, "calls": 120, "changes": 60, "events": 30, "knowledge": 21_600}
 MIN_INTERVAL, MAX_INTERVAL = 10, 86_400
 # A stalled export alerts the escalation contact when the ledger is this far ahead of it, or has waited this long.
 EXPORT_MAX_LAG_EVENTS = 100
@@ -116,6 +116,7 @@ MODULES = {
     "filing": "platform/channels/conversation_filing.py",
     "call_summary": "platform/channels/call_summary.py",
     "call_requests": "platform/channels/call_requests.py",
+    "studio_overlay": "platform/core/studio_overlay.py",
 }
 
 
@@ -304,8 +305,43 @@ class Worker:
         by = self.config["deployedBy"]
         if not by:
             return {"applied": False, "reason": "no-deployer-named"}
-        report = self._schedule_store().reconcile(definitions, by=by, now=now)
+        store = self._schedule_store()
+        report = store.reconcile(self._with_studio_edits(store, definitions), by=by, now=now)
         return {"applied": True, **{key: len(value) for key, value in report.items()}}
+
+    def _studio_schedule_edits(self) -> dict[str, Mapping[str, Any]]:
+        edits = _module("studio_overlay").read(self.data).get("schedules")
+        return {key: value for key, value in edits.items() if isinstance(key, str) and isinstance(value, Mapping)} if isinstance(edits, Mapping) else {}
+
+    def _with_studio_edits(self, store: Any, definitions: Any) -> list[Any]:
+        """The workspace's schedule definitions with the owner's approved cron/budget edits, so a reconcile does not undo them."""
+        edits = self._studio_schedule_edits()
+        if not edits:
+            return list(definitions)
+        by_name = {entry.get("managedBy"): entry["id"] for entry in store.list() if entry.get("managedBy")}
+        merged = []
+        for definition in definitions:
+            edit = edits.get(by_name.get(definition.get("name") if isinstance(definition, Mapping) else None), {})
+            if edit and isinstance(definition, Mapping) and definition.get("cron") is not None:
+                definition = {**definition, **{key: edit[key] for key in ("cron", "budget") if key in edit}}
+            merged.append(definition)
+        return merged
+
+    def run_changes(self, now: int) -> dict[str, Any]:
+        """Apply the schedule edits the owner approved in the Studio to the live schedules (``studio_overlay.py`` for what applies live)."""
+        edits = self._studio_schedule_edits()
+        if not edits:
+            return {"edits": 0}
+        store = self._schedule_store()
+        applied = skipped = 0
+        for schedule_id, edit in sorted(edits.items()):
+            try:
+                changed = store.edit(schedule_id, by=IDENTITY, cron=edit.get("cron"), budget=edit.get("budget"), now=now)
+            except _module("schedules").ScheduleError:
+                skipped += 1  # a schedule that is gone, or values the store refuses, stay in the overlay and the workspace patch
+                continue
+            applied += 1 if changed else 0
+        return {"edits": len(edits), "applied": applied, "notApplied": skipped}
 
     def _scheduler(self):
         return _module("scheduler").Scheduler(
@@ -805,7 +841,7 @@ class Worker:
 
     def jobs(self) -> list[tuple[str, Callable[[int], dict[str, Any]]]]:
         return [
-            ("scheduler", self.run_scheduler), ("mailbox", self.run_mailbox), ("crm-sync", self.run_crm_sync), ("calls", self.run_calls), ("events", self.run_events), ("knowledge", self.run_knowledge),
+            ("scheduler", self.run_scheduler), ("mailbox", self.run_mailbox), ("crm-sync", self.run_crm_sync), ("calls", self.run_calls), ("changes", self.run_changes), ("events", self.run_events), ("knowledge", self.run_knowledge),
             ("notices", self.deliver_notices), ("retention", self.run_retention), ("usage", self.run_usage),
             ("export", self.run_export),
         ]
