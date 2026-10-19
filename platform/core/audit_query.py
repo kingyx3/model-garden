@@ -185,7 +185,7 @@ def query(events: Iterable[Mapping[str, Any]], criteria: Filter) -> list[dict[st
 
 _TASK_KEYS = ("taskId", "fromTask", "toTask")
 _STEP_DETAILS = ("fromTask", "toTask", "fromAgent", "toAgent", "taskId", "step", "outcome", "assignee", "late", "exceeded", "reason", "depth", "chain",
-                 "id", "kind", "digest", "policy", "branches", "concurrency", "succeeded", "failed", "cancelled", "refused", "budgetExhausted")
+                 "id", "kind", "digest", "reportLength", "policy", "branches", "concurrency", "succeeded", "failed", "cancelled", "refused", "budgetExhausted")
 
 
 def _names_task(event: Mapping[str, Any], task: str) -> bool:
