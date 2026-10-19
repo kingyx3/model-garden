@@ -37,7 +37,9 @@ The governed sidecar serves one compiled Agent. A team keeps that property and a
 - **An Agent prepares Studio changes, a person approves them.** ``propose_change`` lets an Agent propose a Studio change for the
   originating person of its task, with exactly that person's authority (never an ``access`` change), one step of the task's budget, and
   the Agent and task recorded on the change and in the ledger. Approving, rejecting and rolling back stay with the owner, and once
-  approved the live runtime takes up what it safely can (``platform/core/studio_overlay.py``).
+  approved the live runtime takes up what it safely can (``platform/core/studio_overlay.py``). With a ``change_store`` the Agent's
+  sidecar also offers the model a ``studio_propose_change`` Tool; the person and task come from the attested task, never from the
+  model's arguments.
 
 Nothing here holds a credential or reaches the network. The task state lives in one host process: sidecars launched from
 ``launch_plan`` do not consult it. Not covered: a model-callable delegation Tool, the runtime-native handoff/A2A decision,
@@ -123,6 +125,7 @@ class TeamRuntime:
         runtime_kwargs: Mapping[str, Any] | None = None,
         notify: Callable[[dict[str, Any]], Any] | None = None,
         max_parallel: int = DEFAULT_MAX_PARALLEL,
+        change_store: Callable[[str], Any] | None = None,
     ) -> None:
         if not isinstance(max_parallel, int) or isinstance(max_parallel, bool) or not 1 <= max_parallel <= MAX_PARALLEL:
             raise TeamError(f"max_parallel must be 1 to {MAX_PARALLEL}")
@@ -151,6 +154,7 @@ class TeamRuntime:
         self._lock = threading.Lock()
         self._notify = notify
         self.max_parallel = max_parallel
+        self._change_store = change_store  # Agent name -> the Studio ChangeStore for that Agent; without it no Agent can prepare changes
         self._parallel = threading.BoundedSemaphore(max_parallel)  # the environment-wide limit, shared by every fan-out
         self._task_lock = threading.RLock()
         self._trees: dict[str, Any] = {}
@@ -197,7 +201,9 @@ class TeamRuntime:
                 directory = self.agent_dir(agent)
                 runtime = _governed().GovernedToolRuntime(
                     directory / "desired-state.json", self.audit_path, directory / "approvals",
-                    environ=self._agent_environ(agent), task_resolver=lambda name=agent: self._task_for(name), **self._runtime_kwargs,
+                    environ=self._agent_environ(agent), task_resolver=lambda name=agent: self._task_for(name),
+                    **({"change_proposer": lambda kind, params, name=agent: self._propose_from_task(name, kind, params)} if self._change_store else {}),
+                    **self._runtime_kwargs,
                 )
                 self._runtimes[agent] = runtime
             return runtime
@@ -457,6 +463,13 @@ class TeamRuntime:
         except TASK_BUDGET.BudgetExhausted as exc:
             raise PermissionError("task-budget-exhausted") from exc
         return store.propose(kind, params, by=envelope["originatingPrincipal"], via={"agent": agent, "taskId": task_id})
+
+    def _propose_from_task(self, agent: str, kind: str, params: Mapping[str, Any]) -> dict[str, Any]:
+        """The model-callable path: the task the host attested for this call decides who it is for; the model never names a person or Agent."""
+        current = _TASK.get()
+        if current is None or current[0] != agent:
+            raise PermissionError("not-working-for-a-person")
+        return self.propose_change(current[1], self._change_store(agent), kind, params)
 
     def charge(self, envelope: Mapping[str, Any], **used: int) -> dict[str, int]:
         """Charge usage the host measured (``tokens``, ``costCents``, ``steps``) to a task; returns what it has left.

@@ -147,6 +147,7 @@ class GovernedToolRuntime:
         upstream_secret_resolver=None,
         upstream_rest_transport=None,
         task_resolver=None,
+        change_proposer=None,
         clock=time.time,
     ) -> None:
         self._base_state = _load_json_object(desired_state_path, "compiled desired state")
@@ -179,6 +180,9 @@ class GovernedToolRuntime:
         # A team runtime, never the model, supplies the delegated task this call runs under (see platform/runtime/team_runtime.py):
         # ``{"governance": {...taskId, originatingPrincipal, delegationChain}, "authority": [Tools], "halt": reason or None, "charge": callable}``.
         self.task_resolver = task_resolver
+        # A team runtime, never the model, supplies the way to propose a Studio change for the person whose task this is; without it the
+        # ``studio_propose_change`` Tool is not offered. ``callable(kind, params) -> change``; it applies that person's own authority.
+        self.change_proposer = change_proposer
         self.read_policy = GOVERN.parse_read_policy(self.environ.get("MODEL_GARDEN_READ_AUDIT"))
         digest = hashlib.sha256(GOVERN._canonical_json(self.desired_state).encode("utf-8")).hexdigest()
         self.agent_version = f"sha256:{digest[:16]}"
@@ -871,6 +875,26 @@ class GovernedToolRuntime:
             return MEMORY.check_scope(f"conversation:{conversation_id}")
         raise ValueError("memory scope must be client, agent or conversation")
 
+    def studio_propose_change(self, *, kind: str, params: dict[str, Any]) -> dict[str, Any]:
+        """Prepare a Studio change for the person whose task this is. Nothing changes until the owner approves it in the Studio."""
+        if self.change_proposer is None:
+            raise ValueError("this coworker cannot prepare Studio changes here")
+        if not isinstance(kind, str) or not isinstance(params, dict):
+            raise ValueError("kind must be text and params an object")
+        try:
+            change = self.change_proposer(kind, params)
+        except PermissionError as exc:
+            return {"status": "refused", "reason": str(exc)[:200] or "not allowed",
+                    "next": "Tell the person plainly that you cannot prepare this change for them; the owner can make it in the Studio."}
+        except ValueError as exc:
+            return {"status": "invalid", "reason": str(exc)[:300]}
+        return {
+            "status": "proposed", "changeId": change["id"], "kind": change["kind"], "summary": change["summary"], "digest": change["digest"],
+            "diff": [{k: item.get(k) for k in ("field", "before", "after")} for item in change["diff"]],
+            "evidence": [{"label": item["label"], "met": item["met"], "detail": item.get("detail", "")} for item in change["evidence"]],
+            "next": "Nothing has changed. Tell the person the owner can review and approve this exact change in the Studio, and which evidence is not met yet.",
+        }
+
     def memory_remember(self, *, text: str, scope: str = "conversation", classification: str = "internal") -> dict[str, Any]:
         """Remember a user-supplied fact only in a scope attested by the channel, with an audit digest."""
         identity, agent, _ = self._memory_caller()
@@ -1129,6 +1153,19 @@ def build_server(runtime: GovernedToolRuntime) -> MCPServer:
         """
         return runtime.crm_read(query=query, object_id=object_id, limit=limit, justification=justification)
 
+
+    if runtime.change_proposer is not None:
+        @mcp.tool(name="studio_propose_change")
+        def studio_propose_change(kind: str, params: dict[str, Any]) -> dict[str, Any]:
+            """Prepare a change to this coworker for the person you are working for, for the owner to approve in the Studio.
+
+            kind is one of skill (params: skill, enabled), skillset (skillset, enabled), schedule (schedule, cron and/or budget),
+            policy (action add, replace or remove, rule or ruleId), knowledge (promote reviewed business knowledge) or new-coworker
+            (name, template). It is proposed as that person, so it works only if they may propose changes; you can never change who may
+            do what. It only prepares the change: nothing happens until the owner approves it. Say what you prepared and what the owner
+            will see, and never say it has been applied.
+            """
+            return runtime.studio_propose_change(kind=kind, params=params)
 
     @mcp.tool(name="memory_remember")
     def memory_remember(text: str, scope: str = "conversation", classification: str = "internal") -> dict[str, Any]:
