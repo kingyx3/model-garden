@@ -34,6 +34,11 @@ The governed sidecar serves one compiled Agent. A team keeps that property and a
   per environment (``max_parallel``), the fan-out, each branch's outcome and spend, and the join are each ledgered against the
   task, so the task timeline shows the cost and actions of every branch. Error text from a branch is never recorded: its type only.
 
+- **An Agent prepares Studio changes, a person approves them.** ``propose_change`` lets an Agent propose a Studio change for the
+  originating person of its task, with exactly that person's authority (never an ``access`` change), one step of the task's budget, and
+  the Agent and task recorded on the change and in the ledger. Approving, rejecting and rolling back stay with the owner, and once
+  approved the live runtime takes up what it safely can (``platform/core/studio_overlay.py``).
+
 Nothing here holds a credential or reaches the network. The task state lives in one host process: sidecars launched from
 ``launch_plan`` do not consult it. Not covered: a model-callable delegation Tool, the runtime-native handoff/A2A decision,
 Docker/Hermes deployment of several Agents, and any live evidence.
@@ -424,6 +429,34 @@ class TeamRuntime:
             })
         self._ledger_action("task.join", by, {"taskId": parent_id, "policy": policy, **counts})
         return {"policy": policy, "concurrency": concurrency, "complete": counts["succeeded"] == len(plan), "branches": results}
+
+    def propose_change(self, envelope: Mapping[str, Any], store: Any, kind: str, params: Mapping[str, Any]) -> dict[str, Any]:
+        """Let an Agent prepare a Studio change for the person whose task it is; only a person can approve it.
+
+        The change is proposed **as the task's originating principal**, so it succeeds only if that person could have proposed it
+        themselves (the owner, or a colleague holding ``author``), and never for an ``access`` change. It takes one ``steps`` from the
+        task's budget like any governed call, and is refused once the task is finished, halted or past its deadline. The change
+        records which Agent and task prepared it (``proposedVia``) and the ledger event carries the same. Approving, rejecting and rolling
+        back stay with the owner in the Studio: no method here approves, and an Agent identity is not the owner.
+        """
+        agent = envelope.get("agent")
+        self._check_envelope(agent, envelope)
+        task_id = envelope["taskId"]
+        with self._task_lock:
+            state = self._tree(task_id)[1].state(task_id)
+        deadline = envelope.get("deadline")
+        reason = ("task-deadline-passed" if deadline is not None and int(self.now()) >= deadline
+                  else {"halted": "task-budget-exhausted", "finished": "task-finished"}.get(state))
+        if reason is not None:
+            self._ledger_action("studio.change-refused", f"agent:{agent}", {"taskId": task_id, "kind": kind, "reason": reason})
+            raise PermissionError(reason)
+        if getattr(store, "agent", agent) != agent:  # a task changes the Agent it runs as, never a teammate's configuration
+            raise PermissionError("change-for-another-agent")
+        try:
+            self.charge({"taskId": task_id}, steps=1)
+        except TASK_BUDGET.BudgetExhausted as exc:
+            raise PermissionError("task-budget-exhausted") from exc
+        return store.propose(kind, params, by=envelope["originatingPrincipal"], via={"agent": agent, "taskId": task_id})
 
     def charge(self, envelope: Mapping[str, Any], **used: int) -> dict[str, int]:
         """Charge usage the host measured (``tokens``, ``costCents``, ``steps``) to a task; returns what it has left.

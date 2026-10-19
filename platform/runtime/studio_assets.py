@@ -81,7 +81,7 @@ function changes(list){var box=$('changes');clear(box);if(!list.length)box.appen
 list.forEach(function(c){var card=el('div','card');card.appendChild(el('span','state',c.state+' '));card.appendChild(el('span','',c.summary+' ('+c.id+')'));
 var b=el('button','','Review');b.onclick=function(){load(c.id)};card.appendChild(b);box.appendChild(card)})}
 function detail(c){var d=$('detail');clear(d);d.hidden=false;d.className='card';d.appendChild(el('h2','',c.summary));
-d.appendChild(el('p','','Request '+c.id+' ('+c.state+'), proposed by '+c.proposedBy+' at '+c.proposedAt+'. Digest '+c.digest));
+d.appendChild(el('p','','Request '+c.id+' ('+c.state+'), proposed by '+c.proposedBy+(c.proposedVia?' through the '+c.proposedVia.agent+' coworker (task '+c.proposedVia.taskId+')':'')+' at '+c.proposedAt+'. Digest '+c.digest));
 d.appendChild(el('h3','','Exact change'));c.diff.forEach(function(x){d.appendChild(el('pre','',x.field+'\\n  before: '+JSON.stringify(x.before)+'\\n  after:  '+JSON.stringify(x.after))})});
 if(c.pack){d.appendChild(el('h3','','Onboarding pack the new coworker starts with'));d.appendChild(el('pre','',c.pack))}
 d.appendChild(el('h3','','Evidence checklist (checked again when you approve)'));var ul=el('ul');

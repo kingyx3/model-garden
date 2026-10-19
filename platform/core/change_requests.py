@@ -206,7 +206,7 @@ class ChangeStore:
 
     @staticmethod
     def summary(document: Mapping[str, Any]) -> dict[str, Any]:
-        return {key: document.get(key) for key in ("id", "kind", "agent", "state", "summary", "proposedBy", "proposedAt", "digest")}
+        return {key: document.get(key) for key in ("id", "kind", "agent", "state", "summary", "proposedBy", "proposedVia", "proposedAt", "digest")}
 
     # -- the deployed coworker ----------------------------------------------------------------------------
 
@@ -692,7 +692,25 @@ class ChangeStore:
                 return by.strip()
             raise
 
-    def propose(self, kind: str, params: Mapping[str, Any], *, by: str) -> dict[str, Any]:
+    @staticmethod
+    def _via(via: Mapping[str, Any] | None) -> dict[str, str] | None:
+        """Who acted for the person: the Agent and task, recorded beside the change and never part of what the owner approves."""
+        if via is None:
+            return None
+        agent, task = (via.get("agent"), via.get("taskId")) if isinstance(via, Mapping) else (None, None)
+        if not (isinstance(agent, str) and _NAME.match(agent) and isinstance(task, str) and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,63}", task)):
+            raise ChangeError("a change made for a person through an Agent names that Agent and its task")
+        return {"agent": agent, "taskId": task}
+
+    def propose(self, kind: str, params: Mapping[str, Any], *, by: str, via: Mapping[str, Any] | None = None) -> dict[str, Any]:
+        """Propose a change as ``by``. ``via`` names the Agent task that prepared it for that person (see ``TeamRuntime.propose_change``).
+
+        The person's own authority decides (owner, or an ``author`` for any kind but ``access``); an Agent acting for them can do no more,
+        and never proposes an ``access`` change.
+        """
+        acting = self._via(via)
+        if acting is not None and kind == "access":
+            raise ChangeRefused(["an-agent-cannot-change-roles"])
         who = self._require_author(by, kind)
         now = int(self.clock())
         with self._locked():
@@ -705,6 +723,7 @@ class ChangeStore:
                 "proposedBy": who, "proposedAt": _iso(now), "proposedEpoch": now, "state": "proposed", "baseVersion": overlay["version"],
                 "params": draft["params"], "diff": draft["diff"], "summary": draft["summary"],
                 **({"pack": draft["pack"]} if "pack" in draft else {}),
+                **({"proposedVia": acting} if acting else {}),
             }
             change["digest"] = sha({k: change[k] for k in ("kind", "agent", "owner", "params", "diff", "baseVersion")})
             change["evidence"] = self.evidence(change)
@@ -712,8 +731,9 @@ class ChangeStore:
             if subject is not None:
                 change["signoffSubject"] = subject
                 change["signoffDigest"] = _mod("policy").rule_digest(subject)
-            change["history"] = [{"at": _iso(now), "by": who, "action": "proposed"}]
-            self._record("studio.change-proposed", who, {"id": change["id"], "kind": kind, "agent": self.agent, "digest": change["digest"]})
+            change["history"] = [{"at": _iso(now), "by": who, "action": "proposed", **({"via": acting} if acting else {})}]
+            self._record("studio.change-proposed", who, {"id": change["id"], "kind": kind, "agent": self.agent, "digest": change["digest"],
+                                                          **({"via": acting, "taskId": acting["taskId"]} if acting else {})})
             self._write(self._path(change["id"]), change)
         return change
 
