@@ -184,7 +184,8 @@ def query(events: Iterable[Mapping[str, Any]], criteria: Filter) -> list[dict[st
 # -- timeline ---------------------------------------------------------------------------------------------
 
 _TASK_KEYS = ("taskId", "fromTask", "toTask")
-_STEP_DETAILS = ("fromTask", "toTask", "fromAgent", "toAgent", "taskId", "step", "outcome", "assignee", "late", "exceeded", "reason", "depth", "chain")
+_STEP_DETAILS = ("fromTask", "toTask", "fromAgent", "toAgent", "taskId", "step", "outcome", "assignee", "late", "exceeded", "reason", "depth", "chain",
+                 "policy", "branches", "concurrency", "succeeded", "failed", "cancelled", "refused", "budgetExhausted")
 
 
 def _names_task(event: Mapping[str, Any], task: str) -> bool:
