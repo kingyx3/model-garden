@@ -12,7 +12,9 @@ holds no credential and sends nothing itself: it is handed the raw request and t
   text changes it. An unmapped sender is a public, read-only principal.
 - **Routing in a fixed order.** A hand-off reply (``done <ref>``) goes to ``HandoffReplies`` and closes the hand-off under the
   channel identity; a schedule command (``schedule create ...``) goes to ``schedule_commands`` for a mapped person only; ``inbox``
-  shows what is waiting (see ``platform/core/inbox.py``) to a mapped person in a direct conversation only; anything
+  shows what is waiting (see ``platform/core/inbox.py``) to a mapped person in a direct conversation only; ``assign <agent>: <goal>``
+  hands a task to a team Agent under the speaker's own identity (a mapped person in a direct conversation only; the injected
+  ``assign`` callable applies the delegation rules and budget, and the ledger notes who assigned to whom, never the goal); anything
   else is a question for the coworker, answered by the injected ``respond`` callable. Hand-off replies are accepted only in a
   direct conversation.
 - **Approvals.** A verified button click goes to ``decide_from_channel``; the responder must be a mapped approver. The reply to
@@ -42,7 +44,16 @@ MAX_SEEN = 5000
 MAX_REPLY_CHARS = 3500
 MAX_ATTACHMENTS = 3
 INBOX_COMMAND = re.compile(r"^/?inbox$", re.IGNORECASE)
+ASSIGN_COMMAND = re.compile(r"^/?(?:assign|delegate)\s+(?:to\s+)?([a-z0-9][a-z0-9-]{0,62})\s*(?::|\s-\s)\s*(.+)$", re.IGNORECASE | re.DOTALL)
 Audit = Callable[[str, str, dict[str, Any]], Any]
+
+
+def parse_assign(words: str) -> tuple[str, str] | None:
+    """``(agent, goal)`` from ``assign <agent>: <goal>`` (or ``delegate``), else None."""
+    found = ASSIGN_COMMAND.match(words.strip())
+    if found is None or not found.group(2).strip():
+        return None
+    return found.group(1).lower(), found.group(2).strip()
 
 
 def _sibling(name: str, relative: str):
@@ -88,10 +99,12 @@ class ChannelIngress:
         audit: Audit | None = None,
         deliverables: Callable[[Any, Any, str], Any] | None = None,
         inbox: Callable[[Any, Any], str] | None = None,
+        assign: Callable[[str, str, str], str] | None = None,
         observed: Callable[[Any], None] | None = None,
     ) -> None:
         self._adapters = dict(adapters)
         self._inbox = inbox
+        self._assign = assign  # (person, agent, goal) -> reply; raises ValueError with a safe message when refused
         self._observed = observed  # told once about each fresh conversational message (not a command or a redelivery), e.g. to raise an event
         self._deliverables = deliverables
         self._directory = directory
@@ -197,6 +210,19 @@ class ChannelIngress:
                     reply = "I can show what is waiting only to a team member in a direct message."
                 self._send(adapter, inbound, reply)
                 return "inbox-command"
+            parsed = parse_assign(text) if self._assign is not None else None
+            if parsed is not None:
+                agent, goal = parsed
+                if principal.mapped and self._is_direct(inbound):
+                    try:
+                        reply = self._assign(principal.identity, agent, goal)
+                        self._note("channel.task-assigned", principal.identity, {"channel": inbound.channel, "agent": agent, "goalLength": len(goal)})
+                    except ValueError as exc:  # a refusal names the rule, never the goal
+                        reply = f"I could not hand that over: {exc}. Nothing was assigned."
+                else:  # the same words for a stranger and for a shared channel
+                    reply = "I can hand a task to an Agent only for a team member in a direct message."
+                self._send(adapter, inbound, reply)
+                return "assign-command"
             if self._observed is not None:
                 try:
                     self._observed(inbound)
