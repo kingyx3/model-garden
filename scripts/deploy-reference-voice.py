@@ -128,6 +128,24 @@ def _context(root: pathlib.Path) -> pathlib.Path:
     return context
 
 
+VOICE_DATA_MOUNT = "/opt/voice"
+
+
+def worker_overlay(base: dict[str, Any]) -> dict[str, Any] | None:
+    """The governed worker's share of the voice overlay: the voice container's data volume, read-only, and where its transcripts are.
+
+    Transcripts live in the voice container's own volume, which the worker could not see. With this mount the worker files each
+    finished call (summary, CRM, timeline) itself; it can read the store and never write to it. ``None`` when the base has no worker.
+    """
+    services = base.get("services") if isinstance(base, dict) else None
+    if not isinstance(services, dict) or "governed-worker" not in services:
+        return None
+    return {
+        "environment": {"MODEL_GARDEN_VOICE_TRANSCRIPTS": f"{VOICE_DATA_MOUNT}/transcripts.jsonl"},
+        "volumes": [f"voice-data:{VOICE_DATA_MOUNT}:ro"],
+    }
+
+
 def apply(binding_path: pathlib.Path, bundle_dir: pathlib.Path, project: str, secrets_json: str | None, timeout: int) -> str:
     binding = _load_json(binding_path)
     voice = _voice(binding)
@@ -199,6 +217,9 @@ def apply(binding_path: pathlib.Path, bundle_dir: pathlib.Path, project: str, se
         },
         "volumes": {"voice-data": {}},
     }
+    shared = worker_overlay(yaml.safe_load(base.read_text(encoding="utf-8")))
+    if shared is not None:
+        document["services"]["governed-worker"] = shared
     overlay.write_text(yaml.safe_dump(document, sort_keys=False), encoding="utf-8")
 
     runtime_env = os.environ.copy()

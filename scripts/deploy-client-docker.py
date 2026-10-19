@@ -104,6 +104,7 @@ RUNTIME_SOURCE_PATHS = (
     pathlib.Path("platform/channels/conversation_recorder.py"),
     pathlib.Path("platform/core/audit_query.py"),
     pathlib.Path("platform/channels/call_summary.py"),
+    pathlib.Path("platform/channels/call_requests.py"),
     pathlib.Path("platform/channels/call_transcript.py"),
     pathlib.Path("platform/core/conversations.py"),
     pathlib.Path("platform/channels/support_mailbox.py"),

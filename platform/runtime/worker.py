@@ -26,6 +26,12 @@ small, bounded amount of work:
 - **knowledge**: tells the escalation contact (else the mailbox owner) once when an approved business-rules source is due for review
   within two weeks and once when it has passed its ``reviewBy`` date (after which the coworker stops answering from it), naming only
   the source and the date.
+- **calls** (when the voice container's transcript volume is mounted, ``MODEL_GARDEN_VOICE_TRANSCRIPTS``): files each finished phone call
+  to the bound contact log through the governed ``crm.log-interaction`` boundary as ``runtime:conversation-filing`` (always the
+  ``unmatched`` queue: a caller's number is not a verified identity), after a post-call summary written by the coworker from the
+  already-redacted turns (else a deterministic fallback), puts the call on the cross-channel timeline with the ledger request ids of
+  the Tool calls the coworker made during it (``call_requests.py``, attributed by time and labelled so), and ledgers each
+  ``TranscriptWriteFailed`` once. The volume is read-only here; the worker never writes to the transcript store.
 - **retention**: purges expired artifacts and mail past the retention period.
 - **usage**: meters model usage from the Hermes session stores mounted read-only (``MODEL_GARDEN_USAGE_SOURCES``) and ledgers
   what changed since the last pass as ``usage.recorded`` (``platform/metering/usage.py``): tokens, API calls and cost per session,
@@ -59,7 +65,7 @@ from collections.abc import Callable, Mapping
 from typing import Any
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
-DEFAULT_INTERVALS = {"scheduler": 60, "mailbox": 30, "notices": 60, "retention": 3600, "usage": 300, "export": 300, "crm-sync": 120, "events": 30, "knowledge": 21_600}
+DEFAULT_INTERVALS = {"scheduler": 60, "mailbox": 30, "notices": 60, "retention": 3600, "usage": 300, "export": 300, "crm-sync": 120, "calls": 120, "events": 30, "knowledge": 21_600}
 MIN_INTERVAL, MAX_INTERVAL = 10, 86_400
 # A stalled export alerts the escalation contact when the ledger is this far ahead of it, or has waited this long.
 EXPORT_MAX_LAG_EVENTS = 100
@@ -67,6 +73,7 @@ EXPORT_MAX_STALE_SECONDS = 6 * 3600
 MAX_QUEUE = 2_000
 MAX_EVENT_BATCH = 50
 IDENTITY = "runtime:worker"
+CALL_FILING_IDENTITY = "runtime:conversation-filing"
 
 
 def _load(name: str, relative: str):
@@ -105,6 +112,10 @@ MODULES = {
     "outbox": "platform/core/event_outbox.py",
     "knowledge": "platform/core/knowledge.py",
     "crm_filing": "platform/core/crm_filing.py",
+    "audit_query": "platform/core/audit_query.py",
+    "filing": "platform/channels/conversation_filing.py",
+    "call_summary": "platform/channels/call_summary.py",
+    "call_requests": "platform/channels/call_requests.py",
 }
 
 
@@ -244,6 +255,7 @@ class Worker:
         clock: Callable[[], float] = time.time,
         export_sink: Any | None = None,
         usage_sources: Mapping[str, pathlib.Path] | None = None,
+        voice_transcripts: pathlib.Path | None = None,
     ) -> None:
         self.desired_state_path = pathlib.Path(desired_state_path)
         self.desired_state = json.loads(self.desired_state_path.read_text(encoding="utf-8"))
@@ -256,6 +268,7 @@ class Worker:
         self.clock = clock
         self.export_sink = export_sink
         self.usage_sources = dict(usage_sources or {})
+        self.voice_transcripts = pathlib.Path(voice_transcripts) if voice_transcripts else None
         self.queue = NoticeQueue(self.data / "worker")
         self.last_run: dict[str, float] = {}
         self.heartbeat = self.data / "worker" / "heartbeat.json"
@@ -382,9 +395,9 @@ class Worker:
         self._save_events_state(state)
         return {"chat": chat, "tickets": tickets_fired}
 
-    def _sidecar(self):
+    def _sidecar(self, identity: str = "runtime:support-mailbox"):
         environ = {
-            **os.environ, "MODEL_GARDEN_INITIATING_IDENTITY": "runtime:support-mailbox",
+            **os.environ, "MODEL_GARDEN_INITIATING_IDENTITY": identity,
             "MODEL_GARDEN_CAPABILITY_MANIFEST": os.environ.get("MODEL_GARDEN_CAPABILITY_MANIFEST", ""),
         }
         return _module("sidecar").GovernedToolRuntime(
@@ -454,6 +467,28 @@ class Worker:
             return holders[0] if len(holders) == 1 else "unmatched"
 
         return contact_for
+
+    def run_calls(self, now: int) -> dict[str, Any]:
+        """File finished phone calls from the voice container's transcript volume (mounted read-only); see the module docstring."""
+        path = self.voice_transcripts
+        if path is None or not path.is_file():
+            return {"skipped": "no-voice-transcripts"}
+        sidecar = self._sidecar(CALL_FILING_IDENTITY)
+        try:
+            store = sidecar.crm_store()
+        except PermissionError:
+            return {"skipped": "no-crm-bound"}
+        filing = _module("filing")
+        records = filing.read_call_transcripts(path)
+        try:
+            records = _module("call_requests").attach_request_ids(records, _module("audit_query").read_ledger(self.audit_path))
+        except ValueError:  # an unreadable ledger only means the calls are filed without request ids
+            pass
+        summarizer = _module("call_summary").CallSummarizer(self.coworker, cache_path=self.data / "call-summaries.json")
+        totals = filing.file_call_transcripts(sidecar, store, records, recorder=self._conversation_recorder(), summarizer=summarizer)
+        ledgered = filing.ledger_transcript_failures(_module("govern"), self.audit_path, filing.read_transcript_failures(path), performed_by=CALL_FILING_IDENTITY)
+        totals["notFiled"] = totals.pop("failed")  # a "failed" key would read as the job itself failing
+        return {"records": len(records), **totals, "writeFailures": ledgered, "summaries": summarizer.counts}
 
     def _told_once(self, kind: str, reference: str) -> bool:
         """True the first time this ``kind`` and ``reference`` is seen and remembers it, so a condition that lasts is announced once."""
@@ -770,7 +805,7 @@ class Worker:
 
     def jobs(self) -> list[tuple[str, Callable[[int], dict[str, Any]]]]:
         return [
-            ("scheduler", self.run_scheduler), ("mailbox", self.run_mailbox), ("crm-sync", self.run_crm_sync), ("events", self.run_events), ("knowledge", self.run_knowledge),
+            ("scheduler", self.run_scheduler), ("mailbox", self.run_mailbox), ("crm-sync", self.run_crm_sync), ("calls", self.run_calls), ("events", self.run_events), ("knowledge", self.run_knowledge),
             ("notices", self.deliver_notices), ("retention", self.run_retention), ("usage", self.run_usage),
             ("export", self.run_export),
         ]
@@ -833,7 +868,9 @@ def build(args: argparse.Namespace, environ: Mapping[str, str]) -> Worker:
     if environ.get("MODEL_GARDEN_SLACK_BOT_TOKEN"):  # notices to a person's Slack direct-message channel (see the channel gateway)
         senders["slack"] = _module("transports").SlackTransport(environ["MODEL_GARDEN_SLACK_BOT_TOKEN"]).send_text
     usage_sources = _module("usage").parse_sources(environ.get("MODEL_GARDEN_USAGE_SOURCES", ""))
-    return Worker(args.desired_state, args.data_root, config, coworker=coworker, senders=senders, usage_sources=usage_sources)
+    voice = environ.get("MODEL_GARDEN_VOICE_TRANSCRIPTS", "").strip()
+    return Worker(args.desired_state, args.data_root, config, coworker=coworker, senders=senders, usage_sources=usage_sources,
+                  voice_transcripts=pathlib.Path(voice) if voice else None)
 
 
 def main(argv: list[str] | None = None) -> int:
