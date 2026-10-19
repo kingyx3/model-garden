@@ -847,3 +847,51 @@ class ExportAlertTests(Case):
         runtime.deliver_notices(T0 + 60)
         self.assertEqual(len(sent), 1)
         self.assertIn("cannot be trusted", sent[0][1])
+
+
+class UsageJobTests(Case):
+    """Model usage from the Hermes session stores is ledgered as counts, once per change, for the billing sync."""
+
+    def store(self, name="state.db"):
+        import sqlite3
+        path = self.root / name
+        connection = sqlite3.connect(path)
+        connection.execute("CREATE TABLE sessions (id TEXT PRIMARY KEY, source TEXT NOT NULL, model TEXT, title TEXT, "
+                           "input_tokens INTEGER DEFAULT 0, output_tokens INTEGER DEFAULT 0, api_call_count INTEGER DEFAULT 0)")
+        self.addCleanup(connection.close)
+        return path, connection
+
+    def test_usage_is_ledgered_once_per_change_and_skipped_without_sources(self):
+        self.assertEqual(self.make().run_usage(T0), {"skipped": "no-usage-sources"})
+        path, hermes = self.store()
+        hermes.execute("INSERT INTO sessions VALUES ('s1', 'slack', 'gpt-5.1', 'Card 4111 1111 1111 1111', 900, 100, 2)")
+        hermes.commit()
+        runtime = self.make()
+        runtime.usage_sources = {"conversations": path, "coworker": self.root / "not-started" / "state.db"}
+        self.assertEqual(runtime.run_usage(T0), {"conversations": {"recorded": 1}, "coworker": {"skipped": "no-store-yet"}})
+        self.assertEqual(runtime.run_usage(T0 + 300)["conversations"], {"recorded": 0})
+        recorded = [event for event in self.events() if event.get("action") == "usage.recorded"]
+        self.assertEqual(len(recorded), 1)
+        self.assertEqual(recorded[0]["performedBy"], "runtime:worker")
+        self.assertEqual(recorded[0]["details"]["usage"], {"tokens": 1000, "costCents": 0})
+        self.assertNotIn("4111 1111", json.dumps(recorded))
+        timeline = worker._load("model_garden_worker_audit_query", "platform/core/audit_query.py")
+        self.assertEqual(timeline._usage(recorded[0]), {"tokens": 1000, "costCents": 0})
+
+    def test_an_unreadable_store_fails_the_job_after_metering_the_others(self):
+        path, hermes = self.store()
+        hermes.execute("INSERT INTO sessions VALUES ('s1', 'slack', 'gpt-5.1', NULL, 10, 1, 1)")
+        hermes.commit()
+        broken = self.root / "broken.db"
+        broken.write_text("not a database", encoding="utf-8")
+        runtime = self.make()
+        runtime.usage_sources = {"conversations": path, "coworker": broken}
+        self.assertEqual(runtime._guard("usage", runtime.run_usage, T0), {"failed": "UsageError"})
+        self.assertEqual(len([event for event in self.events() if event.get("action") == "usage.recorded"]), 1)
+        failed = [event for event in self.events() if event.get("action") == "worker.job-failed"]
+        self.assertEqual(failed[-1]["details"], {"job": "usage", "error": "UsageError"})
+
+    def test_the_sources_come_from_the_environment(self):
+        args = type("Args", (), {"config": None, "desired_state": compiled(self.root), "data_root": self.data})()
+        built = worker.build(args, {"MODEL_GARDEN_USAGE_SOURCES": "conversations=/opt/hermes/conversations/state.db"})
+        self.assertEqual(built.usage_sources, {"conversations": pathlib.Path("/opt/hermes/conversations/state.db")})

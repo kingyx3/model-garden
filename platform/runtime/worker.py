@@ -27,6 +27,9 @@ small, bounded amount of work:
   within two weeks and once when it has passed its ``reviewBy`` date (after which the coworker stops answering from it), naming only
   the source and the date.
 - **retention**: purges expired artifacts and mail past the retention period.
+- **usage**: meters model usage from the Hermes session stores mounted read-only (``MODEL_GARDEN_USAGE_SOURCES``) and ledgers
+  what changed since the last pass as ``usage.recorded`` (``platform/metering/usage.py``): tokens, API calls and cost per session,
+  channel and model, counts only. The export carries them to the bucket, where the billing sync reads them for Lago.
 - **export** (when configured): copies new ledger records to the retention-locked bucket; a local ledger that no longer matches
   the export, or one falling behind because exporting fails, is alerted to ``escalateTo`` through the notices job
   (``export_monitor.py``): once when it starts, a reminder while it lasts, and once when it recovers.
@@ -56,7 +59,7 @@ from collections.abc import Callable, Mapping
 from typing import Any
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
-DEFAULT_INTERVALS = {"scheduler": 60, "mailbox": 30, "notices": 60, "retention": 3600, "export": 300, "crm-sync": 120, "events": 30, "knowledge": 21_600}
+DEFAULT_INTERVALS = {"scheduler": 60, "mailbox": 30, "notices": 60, "retention": 3600, "usage": 300, "export": 300, "crm-sync": 120, "events": 30, "knowledge": 21_600}
 MIN_INTERVAL, MAX_INTERVAL = 10, 86_400
 # A stalled export alerts the escalation contact when the ledger is this far ahead of it, or has waited this long.
 EXPORT_MAX_LAG_EVENTS = 100
@@ -96,6 +99,7 @@ MODULES = {
     "transports": "platform/channels/transports.py",
     "ledger": "platform/core/ledger_export.py",
     "export_monitor": "platform/core/export_monitor.py",
+    "usage": "platform/metering/usage.py",
     "approval": "scripts/runtime-approval.py",
     "crm_sync": "platform/core/crm_sync.py",
     "outbox": "platform/core/event_outbox.py",
@@ -239,6 +243,7 @@ class Worker:
         senders: Mapping[str, Callable[[str, str], Any]] | None = None,
         clock: Callable[[], float] = time.time,
         export_sink: Any | None = None,
+        usage_sources: Mapping[str, pathlib.Path] | None = None,
     ) -> None:
         self.desired_state_path = pathlib.Path(desired_state_path)
         self.desired_state = json.loads(self.desired_state_path.read_text(encoding="utf-8"))
@@ -250,6 +255,7 @@ class Worker:
         self.senders = dict(senders or {})
         self.clock = clock
         self.export_sink = export_sink
+        self.usage_sources = dict(usage_sources or {})
         self.queue = NoticeQueue(self.data / "worker")
         self.last_run: dict[str, float] = {}
         self.heartbeat = self.data / "worker" / "heartbeat.json"
@@ -652,6 +658,37 @@ class Worker:
                                "with no decision, so it was not done. Ask for it again if it is still needed.", reference=item["requestId"][:40])
         return len(removed)
 
+    def run_usage(self, now: int) -> dict[str, Any]:
+        """Ledger the model usage each Hermes session store gained since the last pass.
+
+        A store that does not exist yet (Hermes never started) is skipped. One that exists but cannot be read fails the job after
+        the other stores are metered, so it is ledgered and shows in the heartbeat; nothing is lost, the next readable pass meters
+        the whole difference.
+        """
+        if not self.usage_sources:
+            return {"skipped": "no-usage-sources"}
+        usage = _module("usage")
+        meter = usage.UsageMeter(self.data / "worker" / "usage-cursor.sqlite")
+        report: dict[str, Any] = {}
+        unreadable = []
+        for surface, path in sorted(self.usage_sources.items()):
+            if not path.is_file():
+                report[surface] = {"skipped": "no-store-yet"}
+                continue
+            try:
+                facts = meter.collect(surface, usage.read_sessions(path))
+            except usage.UsageError:
+                unreadable.append(surface)
+                continue
+            recorded = [fact for fact in facts if "usageId" in fact]
+            for fact in recorded:
+                self.audit("usage.recorded", IDENTITY, usage.ledger_details(fact, agent=self._agent()))
+            meter.commit(facts)
+            report[surface] = {"recorded": len(recorded)}
+        if unreadable:
+            raise usage.UsageError(f"usage store unreadable: {', '.join(unreadable)}")
+        return report
+
     def run_export(self, now: int) -> dict[str, Any]:
         """Copy new ledger records and a head manifest to the retention-locked bucket, as the separate export identity.
 
@@ -734,7 +771,8 @@ class Worker:
     def jobs(self) -> list[tuple[str, Callable[[int], dict[str, Any]]]]:
         return [
             ("scheduler", self.run_scheduler), ("mailbox", self.run_mailbox), ("crm-sync", self.run_crm_sync), ("events", self.run_events), ("knowledge", self.run_knowledge),
-            ("notices", self.deliver_notices), ("retention", self.run_retention), ("export", self.run_export),
+            ("notices", self.deliver_notices), ("retention", self.run_retention), ("usage", self.run_usage),
+            ("export", self.run_export),
         ]
 
     def tick(self) -> dict[str, Any]:
@@ -794,7 +832,8 @@ def build(args: argparse.Namespace, environ: Mapping[str, str]) -> Worker:
     senders: dict[str, Any] = {}
     if environ.get("MODEL_GARDEN_SLACK_BOT_TOKEN"):  # notices to a person's Slack direct-message channel (see the channel gateway)
         senders["slack"] = _module("transports").SlackTransport(environ["MODEL_GARDEN_SLACK_BOT_TOKEN"]).send_text
-    return Worker(args.desired_state, args.data_root, config, coworker=coworker, senders=senders)
+    usage_sources = _module("usage").parse_sources(environ.get("MODEL_GARDEN_USAGE_SOURCES", ""))
+    return Worker(args.desired_state, args.data_root, config, coworker=coworker, senders=senders, usage_sources=usage_sources)
 
 
 def main(argv: list[str] | None = None) -> int:

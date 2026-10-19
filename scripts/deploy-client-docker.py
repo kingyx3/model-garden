@@ -46,6 +46,7 @@ RUNTIME_SOURCE_PATHS = (
     pathlib.Path("platform/runtime/governed_mcp.py"),
     pathlib.Path("platform/runtime/worker.py"),
     pathlib.Path("platform/runtime/coworker_client.py"),
+    pathlib.Path("platform/metering/usage.py"),
     pathlib.Path("platform/runtime/gateway.py"),
     pathlib.Path("platform/runtime/upstream_http.py"),
     pathlib.Path("platform/channels/ingress.py"),
@@ -758,6 +759,9 @@ def _compose(
         }
         if coworker_api:
             environment["MODEL_GARDEN_COWORKER_API_KEY"] = "${MODEL_GARDEN_COWORKER_API_KEY:?MODEL_GARDEN_COWORKER_API_KEY is required}"
+        # Each Hermes state volume is mounted read-only so the worker can meter model usage from its session store.
+        usage_stores = {"conversations": "hermes-data", **({"coworker": "coworker-data"} if coworker_api else {})}
+        environment["MODEL_GARDEN_USAGE_SOURCES"] = ",".join(f"{name}=/opt/hermes/{name}/state.db" for name in usage_stores)
         depends = {}
         if built_in_tools:
             depends["governed-tools"] = {"condition": "service_healthy"}
@@ -768,7 +772,7 @@ def _compose(
             "restart": "unless-stopped",
             "entrypoint": ["python", "/opt/model-garden-platform/platform/runtime/worker.py"],
             "environment": environment,
-            "volumes": ["governance-data:/opt/data"],
+            "volumes": ["governance-data:/opt/data", *(f"{volume}:/opt/hermes/{name}:ro" for name, volume in usage_stores.items())],
             "healthcheck": {
                 "test": ["CMD", "python", "/opt/model-garden-platform/platform/runtime/worker.py", "--health"],
                 "interval": "30s", "timeout": "10s", "retries": 6, "start_period": "60s",

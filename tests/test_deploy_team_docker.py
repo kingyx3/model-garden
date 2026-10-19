@@ -127,7 +127,11 @@ class TeamDeployTests(unittest.TestCase):
         self.assertEqual(compose["services"]["front-desk-channel-gateway"]["ports"], ["127.0.0.1:8080:8080"])
         self.assertEqual({item["agent"]: item["channelGateway"] for item in metadata["agents"]}, {"front-desk": True, "billing": False})
         self.assertIn("billing-governed-worker", compose["services"])
-        self.assertEqual(compose["services"]["billing-governed-worker"]["volumes"], ["billing-governance-data:/opt/data"])
+        # Each Agent's worker meters only that Agent's own Hermes stores, mounted read-only.
+        worker_volumes = compose["services"]["billing-governed-worker"]["volumes"]
+        self.assertEqual(worker_volumes, ["billing-governance-data:/opt/data", "billing-hermes-data:/opt/hermes/conversations:ro",
+                                          "billing-coworker-data:/opt/hermes/coworker:ro"])
+        self.assertTrue({volume.split(":")[0] for volume in worker_volumes} <= set(compose["volumes"]))
         with self.assertRaisesRegex(ValueError, "both publish host port"):
             self.render(profiles, self.binding(worker=WORKER, gateway=GATEWAY), name="shared")
 

@@ -137,7 +137,7 @@ Keyless cloud deployment is the only supported deployment path; there is no self
 
 ## Client/platform ownership boundary
 
-Platform-owned here: contracts, compiler, Hermes adapter, governed actions, reusable Skills, provider-neutral Tool governance and channel adapters, keyless cloud bootstrap, Docker target adapter, thin Lago usage adapter, operator helpers and shared CI.
+Platform-owned here: contracts, compiler, Hermes adapter, governed actions, reusable Skills, provider-neutral Tool governance and channel adapters, keyless cloud bootstrap, Docker target adapter, usage metering and the Lago billing sync, operator helpers and shared CI.
 
 Client-specific desired state in the separate private workspace: `modelgarden.yaml`, `platform.lock.yaml`, `agents/`, genuinely client-specific `skills/`, Knowledge references, `evals/`, and environment-specific non-secret configuration.
 

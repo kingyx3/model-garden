@@ -95,23 +95,58 @@ class LagoMeteringTests(unittest.TestCase):
                 properties={"transcript": "customer content"},
             )
 
-    def test_client_posts_only_usage_facts_to_lago_event_endpoint(self):
-        transport = FakeTransport()
+    def test_client_posts_usage_facts_in_batches_to_the_lago_batch_endpoint(self):
+        transport = FakeTransport(response={"events": []})
         client = lago.LagoClient("runtime-lago-secret", base_url="https://lago.example", transport=transport)
-        response = client.send_usage(
-            transaction_id="voice_acme_0001",
-            external_subscription_id="acme-prod",
-            code="voice_minutes",
-            timestamp=1789466400,
-            properties={"client": "acme", "agent": "receptionist", "minutes": 4.5},
-        )
-        self.assertEqual(response["event"]["lago_id"], "evt-1")
+        events = [lago.build_usage_event(transaction_id=f"txn-{n}", external_subscription_id="acme-prod", code="tool_calls",
+                                         timestamp=1789466400, properties={"quantity": 1})["event"] for n in range(150)]
+        self.assertEqual(client.send_events(events), {"accepted": 150, "alreadyPresent": 0})
+        self.assertEqual([len(call[3]["events"]) for call in transport.calls], [100, 50])
         method, url, headers, payload = transport.calls[0]
-        self.assertEqual(method, "POST")
-        self.assertEqual(url, "https://lago.example/api/v1/events")
+        self.assertEqual((method, url), ("POST", "https://lago.example/api/v1/events/batch"))
         self.assertEqual(headers["Authorization"], "Bearer runtime-lago-secret")
         self.assertNotIn("runtime-lago-secret", repr(payload))
-        self.assertEqual(payload["event"]["properties"]["minutes"], 4.5)
+
+    def test_events_lago_already_holds_are_dropped_and_the_rest_resent(self):
+        calls = []
+
+        def transport(method, url, headers, payload):
+            calls.append([event["transaction_id"] for event in payload["events"]])
+            if len(calls) == 1:
+                return 422, {"code": "validation_errors", "error_details": {"1": {"transaction_id": ["value_already_exist"]}}}
+            return 200, {"events": []}
+
+        client = lago.LagoClient("k", base_url="http://127.0.0.1:3000", transport=transport)
+        events = [{"transaction_id": name} for name in ("a", "b", "c")]
+        self.assertEqual(client.send_events(events), {"accepted": 2, "alreadyPresent": 1})
+        self.assertEqual(calls, [["a", "b", "c"], ["a", "c"]])
+
+    def test_any_other_rejection_fails_without_dropping_events(self):
+        client = lago.LagoClient("k", base_url="http://127.0.0.1:3000", transport=FakeTransport(
+            status=422, response={"error_details": {"0": {"transaction_id": ["value_already_exist"]}, "1": {"code": ["value_is_mandatory"]}}}))
+        with self.assertRaisesRegex(RuntimeError, "HTTP 422"):
+            client.send_events([{"transaction_id": "a"}, {"transaction_id": "b"}])
+
+    def test_billable_metrics_are_created_then_left_alone_then_updated(self):
+        definition = {"code": "tool_calls", "name": "Governed Tool calls", "aggregation_type": "sum_agg", "field_name": "quantity",
+                      "recurring": False, "filters": [{"key": "agent", "values": ["receptionist"]}]}
+        stored: dict = {}
+
+        def transport(method, url, headers, payload):
+            if method == "GET":
+                return (200, {"billable_metric": stored["metric"]}) if stored else (404, {})
+            stored["metric"] = {**payload["billable_metric"], "lago_id": "bm-1",
+                                "filters": [{"key": f["key"], "values": list(reversed(f["values"]))} for f in payload["billable_metric"]["filters"]]}
+            return 200, {"billable_metric": stored["metric"]}
+
+        client = lago.LagoClient("k", base_url="http://127.0.0.1:3000", transport=transport)
+        self.assertEqual(client.ensure_metric(definition), "created")
+        self.assertEqual(client.ensure_metric(definition), "unchanged")
+        widened = {**definition, "filters": [{"key": "agent", "values": ["receptionist", "sales"]}]}
+        self.assertEqual(client.ensure_metric(widened), "updated")
+        broken = lago.LagoClient("k", base_url="http://127.0.0.1:3000", transport=FakeTransport(status=401, response={}))
+        with self.assertRaisesRegex(RuntimeError, "HTTP 401"):
+            broken.ensure_metric(definition)
 
     def test_adapter_does_not_compute_markup_or_invoice_amounts(self):
         payload = lago.build_usage_event(
@@ -135,9 +170,11 @@ class LagoMeteringTests(unittest.TestCase):
                 code="usage",
                 properties={"bad": object()},
             )
-        client = lago.LagoClient("secret", transport=FakeTransport(status=422, response={"error": "invalid"}))
+        client = lago.LagoClient("secret", base_url="https://lago.example", transport=FakeTransport(status=422, response={"error": "invalid"}))
         with self.assertRaisesRegex(RuntimeError, "HTTP 422"):
-            client.send_usage(transaction_id="txn", external_subscription_id="acme", code="usage")
+            client.send_events([{"transaction_id": "txn"}])
+        with self.assertRaisesRegex(ValueError, "embedded credentials"):
+            lago.LagoClient("secret", base_url="https://user:pass@lago.example")
 
 
 if __name__ == "__main__":

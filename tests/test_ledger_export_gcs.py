@@ -45,7 +45,8 @@ class FakeStorage:
         if "alt=media" in url:
             return 200, self.objects[urllib.parse.unquote(parsed.path.rsplit("/o/", 1)[1])]
         prefix = query["prefix"][0]
-        names = sorted(name for name in self.objects if name.startswith(prefix))
+        offset = query.get("startOffset", [""])[0]
+        names = sorted(name for name in self.objects if name.startswith(prefix) and name >= offset)
         start = int(query.get("pageToken", ["0"])[0])
         page = names[start:start + self.page_size]
         out: dict = {"items": [{"name": name} for name in page]}
@@ -72,6 +73,12 @@ class GcsSinkTests(unittest.TestCase):
         report = export.verify_export(self.ledger, self.sink())
         self.assertTrue(report["ok"], report["problems"])
         self.assertEqual(report["exportedRecords"], 5)
+
+    def test_records_after_a_sequence_list_only_the_newer_objects(self):
+        export.export_ledger(self.ledger, self.sink(prefix="acme/prod"), self.root / "state.json")
+        newer = self.sink(prefix="acme/prod").records(after=3)
+        self.assertEqual([record["sequence"] for record in newer], [4, 5])
+        self.assertEqual(len(self.sink(prefix="acme/prod").records()), 5)
 
     def test_writes_are_create_only_and_a_repeat_is_harmless(self):
         sink = self.sink()

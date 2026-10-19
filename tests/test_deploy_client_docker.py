@@ -132,7 +132,10 @@ class DeployClientDockerTests(unittest.TestCase):
             compose = yaml.safe_load((root / "bundle" / "compose.yaml").read_text(encoding="utf-8"))
             self.assertTrue(metadata["runtimeWorker"] and metadata["coworkerApi"])
             service = compose["services"]["governed-worker"]
-            self.assertEqual(service["volumes"], ["governance-data:/opt/data"])
+            self.assertEqual(service["volumes"], ["governance-data:/opt/data", "hermes-data:/opt/hermes/conversations:ro",
+                                                  "coworker-data:/opt/hermes/coworker:ro"])
+            self.assertEqual(service["environment"]["MODEL_GARDEN_USAGE_SOURCES"],
+                             "conversations=/opt/hermes/conversations/state.db,coworker=/opt/hermes/coworker/state.db")
             self.assertIn("worker.py", " ".join(service["entrypoint"]))
             self.assertEqual(service["depends_on"]["governed-tools"]["condition"], "service_healthy")
             api = compose["services"]["coworker-api"]

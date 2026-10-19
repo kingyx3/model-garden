@@ -3,7 +3,7 @@
 
 Model Garden emits attributable usage facts; Lago owns aggregation, pricing, credits,
 invoicing, subscription plans, and consumption/overage policy. This module intentionally
-contains no pricing tables or invoice logic.
+contains no pricing tables or invoice logic. The billing sync (``billing.py``) is its caller.
 """
 from __future__ import annotations
 
@@ -16,7 +16,7 @@ import urllib.parse
 import urllib.request
 from typing import Any, Callable
 
-Transport = Callable[[str, str, dict[str, str], dict[str, Any]], tuple[int, dict[str, Any]]]
+Transport = Callable[[str, str, dict[str, str], dict[str, Any] | None], tuple[int, dict[str, Any]]]
 
 _CANONICAL_ATTRIBUTION_KEYS = frozenset(
     {
@@ -67,11 +67,11 @@ def _validated_http_url(value: str, label: str) -> str:
     return url
 
 
-def _http_transport(method: str, url: str, headers: dict[str, str], payload: dict[str, Any]) -> tuple[int, dict[str, Any]]:
+def _http_transport(method: str, url: str, headers: dict[str, str], payload: dict[str, Any] | None) -> tuple[int, dict[str, Any]]:
     _validated_http_url(url, "Lago request URL")
     request = urllib.request.Request(
         url,
-        data=json.dumps(payload, separators=(",", ":")).encode("utf-8"),
+        data=None if payload is None else json.dumps(payload, separators=(",", ":")).encode("utf-8"),
         headers=headers,
         method=method,
     )
@@ -82,7 +82,11 @@ def _http_transport(method: str, url: str, headers: dict[str, str], payload: dic
             raw = response.read().decode("utf-8")
     except urllib.error.HTTPError as exc:
         raw = exc.read().decode("utf-8", errors="replace")
-        return exc.code, {"error": raw or exc.reason}
+        try:
+            decoded = json.loads(raw)
+        except json.JSONDecodeError:
+            decoded = None
+        return exc.code, decoded if isinstance(decoded, dict) else {"error": raw or exc.reason}
     except urllib.error.URLError as exc:
         raise RuntimeError(f"Lago request failed: {exc.reason}") from exc
     if not raw:
@@ -229,50 +233,83 @@ def build_usage_event(
 
 
 class LagoClient:
-    """Minimal Lago REST client for usage-event ingestion."""
+    """Minimal Lago REST client: batched usage ingestion and billable-metric setup, nothing commercial."""
 
-    def __init__(
-        self,
-        api_key: str,
-        *,
-        base_url: str = "https://api.getlago.com",
-        transport: Transport = _http_transport,
-    ) -> None:
+    BATCH = 100  # Lago's default LAGO_EVENTS_BATCH_MAX_LENGTH
+
+    def __init__(self, api_key: str, *, base_url: str, transport: Transport = _http_transport) -> None:
         self.api_key = _require_text(api_key, "Lago API key")
         self.base_url = _validated_http_url(base_url, "Lago base URL")
         self.transport = transport
 
-    def send_usage(
-        self,
-        *,
-        transaction_id: str,
-        external_subscription_id: str,
-        code: str,
-        properties: dict[str, Any] | None = None,
-        timestamp: int | float | None = None,
-        precise_total_amount_cents: str | None = None,
-    ) -> dict[str, Any]:
-        payload = build_usage_event(
-            transaction_id=transaction_id,
-            external_subscription_id=external_subscription_id,
-            code=code,
-            properties=properties,
-            timestamp=timestamp,
-            precise_total_amount_cents=precise_total_amount_cents,
-        )
-        status, response = self.transport(
-            "POST",
-            f"{self.base_url}/api/v1/events",
-            {
-                "Authorization": f"Bearer {self.api_key}",
-                "Content-Type": "application/json",
-                "Accept": "application/json",
-            },
-            payload,
-        )
-        if status < 200 or status >= 300:
-            raise RuntimeError(f"Lago usage ingestion failed with HTTP {status}")
-        event = response.get("event")
-        if event is not None and not isinstance(event, dict):
-            raise RuntimeError("Lago usage ingestion returned an unexpected event shape")
-        return response
+    def _call(self, method: str, path: str, payload: dict[str, Any] | None = None) -> tuple[int, dict[str, Any]]:
+        headers = {"Authorization": f"Bearer {self.api_key}", "Accept": "application/json"}
+        if payload is not None:
+            headers["Content-Type"] = "application/json"
+        return self.transport(method, f"{self.base_url}{path}", headers, payload)
+
+    def send_events(self, events: list[dict[str, Any]]) -> dict[str, int]:
+        """Send ``build_usage_event(...)["event"]`` payloads in batches; returns how many were accepted and already present.
+
+        Lago rejects a whole batch when any ``transaction_id`` already exists. An event Lago already holds is a retry of one sent
+        before, so it is dropped and the rest of the batch is sent again; any other rejection raises and nothing is assumed sent.
+        """
+        accepted = duplicates = 0
+        for start in range(0, len(events), self.BATCH):
+            batch = list(events[start:start + self.BATCH])
+            status, response = self._call("POST", "/api/v1/events/batch", {"events": batch})
+            if status == 422:
+                existing = _already_existing(response, len(batch))
+                if existing:
+                    batch = [event for index, event in enumerate(batch) if index not in existing]
+                    duplicates += len(existing)
+                    status, response = self._call("POST", "/api/v1/events/batch", {"events": batch}) if batch else (200, {})
+            if not 200 <= status < 300:
+                raise RuntimeError(f"Lago usage ingestion failed with HTTP {status}")
+            accepted += len(batch)
+        return {"accepted": accepted, "alreadyPresent": duplicates}
+
+    def ensure_metric(self, definition: dict[str, Any]) -> str:
+        """Create or update one billable metric by code; returns ``created``, ``updated`` or ``unchanged``."""
+        code = _require_text(definition.get("code"), "billable metric code")
+        status, current = self._call("GET", f"/api/v1/billable_metrics/{urllib.parse.quote(code, safe='')}")
+        if status == 404:
+            status, _ = self._call("POST", "/api/v1/billable_metrics", {"billable_metric": definition})
+            outcome = "created"
+        elif status == 200:
+            if _same_metric(current.get("billable_metric") or {}, definition):
+                return "unchanged"
+            status, _ = self._call("PUT", f"/api/v1/billable_metrics/{urllib.parse.quote(code, safe='')}", {"billable_metric": definition})
+            outcome = "updated"
+        else:
+            raise RuntimeError(f"Lago billable metric {code} could not be read (HTTP {status})")
+        if not 200 <= status < 300:
+            raise RuntimeError(f"Lago billable metric {code} could not be set up (HTTP {status})")
+        return outcome
+
+
+def _already_existing(response: dict[str, Any], size: int) -> set[int]:
+    """Indexes Lago reported as an existing ``transaction_id``, or nothing when any error in the batch is something else."""
+    details = response.get("error_details")
+    if not isinstance(details, dict) or not details:
+        return set()
+    indexes = set()
+    for key, errors in details.items():
+        if not (isinstance(errors, dict) and errors == {"transaction_id": ["value_already_exist"]}):
+            return set()
+        try:
+            index = int(key)
+        except (TypeError, ValueError):
+            return set()
+        if not 0 <= index < size:
+            return set()
+        indexes.add(index)
+    return indexes
+
+
+def _same_metric(current: dict[str, Any], definition: dict[str, Any]) -> bool:
+    def filters(value: Any) -> list[tuple[str, tuple[str, ...]]]:
+        return sorted((str(item.get("key")), tuple(sorted(item.get("values") or []))) for item in value or [] if isinstance(item, dict))
+
+    return all(current.get(key) == value for key, value in definition.items() if key != "filters") and \
+        filters(current.get("filters")) == filters(definition.get("filters"))
