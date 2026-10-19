@@ -4,8 +4,9 @@ A client should be able to connect an API Model Garden has no connector for, wit
 an unrestricted HTTP requester. This is the credential-free contract for that. It validates a **definition** (a base URL plus
 named operations, each with a method, a path, bounded parameters and an optional request body), classifies every operation's
 risk, lets a person approve the exact definition, and builds a checked request for one declared operation. It contains **no
-HTTP client** and no secret: the sidecar would send the request it builds, add the credential from a ``secret://`` reference
-and apply the limits below. It is not wired into the sidecar.
+HTTP client** and no secret: the sidecar sends the request it builds (``platform/runtime/custom_api_http.py``), adds the credential
+from a ``secret://`` reference and applies the limits below. The sidecar serves approved operations as ``api.<name>.<operation>``
+Tools (compiled ``http`` Tools of the same risk); ``scripts/runtime-custom-api.py`` is where an owner's reviewer approves them.
 
 - **Only what is declared.** There is no "call any URL" operation. Each operation is a method and a path under the base URL
   with named parameters; a request for anything else is refused. Path parameters can only be plain identifiers (letters,

@@ -213,6 +213,30 @@ class DeployClientDockerTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "upstream"):
                     deployer.render_bundle(profile, self._binding(root, {"upstream": bad}), root / f"bad-{len(str(bad))}", "acme-dev")
 
+    def test_custom_apis_are_opt_in_validated_and_their_credentials_reach_only_the_sidecar(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            profile = self._profile(root)
+            definition = {"name": "shop", "baseUrl": "https://api.shop.example/v2", "auth": {"type": "bearer", "credentialRef": "secret://shop/acme-dev"},
+                          "operations": {"get-order": {"method": "GET", "path": "/orders/{orderId}", "summary": "Fetch one order",
+                                                        "parameters": {"orderId": {"in": "path", "required": True, "schema": {"type": "string"}}}}}}
+            binding = self._binding(root, {"upstream": {"api": [definition]}})
+            metadata = deployer.render_bundle(profile, binding, root / "bundle", "acme-dev")
+            compose = yaml.safe_load((root / "bundle" / "compose.yaml").read_text(encoding="utf-8"))
+            self.assertEqual((metadata["customApis"], metadata["upstreamMcp"], metadata["governedToolService"]), (["shop"], False, True))
+            sidecar = compose["services"]["governed-tools"]["environment"]
+            self.assertEqual(sidecar["MODEL_GARDEN_CUSTOM_API"], "enabled")
+            self.assertEqual(len([name for name in sidecar if name.startswith("MODEL_GARDEN_SECRET_")]), 1)
+            self.assertNotIn("MODEL_GARDEN_SECRET_", json.dumps(compose["services"]["hermes"]))
+            self.assertNotIn("secret://shop", (root / "bundle" / "compose.yaml").read_text(encoding="utf-8"))
+            written = json.loads((root / "bundle" / "profile" / ".modelgarden" / "custom-apis.json").read_text(encoding="utf-8"))
+            self.assertEqual(written[0]["name"], "shop")
+            self.assertTrue((root / "bundle" / "model-garden-platform" / "platform" / "runtime" / "custom_api_http.py").is_file())
+            self.assertTrue((root / "bundle" / "model-garden-platform" / "scripts" / "runtime-custom-api.py").is_file())
+            for bad in ([], [{**definition, "baseUrl": "http://10.0.0.1/x"}], [definition, definition], [{**definition, "auth": {"type": "bearer", "credentialRef": "literal-token"}}]):
+                with self.assertRaisesRegex(ValueError, "upstream.api"):
+                    deployer.render_bundle(profile, self._binding(root, {"upstream": {"api": bad}}), root / f"bad-{len(str(bad))}", "acme-dev")
+
     def test_worker_ledger_export_is_rendered_as_non_secret_settings_and_validated(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = pathlib.Path(tmp)

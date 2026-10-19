@@ -47,6 +47,7 @@ RUNTIME_SOURCE_PATHS = (
     pathlib.Path("platform/runtime/coworker_client.py"),
     pathlib.Path("platform/runtime/gateway.py"),
     pathlib.Path("platform/runtime/upstream_http.py"),
+    pathlib.Path("platform/runtime/custom_api_http.py"),
     pathlib.Path("platform/channels/ingress.py"),
     pathlib.Path("platform/channels/transports.py"),
     pathlib.Path("platform/channels/smtp_intake.py"),
@@ -107,6 +108,7 @@ RUNTIME_SOURCE_PATHS = (
     pathlib.Path("scripts/runtime-artifacts.py"),
     pathlib.Path("scripts/runtime-connection.py"),
     pathlib.Path("scripts/runtime-mcp-connections.py"),
+    pathlib.Path("scripts/runtime-custom-api.py"),
     pathlib.Path("VERSION"),
 )
 MANIFEST_PATH = pathlib.Path(".modelgarden") / "capability-manifest.json"
@@ -353,9 +355,11 @@ def _upstream_settings(binding: dict[str, Any]) -> list[str] | None:
     upstream = binding.get("spec", {}).get("upstream")
     if upstream is None:
         return None
-    if not isinstance(upstream, dict) or set(upstream) - {"mcp"}:
-        raise ValueError("Docker target failed: EnvironmentBinding upstream holds only mcp")
-    mcp = upstream["mcp"]
+    if not isinstance(upstream, dict) or set(upstream) - {"mcp", "api"}:
+        raise ValueError("Docker target failed: EnvironmentBinding upstream holds only mcp and api")
+    mcp = upstream.get("mcp")
+    if mcp is None:
+        return None
     if not isinstance(mcp, dict) or set(mcp) - {"enabled", "secret_refs"}:
         raise ValueError("Docker target failed: upstream.mcp holds only enabled and secret_refs")
     if mcp.get("enabled") is not True:
@@ -366,6 +370,50 @@ def _upstream_settings(binding: dict[str, Any]) -> list[str] | None:
     ):
         raise ValueError("Docker target failed: upstream.mcp.secret_refs must list secret:// references")
     return sorted(set(refs))
+
+
+CUSTOM_API_PATH = pathlib.Path(".modelgarden") / "custom-apis.json"
+
+
+def _custom_api_settings(binding: dict[str, Any]) -> list[dict[str, Any]] | None:
+    """``EnvironmentBinding.spec.upstream.api`` (opt-in): the client's own REST APIs, as validated definitions.
+
+    Each definition is a base URL plus named operations (``platform/core/custom_api.py``); the compiled ``http`` Tools
+    ``api.<name>.<operation>`` and an owner's approval of each operation's exact definition decide what may run. A definition holds
+    only ``secret://`` references, which become environment variables on the governed sidecar alone; the Hermes process never
+    receives them. Returns ``None`` when no API is declared (the sidecar then offers none).
+    """
+    upstream = binding.get("spec", {}).get("upstream")
+    api = upstream.get("api") if isinstance(upstream, dict) else None
+    if api is None:
+        return None
+    if not isinstance(api, list) or not api or len(api) > 20:
+        raise ValueError("Docker target failed: upstream.api must list 1 to 20 API definitions")
+    spec = importlib.util.spec_from_file_location("model_garden_deploy_custom_api", ROOT / "platform" / "core" / "custom_api.py")
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    definitions, names = [], set()
+    for raw in api:
+        try:
+            normal = module.validate_definition(raw)
+        except ValueError as exc:
+            raise ValueError(f"Docker target failed: upstream.api definition is invalid: {exc}") from None
+        if normal["name"] in names:
+            raise ValueError(f"Docker target failed: upstream.api declares {normal['name']!r} twice")
+        names.add(normal["name"])
+        definitions.append(normal)
+    return definitions
+
+
+def _sidecar_secret_refs(binding: dict[str, Any]) -> list[str]:
+    """Every ``secret://`` reference the governed sidecar resolves: upstream MCP grants and custom API credentials."""
+    refs = set(_upstream_settings(binding) or [])
+    for definition in _custom_api_settings(binding) or []:
+        if definition["auth"].get("credentialRef"):
+            refs.add(definition["auth"]["credentialRef"])
+    return sorted(refs)
 
 
 def _upstream_env(refs: list[str]) -> dict[str, str]:
@@ -531,6 +579,8 @@ def _compose(
     coworker_api: bool = False,
     gateway: tuple[dict[str, Any], dict[str, str], dict[str, str]] | None = None,
     upstream_refs: list[str] | None = None,
+    custom_api_enabled: bool = False,
+    sidecar_secret_refs: list[str] | None = None,
 ) -> str:
     provider_env = PROVIDER_ENV[provider]
     hermes: dict[str, Any] = {
@@ -566,9 +616,10 @@ def _compose(
                 "MODEL_GARDEN_DEPLOYED_BY": "${MODEL_GARDEN_DEPLOYED_BY:-}",
                 "MODEL_GARDEN_CAPABILITY_MANIFEST": f"/opt/profile-seed/{MANIFEST_PATH.as_posix()}",
                 **({"MODEL_GARDEN_READ_AUDIT": read_audit} if read_audit else {}),
-                **({"MODEL_GARDEN_UPSTREAM_MCP": "enabled",
-                    **{name: f"${{{name}:?{name} is required}}" for name in sorted(_upstream_env(upstream_refs))}}
-                   if upstream_refs else {}),
+                **({"MODEL_GARDEN_UPSTREAM_MCP": "enabled"} if upstream_refs else {}),
+                **({"MODEL_GARDEN_CUSTOM_API": "enabled",
+                    "MODEL_GARDEN_CUSTOM_API_DEFINITIONS": f"/opt/profile-seed/{CUSTOM_API_PATH.as_posix()}"} if custom_api_enabled else {}),
+                **{name: f"${{{name}:?{name} is required}}" for name in sorted(_upstream_env(sidecar_secret_refs or []))},
             },
             "volumes": ["governance-data:/opt/data"],
             "healthcheck": _healthcheck(9120),
@@ -733,7 +784,8 @@ def render_bundle(
         coworker_key_ref = gateway[1]["MODEL_GARDEN_COWORKER_API_KEY"]
     read_audit = _read_audit_mode(binding)
     upstream_refs = _upstream_settings(binding)
-    built_in_tools = bool(selected_tools & BUILT_IN_TOOLS) or upstream_refs is not None
+    custom_apis = _custom_api_settings(binding)
+    built_in_tools = bool(selected_tools & BUILT_IN_TOOLS) or upstream_refs is not None or custom_apis is not None
     lock = _load_hermes_lock(platform_root)
 
     bundle_dir.mkdir(parents=True, exist_ok=True)
@@ -742,6 +794,8 @@ def render_bundle(
     (bundle_dir / "profile" / MANIFEST_PATH).write_text(manifest_text, encoding="utf-8")
     if worker_config is not None:
         (bundle_dir / "profile" / WORKER_CONFIG_PATH).write_text(json.dumps(worker_config, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    if custom_apis is not None:
+        (bundle_dir / "profile" / CUSTOM_API_PATH).write_text(json.dumps(custom_apis, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     if gateway[0] is not None:
         (bundle_dir / "profile" / GATEWAY_CONFIG_PATH).write_text(json.dumps(gateway[0], indent=2, sort_keys=True) + "\n", encoding="utf-8")
     _copy_runtime_source(platform_root, bundle_dir / "model-garden-platform")
@@ -752,7 +806,8 @@ def render_bundle(
     (bundle_dir / "compose.yaml").write_text(
         _compose(project_name, provider, lock, read_audit=read_audit, built_in_tools=built_in_tools,
                  worker=worker_config is not None, coworker_api=coworker_key_ref is not None,
-                 gateway=gateway if gateway[0] is not None else None, upstream_refs=upstream_refs),
+                 gateway=gateway if gateway[0] is not None else None, upstream_refs=upstream_refs,
+                 custom_api_enabled=custom_apis is not None, sidecar_secret_refs=_sidecar_secret_refs(binding)),
         encoding="utf-8",
     )
     metadata = {
@@ -768,6 +823,7 @@ def render_bundle(
         "coworkerApi": coworker_key_ref is not None,
         "channelGateway": gateway[0] is not None,
         "upstreamMcp": upstream_refs is not None,
+        "customApis": sorted(item["name"] for item in custom_apis) if custom_apis else [],
         "hermes": {"version": lock["version"], "revision": lock["commit"]},
         "bindingSha256": hashlib.sha256(normalized_binding.encode("utf-8")).hexdigest(),
         "capabilityManifestSha256": hashlib.sha256(manifest_text.encode("utf-8")).hexdigest(),
@@ -854,7 +910,7 @@ def apply_bundle(
     _, coworker_key_ref = _worker_settings(binding)
     if coworker_key_ref is not None:
         runtime_env["MODEL_GARDEN_COWORKER_API_KEY"] = resolved[coworker_key_ref]
-    for name, ref in _upstream_env(_upstream_settings(binding) or []).items():
+    for name, ref in _upstream_env(_sidecar_secret_refs(binding)).items():
         runtime_env[name] = resolved[ref]
     gateway_config, gateway_secrets, _ = _gateway_settings(binding)
     for name, ref in gateway_secrets.items():
