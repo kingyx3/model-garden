@@ -267,12 +267,19 @@ class TeamRuntime:
         return self.base / "tasks"
 
     def _restore_tasks(self) -> None:
+        """Load every saved task tree this process does not hold yet.
+
+        Another process of the same team (the operator command that assigns a task, a restarted host) saves a new task tree to disk; this
+        picks it up. A tree already held here is never replaced, so one process's unsaved spending is not overwritten by a stale file.
+        """
         directory = self._tasks_dir()
         if not directory.is_dir():
             return
         for path in sorted(directory.glob("*.json")):
-            tree = TASK_BUDGET.TaskBudgetTree.restore(json.loads(path.read_text(encoding="utf-8")), audit=self._ledger_action, notify=self._notify)
             root = path.stem
+            if root in self._trees:
+                continue
+            tree = TASK_BUDGET.TaskBudgetTree.restore(json.loads(path.read_text(encoding="utf-8")), audit=self._ledger_action, notify=self._notify)
             self._trees[root] = tree
             for row in tree.timeline():
                 self._root_of[row["taskId"]] = root
@@ -282,6 +289,10 @@ class TeamRuntime:
 
     def _tree(self, task_id: Any) -> tuple[str, Any]:
         root = self._root_of.get(task_id) if isinstance(task_id, str) else None
+        if root is None and isinstance(task_id, str):
+            with self._task_lock:
+                self._restore_tasks()  # a task another process of this team started since we last looked
+            root = self._root_of.get(task_id)
         if root is None:
             raise TeamError("that task was not started by this team")
         return root, self._trees[root]
