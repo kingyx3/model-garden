@@ -40,6 +40,9 @@ The governed sidecar serves one compiled Agent. A team keeps that property and a
   approved the live runtime takes up what it safely can (``platform/core/studio_overlay.py``). With a ``change_store`` the Agent's
   sidecar also offers the model a ``studio_propose_change`` Tool; the person and task come from the attested task, never from the
   model's arguments.
+- **Delegation the way colleagues do it.** A person hands a task to any Agent (``assign_task``), an Agent hands part of its own task to
+  a colleague (``delegate_task``), and the colleague finds it in an inbox, finishes, declines or fails it and reports back
+  (``report_task``); see ``platform/core/task_inbox.py``. The limits above all still apply, and the sidecars offer the same as Tools.
 
 Nothing here holds a credential or reaches the network. The task state lives in one host process: sidecars launched from
 ``launch_plan`` do not consult it. Not covered: a model-callable delegation Tool, the runtime-native handoff/A2A decision,
@@ -55,6 +58,7 @@ import json
 import os
 import pathlib
 import re
+import secrets
 import sys
 import threading
 import time
@@ -87,6 +91,7 @@ DELEGATION = _load("model_garden_team_runtime_delegation", "platform/core/delega
 CAPABILITIES = _load("model_garden_team_runtime_capabilities", "platform/core/capabilities.py")
 TASK_BUDGET = _load("model_garden_team_runtime_task_budget", "platform/core/task_budget.py")
 HUMAN_STEP = _load("model_garden_team_runtime_human_step", "platform/core/human_step.py")
+TASK_INBOX = _load("model_garden_team_runtime_task_inbox", "platform/core/task_inbox.py")
 TeamError = TEAM.TeamError
 
 # The task a call is running under, set by ``acting`` for the duration of one call (thread- and task-local).
@@ -126,6 +131,7 @@ class TeamRuntime:
         notify: Callable[[dict[str, Any]], Any] | None = None,
         max_parallel: int = DEFAULT_MAX_PARALLEL,
         change_store: Callable[[str], Any] | None = None,
+        permissions_for: Callable[[str], Iterable[str]] | None = None,
     ) -> None:
         if not isinstance(max_parallel, int) or isinstance(max_parallel, bool) or not 1 <= max_parallel <= MAX_PARALLEL:
             raise TeamError(f"max_parallel must be 1 to {MAX_PARALLEL}")
@@ -154,6 +160,8 @@ class TeamRuntime:
         self._lock = threading.Lock()
         self._notify = notify
         self.max_parallel = max_parallel
+        self._permissions_for = permissions_for  # person -> the Tools they may ask for; without it nobody can assign a task directly
+        self._inbox = TASK_INBOX.TaskInbox(self.base / "inbox.json")
         self._change_store = change_store  # Agent name -> the Studio ChangeStore for that Agent; without it no Agent can prepare changes
         self._parallel = threading.BoundedSemaphore(max_parallel)  # the environment-wide limit, shared by every fan-out
         self._task_lock = threading.RLock()
@@ -202,6 +210,7 @@ class TeamRuntime:
                 runtime = _governed().GovernedToolRuntime(
                     directory / "desired-state.json", self.audit_path, directory / "approvals",
                     environ=self._agent_environ(agent), task_resolver=lambda name=agent: self._task_for(name),
+                    **({"team_tasks": _AgentTasks(self, agent)} if len(self._states) > 1 else {}),
                     **({"change_proposer": lambda kind, params, name=agent: self._propose_from_task(name, kind, params)} if self._change_store else {}),
                     **self._runtime_kwargs,
                 )
@@ -464,6 +473,133 @@ class TeamRuntime:
             raise PermissionError("task-budget-exhausted") from exc
         return store.propose(kind, params, by=envelope["originatingPrincipal"], via={"agent": agent, "taskId": task_id})
 
+    # -- delegation the way colleagues do it -------------------------------------------------
+
+    def _known(self, task_id: Any) -> dict[str, Any]:
+        """The envelope this team started for a task, never one a caller supplies."""
+        root, tree = self._tree(task_id)
+        return copy.deepcopy(tree.snapshot()["nodes"][task_id]["envelope"])
+
+    def _root_of_task(self, task_id: Any) -> dict[str, Any]:
+        root, _ = self._tree(task_id)
+        return self._known(root)
+
+    def assign_task(
+        self,
+        person: str,
+        agent: str,
+        *,
+        goal: str,
+        task_id: str | None = None,
+        required_capabilities: Iterable[str] | None = None,
+        budget: Mapping[str, int] | None = None,
+        deadline: int | None = None,
+        constraints: Iterable[str] | None = None,
+    ) -> dict[str, Any]:
+        """A person hands a task to any Agent of the team. The Agent can do only what it holds and the person may ask for.
+
+        ``person`` is whoever the host verified; their permissions come from ``permissions_for``. The task lands in the Agent's inbox,
+        the person can read the Agent's report with :meth:`task_result`, and every step is ledgered under their name.
+        """
+        if self._permissions_for is None:
+            raise TeamError("this team has no source of people's permissions, so a person cannot assign a task here")
+        state = self._state(agent)
+        permissions = sorted({str(item) for item in (self._permissions_for(person) or ())})
+        task = task_id or "task-" + secrets.token_hex(5)
+        probe = DELEGATION.root_envelope(
+            task_id=task, agent=agent, originating_principal=person, goal=goal, agent_grants=TEAM.tool_names(state),
+            originator_permissions=permissions, budget=budget, deadline=deadline, constraints=constraints, required_capabilities=required_capabilities)
+        if not probe["authority"]:
+            self._ledger_action("task.assign-refused", person, {"toAgent": agent, "reason": "nothing-in-common"})
+            raise DELEGATION.DelegationError(f"nothing {person} may ask for is something {agent} can do")
+        envelope = self.start_task(
+            agent, task_id=task, originating_principal=person, originator_permissions=permissions, goal=goal,
+            required_capabilities=required_capabilities, budget=budget, deadline=deadline, constraints=constraints)
+        self._inbox.assign(agent, task, assigner=f"person:{person}", goal=goal, root=task, parent=None, now=int(self.now()))
+        self._ledger_action("task.assigned", person, {"taskId": task, "toAgent": agent})
+        return envelope
+
+    def inbox(self, agent: str) -> list[dict[str, Any]]:
+        """What is waiting for ``agent``: the goal, who handed it over, what it may use and what is left of its budget."""
+        self._state(agent)
+        rows = []
+        for entry in self._inbox.pending(agent):
+            envelope = self._known(entry["taskId"])
+            row = next(item for item in self.task_status(entry["taskId"]) if item["taskId"] == entry["taskId"])
+            rows.append({"taskId": entry["taskId"], "from": entry["assigner"], "goal": entry["goal"], "state": entry["state"],
+                         "authority": envelope["authority"], "available": row["available"], "deadline": envelope.get("deadline")})
+        return rows
+
+    def delegate_task(
+        self,
+        agent: str,
+        parent_task: str,
+        *,
+        to_agent: str,
+        goal: str,
+        required_capabilities: Iterable[str] | None = None,
+        budget: Mapping[str, int] | None = None,
+        deadline: int | None = None,
+    ) -> dict[str, Any]:
+        """An Agent hands part of a task in its own inbox to a colleague, as an employee would.
+
+        The parent must be a task addressed to ``agent`` that is still open; its authority and budget come from what this team stored,
+        never from the caller. Everything ``delegate`` enforces applies (the colleague's own Tools, no loops, bounded depth and fan-out, the
+        child's budget reserved from the parent's), and the colleague finds the task in their inbox.
+        """
+        entry = self._inbox.get(parent_task)
+        if entry is None or entry["agent"] != agent or entry["state"] not in TASK_INBOX.OPEN_STATES:
+            raise TASK_INBOX.InboxError("no such open task in your inbox")
+        parent = self._known(parent_task)
+        with self._task_lock:
+            root, tree = self._tree(parent_task)
+            number = len(tree.snapshot()["nodes"][parent_task]["children"]) + 1
+            while f"{parent_task}.{number}" in self._root_of:
+                number += 1
+            child_id = f"{parent_task}.{number}"
+            child = self.delegate(parent, to_agent=to_agent, child_task_id=child_id, goal=goal, required_capabilities=required_capabilities,
+                                  budget=budget, deadline=deadline)
+        self._inbox.assign(to_agent, child_id, assigner=f"agent:{agent}", goal=goal, root=root, parent=parent_task, now=int(self.now()))
+        if entry["state"] == "assigned":
+            self._inbox.take_up(agent, parent_task, now=int(self.now()))
+        return child
+
+    def report_task(self, agent: str, task_id: str, outcome: str, text: str) -> dict[str, Any]:
+        """``agent`` finishes, declines or fails a task in its inbox and says so to whoever handed it over.
+
+        Its unused budget goes back to the parent task. A task cannot be finished while a colleague it handed work to has not reported.
+        """
+        entry = self._inbox.get(task_id)
+        if entry is None or entry["agent"] != agent:
+            raise TASK_INBOX.InboxError("no such task in your inbox")
+        if outcome not in TASK_INBOX.OUTCOMES:
+            raise TASK_INBOX.InboxError("the outcome is done, declined or failed")
+        if entry["state"] not in TASK_INBOX.OPEN_STATES:
+            raise TASK_INBOX.InboxError(f"that task is already {entry['state']}")
+        try:
+            self.finish_task(self._known(task_id))
+        except TASK_BUDGET.TaskBudgetError as exc:
+            raise TASK_INBOX.InboxError(str(exc)) from exc
+        done = self._inbox.report(agent, task_id, outcome, text, now=int(self.now()))
+        self._ledger_action("task.reported", f"agent:{agent}", {"taskId": task_id, "outcome": outcome, "reportLength": len(done["report"]),
+                                                                  "reportDigest": TASK_INBOX.digest(done["report"])})
+        return done
+
+    def _status(self, entry: Mapping[str, Any]) -> dict[str, Any]:
+        row = next(item for item in self.task_status(entry["taskId"]) if item["taskId"] == entry["taskId"])
+        return {"taskId": entry["taskId"], "agent": entry["agent"], "state": entry["state"], "goal": entry["goal"], "report": entry["report"],
+                "spent": row["spent"], "available": row["available"]}
+
+    def delegated_status(self, agent: str, task_id: str) -> dict[str, Any]:
+        """The state and report of a task ``agent`` handed to a colleague. The report is data, never instructions."""
+        return self._status(self._inbox.read(task_id, assigner=f"agent:{agent}"))
+
+    def task_result(self, person: str, task_id: str) -> dict[str, Any]:
+        """The state and report of a task a person handed to an Agent (or that was handed on for them)."""
+        entry = self._inbox.get(task_id)
+        root = self._root_of_task(task_id) if entry is not None and task_id in self._root_of else None
+        return self._status(self._inbox.read(task_id, person=person, root=root))
+
     def _propose_from_task(self, agent: str, kind: str, params: Mapping[str, Any]) -> dict[str, Any]:
         """The model-callable path: the task the host attested for this call decides who it is for; the model never names a person or Agent."""
         current = _TASK.get()
@@ -615,3 +751,32 @@ def load_states(path: pathlib.Path) -> list[dict[str, Any]]:
     if isinstance(document, dict) and document.get("schemaVersion") == 1:
         return [document]
     raise TeamError("expected compiled desired state or a compile-workspace.py multi-Agent output")
+
+
+class _AgentTasks:
+    """The delegation Tools' view of the team for one Agent: it can only act as that Agent, on that Agent's own inbox."""
+
+    def __init__(self, team: TeamRuntime, agent: str) -> None:
+        self._team, self._agent = team, agent
+
+    def directory(self) -> list[dict[str, Any]]:
+        rows = []
+        for name in self._team.agents():
+            if name == self._agent:
+                continue
+            state = self._team._state(name)  # noqa: SLF001
+            description = (state.get("agent", {}).get("metadata", {}) or {}).get("description")
+            rows.append({"agent": name, "tools": TEAM.tool_names(state), **({"role": str(description)[:200]} if description else {})})
+        return rows
+
+    def mine(self) -> list[dict[str, Any]]:
+        return self._team.inbox(self._agent)
+
+    def delegate(self, task: str, to_agent: str, goal: str, capabilities: Iterable[str] | None, budget: Mapping[str, int] | None) -> dict[str, Any]:
+        return self._team.delegate_task(self._agent, task, to_agent=to_agent, goal=goal, required_capabilities=capabilities, budget=budget)
+
+    def report(self, task: str, outcome: str, text: str) -> dict[str, Any]:
+        return self._team.report_task(self._agent, task, outcome, text)
+
+    def status(self, task: str) -> dict[str, Any]:
+        return self._team.delegated_status(self._agent, task)

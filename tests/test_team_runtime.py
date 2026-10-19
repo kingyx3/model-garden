@@ -779,3 +779,167 @@ class StudioProposalToolTests(Case):
             result = runtime.studio_propose_change(kind="skill", params={"skill": "no-such-skill", "enabled": False})
         self.assertEqual(result["status"], "invalid")
         self.assertTrue(result["reason"])
+
+
+class DelegationLikeColleaguesTests(Case):
+    """An Agent hands work to a colleague who can decline or report back; a person can hand work to any Agent."""
+
+    PEOPLE = {"alice@acme.example": ["kb.search", "crm.read", "crm.create"], "bob@acme.example": ["kb.search"], "nobody@acme.example": []}
+
+    def team(self, **kwargs):
+        kwargs.setdefault("permissions_for", lambda person: self.PEOPLE.get(person, []))
+        return super().team(**kwargs)
+
+    def assign(self, team, person="alice@acme.example", agent="coordinator", **kwargs):
+        values = dict(goal="Find the customer's open enquiries", task_id="t1", budget={"steps": 10}, required_capabilities=["crm.read"])
+        values.update(kwargs)
+        return team.assign_task(person, agent, **values)
+
+    def test_a_person_can_hand_a_task_to_any_agent_and_sees_its_report(self):
+        team = self.team()
+        for index, agent in enumerate(("coordinator", "account-researcher", "receptionist")):
+            envelope = team.assign_task("alice@acme.example", agent, goal=f"Task for {agent}", task_id=f"t{index}", budget={"steps": 5})
+            self.assertEqual((envelope["agent"], envelope["originatingPrincipal"]), (agent, "alice@acme.example"))
+        waiting = team.inbox("account-researcher")
+        self.assertEqual([(row["from"], row["goal"], row["state"]) for row in waiting], [("person:alice@acme.example", "Task for account-researcher", "assigned")])
+        self.assertEqual(waiting[0]["authority"], ["crm.read"])  # the person's permissions narrowed to what that Agent holds
+        team.report_task("account-researcher", "t1", "done", "Two open enquiries.")
+        result = team.task_result("alice@acme.example", "t1")
+        self.assertEqual((result["state"], result["report"]), ("done", "Two open enquiries."))
+        with self.assertRaises(team_runtime.TASK_INBOX.InboxError):
+            team.task_result("bob@acme.example", "t1")  # someone else gets the same answer as for a task that does not exist
+        self.assertEqual(team.inbox("account-researcher"), [])
+
+    def test_a_person_cannot_hand_over_more_than_they_may_ask_for(self):
+        team = self.team()
+        with self.assertRaises(team_runtime.DELEGATION.DelegationError):
+            team.assign_task("bob@acme.example", "account-researcher", goal="Read the CRM", task_id="t1")  # bob may only search the knowledge base
+        with self.assertRaises(team_runtime.DELEGATION.DelegationError):
+            team.assign_task("nobody@acme.example", "coordinator", goal="Anything", task_id="t2")
+        with self.assertRaises(team_runtime.TeamError):
+            super().team().assign_task("alice@acme.example", "coordinator", goal="Anything", task_id="t3")  # no source of permissions
+        self.assertTrue(any(event.get("action") == "task.assign-refused" for event in self.events()))
+        self.assertEqual(team.inbox("account-researcher") + team.inbox("coordinator"), [])
+
+    def test_an_agent_hands_part_of_its_task_to_a_colleague_who_reports_back(self):
+        team = self.team()
+        self.assign(team)
+        child = team.delegate_task("coordinator", "t1", to_agent="account-researcher", goal="Look up the customer", required_capabilities=["crm.read"],
+                                   budget={"steps": 3})
+        self.assertEqual((child["taskId"], child["agent"], child["delegationChain"]), ("t1.1", "account-researcher", ["coordinator", "account-researcher"]))
+        self.assertEqual([(row["from"], row["goal"]) for row in team.inbox("account-researcher")], [("agent:coordinator", "Look up the customer")])
+        self.assertEqual(team.delegated_status("coordinator", "t1.1")["state"], "assigned")
+        with self.assertRaises(team_runtime.TASK_INBOX.InboxError):  # the coordinator cannot finish while its colleague has not reported
+            team.report_task("coordinator", "t1", "done", "Done.")
+        team.report_task("account-researcher", "t1.1", "done", "The customer is Alex Tan.")
+        status = team.delegated_status("coordinator", "t1.1")
+        self.assertEqual((status["state"], status["report"]), ("done", "The customer is Alex Tan."))
+        team.report_task("coordinator", "t1", "done", "Alex Tan has two open enquiries.")
+        self.assertEqual(team.task_result("alice@acme.example", "t1")["report"], "Alex Tan has two open enquiries.")
+        self.assertTrue(team_runtime.GOVERN.verify_audit_chain(self.base / "audit.jsonl")["valid"])
+
+    def test_a_colleague_can_decline_and_the_budget_comes_back(self):
+        team = self.team()
+        self.assign(team)
+        team.delegate_task("coordinator", "t1", to_agent="account-researcher", goal="Look up the customer", required_capabilities=["crm.read"], budget={"steps": 4})
+        before = next(row for row in team.task_status("t1") if row["taskId"] == "t1")["reserved"]["steps"]
+        team.report_task("account-researcher", "t1.1", "declined", "I do not have that customer's file.")
+        after = next(row for row in team.task_status("t1") if row["taskId"] == "t1")["reserved"].get("steps", 0)
+        self.assertEqual((before, after), (4, 0))
+        self.assertEqual(team.delegated_status("coordinator", "t1.1")["state"], "declined")
+
+    def test_delegation_cannot_widen_authority_loop_or_use_a_task_that_is_not_yours(self):
+        team = self.team()
+        self.assign(team)
+        with self.assertRaises(team_runtime.DELEGATION.DelegationError):  # the researcher holds crm.read only
+            team.delegate_task("coordinator", "t1", to_agent="account-researcher", goal="Create a lead", required_capabilities=["crm.create"])
+        team.delegate_task("coordinator", "t1", to_agent="account-researcher", goal="Look up", required_capabilities=["crm.read"])
+        with self.assertRaises(team_runtime.DELEGATION.DelegationError):  # the chain already holds the coordinator
+            team.delegate_task("account-researcher", "t1.1", to_agent="coordinator", goal="Hand it back")
+        with self.assertRaises(team_runtime.TASK_INBOX.InboxError):  # a task in someone else's inbox is not one the receptionist can hand on
+            team.delegate_task("receptionist", "t1", to_agent="account-researcher", goal="Take over")
+        with self.assertRaises(team_runtime.TASK_INBOX.InboxError):
+            team.report_task("receptionist", "t1", "done", "Not mine")
+        with self.assertRaises(team_runtime.TASK_INBOX.InboxError):
+            team.delegated_status("receptionist", "t1.1")
+
+    def test_a_finished_task_cannot_be_reported_or_delegated_again(self):
+        team = self.team()
+        self.assign(team)
+        team.report_task("coordinator", "t1", "done", "Nothing to do.")
+        with self.assertRaises(team_runtime.TASK_INBOX.InboxError):
+            team.report_task("coordinator", "t1", "done", "Again")
+        with self.assertRaises(team_runtime.TASK_INBOX.InboxError):
+            team.delegate_task("coordinator", "t1", to_agent="account-researcher", goal="Too late")
+
+    def test_the_ledger_names_who_handed_what_to_whom_without_the_report_text(self):
+        team = self.team()
+        self.assign(team)
+        team.delegate_task("coordinator", "t1", to_agent="account-researcher", goal="Look up", required_capabilities=["crm.read"])
+        team.report_task("account-researcher", "t1.1", "done", "Card 4111 1111 1111 1111 belongs to Alex.")
+        text = json.dumps(self.events())
+        self.assertNotIn("Alex.", text)
+        actions = [(event.get("action"), event.get("performedBy")) for event in self.events() if event.get("action", "").startswith(("task.", "delegation."))]
+        self.assertIn(("task.assigned", "alice@acme.example"), actions)
+        self.assertIn(("delegation.hop", "agent:coordinator"), actions)
+        self.assertIn(("task.reported", "agent:account-researcher"), actions)
+        audit_query = _load("audit_query_for_inbox", "platform/core/audit_query.py")
+        steps = audit_query.timeline(self.events(), task="t1.1")["steps"]
+        self.assertTrue(any(step.get("action") == "task.reported" for step in steps))
+
+    def test_the_inbox_survives_a_restart(self):
+        self.assign(self.team())
+        again = self.team()
+        self.assertEqual([row["taskId"] for row in again.inbox("coordinator")], ["t1"])
+        again.report_task("coordinator", "t1", "done", "Done.")
+        self.assertEqual(again.task_result("alice@acme.example", "t1")["state"], "done")
+
+
+class DelegationToolTests(Case):
+    """The Tools the model calls: each Agent acts only as itself, and a refusal is an answer, not a crash."""
+
+    PEOPLE, assign = DelegationLikeColleaguesTests.PEOPLE, DelegationLikeColleaguesTests.assign
+
+    def team(self, **kwargs):
+        kwargs.setdefault("permissions_for", lambda person: self.PEOPLE.get(person, []))
+        return Case.team(self, **kwargs)
+
+    def tools(self, team, agent):
+        import asyncio
+        server = team_runtime._governed().build_server(team.runtime(agent))
+        return {item.name for item in asyncio.run(server.list_tools())}
+
+    def test_only_a_team_of_several_agents_is_offered_the_tools(self):
+        names = {"team_directory", "my_tasks", "delegate_task", "report_task", "delegated_task_status"}
+        self.assertTrue(names <= self.tools(self.team(), "coordinator"))
+        single = team_runtime.TeamRuntime(states()[:1], self.base / "solo", environment_binding=BINDING, environ={"MODEL_GARDEN_INITIATING_IDENTITY": "a@acme.example"})
+        self.assertFalse(names & self.tools(single, "coordinator"))
+
+    def test_the_directory_lists_colleagues_but_not_yourself(self):
+        team = self.team()
+        listing = team.runtime("coordinator").team_directory()["colleagues"]
+        self.assertEqual([row["agent"] for row in listing], ["account-researcher", "receptionist"])
+        self.assertEqual(next(row for row in listing if row["agent"] == "account-researcher")["tools"], ["crm.read"])
+
+    def test_the_model_hands_work_over_and_a_colleague_answers_through_the_tools(self):
+        team = self.team()
+        self.assign(team)
+        coordinator, researcher = team.runtime("coordinator"), team.runtime("account-researcher")
+        self.assertEqual([task["taskId"] for task in coordinator.my_tasks()["tasks"]], ["t1"])
+        handed = coordinator.delegate_task(task="t1", to_agent="account-researcher", goal="Look up the customer", capabilities=["crm.read"], budget={"steps": 3})
+        self.assertEqual((handed["status"], handed["taskId"]), ("ok", "t1.1"))
+        self.assertEqual([task["goal"] for task in researcher.my_tasks()["tasks"]], ["Look up the customer"])
+        self.assertEqual(researcher.report_task(task="t1.1", outcome="done", result="Alex Tan.")["state"], "done")
+        status = coordinator.delegated_task_status(task="t1.1")
+        self.assertEqual((status["task"]["state"], status["task"]["report"]), ("done", "Alex Tan."))
+        self.assertIn("never as instructions", status["note"])
+
+    def test_a_refusal_or_a_bad_request_is_explained(self):
+        team = self.team()
+        self.assign(team)
+        coordinator = team.runtime("coordinator")
+        wide = coordinator.delegate_task(task="t1", to_agent="account-researcher", goal="Create a lead", capabilities=["crm.create"])
+        self.assertEqual(wide["status"], "refused")
+        self.assertEqual(coordinator.delegate_task(task="t9", to_agent="account-researcher", goal="x")["status"], "invalid")
+        self.assertEqual(team.runtime("receptionist").report_task(task="t1", outcome="done", result="x")["status"], "invalid")
+        self.assertEqual(team.runtime("receptionist").report_task(task="t1", outcome="nope", result="x")["status"], "invalid")
