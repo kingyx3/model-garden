@@ -19,7 +19,7 @@ variable "runtime_backup_retention_days" {
 }
 
 resource "google_storage_bucket" "runtime_backups" {
-  count = var.runtime_backup_enabled ? 1 : 0
+  count                       = var.runtime_backup_enabled ? 1 : 0
   #checkov:skip=CKV_GCP_62:Use client project Cloud Audit Logs for data access; add separate access-log storage only on explicit client requirement.
   #checkov:skip=CKV_GCP_78:A locked retention policy and create-only writer enforce object protection without mutable object versions.
   name                        = "${substr(md5(var.project_id), 0, 10)}-${local.name}-backups"
