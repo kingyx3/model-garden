@@ -52,7 +52,10 @@ class CloudReadbackTests(unittest.TestCase):
         pathlib.Path(destination).write_bytes(self.remote[uri.rsplit("/", 1)[-1]])
 
     def size(self, uri):
-        return len(self.remote[uri.rsplit("/", 1)[-1]])
+        name = uri.rsplit("/", 1)[-1]
+        if name not in self.remote:
+            raise READBACK.ReadbackError("cloud object missing")
+        return len(self.remote[name])
 
     def run(self, **overrides):
         opts = {"compose": self.compose, "project": "acme-dev",
@@ -109,8 +112,9 @@ class CloudReadbackTests(unittest.TestCase):
             {"volumes": [{"volume": "hermes-data", "object": "../bad",
                           "bytes": 3, "sha256": "a" * 64}]},
         ]
-        for replacement in cases:
+        for index, replacement in enumerate(cases):
             with self.subTest(replacement=replacement):
+                self.destination = self.root / f"acme-dev-invalid-{index}"
                 document = dict(self.manifest, **replacement)
                 self.remote["manifest.json"] = json.dumps(document).encode()
                 with self.assertRaises(READBACK.ReadbackError):
@@ -118,12 +122,9 @@ class CloudReadbackTests(unittest.TestCase):
                 self.assertEqual(len(self.calls), 1)
                 self.assertFalse((self.destination / "manifest.json").exists())
                 self.calls.clear()
-                if self.destination.exists():
-                    # Explicitly simulate an operator starting a new, unique retrieval.
-                    self.destination = self.root / ("acme-dev-recovered-" + str(len(str(replacement))))
 
     def test_remote_ciphertext_tampering_blocks_completion_marker(self):
-        self.remote["hermes-data.tar.age"] = b"changed-but-same-size!"[:len(self.ciphertext)]
+        self.remote["hermes-data.tar.age"] = b"x" * len(self.ciphertext)
         with self.assertRaisesRegex(READBACK.ReadbackError, "integrity"):
             self.run()
         self.assertEqual(len(self.calls), 2)
