@@ -883,6 +883,7 @@ class Worker:
         document = {"at": now, "failed": failed, "persistentFailures": persistent}
         temporary = self.heartbeat.with_suffix(".tmp")
         descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
+        os.fchmod(descriptor, 0o600)  # a leftover .tmp file must not retain permissive permissions
         with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
             stream.write(json.dumps(document, sort_keys=True) + "\n")
             stream.flush()
