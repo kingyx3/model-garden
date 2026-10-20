@@ -7,7 +7,6 @@ verification. This is NOT a recovery drill or proof of signed backup provenance.
 from __future__ import annotations
 
 import argparse
-import hashlib
 import importlib.util
 import json
 import os
