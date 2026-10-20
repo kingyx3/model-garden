@@ -2,6 +2,12 @@
 
 This is the executable evidence path for the remaining reference-deployment proof. Confluence owns the business readiness decision; this page owns exact repository mechanics.
 
+## Worker liveness versus operational readiness (issue #231)
+
+The optional governed worker writes `/opt/data/.modelgarden/worker/heartbeat.json` with a recent timestamp and **job names only** (no message text, contact details, provider errors or credentials). The Compose `--health` check continues to mean *the worker loop is alive*, not that every optional integration is working. New `--readiness` emits only `status`, `reason`, `failedJobs` and `persistentFailures`, returning non-zero for a missing/stale/invalid heartbeat or three consecutive failed **attempts** of a job. Skipped long-interval jobs retain their previous failure condition until the next successful attempt; recovery clears it. A timestamp from over 30 seconds in the future is rejected.
+
+On an authorized client host, run `docker compose exec -T governed-worker python /opt/model-garden-platform/platform/runtime/worker.py --readiness` from the deployed bundle directory. Use the exit status for operator diagnostics; no customer content enters the output. If the worker was never enabled, no heartbeat exists and this probe must not be used as an alarm for that client. These code checks are **not** Cloud Monitoring uptime checks, alert delivery or live availability evidence. [Issue #231](https://github.com/kingyx3/model-garden/issues/231) remains open for authenticated per-client notification channels, voice/gateway checks, deduplication and real failure/recovery drills.
+
 ## What is now implemented
 
 The managed GCP deployment can optionally run the Receptionist through a LiveKit voice worker while keeping Hermes as the reasoning/runtime authority. The voice worker:
