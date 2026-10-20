@@ -875,7 +875,6 @@ class Worker:
 
     def _beat(self, now: int, report: Mapping[str, Any]) -> None:
         self.heartbeat.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-        os.chmod(self.heartbeat.parent, 0o700)
         failed = sorted(name for name, value in report.items() if isinstance(value, Mapping) and "failed" in value)
         for name in report:  # do not reset a long-interval job on ticks when it did not run
             self._failure_streaks[name] = self._failure_streaks.get(name, 0) + 1 if name in failed else 0
@@ -916,7 +915,8 @@ def operational_health(heartbeat: pathlib.Path, *, now: float, max_age: int = 30
         return {**unavailable, "reason": "invalid"}
     failed = document.get("failed", [])
     persistent = document.get("persistentFailures", [])
-    name_ok = lambda v: isinstance(v, str) and re.fullmatch(r"[a-z][a-z0-9-]{0,39}", v) is not None
+    def name_ok(value: Any) -> bool:
+        return isinstance(value, str) and re.fullmatch(r"[a-z][a-z0-9-]{0,39}", value) is not None
     if not isinstance(failed, list) or not isinstance(persistent, list) or not all(name_ok(x) for x in failed + persistent):
         return {**unavailable, "reason": "invalid"}
     age = now - at
