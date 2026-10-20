@@ -57,7 +57,7 @@ class CloudReadbackTests(unittest.TestCase):
             raise READBACK.ReadbackError("cloud object missing")
         return len(self.remote[name])
 
-    def run(self, **overrides):
+    def readback(self, **overrides):
         opts = {"compose": self.compose, "project": "acme-dev",
                 "destination": self.destination, "run_id": "acme-dev-run12345",
                 "gcp_project": "sample-project-123", "client_slug": "acme",
@@ -69,7 +69,7 @@ class CloudReadbackTests(unittest.TestCase):
             return READBACK.retrieve(**opts)
 
     def test_readback_requires_manifest_then_all_ciphertext_with_client_scoped_urls(self):
-        result = self.run()
+        result = self.readback()
         bucket = READBACK.UPLOAD.expected_bucket("sample-project-123", "acme", "dev")
         prefix = f"gs://{bucket}/v1/acme-dev/acme-dev-run12345/"
         self.assertEqual(self.calls, [prefix + "manifest.json", prefix + "hermes-data.tar.age"])
@@ -88,21 +88,21 @@ class CloudReadbackTests(unittest.TestCase):
             {"gcp_project": "not a valid project"},
         ]:
             with self.subTest(overrides=overrides), self.assertRaises(READBACK.ReadbackError):
-                self.run(**overrides)
+                self.readback(**overrides)
         self.assertEqual(self.calls, [])
         self.destination.mkdir()
         with self.assertRaisesRegex(READBACK.ReadbackError, "exist"):
-            self.run()
+            self.readback()
         self.assertFalse(self.calls)
 
     def test_manifest_absence_or_unbounded_size_is_rejected_without_other_object_download(self):
         self.remote.pop("manifest.json")
         with self.assertRaises(READBACK.ReadbackError):
-            self.run()
+            self.readback()
         self.assertFalse(self.calls)
         self.remote["manifest.json"] = b"x" * (READBACK.RESTORE.MAX_MANIFEST_BYTES + 1)
         with self.assertRaisesRegex(READBACK.ReadbackError, "size"):
-            self.run()
+            self.readback()
         self.assertFalse(self.calls)
 
     def test_wrong_volume_inventory_or_forged_object_name_fails_before_archive_download(self):
@@ -118,7 +118,7 @@ class CloudReadbackTests(unittest.TestCase):
                 document = dict(self.manifest, **replacement)
                 self.remote["manifest.json"] = json.dumps(document).encode()
                 with self.assertRaises(READBACK.ReadbackError):
-                    self.run()
+                    self.readback()
                 self.assertEqual(len(self.calls), 1)
                 self.assertFalse((self.destination / "manifest.json").exists())
                 self.calls.clear()
@@ -126,7 +126,7 @@ class CloudReadbackTests(unittest.TestCase):
     def test_remote_ciphertext_tampering_blocks_completion_marker(self):
         self.remote["hermes-data.tar.age"] = b"x" * len(self.ciphertext)
         with self.assertRaisesRegex(READBACK.ReadbackError, "integrity"):
-            self.run()
+            self.readback()
         self.assertEqual(len(self.calls), 2)
         self.assertFalse((self.destination / "manifest.json").exists())
 
@@ -150,7 +150,7 @@ class CloudReadbackTests(unittest.TestCase):
         identity.write_text("fixture not an actual key", encoding="utf-8")
         identity.chmod(0o600)
         with mock.patch.object(READBACK.RESTORE, "verify", return_value=["hermes-data"]) as verify:
-            result = self.run(identity=identity)
+            result = self.readback(identity=identity)
         verify.assert_called_once()
         self.assertEqual(result["status"], "cloud-ciphertext-and-age-verified-not-recovery-proven")
         self.assertEqual(result["volumes"], 1)
