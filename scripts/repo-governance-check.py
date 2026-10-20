@@ -29,6 +29,7 @@ from typing import Any
 REQUIRED_CONTEXTS = (
     "version-contract", "contracts-and-runtime", "hermes-compatibility",
     "terraform (infra/bootstrap/gcp)", "terraform (infra/docker-host/gcp)",
+    "enterprise-evidence",
 )
 AUTHORITY_PATHS = ("/infra/", "/platform/", "/scripts/", "/contracts/", "/.github/", "/assurance/", "/evals/")
 SOLE_MAINTAINER_LIMITATION = (

@@ -33,15 +33,31 @@ class EnterpriseSDLCTests(unittest.TestCase):
         self.assertIn("github.event.workflow_run.head_repository.full_name == github.repository", workflow)
         self.assertIn("persist-credentials: false", workflow)
 
-    def test_assurance_scans_run_inside_ruleset_required_job(self):
+    def test_required_enterprise_evidence_context_is_an_unconditional_fail_closed_job(self):
+        """The ruleset requires this exact GitHub Actions job name, not a nested step."""
         workflow = yaml.safe_load((ROOT / ".github" / "workflows" / "validate.yml").read_text(encoding="utf-8"))
-        job = workflow["jobs"]["contracts-and-runtime"]
-        rendered = repr(job)
-        self.assertIn("run-assurance-scans.sh", rendered)
-        self.assertIn("enterprise-evidence-pack.md", rendered)
-        self.assertIn("retention-days", rendered)
-        self.assertIn("90", rendered)
-        self.assertIn("always()", rendered)
+        jobs = workflow["jobs"]
+        self.assertIn("enterprise-evidence", jobs)
+        job = jobs["enterprise-evidence"]
+        self.assertNotIn("if", job, "a required check must be reported even if other jobs fail")
+        self.assertNotIn("needs", job, "assurance must still report if runtime validation fails")
+        self.assertNotIn("continue-on-error", job, "scan findings must fail the required check")
+        self.assertEqual(job.get("timeout-minutes"), 30)
+        steps = job["steps"]
+        scan = next(step for step in steps if "run-assurance-scans.sh" in step.get("run", ""))
+        self.assertNotIn("if", scan)
+        self.assertNotIn("continue-on-error", scan)
+        self.assertIn("--require-clean-scans", (ROOT / "scripts" / "run-assurance-scans.sh").read_text())
+        verify = next(step for step in steps if "enterprise-evidence-pack.md" in step.get("run", ""))
+        self.assertIn(".enterprise-evidence/manifest.json", verify["run"])
+        self.assertIn("python3 -m json.tool", verify["run"])
+        upload = next(step for step in steps if step.get("uses", "").startswith("actions/upload-artifact@"))
+        self.assertEqual(upload["with"]["if-no-files-found"], "error")
+        self.assertEqual(upload["with"]["retention-days"], 90)
+        self.assertEqual(upload.get("if"), "always()", "retain scanner evidence even on a failed scan")
+        self.assertIn("enterprise-evidence", jobs["publish-main-release"]["needs"], "publishing must wait for a clean evidence gate")
+        self.assertNotIn("run-assurance-scans.sh", repr(jobs["contracts-and-runtime"]))
+        self.assertIn("enterprise-evidence", (ROOT / "scripts" / "repo-governance-check.py").read_text())
 
     def test_voice_dependencies_are_exactly_pinned(self):
         requirements = {
