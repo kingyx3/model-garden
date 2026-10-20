@@ -49,6 +49,11 @@ class WorkerOperationalReadinessTests(unittest.TestCase):
                 self.assertFalse(worker.healthy(self.path, now=T0))
         self.path.write_text("{ broken", encoding="utf-8")
         self.assertEqual(worker.operational_health(self.path, now=T0)["status"], "unavailable")
+        self.path.write_text("x" * 4097, encoding="utf-8")
+        self.assertEqual(worker.operational_health(self.path, now=T0)["status"], "unavailable")
+        self.path.unlink()
+        self.path.symlink_to(pathlib.Path(self.tmp.name) / "not-a-heartbeat.json")
+        self.assertEqual(worker.operational_health(self.path, now=T0)["status"], "unavailable")
 
     def test_persistent_job_failure_is_visible_but_does_not_kill_liveness(self) -> None:
         runtime = worker.Worker.__new__(worker.Worker)
