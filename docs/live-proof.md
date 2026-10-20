@@ -13,6 +13,26 @@ For an **operator-authorized maintenance window only**, `scripts/client-volume-s
 
 **Not yet production-backup coverage:** This manual snapshot requires maintenance downtime; no automated schedule, upload, monitoring, independent chain of custody, operator-only restore procedure or real recovery drill is implemented. Snapshot encryption does not authorize decryption or restoration into a different client. [Issue #230](https://github.com/kingyx3/model-garden/issues/230) remains open until those paths are built and live-tested. Keep the client stopped only for the approved maintenance interval; explicitly return services to their approved operational state afterward.
 
+## Create-only upload of completed encrypted snapshots (issue #230)
+
+`scripts/client-backup-upload.py` uploads the completed **encrypted** snapshot from the stopped-volume maintenance procedure to the *existing, opt-in* GCP bucket in `infra/docker-host/gcp/runtime_backups.tf`. It does **not** take a new snapshot, schedule an automatic backup, grant cloud permissions, restore files, or prove recovery. The bucket must have been provisioned and approved for that client and environment; `gcloud` must already be authenticated through the client's approved, preferably keyless workload identity. The bucket-scoped `roles/storage.objectCreator` writer is enough for immutable creation: **no list, read, overwrite or delete access is required**.
+
+Example, after a snapshot has completed successfully and its complete `manifest.json` exists:
+
+```sh
+python3 scripts/client-backup-upload.py \
+  --compose /approved/bundle/compose.yaml \
+  --project acme-dev \
+  --source /private/backups/acme-dev-unique-run \
+  --gcp-project-id approved-client-gcp-project \
+  --client-slug acme \
+  --environment dev
+```
+
+The tool validates client/environment binding and the exact Terraform-derived bucket name, rejects non-private or linked local files, checks the complete Compose volume inventory and encrypted SHA-256/byte sizes using the restore-side verifier, uploads each encrypted archive using `gcloud storage cp --if-generation-match=0`, rechecks local integrity and only then uploads the `manifest.json` **last** as a completion marker. It prints a minimal machine-readable success event; failures return nonzero with no cloud stderr or customer payload. A failed/partial run may have uploaded some immutable archives **without** a manifest and must be investigated rather than silently re-used; do not delete objects or retry the same object path automatically. Use a genuinely unique snapshot run directory for the next authorized attempt.
+
+**Security and evidence:** Neither the script nor the snapshot manifest proves independent provenance of the sender, that an object is readable/restorable, or that an untrusted privileged host cannot alter files. Cloud Storage CLI transfer checks are not a substitute for an independently authorized object read-back and end-to-end recovery drill. The named cloud identity needs only create authority; operators validating recovery must use separate, explicitly authorized read credentials. Avoid granting broad `storage.objectAdmin` to the client runtime. Do not log encrypted object contents, private keys, personal data or secret-bearing external CLI output. Scheduling, failure notifications, cloud-side integrity read-back, customer-approved live recovery and measured RPO/RTO remain open in [#230](https://github.com/kingyx3/model-garden/issues/230).
+
 ## Fail-closed operator restore of an encrypted snapshot (issue #230)
 
 `scripts/client-volume-restore.py` is a separate **operator-only host CLI**, not a customer endpoint. It uses the existing stopped Compose-volume snapshot manifest and requires the age **private** identity to be held by an authorized host operator (mode 0600; never checked into the client workspace or given to the coworker). Run it on an **isolated, approved replacement or clean destination host**, not on a live client's existing data.
