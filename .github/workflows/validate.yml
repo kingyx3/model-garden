@@ -128,14 +128,21 @@ jobs:
         run: |
           python3 -m pip install -r requirements-voice.txt
           python3 -c 'from livekit import api, rtc; from livekit.agents import Agent, AgentServer, AgentSession, JobContext, RunContext, cli, function_tool, get_job_context; from livekit.plugins import openai; print("LiveKit voice API imports verified")'
+  # Keep the job ID in sync with the branch ruleset's required GitHub Actions
+  # context (integration_id 15368). A step in contracts-and-runtime does NOT
+  # publish a check named enterprise-evidence and leaves PRs waiting forever.
+  enterprise-evidence:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
       - name: Install assurance dependencies
-        if: always()
         run: python3 -m pip install -r requirements-assurance.txt
       - name: Generate scanner evidence and enterprise pack
-        if: always()
         run: bash scripts/run-assurance-scans.sh
       - name: Verify evidence pack exists
-        if: always()
         run: |
           test -s .enterprise-evidence/enterprise-evidence-pack.md
           test -s .enterprise-evidence/manifest.json
