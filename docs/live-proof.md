@@ -33,6 +33,24 @@ The tool validates client/environment binding and the exact Terraform-derived bu
 
 **Security and evidence:** Neither the script nor the snapshot manifest proves independent provenance of the sender, that an object is readable/restorable, or that an untrusted privileged host cannot alter files. Cloud Storage CLI transfer checks are not a substitute for an independently authorized object read-back and end-to-end recovery drill. The named cloud identity needs only create authority; operators validating recovery must use separate, explicitly authorized read credentials. Avoid granting broad `storage.objectAdmin` to the client runtime. Do not log encrypted object contents, private keys, personal data or secret-bearing external CLI output. Scheduling, failure notifications, cloud-side integrity read-back, customer-approved live recovery and measured RPO/RTO remain open in [#230](https://github.com/kingyx3/model-garden/issues/230).
 
+## Independent cloud ciphertext read-back (issue #230)
+
+`scripts/client-backup-readback.py` performs a **manually authorized, independent read** of exactly one client/environment/run backup under the Terraform-derived GCS bucket. Use a **different** client-scoped operator identity with `storage.objects.get` only (e.g. an approved bucket-level `roles/storage.objectViewer` binding; that broad role also grants listing, so restrict it with a custom get-only role where practical). Do not give this authority to the create-only runtime backup writer. This CLI does not modify or delete cloud objects, and it does not need Docker or an age key for ciphertext verification.
+
+Example on an authorized operator host with existing `gcloud` read-only credentials, a private destination parent (mode 0700), and the **exact approved client Compose inventory**:
+
+```sh
+python3 scripts/client-backup-readback.py \\
+  --compose /approved/bundle/compose.yaml --project acme-dev \\
+  --gcp-project-id approved-client-gcp-project --client-slug acme \\
+  --environment dev --run-id acme-dev-run12345 \\
+  --destination /private/recovery/acme-dev-retrieved
+```
+
+The tool derives the only permitted GCS bucket and `v1/<project>/<run-id>/` prefix; it refuses a different project, cross-tenant run prefix, existing destination or unsafe storage parent. It looks up the **manifest** object and rejects missing/oversized manifests before download. It validates the manifest's exact Compose volume inventory and expected archive object names, queries object sizes, then retrieves each encrypted archive and independently checks SHA-256 and byte size. Only after every archive passes does it promote the downloaded manifest to `manifest.json` as the local completeness marker. On failure, the incomplete private destination must not be used; do not retry into the same path.
+
+With an approved **offline age private identity** available separately, additionally pass `--identity /private/age-identity` to require authenticated archive decryption and safe TAR validation via the existing restore verifier; no plaintext TAR is written. Even with this option, the result **does not prove** snapshot source authenticity (the manifest is unsigned), that a recovery was tested on a clean host, any RPO/RTO or an active monitoring SLA. Cloud access, provenance and host credential custody remain governed operator activities. Keep [#230](https://github.com/kingyx3/model-garden/issues/230) open for automated scheduling, failure/recovery alerts, key lifecycle and an approved live recovery drill.
+
 ## Fail-closed operator restore of an encrypted snapshot (issue #230)
 
 `scripts/client-volume-restore.py` is a separate **operator-only host CLI**, not a customer endpoint. It uses the existing stopped Compose-volume snapshot manifest and requires the age **private** identity to be held by an authorized host operator (mode 0600; never checked into the client workspace or given to the coworker). Run it on an **isolated, approved replacement or clean destination host**, not on a live client's existing data.
