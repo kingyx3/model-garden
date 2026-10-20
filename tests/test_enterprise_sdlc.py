@@ -55,6 +55,7 @@ class EnterpriseSDLCTests(unittest.TestCase):
         self.assertEqual(upload["with"]["if-no-files-found"], "error")
         self.assertEqual(upload["with"]["retention-days"], 90)
         self.assertEqual(upload.get("if"), "always()", "retain scanner evidence even on a failed scan")
+        self.assertIn("enterprise-evidence", jobs["publish-main-release"]["needs"], "publishing must wait for a clean evidence gate")
         self.assertNotIn("run-assurance-scans.sh", repr(jobs["contracts-and-runtime"]))
         self.assertIn("enterprise-evidence", (ROOT / "scripts" / "repo-governance-check.py").read_text())
 
