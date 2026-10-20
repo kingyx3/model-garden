@@ -54,6 +54,8 @@ def _private(path: pathlib.Path, *, is_dir: bool) -> None:
 def _snapshot_files(compose: pathlib.Path, project: str, source: pathlib.Path) -> list[pathlib.Path]:
     _private(source, is_dir=True)
     manifest = source / "manifest.json"
+    if manifest.is_symlink() or not manifest.is_file():
+        raise UploadError("backup manifest is missing or unsafe")
     _private(manifest, is_dir=False)
     try:
         volumes = RESTORE._validated_manifest(compose, project, source)
