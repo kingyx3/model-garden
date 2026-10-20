@@ -54,6 +54,7 @@ import fcntl
 import hashlib
 import importlib.util
 import json
+import math
 import os
 import pathlib
 import re
@@ -273,6 +274,7 @@ class Worker:
         self.queue = NoticeQueue(self.data / "worker")
         self.last_run: dict[str, float] = {}
         self.heartbeat = self.data / "worker" / "heartbeat.json"
+        self._failure_streaks: dict[str, int] = {}  # per-job attempts, not every loop tick
         self._schedules_applied = False
 
     # -- shared ------------------------------------------------------------------------------------
@@ -874,8 +876,18 @@ class Worker:
     def _beat(self, now: int, report: Mapping[str, Any]) -> None:
         self.heartbeat.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         failed = sorted(name for name, value in report.items() if isinstance(value, Mapping) and "failed" in value)
+        for name in report:  # do not reset a long-interval job on ticks when it did not run
+            self._failure_streaks[name] = self._failure_streaks.get(name, 0) + 1 if name in failed else 0
+        persistent = sorted(name for name, count in self._failure_streaks.items() if count >= 3)
+        # Heartbeat carries ONLY fixed job names and counts, never provider errors or user data.
+        document = {"at": now, "failed": failed, "persistentFailures": persistent}
         temporary = self.heartbeat.with_suffix(".tmp")
-        temporary.write_text(json.dumps({"at": now, "failed": failed}) + "\n", encoding="utf-8")
+        descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
+        os.fchmod(descriptor, 0o600)  # a leftover .tmp file must not retain permissive permissions
+        with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+            stream.write(json.dumps(document, sort_keys=True) + "\n")
+            stream.flush()
+            os.fsync(stream.fileno())
         os.replace(temporary, self.heartbeat)
 
     def run_forever(self, stop: threading.Event, *, pause: int = MIN_INTERVAL) -> None:
@@ -884,11 +896,42 @@ class Worker:
             stop.wait(pause)
 
 
-def healthy(heartbeat: pathlib.Path, *, now: float, max_age: int = 300) -> bool:
+def operational_health(heartbeat: pathlib.Path, *, now: float, max_age: int = 300) -> dict[str, Any]:
+    """Small, payload-free worker readiness signal, independent of Docker liveness.
+
+    Three failed attempts at the same job mean degradation; a healthy heartbeat is
+    still live so restarting the worker cannot obscure a provider outage.
+    """
+    unavailable = {"status": "unavailable", "reason": "missing-or-invalid", "failedJobs": [], "persistentFailures": []}
     try:
-        return now - json.loads(heartbeat.read_text(encoding="utf-8"))["at"] <= max_age
-    except (OSError, ValueError, KeyError, TypeError):
-        return False
+        if heartbeat.is_symlink() or heartbeat.stat().st_size > 4096:
+            return unavailable
+        document = json.loads(heartbeat.read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        return unavailable
+    if not isinstance(document, dict):
+        return unavailable
+    at = document.get("at")
+    if isinstance(at, bool) or not isinstance(at, (int, float)) or not math.isfinite(at):
+        return {**unavailable, "reason": "invalid"}
+    failed = document.get("failed", [])
+    persistent = document.get("persistentFailures", [])
+    def name_ok(value: Any) -> bool:
+        return isinstance(value, str) and re.fullmatch(r"[a-z][a-z0-9-]{0,39}", value) is not None
+    if not isinstance(failed, list) or not isinstance(persistent, list) or not all(name_ok(x) for x in failed + persistent):
+        return {**unavailable, "reason": "invalid"}
+    age = now - at
+    if age < -30:
+        return {**unavailable, "reason": "future"}
+    if age > max_age:
+        return {**unavailable, "reason": "stale"}
+    return {"status": "degraded" if persistent else "healthy", "reason": "persistent-job-failures" if persistent else "recent",
+            "failedJobs": sorted(set(failed)), "persistentFailures": sorted(set(persistent))}
+
+
+def healthy(heartbeat: pathlib.Path, *, now: float, max_age: int = 300) -> bool:
+    # A failing integration must be alerted to, not hidden behind Docker restarts.
+    return operational_health(heartbeat, now=now, max_age=max_age)["status"] != "unavailable"
 
 
 def build(args: argparse.Namespace, environ: Mapping[str, str]) -> Worker:
@@ -917,8 +960,13 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--config", type=pathlib.Path,
                         default=pathlib.Path(os.environ.get("MODEL_GARDEN_WORKER_CONFIG", "/opt/profile-seed/.modelgarden/worker.json")))
     parser.add_argument("--once", action="store_true", help="run one pass and print what each job did")
-    parser.add_argument("--health", action="store_true", help="exit 0 when the last pass is recent (container health check)")
+    parser.add_argument("--health", action="store_true", help="exit 0 when the last pass is recent (Docker liveness only)")
+    parser.add_argument("--readiness", action="store_true", help="emit payload-free operational status; nonzero on persistent job failures or stalled worker")
     args = parser.parse_args(argv)
+    if args.readiness:
+        status = operational_health(args.data_root / "worker" / "heartbeat.json", now=time.time())
+        print(json.dumps(status, sort_keys=True))
+        return 0 if status["status"] == "healthy" else 1
     if args.health:
         return 0 if healthy(args.data_root / "worker" / "heartbeat.json", now=time.time()) else 1
     try:
