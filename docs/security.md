@@ -67,6 +67,8 @@ Business definitions and raw runtime credentials must not be intentionally store
 
 - Preserve the known-good Model Garden release, workspace revision and previous deployable image needed for rollback.
 - Document ownership and backup/restore requirements for persistent Hermes/runtime data.
+- **Backup storage is opt-in infrastructure, not proof of recovery:** `runtime_backup_enabled` in `infra/docker-host/gcp` provisions a private client/environment-specific GCS bucket with create-only runtime writes and configurable protected retention (7–3650 days; default 30). It does **not** schedule coherent Docker-volume snapshots, avoid live-write races, or perform a restore. Do not turn this on or claim an RTO/RPO until the separate encrypted snapshot, integrity verification, operator-only restore and live drill in [#230](https://github.com/kingyx3/model-garden/issues/230) are implemented and approved. The client/operator must explicitly authorize bucket costs and access.
+
 - Export relevant application, governed-action and cloud audit records to the client's or Model Garden's existing logging/SIEM stack when required. The reference ledger-export bucket (`ledger_export_enabled`) retains every exported object for `export_retention_days`, **365 days** by default and between 1 and 3650 (set per client with `MODEL_GARDEN_EXPORT_RETENTION_DAYS`); a locked policy (`export_lock_retention`, required for production) can only be lengthened, so choose the client's approved period before locking it.
 - Use protected production GitHub Environments and business/operator approval before promotion.
 - Test prohibited actions, approval-required actions, credential revocation, audit-chain verification and rollback as part of production acceptance.
