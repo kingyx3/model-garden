@@ -218,6 +218,76 @@ class Case(unittest.TestCase):
         with self.assertRaisesRegex(Error, "size limit"):
             self.registry.list()
 
+    def test_cross_tenant_record_is_rejected_even_when_registry_header_matches(self):
+        first = self.grant()
+        path = self.registry.path
+        original = json.loads(path.read_text())
+        altered = json.loads(json.dumps(original))
+        altered["grants"][first["id"]]["tenant"] = "globex-prod"
+        path.write_text(json.dumps(altered))
+        with self.assertRaisesRegex(Error, "foreign-tenant"):
+            self.registry.list()
+        with self.assertRaisesRegex(Error, "foreign-tenant"):
+            self.resolve()
+        with self.assertRaisesRegex(Error, "foreign-tenant"):
+            self.registry.revoke(first["id"], by=ADMIN, now=T0 + 1)
+        self.assertEqual(json.loads(path.read_text()), altered)
+        path.write_text(json.dumps(original))
+        self.assertEqual(self.resolve()["grantId"], first["id"])
+
+    def test_grant_store_rejects_mismatched_ids_and_malformed_access_records(self):
+        first = self.grant()
+        path = self.registry.path
+        original = json.loads(path.read_text())
+        changes = [
+            ("id", "g-another"),
+            ("agent", "../other-tenant"),
+            ("family", "CRM"),
+            ("secretRef", "plain-text"),
+            ("scopes", ["crm.create", "crm.create"]),
+            ("scopes", ["crm.create", "not a portable tool"]),
+            ("health", "unknown"),
+            ("isolation", "shared-admin"),
+            ("rotations", True),
+            ("createdAt", "yesterday"),
+            ("retiredSecretRefs", "secret://unsafe/iterable"),
+            ("retiredSecretRefs", ["not-a-secret-ref"]),
+        ]
+        for field, value in changes:
+            with self.subTest(field=field, value=value):
+                altered = json.loads(json.dumps(original))
+                altered["grants"][first["id"]][field] = value
+                path.write_text(json.dumps(altered))
+                with self.assertRaises(Error):
+                    self.registry.list()
+        path.write_text(json.dumps(original))
+        self.assertEqual(self.resolve()["grantId"], first["id"])
+
+    def test_duplicate_retired_reference_or_cross_coworker_reference_is_rejected(self):
+        first, second = self.grant(), self.other()
+        path = self.registry.path
+        original = json.loads(path.read_text())
+        for field in ("secretRef", "retiredSecretRefs"):
+            with self.subTest(field=field):
+                altered = json.loads(json.dumps(original))
+                altered["grants"][second["id"]][field] = (
+                    SECRET_A if field == "secretRef" else [SECRET_A]
+                )
+                path.write_text(json.dumps(altered))
+                with self.assertRaisesRegex(Error, "reuses a secret reference"):
+                    self.registry.list()
+        path.write_text(json.dumps(original))
+        self.assertEqual(self.resolve(agent="researcher", tool="crm.read")["grantId"], second["id"])
+
+    def test_invalid_mutation_never_persists_a_corrupt_grant_store(self):
+        first = self.grant()
+        initial = self.registry.path.read_bytes()
+        with self.assertRaisesRegex(Error, "foreign-tenant"):
+            with self.registry._locked() as state:
+                state["grants"][first["id"]]["tenant"] = "other-prod"
+        self.assertEqual(self.registry.path.read_bytes(), initial)
+        self.assertEqual(self.resolve()["grantId"], first["id"])
+
     def test_failed_or_expired_grants_refuse_rather_than_fall_back(self):
         first = self.grant(expires_at=T0 + 100)
         self.assertEqual(self.resolve(now=T0 + 99)["grantId"], first["id"])

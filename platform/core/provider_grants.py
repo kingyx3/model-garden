@@ -86,6 +86,57 @@ class GrantRegistry:
         self.path = self.root / f"{tenant}.grants.json"
         self._audit = audit
 
+    def _validate_grants(self, grants: Any) -> None:
+        """Fail closed on invalid or foreign grant records in a tenant store.
+
+        The outer tenant label alone is not sufficient: a copied or corrupted
+        record must never resolve to another tenant's acting identity/secret.
+        The store is permission-protected local state, not an authentication
+        mechanism for writers; only a trusted operator may modify it.
+        """
+        if not isinstance(grants, dict) or len(grants) > MAX_GRANTS:
+            raise GrantError("grant registry contains invalid grants")
+        seen_refs: set[str] = set()
+        for grant_id, grant in grants.items():
+            if not isinstance(grant_id, str) or not isinstance(grant, dict):
+                raise GrantError("grant registry contains invalid grant records")
+            if grant.get("id") != grant_id or grant.get("tenant") != self.tenant:
+                raise GrantError("grant registry contains a mismatched or foreign-tenant grant")
+            for field, pattern in (
+                ("agent", _AGENT), ("family", _FAMILY),
+                ("provider", _PROVIDER), ("connectionId", _CONNECTION),
+                ("actingIdentity", _IDENTITY), ("owner", _PERSON),
+                ("secretRef", _SECRET_REF),
+            ):
+                if not isinstance(grant.get(field), str) or not pattern.fullmatch(grant[field]):
+                    raise GrantError("grant registry contains invalid grant identity or reference")
+            if grant.get("isolation") not in ISOLATIONS or grant.get("health") not in HEALTH:
+                raise GrantError("grant registry contains invalid grant lifecycle state")
+            scopes = grant.get("scopes")
+            if not isinstance(scopes, list) or not scopes or len(scopes) > MAX_SCOPES or any(
+                not isinstance(scope, str) or not _TOOL.fullmatch(scope) for scope in scopes
+            ):
+                raise GrantError("grant registry contains invalid grant scopes")
+            if len(scopes) != len(set(scopes)):
+                raise GrantError("grant registry contains duplicate grant scopes")
+            if not isinstance(grant.get("rotations"), int) or isinstance(grant["rotations"], bool) or grant["rotations"] < 0:
+                raise GrantError("grant registry contains invalid rotation state")
+            for field in ("createdAt", "rotatedAt", "revokedAt", "expiresAt"):
+                value = grant.get(field)
+                if (field == "createdAt" or value is not None) and (
+                    not isinstance(value, int) or isinstance(value, bool) or value < 0
+                ):
+                    raise GrantError("grant registry contains invalid grant timestamps")
+            retired = grant.get("retiredSecretRefs", [])
+            if not isinstance(retired, list) or len(retired) > 500:
+                raise GrantError("grant registry contains invalid retired secret references")
+            for ref in [grant["secretRef"], *retired]:
+                if not isinstance(ref, str) or not _SECRET_REF.fullmatch(ref):
+                    raise GrantError("grant registry contains invalid retired secret references")
+                if ref in seen_refs:
+                    raise GrantError("grant registry reuses a secret reference")
+                seen_refs.add(ref)
+
     @contextlib.contextmanager
     def _locked(self) -> Iterator[dict[str, Any]]:
         self.root.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -117,12 +168,12 @@ class GrantRegistry:
                 loaded = json.loads(payload)
                 if not isinstance(loaded, dict) or loaded.get("schemaVersion") != SCHEMA_VERSION or loaded.get("tenant") != self.tenant:
                     raise GrantError("grant registry has an unsupported format or belongs to another tenant")
-                if not isinstance(loaded.get("grants"), dict) or len(loaded["grants"]) > MAX_GRANTS:
-                    raise GrantError("grant registry contains invalid grants")
+                self._validate_grants(loaded.get("grants"))
                 state = loaded
             before = json.dumps(state, sort_keys=True)
             yield state
             if json.dumps(state, sort_keys=True) != before:
+                self._validate_grants(state["grants"])
                 # Fail closed if an existing target was replaced with a symlink or special file.
                 try:
                     check = regular(self.path, os.O_RDONLY)
