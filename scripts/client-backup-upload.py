@@ -40,7 +40,7 @@ def expected_bucket(gcp_project: str, client_slug: str, environment: str) -> str
         raise UploadError("invalid GCP project ID")
     if not SLUG.fullmatch(client_slug) or environment not in ENVIRONMENTS:
         raise UploadError("invalid client slug or environment")
-    prefix = hashlib.md5(gcp_project.encode("ascii")).hexdigest()[:10]
+    prefix = hashlib.md5(gcp_project.encode("ascii"), usedforsecurity=False).hexdigest()[:10]
     return f"{prefix}-{client_slug}-{environment}-mg-backups"
 
 
