@@ -1,0 +1,42 @@
+"""Offline guardrails for the optional client runtime backup storage boundary (#230).
+
+Terraform format/validate and security checks remain the authoritative HCL validation.
+"""
+from __future__ import annotations
+
+import pathlib
+import unittest
+
+ROOT = pathlib.Path(__file__).resolve().parents[1]
+BUCKET = ROOT / "infra" / "docker-host" / "gcp" / "runtime_backups.tf"
+
+
+class RuntimeBackupBucketContractTests(unittest.TestCase):
+    def test_client_runtime_backup_is_opt_in_and_project_scoped(self):
+        source = BUCKET.read_text(encoding="utf-8")
+        self.assertIn('variable "runtime_backup_enabled"', source)
+        self.assertIn("default     = false", source)
+        self.assertIn("var.runtime_backup_enabled ? 1 : 0", source)
+        self.assertIn('substr(md5(var.project_id), 0, 10)', source)
+        self.assertIn('local.name', source)
+
+    def test_private_retained_objects_have_upload_only_runtime_permission(self):
+        source = BUCKET.read_text(encoding="utf-8")
+        for declaration in (
+            'uniform_bucket_level_access = true',
+            'public_access_prevention    = "enforced"',
+            'force_destroy               = false',
+            "retention_policy {",
+            "runtime_backup_retention_days * 86400",
+            'role   = "roles/storage.objectCreator"',
+            'member = "serviceAccount:${var.runtime_service_account}"',
+        ):
+            with self.subTest(declaration=declaration):
+                self.assertIn(declaration, source)
+        self.assertNotIn("roles/storage.objectAdmin", source)
+        self.assertNotIn("roles/storage.admin", source)
+        self.assertNotIn("roles/storage.objectViewer", source)
+
+
+if __name__ == "__main__":
+    unittest.main()

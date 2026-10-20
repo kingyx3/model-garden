@@ -11,6 +11,8 @@ Supported v1 business resources:
 - `KnowledgeSource` — approved source and data classification.
 - `Policy` — client-owned approval rules, enforced by the governed boundary (see [Client approval policy](#client-approval-policy)); a dedicated policy engine remains out of scope.
 
+**Model routing in the pinned Hermes runtime (v0.21.2).** A `ModelProfile` with multiple candidates must explicitly select `routing.strategy: ordered-fallback`: the **listed order** is primary first, then Hermes `fallback_providers` in order. The optional `priority` numbers are descriptive; reorder the list to change actual precedence. Provisioning fails closed on malformed/duplicate candidates or multiple candidates with a non-fallback strategy, rather than silently ignoring secondary models. The generated profile carries provider/model names only, **never provider API keys**; each provider must separately have valid approved credentials and cost/data-residency permissions before a live fallback is enabled. Hermes only attempts fallback for its supported provider-error classes; do not assume this guarantees availability. Verify provider-side fallback, cost attribution and authority boundaries in a live outage drill before making an SLA claim.
+
 **Shipped contract:** reusable `Skillset` catalogue packages group versioned Skills without granting Tool permissions or forcing activation. Each coworker explicitly selects enabled members; the compiler resolves dependencies and enforces independent readiness (details below). Business intent is defined in the [target architecture](https://modelgarden.atlassian.net/wiki/spaces/BA/pages/11796484).
 
 ## Capability contracts

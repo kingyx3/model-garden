@@ -74,6 +74,11 @@ assert soul and "Receptionist" in soul
 config = yaml.safe_load((home / "config.yaml").read_text())
 assert config["model"]["provider"] == "openai"
 assert config["model"]["default"] == "approved-openai-model"
+from hermes_cli.fallback_config import get_fallback_chain
+assert get_fallback_chain(config) == [
+    {"provider": "anthropic", "model": "approved-anthropic-model"},
+    {"provider": "internal", "model": "approved-open-weight-model"},
+], "Pinned Hermes did not recognize the generated fallback chain"
 
 skills_dir = get_skills_dir().resolve()
 assert skills_dir == (home / "skills").resolve()
