@@ -10,6 +10,7 @@ import os
 import pathlib
 import tempfile
 import unittest
+from unittest import mock
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 spec = importlib.util.spec_from_file_location("test_worker_operational_module", ROOT / "platform/runtime/worker.py")
@@ -80,8 +81,9 @@ class WorkerOperationalReadinessTests(unittest.TestCase):
             runtime._beat(T0 + index, {"mailbox": {"failed": "customer secret payload"}})
         body = self.path.read_text(encoding="utf-8")
         self.assertNotIn("customer secret", body)
-        self.assertEqual(worker.main(["--readiness", "--data-root", self.path.parent.parent]), 1)
-        self.assertEqual(worker.main(["--health", "--data-root", self.path.parent.parent]), 1)  # ancient fixture time
+        with mock.patch.object(worker.time, "time", return_value=T0 + 2):
+            self.assertEqual(worker.main(["--readiness", "--data-root", str(self.path.parent.parent)]), 1)
+            self.assertEqual(worker.main(["--health", "--data-root", str(self.path.parent.parent)]), 0)
 
 
 if __name__ == "__main__":
