@@ -100,7 +100,10 @@ def _verify_download(path: pathlib.Path, size: int, digest: str | None = None) -
 def retrieve(*, compose: pathlib.Path, project: str, destination: pathlib.Path,
              gcp_project: str, client_slug: str, environment: str, run_id: str,
              identity: pathlib.Path | None = None) -> dict[str, Any]:
-    bucket = UPLOAD.expected_bucket(gcp_project, client_slug, environment)
+    try:
+        bucket = UPLOAD.expected_bucket(gcp_project, client_slug, environment)
+    except UPLOAD.UploadError as exc:
+        raise ReadbackError("invalid client GCP backup binding") from exc
     if project != f"{client_slug}-{environment}" or \
        not UPLOAD.RUN_ID.fullmatch(run_id) or not run_id.startswith(project + "-"):
         raise ReadbackError("snapshot run is not bound to the exact client and environment")
