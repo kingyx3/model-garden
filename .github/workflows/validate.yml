@@ -173,7 +173,7 @@ jobs:
 
   publish-main-release:
     if: github.ref == 'refs/heads/main'
-    needs: [version-contract, current-terraform, contracts-and-runtime, hermes-compatibility]
+    needs: [version-contract, current-terraform, contracts-and-runtime, hermes-compatibility, enterprise-evidence]
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
