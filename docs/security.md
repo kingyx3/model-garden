@@ -42,7 +42,7 @@ Model Garden's early-client deployment is intentionally small: one isolated clie
 
 - Third-party GitHub Actions in the validation workflow are referenced by immutable commit SHA rather than mutable major-version tags.
 - Runtime-critical Python dependencies use exact pins where they are deployed into the production bundle; automated weekly dependency update checks cover Python, GitHub Actions and supported Terraform modules.
-- CI runs dependency vulnerability, Python security, Terraform/IaC, repository-secret and SBOM scans inside a branch-ruleset-required validation job. Scanner failure therefore fails that required check rather than producing advisory-only evidence.
+- CI runs dependency vulnerability, Python security, Terraform/IaC, repository-secret and SBOM scans in the **independent `enterprise-evidence` job**, which must be configured as a GitHub Actions required check under the same exact name. Its scanner and manifest verification steps fail closed, while artifact upload runs even after failure so evidence can be investigated. An Actions *step* does not publish a check; never require an unreported check name in the branch ruleset.
 - Enterprise Evidence Pack artifacts are retained for 90 days by CI; customer/contracts may require longer external retention.
 - Dependency automation does not authorize an upgrade: every change still follows the normal version contract, tests/evals and DEV-to-PROD promotion path.
 - See `SECURITY.md` for vulnerability disclosure and triage scope.
