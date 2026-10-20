@@ -250,7 +250,7 @@ class GovernanceTests(unittest.TestCase):
         checks["parameters"]["required_status_checks"] = [{"context": "version-contract"}]
         result = governance.check(document, CODEOWNERS)
         self.assertEqual(self.ids(result), ["missing-required-check", "no-deletion-rule", "no-non-fast-forward-rule", "ruleset-not-active"])
-        self.assertEqual(sum(item["id"] == "missing-required-check" for item in result["gaps"]), 4)
+        self.assertEqual(sum(item["id"] == "missing-required-check" for item in result["gaps"]), len(governance.REQUIRED_CONTEXTS) - 1)
         none = governance.check({**ruleset(), "rules": []}, CODEOWNERS)
         self.assertIn("no-pull-request-rule", self.ids(none))
         self.assertIn("no-required-checks", self.ids(none))
