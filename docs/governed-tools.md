@@ -233,6 +233,10 @@ The consent and idempotency gate that a future booking-notice sender must pass t
 
 Not done, and not claimed (#240 stays open): the confirmed-booking event itself and its cancellation, reschedule and conflict handling, delivery through a governed mail or WhatsApp channel and its provider receipts, sender-policy windows such as a messaging session window, retry bounds, DST-aware named timezones (a fixed UTC offset per call is used), consent capture from an inbound STOP or code reply, and live evidence.
 
+## Multilingual hostile-input checks (v0.8.83)
+
+`evals/receptionist/adversarial.yaml` gains synthetic Mandarin, Malay, Tamil, code-switched and "translate the rules" variants of the forged-owner, approval and authority-escalation attacks. The existing cross-surface test holds each to the same governed outcome as the English ones: the sender stays unmapped and public, cannot approve, and a write is denied and ledgered (`principal-not-authorized`). `tests/test_locale_fallback.py` adds look-alike spellings of the pause command (ideographic space, upper case and a leading slash from a stranger are refused with the neutral reply and change nothing; full-width letters, a zero-width space, another language's word and a non-matching verb are ordinary text and never pause or resume anything, even from an administrator). These are deterministic tests of the governed outcome. No model is called, so they are not evidence that a model resists multilingual injection or that any language is supported; that needs a credential-backed run (#235, #239 stay open).
+
 ## Enterprise audit contract
 
 Governed material actions emit versioned JSONL records with `schemaVersion: 3`. Depending on the stage, records capture:
