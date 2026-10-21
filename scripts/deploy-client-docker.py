@@ -350,7 +350,7 @@ def _worker_settings(binding: dict[str, Any]) -> tuple[dict[str, Any] | None, st
         raise ValueError("Docker target failed: EnvironmentBinding worker must be an object")
     if worker.get("enabled") is not True:
         return None, None
-    allowed = {"enabled", "coworker_api_key_ref", "people", "escalate_to", "owners", "mailbox", "intervals", "artifact_retention_days", "ledger_export"}
+    allowed = {"enabled", "coworker_api_key_ref", "people", "escalate_to", "owners", "mailbox", "intervals", "artifact_retention_days", "ledger_export", "monthly_spend_cap"}
     unknown = sorted(set(worker) - allowed)
     if unknown:
         raise ValueError(f"Docker target failed: unknown worker settings: {', '.join(unknown)}")
@@ -368,6 +368,11 @@ def _worker_settings(binding: dict[str, Any]) -> tuple[dict[str, Any] | None, st
         config["intervals"] = worker["intervals"]
     if worker.get("artifact_retention_days") is not None:
         config["artifactRetentionDays"] = worker["artifact_retention_days"]
+    cap = worker.get("monthly_spend_cap")
+    if cap is not None:
+        if not isinstance(cap, dict) or set(cap) - {"cap_cents", "warn_at_percent"}:
+            raise ValueError("Docker target failed: worker.monthly_spend_cap holds cap_cents and optional warn_at_percent")
+        config["spend"] = {"capCents": cap.get("cap_cents"), **({"warnAtPercent": cap["warn_at_percent"]} if "warn_at_percent" in cap else {})}
     export = worker.get("ledger_export")
     if export is not None:
         if not isinstance(export, dict) or set(export) - {"gcs_bucket", "impersonate_service_account", "prefix"} or not export.get("gcs_bucket"):
