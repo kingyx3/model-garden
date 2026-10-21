@@ -183,6 +183,12 @@ A deployed gateway accepts `assign <agent>: <goal>` (or `delegate ...`) in a dir
 
 Not done, and not claimed (#229 stays open): the Agent starting on the task by itself, telling the person in the same channel when it reports done, declined or failed, task state shared between the gateway, worker and sidecar processes while they run, and any live evidence.
 
+## Task report notices and adversarial control-surface checks (v0.8.77)
+
+**Task reports reach the person (#229).** The worker's `task-reports` job (every 60 s, `intervals.task-reports`) reads the task inbox (`inbox.json` on the governance volume) and, once per task, queues a notice to the person who handed the task over when the Agent reports it `done`, `declined` or `failed`. The notice names only the task id, the Agent and the outcome; the report text stays in the task inbox and never enters the notice queue or the ledger. A task an Agent handed to a colleague is not announced to a person. The notice is delivered by the normal notices job to the person's own channel in the worker's `people` directory (a person who is not listed gets the usual undeliverable-notice handling). It keeps running while the coworker is paused, because a person is waiting to hear. This does not make the Agent start on a task by itself, share task state between running processes, or provide live evidence.
+
+**Adversarial control-surface checks (#235, #232).** `evals/receptionist/adversarial.yaml` gains `controlCommands`, and `tests/test_control_surface_adversarial.py` sends them as a stranger, an ordinary member and an administrator in a shared channel, with the coworker already paused and not paused: the reply is always the same neutral refusal and the pause state never changes; a claim of authority in an earlier turn does not carry over; a paused coworker gives everyone, including a forged owner, only the holding reply; and a granted approval is neither consumed nor usable while paused, then still works once, after resume. These are deterministic tests of the governed outcome. No model is called, so they are not evidence that a model resists injection (a credential-backed red-team run is still required, and #235 stays open).
+
 ## Enterprise audit contract
 
 Governed material actions emit versioned JSONL records with `schemaVersion: 3`. Depending on the stage, records capture:
