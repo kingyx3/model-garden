@@ -89,6 +89,7 @@ def _load(name: str, relative: str):
 
 
 MODULES = {
+    "heartbeat": "platform/core/heartbeat.py",
     "pause": "platform/core/pause.py",
     "govern": "scripts/govern-action.py",
     "schedules": "platform/core/schedules.py",
@@ -914,31 +915,7 @@ def operational_health(heartbeat: pathlib.Path, *, now: float, max_age: int = 30
     Three failed attempts at the same job mean degradation; a healthy heartbeat is
     still live so restarting the worker cannot obscure a provider outage.
     """
-    unavailable = {"status": "unavailable", "reason": "missing-or-invalid", "failedJobs": [], "persistentFailures": []}
-    try:
-        if heartbeat.is_symlink() or heartbeat.stat().st_size > 4096:
-            return unavailable
-        document = json.loads(heartbeat.read_text(encoding="utf-8"))
-    except (OSError, ValueError, TypeError):
-        return unavailable
-    if not isinstance(document, dict):
-        return unavailable
-    at = document.get("at")
-    if isinstance(at, bool) or not isinstance(at, (int, float)) or not math.isfinite(at):
-        return {**unavailable, "reason": "invalid"}
-    failed = document.get("failed", [])
-    persistent = document.get("persistentFailures", [])
-    def name_ok(value: Any) -> bool:
-        return isinstance(value, str) and re.fullmatch(r"[a-z][a-z0-9-]{0,39}", value) is not None
-    if not isinstance(failed, list) or not isinstance(persistent, list) or not all(name_ok(x) for x in failed + persistent):
-        return {**unavailable, "reason": "invalid"}
-    age = now - at
-    if age < -30:
-        return {**unavailable, "reason": "future"}
-    if age > max_age:
-        return {**unavailable, "reason": "stale"}
-    return {"status": "degraded" if persistent else "healthy", "reason": "persistent-job-failures" if persistent else "recent",
-            "failedJobs": sorted(set(failed)), "persistentFailures": sorted(set(persistent))}
+    return _module("heartbeat").check(heartbeat, now=now, max_age=max_age)
 
 
 def healthy(heartbeat: pathlib.Path, *, now: float, max_age: int = 300) -> bool:

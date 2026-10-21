@@ -46,6 +46,7 @@ RUNTIME_SOURCE_PATHS = (
     pathlib.Path("platform/runtime/governed_mcp.py"),
     pathlib.Path("platform/runtime/worker.py"),
     pathlib.Path("platform/core/pause.py"),
+    pathlib.Path("platform/core/heartbeat.py"),
     pathlib.Path("scripts/runtime-pause.py"),
     pathlib.Path("platform/runtime/coworker_client.py"),
     pathlib.Path("platform/metering/usage.py"),
@@ -96,6 +97,9 @@ RUNTIME_SOURCE_PATHS = (
     pathlib.Path("platform/core/onboarding_pack.py"),
     pathlib.Path("platform/core/knowledge_deploy.py"),
     pathlib.Path("platform/core/team.py"),
+    pathlib.Path("platform/core/task_budget.py"),
+    pathlib.Path("platform/core/task_inbox.py"),
+    pathlib.Path("platform/runtime/team_runtime.py"),
     pathlib.Path("platform/core/mcp_passthrough.py"),
     pathlib.Path("platform/core/mcp_executor.py"),
     pathlib.Path("platform/core/mcp_connections.py"),
@@ -595,6 +599,8 @@ def _gateway_settings(binding: dict[str, Any]) -> tuple[dict[str, Any] | None, d
     for source, target in (("escalate_to", "escalateTo"), ("agent", "agent"), ("paused_message", "pausedMessage")):
         if gateway.get(source):
             config[target] = gateway[source]
+    if gateway.get("assign") is not None:
+        config["assign"] = gateway["assign"]  # {"permissions": {person: [Tool names]}}; the gateway validates the shape
     web = gateway.get("web")
     if web is not None:
         mail = (web or {}).get("mail") or {}

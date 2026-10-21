@@ -52,7 +52,7 @@ import threading
 import time
 import urllib.parse
 from collections import OrderedDict
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from email.message import EmailMessage
 from typing import Any
 
@@ -61,6 +61,7 @@ MAX_BODY = 1024 * 1024
 HTTP_PORT = 8080
 SMTP_PORT = 2525
 ANNOUNCE_EVERY = 15
+READINESS_MAX_AGE = 120  # eight missed beats
 IDENTITY = "runtime:gateway"
 _ENROLL_TOKEN = re.compile(r"[A-Za-z0-9_-]{32,128}")
 _CSP = "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
@@ -91,7 +92,7 @@ def _module(key: str):
         "handoff_reply": "platform/core/handoff_reply.py", "schedules": "platform/core/schedules.py",
         "artifacts": "platform/core/artifacts.py", "coworker": "platform/runtime/coworker_client.py",
         "enrollment": "platform/core/secret_enrollment.py", "vault": "platform/core/sealed_vault.py",
-        "receipts": "platform/channels/receipts.py", "pause": "platform/core/pause.py", "inbox": "platform/core/inbox.py", "event_outbox": "platform/core/event_outbox.py", "oauth": "platform/core/oauth_consent.py", "readiness": "platform/core/grant_readiness.py", "studio": "platform/runtime/studio.py",
+        "receipts": "platform/channels/receipts.py", "pause": "platform/core/pause.py", "heartbeat": "platform/core/heartbeat.py", "team_runtime": "platform/runtime/team_runtime.py", "inbox": "platform/core/inbox.py", "event_outbox": "platform/core/event_outbox.py", "oauth": "platform/core/oauth_consent.py", "readiness": "platform/core/grant_readiness.py", "studio": "platform/runtime/studio.py",
     }
     # Shared names, so an error class raised in one module is the class another module catches.
     shared = {"text": "model_garden_text_channel", "schedules": "model_garden_schedule_commands_store"}
@@ -111,7 +112,7 @@ def load_config(document: Mapping[str, Any]) -> dict[str, Any]:
     """Validate the non-secret configuration rendered from ``EnvironmentBinding.spec.gateway``."""
     if not isinstance(document, Mapping):
         raise GatewayConfigError("gateway configuration must be an object")
-    allowed = {"publicOrigin", "directory", "people", "escalateTo", "web", "slack", "teams", "approvals", "mailbox", "coworker", "agent", "enrollment", "oauth", "studio", "pausedMessage"}
+    allowed = {"publicOrigin", "directory", "people", "escalateTo", "web", "slack", "teams", "approvals", "mailbox", "coworker", "agent", "enrollment", "oauth", "studio", "pausedMessage", "assign"}
     unknown = sorted(set(document) - allowed)
     if unknown:
         raise GatewayConfigError(f"unknown gateway settings: {', '.join(unknown)}")
@@ -123,6 +124,14 @@ def load_config(document: Mapping[str, Any]) -> dict[str, Any]:
     held = document.get("pausedMessage")
     if held is not None and not (isinstance(held, str) and 1 <= len(held.strip()) <= 500):
         raise GatewayConfigError("pausedMessage must be 1-500 characters of text")
+    assign = document.get("assign")
+    if assign is not None:
+        permissions = assign.get("permissions") if isinstance(assign, Mapping) else None
+        if (not isinstance(assign, Mapping) or set(assign) - {"permissions"} or not isinstance(permissions, Mapping) or not permissions
+                or not all(isinstance(person, str) and person and isinstance(tools, list) and all(isinstance(tool, str) and tool for tool in tools)
+                           for person, tools in permissions.items())):
+            raise GatewayConfigError("assign needs permissions: a non-empty object of person -> list of Tool names")
+        assign = {"permissions": {person: sorted(set(tools)) for person, tools in permissions.items()}}
     sections: dict[str, Any] = {}
     for name, required in (("web", {"allowedAddresses"}), ("slack", {"botUserId"}), ("teams", {"appId", "tenants"}),
                            ("approvals", set()), ("mailbox", {"addresses"}), ("coworker", {"url"}), ("enrollment", {"vaultPublicKey"}), ("oauth", {"providers"}), ("studio", {"owner"})):
@@ -171,7 +180,7 @@ def load_config(document: Mapping[str, Any]) -> dict[str, Any]:
             raise GatewayConfigError(str(exc)) from None
     return {
         "publicOrigin": origin, "directory": dict(document.get("directory") or {}), "people": dict(document.get("people") or {}),
-        "escalateTo": document.get("escalateTo"), "pausedMessage": held.strip() if held else None, "agent": document.get("agent") or "coworker", **{k: sections.get(k) for k in
+        "escalateTo": document.get("escalateTo"), "pausedMessage": held.strip() if held else None, "assign": assign, "agent": document.get("agent") or "coworker", **{k: sections.get(k) for k in
         ("web", "slack", "teams", "approvals", "mailbox", "coworker", "enrollment", "oauth", "studio")},
     }
 
@@ -330,6 +339,8 @@ class Gateway:
         self.data = pathlib.Path(data_root)
         self.audit_path = self.data / "audit.jsonl"
         self.tenant = tenant_of(self.desired_state)
+        self._team_runtime, self._team_lock = None, threading.Lock()
+        self._heartbeat = _module("heartbeat").Beat(pathlib.Path(data_root) / "gateway" / "heartbeat.json")
         self.coworker, self.clock, self.environ = coworker, clock, environ
         self._http = http
         self.outbox = _module("transports").WebOutbox()
@@ -414,6 +425,7 @@ class Gateway:
             self.adapters, self.directory, respond=self._respond, decide=self._decide, handoff_replies=self._handoff_replies(),
             schedules=self._schedule_store(), agent=self.config["agent"], executor=executor, audit=self.audit,
             deliverables=self._deliverables, inbox=self._inbox_text, observed=self._chat_event, pause=self._pause_command,
+            assign=self._assign_task if self.config["assign"] else None,
         )
 
     # -- shared -------------------------------------------------------------------------------------------
@@ -498,6 +510,28 @@ class Gateway:
         reference = hashlib.sha256(f"{inbound.channel}\0{inbound.conversation_id}\0{inbound.message_id}".encode("utf-8")).hexdigest()[:32]
         if not _module("event_outbox").EventOutbox(self.data / "events").append("chat.message", reference, at=int(self.clock())):
             self.audit("channel.event-dropped", IDENTITY, {"channel": inbound.channel, "reason": "outbox-full"})
+
+    def beat(self, now: int, failed: Iterable[str] = ()) -> dict[str, Any]:
+        """Record that the gateway's own loop ran (and which periodic jobs failed), for ``--readiness`` and an external alert."""
+        failed = set(failed)
+        return self._heartbeat.write(now, {name: name in failed for name in ("announce-approvals", "announce-receipts")})
+
+    def _team(self):
+        """The Agent's task runtime over the governance volume, so tasks and the ledger are the ones the runtime already uses (#229)."""
+        if self._team_runtime is None:
+            team = _module("team_runtime")
+            people = self.config["assign"]["permissions"]
+            self._team_runtime = team.TeamRuntime([self.desired_state], self.data, environ=self.environ, permissions_for=lambda person: people.get(person, []))
+        return self._team_runtime
+
+    def _assign_task(self, person: str, agent: str, goal: str) -> str:
+        """``assign <agent>: <goal>`` from a mapped person in a direct chat; a refusal names the rule and never the goal."""
+        with self._team_lock:
+            try:
+                envelope = self._team().assign_task(person, agent, goal=goal)
+            except PermissionError as exc:  # TeamError and DelegationError: unknown Agent, nothing in common, over budget
+                raise ValueError(str(exc)) from None
+        return f"Handed to {agent} as task {envelope['taskId']}. It is in the Agent's inbox."
 
     def _pause_command(self, admin: str, verb: str, reason: str) -> str:
         """``pause coworker [reason]`` / ``resume coworker`` from a mapped admin: the state is written, then ledgered with who and why."""
@@ -882,9 +916,14 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--port", type=int, default=HTTP_PORT)
     parser.add_argument("--smtp-port", type=int, default=SMTP_PORT)
     parser.add_argument("--health", action="store_true", help="exit 0 when the HTTP server answers (container health check)")
+    parser.add_argument("--readiness", action="store_true", help="print payload-free operational status; nonzero unless the loop beat recently and nothing persistently fails")
     args = parser.parse_args(argv)
     if args.health:
         return 0 if healthy(args.port) else 1
+    if args.readiness:
+        status = _module("heartbeat").check(args.data_root / "gateway" / "heartbeat.json", now=time.time(), max_age=READINESS_MAX_AGE)
+        print(json.dumps(status, sort_keys=True))
+        return 0 if status["status"] == "healthy" else 1
     try:
         gateway = build(args, os.environ)
     except (OSError, ValueError, KeyError, RuntimeError) as exc:  # RuntimeError: CoworkerError, TransportError
@@ -902,15 +941,23 @@ def main(argv: list[str] | None = None) -> int:
     for sig in (signal.SIGTERM, signal.SIGINT):
         signal.signal(sig, lambda *_: stop.set())
     threading.Thread(target=server.serve_forever, daemon=True).start()
-    while not stop.wait(ANNOUNCE_EVERY):
-        for announce in (gateway.announce_approvals, gateway.announce_receipts):
+    while True:
+        failed = []
+        for name, announce in (("announce-approvals", gateway.announce_approvals), ("announce-receipts", gateway.announce_receipts)):
             try:
                 announce()
             except Exception as exc:  # noqa: BLE001
+                failed.append(name)
                 try:
                     gateway.audit("gateway.announce-failed", IDENTITY, {"error": type(exc).__name__})
                 except Exception:  # noqa: BLE001
                     pass
+        try:
+            gateway.beat(int(time.time()), failed)
+        except OSError:  # a full or read-only volume must not stop the gateway; the missing beat is itself the signal
+            pass
+        if stop.wait(ANNOUNCE_EVERY):
+            break
     server.shutdown()
     if smtp:
         smtp.shutdown()
