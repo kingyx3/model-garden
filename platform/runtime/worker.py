@@ -66,7 +66,7 @@ from collections.abc import Callable, Mapping
 from typing import Any
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
-DEFAULT_INTERVALS = {"scheduler": 60, "mailbox": 30, "notices": 60, "retention": 3600, "usage": 300, "export": 300, "crm-sync": 120, "calls": 120, "changes": 60, "events": 30, "knowledge": 21_600, "task-reports": 60}
+DEFAULT_INTERVALS = {"scheduler": 60, "mailbox": 30, "notices": 60, "retention": 3600, "usage": 300, "export": 300, "crm-sync": 120, "calls": 120, "changes": 60, "events": 30, "knowledge": 21_600, "task-reports": 60, "spend": 300}
 MIN_INTERVAL, MAX_INTERVAL = 10, 86_400
 # A stalled export alerts the escalation contact when the ledger is this far ahead of it, or has waited this long.
 EXPORT_MAX_LAG_EVENTS = 100
@@ -147,7 +147,7 @@ def load_config(document: Mapping[str, Any]) -> dict[str, Any]:
     """Validate the non-secret worker configuration rendered from ``EnvironmentBinding.spec.worker``."""
     if not isinstance(document, Mapping):
         raise WorkerConfigError("worker configuration must be an object")
-    allowed = {"deployedBy", "intervals", "people", "escalateTo", "owners", "mailbox", "coworker", "connectors", "artifactRetentionDays", "export"}
+    allowed = {"deployedBy", "intervals", "people", "escalateTo", "owners", "mailbox", "coworker", "connectors", "artifactRetentionDays", "export", "spend"}
     unknown = sorted(set(document) - allowed)
     if unknown:
         raise WorkerConfigError(f"unknown worker settings: {', '.join(unknown)}")
@@ -179,6 +179,17 @@ def load_config(document: Mapping[str, Any]) -> dict[str, Any]:
         _module("ledger").GcsSink(str(export["gcsBucket"]), lambda: "", prefix=str(export.get("prefix") or ""))  # validates the names
         if export.get("impersonate") is not None:
             _module("ledger").impersonated_token(str(export["impersonate"]), lambda: "", scope="x")
+    spend = document.get("spend")
+    if spend is not None:
+        if not isinstance(spend, Mapping) or set(spend) - {"capCents", "warnAtPercent"}:
+            raise WorkerConfigError("spend holds capCents and optional warnAtPercent")
+        cap = spend.get("capCents")
+        if isinstance(cap, bool) or not isinstance(cap, int) or not 1 <= cap <= 100_000_000:
+            raise WorkerConfigError("spend.capCents must be a whole number of US cents, 1 or more")
+        warn = spend.get("warnAtPercent", [80])
+        if not isinstance(warn, list) or len(warn) > 5 or not all(isinstance(item, int) and not isinstance(item, bool) and 1 <= item <= 99 for item in warn):
+            raise WorkerConfigError("spend.warnAtPercent is up to five whole percentages from 1 to 99")
+        spend = {"capCents": cap, "warnAtPercent": sorted(set(warn))}
     escalate_to = document.get("escalateTo")
     if escalate_to is not None:
         _person(escalate_to, "escalateTo")
@@ -191,7 +202,7 @@ def load_config(document: Mapping[str, Any]) -> dict[str, Any]:
         "deployedBy": document.get("deployedBy") or None, "intervals": intervals, "people": dict(people), "escalateTo": escalate_to,
         "owners": owners, "mailbox": dict(mailbox) if mailbox else None, "coworker": dict(coworker) if coworker else None,
         "connectors": dict(connectors), "artifactRetentionDays": document.get("artifactRetentionDays"),
-        "export": dict(export) if export else None,
+        "export": dict(export) if export else None, "spend": spend,
     }
 
 
@@ -554,6 +565,68 @@ class Worker:
         os.replace(temporary, path)
         return True
 
+    def month_to_date_micros(self, window: str) -> int:
+        """Model cost metered into the ledger so far in the UTC calendar month ``window`` (``YYYY-MM``), in micro-dollars (an estimate)."""
+        total = 0
+        try:
+            lines = self.audit_path.open(encoding="utf-8")
+        except FileNotFoundError:
+            return 0
+        with lines:
+            for line in lines:
+                if '"usage.recorded"' not in line:
+                    continue
+                try:
+                    event = json.loads(line)
+                except ValueError:
+                    continue
+                cost = (event.get("details") or {}).get("costMicrosUsd")
+                if (event.get("action") == "usage.recorded" and str(event.get("timestamp", ""))[:7] == window
+                        and isinstance(cost, int) and not isinstance(cost, bool) and cost > 0):
+                    total += cost
+        return total
+
+    def run_spend(self, now: int) -> dict[str, Any]:
+        """Warn at configured percentages of a monthly cap, and at the cap pause the coworker (#238, using the #232 pause).
+
+        The month is the UTC calendar month and the figure is what Hermes estimated for each session, so it is a guard rail, not an
+        invoice. A pause the cap caused is re-applied while spending is still at or over the cap (resuming by hand does not outrun it;
+        raise the cap or wait for the next month) and clears itself when a new month starts under the cap; a pause an owner made is never
+        cleared here. Notices go to ``escalateTo`` (else the mailbox owner) once per threshold per month.
+        """
+        settings = self.config["spend"]
+        if settings is None:
+            return {"skipped": "no-spend-cap-configured"}
+        window = dt.datetime.fromtimestamp(now, dt.timezone.utc).strftime("%Y-%m")
+        cap_micros = settings["capCents"] * 10_000
+        spent = self.month_to_date_micros(window)
+        percent = spent * 100 // cap_micros
+        to = self.config["escalateTo"] or (self.config["mailbox"] or {}).get("owner")
+        store = _module("pause").PauseStore(self.data)
+        state = store.status()
+        if state["paused"] and state.get("cause") == "spend-cap" and state.get("window") != window and spent < cap_micros:
+            store.resume(IDENTITY, now)
+            self.audit("spend.cap-cleared", IDENTITY, {"window": window, "previousWindow": state.get("window")})
+            state = {"paused": False}
+        told = 0
+        for threshold in settings["warnAtPercent"]:
+            if percent >= threshold and spent < cap_micros and self._told_once("spend-warn", f"{window}|{threshold}|{settings['capCents']}"):
+                told += 1
+                self.audit("spend.warning", IDENTITY, {"window": window, "threshold": threshold, "percent": int(percent)})
+                if to:
+                    self.queue.add("spend-warning", to, f"Model spend this month is about {int(percent)}% of the {settings['capCents'] / 100:.2f} USD cap "
+                                   f"(an estimate). At the cap the coworker stops new actions.", reference=f"{window}:{threshold}")
+        paused_now = False
+        if spent >= cap_micros:
+            if not state["paused"]:
+                store.pause(IDENTITY, f"monthly spend cap reached ({settings['capCents'] / 100:.2f} USD)", now, cause="spend-cap", window=window)
+                paused_now = True
+                self.audit("spend.cap-reached", IDENTITY, {"window": window, "capCents": settings["capCents"], "spentMicrosUsd": spent})
+                if to and self._told_once("spend-cap", f"{window}|{settings['capCents']}"):
+                    self.queue.add("spend-cap", to, f"The monthly model-spend cap of {settings['capCents'] / 100:.2f} USD (an estimate) was reached, so the coworker "
+                                   "has stopped new actions. Raise the cap or wait for next month; then it resumes.", reference=f"{window}:cap")
+        return {"window": window, "spentMicrosUsd": spent, "percent": int(percent), "warned": told, "paused": paused_now}
+
     def run_task_reports(self, now: int) -> dict[str, Any]:
         """Tell each person whose task an Agent has reported (done, declined or failed), once, through their own channel (#229).
 
@@ -876,7 +949,7 @@ class Worker:
 
     def jobs(self) -> list[tuple[str, Callable[[int], dict[str, Any]]]]:
         return [
-            ("scheduler", self.run_scheduler), ("mailbox", self.run_mailbox), ("crm-sync", self.run_crm_sync), ("calls", self.run_calls), ("changes", self.run_changes), ("events", self.run_events), ("knowledge", self.run_knowledge), ("task-reports", self.run_task_reports),
+            ("scheduler", self.run_scheduler), ("mailbox", self.run_mailbox), ("crm-sync", self.run_crm_sync), ("calls", self.run_calls), ("changes", self.run_changes), ("events", self.run_events), ("knowledge", self.run_knowledge), ("task-reports", self.run_task_reports), ("spend", self.run_spend),
             ("notices", self.deliver_notices), ("retention", self.run_retention), ("usage", self.run_usage),
             ("export", self.run_export),
         ]

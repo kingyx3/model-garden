@@ -169,7 +169,7 @@ def _paused(root: pathlib.Path | None) -> list[dict[str, Any]]:
     state = _sibling("model_garden_inbox_pause", "pause.py").PauseStore(pathlib.Path(root)).status()
     if not state["paused"]:
         return []
-    return [{"kind": "paused", "by": state.get("by"), "at": state.get("at"), "reason": state.get("reason") or "",
+    return [{"kind": "paused", "by": state.get("by"), "at": state.get("at"), "reason": state.get("reason") or "", "cause": state.get("cause"),
              "next": "an administrator resumes with `resume coworker` in a direct chat, or `client-operator.py resume`"}]
 
 

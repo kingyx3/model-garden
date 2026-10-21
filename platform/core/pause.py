@@ -44,7 +44,11 @@ class PauseStore:
             return {"paused": True, "by": None, "at": None, "reason": "pause state unreadable (failing safe)"}
         if not document["paused"]:
             return {"paused": False, "by": document.get("by"), "at": document.get("at")}
-        return {"paused": True, "by": document.get("by"), "at": document.get("at"), "reason": clean(document.get("reason"))}
+        found = {"paused": True, "by": document.get("by"), "at": document.get("at"), "reason": clean(document.get("reason"))}
+        for key in ("cause", "window"):  # set only by a system-initiated pause (the monthly spend cap); an owner's pause has neither
+            if isinstance(document.get(key), str):
+                found[key] = clean(document[key])[:40]
+        return found
 
     def is_paused(self) -> bool:
         return bool(self.status()["paused"])
@@ -66,11 +70,12 @@ class PauseStore:
                 pass
             raise
 
-    def pause(self, by: str, reason: str, now: int) -> dict[str, Any]:
+    def pause(self, by: str, reason: str, now: int, *, cause: str | None = None, window: str | None = None) -> dict[str, Any]:
         by = clean(by)
         if not by:
             raise ValueError("who is pausing is required")
-        self._write({"paused": True, "by": by, "at": int(now), "reason": clean(reason)})
+        extra = {key: value for key, value in (("cause", cause), ("window", window)) if value}
+        self._write({"paused": True, "by": by, "at": int(now), "reason": clean(reason), **extra})
         return self.status()
 
     def resume(self, by: str, now: int) -> dict[str, Any]:
