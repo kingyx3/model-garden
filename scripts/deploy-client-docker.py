@@ -46,6 +46,8 @@ RUNTIME_SOURCE_PATHS = (
     pathlib.Path("platform/runtime/governed_mcp.py"),
     pathlib.Path("platform/runtime/worker.py"),
     pathlib.Path("platform/core/pause.py"),
+    pathlib.Path("platform/core/subject_access.py"),
+    pathlib.Path("scripts/runtime-subject-access.py"),
     pathlib.Path("platform/core/unanswered.py"),
     pathlib.Path("scripts/runtime-unanswered.py"),
     pathlib.Path("platform/core/heartbeat.py"),

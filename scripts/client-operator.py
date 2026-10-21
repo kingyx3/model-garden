@@ -717,6 +717,41 @@ def runtime_unanswered(project_name: str, command: str, *, group: str | None = N
     return 0
 
 
+def runtime_subject_access(project_name: str, command: str, *, contact: str | None = None, email: str | None = None, phone: str | None = None,
+                           field: str | None = None, request_id: str | None = None, status: str | None = None, verified_by: str | None = None,
+                           method: str | None = None, approved_by: str | None = None, reason: str | None = None, by: str | None = None) -> int:
+    """Answer a verified customer's data-access or correction request from the Tier 0 stores (#241); two different named people, ledgered, bundles expire."""
+    if command not in {"export", "purge", "request-correction", "resolve-correction", "list-corrections"}:
+        raise ValueError("subject-access command must be export, purge, request-correction, resolve-correction or list-corrections")
+    people = {"verified-by": verified_by, "approved-by": approved_by}
+    if command in {"export", "request-correction"}:
+        for label, value in people.items():
+            if not (isinstance(value, str) and ARTIFACT_PERSON.fullmatch(value.strip())):
+                raise ValueError(f"--{label.replace('_', '-')} must name a person")
+        if not (method and reason and reason.strip()):
+            raise ValueError("--method and --reason are required")
+    if command == "resolve-correction" and not (isinstance(by, str) and ARTIFACT_PERSON.fullmatch(by.strip()) and request_id and status):
+        raise ValueError("resolve-correction needs a request id, --status and --by")
+    container = _governed_tool_container(project_name)
+    inner = ["python", "/opt/model-garden-platform/scripts/runtime-subject-access.py", "/opt/data/.modelgarden", command]
+    if command == "export":
+        inner.extend(["--contact", contact] if contact else ["--email", email] if email else ["--phone", phone] if phone else [])
+    if command == "request-correction":
+        inner.extend(["--contact", contact or "", "--field", field or ""])
+    if command in {"export", "request-correction"}:
+        inner.extend(["--verified-by", verified_by.strip(), "--method", method, "--approved-by", approved_by.strip(), "--reason", reason.strip()])
+    if command == "resolve-correction":
+        inner.extend([request_id, "--status", status, "--by", by.strip()])
+    if command == "list-corrections" and status:
+        inner.extend(["--status", status])
+    result = _run(["docker", "exec", container, *inner])
+    if result.returncode != 0:
+        raise ValueError(result.stderr.strip() or result.stdout.strip() or "runtime subject-access command failed")
+    if result.stdout:
+        print(result.stdout.strip())
+    return 0
+
+
 def runtime_inbox(project_name: str, as_json: bool = False) -> int:
     """Show everything waiting for a person: approvals, hand-offs and records to review (no personal data)."""
     container = _governed_tool_container(project_name)
@@ -979,6 +1014,20 @@ def main() -> int:
     unanswered.add_argument("--project-name", required=True)
     unanswered.add_argument("--status", choices=["open", "dismissed", "answered"], help="with list: only groups in this status")
     unanswered.add_argument("--by", help="the named person deciding, for dismiss, reopen and answered")
+    subject = sub.add_parser("subject-access", help="answer a verified customer's data-access or correction request from the Tier 0 stores")
+    subject.add_argument("action", choices=["export", "purge", "request-correction", "resolve-correction", "list-corrections"])
+    subject.add_argument("request_id", nargs="?", help="the request id (sa-...) for resolve-correction")
+    subject.add_argument("--project-name", required=True)
+    subject.add_argument("--contact", help="the customer's contact id (c-...)")
+    subject.add_argument("--email", help="the customer's exact email address")
+    subject.add_argument("--phone", help="the customer's exact phone number")
+    subject.add_argument("--field", choices=["name", "phone", "email", "notes"], help="with request-correction: the field the customer says is wrong")
+    subject.add_argument("--status", help="resolve-correction: applied or declined; list-corrections: open, applied or declined")
+    subject.add_argument("--verified-by", help="the person who verified the requester's identity")
+    subject.add_argument("--method", choices=["email-link", "known-account", "id-document", "call-back", "other"], help="how the requester was verified")
+    subject.add_argument("--approved-by", help="a different person who approves the request")
+    subject.add_argument("--reason", help="why, in a short line")
+    subject.add_argument("--by", help="the person resolving a correction")
     inbox = sub.add_parser("inbox", help="show everything waiting for a person: approvals, hand-offs, records to review")
     inbox.add_argument("--project-name", required=True)
     inbox.add_argument("--json", action="store_true")
@@ -1169,6 +1218,10 @@ def main() -> int:
                                  reason=getattr(args, "reason", None))
         if args.command == "unanswered":
             return runtime_unanswered(args.project_name, args.action, group=args.group, by=args.by, status=args.status)
+        if args.command == "subject-access":
+            return runtime_subject_access(
+                args.project_name, args.action, contact=args.contact, email=args.email, phone=args.phone, field=args.field, request_id=args.request_id,
+                status=args.status, verified_by=args.verified_by, method=args.method, approved_by=args.approved_by, reason=args.reason, by=args.by)
         if args.command == "inbox":
             return runtime_inbox(args.project_name, as_json=args.json)
         if args.command == "file-calls":
