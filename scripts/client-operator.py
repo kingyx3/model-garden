@@ -674,6 +674,26 @@ def runtime_crm_sync(project_name: str, command: str, *, key: str | None = None,
     return 0
 
 
+def runtime_pause(project_name: str, command: str, *, by: str | None = None, reason: str | None = None) -> int:
+    """Pause, resume or show the pause state of the AI coworker (#232); pause and resume are ledgered under the named person."""
+    if command not in {"pause", "resume", "status"}:
+        raise ValueError("pause command must be pause, resume or status")
+    if command != "status" and not (isinstance(by, str) and ARTIFACT_PERSON.fullmatch(by.strip())):
+        raise ValueError("--by must name the person deciding")
+    container = _governed_tool_container(project_name)
+    inner = ["python", "/opt/model-garden-platform/scripts/runtime-pause.py", "/opt/data/.modelgarden", command]
+    if command != "status":
+        inner.extend(["--by", by.strip()])
+    if command == "pause" and reason:
+        inner.extend(["--reason", reason])
+    result = _run(["docker", "exec", container, *inner])
+    if result.returncode != 0:
+        raise ValueError(result.stderr.strip() or result.stdout.strip() or "runtime pause command failed")
+    if result.stdout:
+        print(result.stdout.strip())
+    return 0
+
+
 def runtime_inbox(project_name: str, as_json: bool = False) -> int:
     """Show everything waiting for a person: approvals, hand-offs and records to review (no personal data)."""
     container = _governed_tool_container(project_name)
@@ -922,6 +942,14 @@ def main() -> int:
     conversations.add_argument("--unlinked", action="store_true", help="with list: only conversations no customer is linked to")
     conversations.add_argument("--ledger", action="store_true", help="with timeline --conversation: also show every ledger event of the conversation's requests and call, together")
     conversations.add_argument("--by", help="the named person deciding, for confirm, dismiss, link, unlink, erase and purge")
+    for name, text in (("pause", "emergency-pause the AI coworker: no new action, scheduled work or reply (ledgered)"),
+                       ("resume", "resume a paused AI coworker (ledgered)"), ("pause-status", "show whether the AI coworker is paused")):
+        paused = sub.add_parser(name, help=text)
+        paused.add_argument("--project-name", required=True)
+        if name != "pause-status":
+            paused.add_argument("--by", required=True, help="the named person deciding")
+        if name == "pause":
+            paused.add_argument("--reason", default="", help="why, recorded in the ledger and shown in the inbox")
     inbox = sub.add_parser("inbox", help="show everything waiting for a person: approvals, hand-offs, records to review")
     inbox.add_argument("--project-name", required=True)
     inbox.add_argument("--json", action="store_true")
@@ -1107,6 +1135,9 @@ def main() -> int:
             )
         if args.command == "artifacts":
             return runtime_artifacts(args.project_name, args.action, artifact_id=args.artifact_id, by=args.by, requested_by=args.requested_by)
+        if args.command in {"pause", "resume", "pause-status"}:
+            return runtime_pause(args.project_name, "status" if args.command == "pause-status" else args.command, by=args.by,
+                                 reason=getattr(args, "reason", None))
         if args.command == "inbox":
             return runtime_inbox(args.project_name, as_json=args.json)
         if args.command == "file-calls":

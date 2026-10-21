@@ -54,6 +54,7 @@ def _load_module(name: str, path: pathlib.Path):
 GOVERN = _load_module("model_garden_govern_action", ROOT / "scripts" / "govern-action.py")
 CAPABILITIES = _load_module("model_garden_runtime_capabilities", ROOT / "platform" / "core" / "capabilities.py")
 TEXT_CHANNEL = _load_module("model_garden_text_channel", ROOT / "platform" / "channels" / "text_channel.py")
+PAUSE = _load_module("model_garden_runtime_pause", ROOT / "platform" / "core" / "pause.py")
 HANDOFF = _load_module("model_garden_runtime_handoff", ROOT / "platform" / "core" / "handoff.py")
 KNOWLEDGE = _load_module("model_garden_runtime_knowledge", ROOT / "platform" / "core" / "knowledge.py")
 CONTACTS = _load_module("model_garden_runtime_contacts", ROOT / "platform" / "core" / "contacts.py")
@@ -330,6 +331,15 @@ class GovernedToolRuntime:
             governance_context.update(principal_context)
         return identity, governance_context, principal_access
 
+    def _paused_for(self, tool_name: str) -> bool:
+        """True while the owner's pause is on and the Tool is not a read (an unknown Tool counts as material)."""
+        if not PAUSE.PauseStore(self.governance_root).is_paused():
+            return False
+        for tool in self.desired_state.get("tools", []) if isinstance(self.desired_state, dict) else []:
+            if tool.get("metadata", {}).get("name") == tool_name:
+                return tool.get("spec", {}).get("risk") != "read"
+        return True
+
     def _execute(
         self,
         tool_name: str,
@@ -372,6 +382,15 @@ class GovernedToolRuntime:
                 )
                 GOVERN.append_audit_event(self.audit_path, event)
                 raise PermissionError(f"Tool {tool_name!r} is not allowed for this delegated task ({reason})")
+        if self._paused_for(tool_name):
+            # The owner's emergency pause: nothing new that changes something starts. It precedes the approval claim, so an approval
+            # stays pending (until resume or its own expiry) and a call that already passed this point is allowed to finish.
+            event = GOVERN.make_audit_event(
+                "authorization", request, outcome="deny", details={"reason": "coworker-paused"},
+                ledger={**self._ledger(provider=provider, justification=None, tier=tier), **(ledger_extra or {})},
+            )
+            GOVERN.append_audit_event(self.audit_path, event)
+            raise PermissionError(f"Tool {tool_name!r} is not allowed: this coworker is paused by its owner")
         if family is not None:
             state = CAPABILITIES.read_connection_health(self.governance_root).get(family, {}).get("health")
             if state in CAPABILITIES.UNAVAILABLE_HEALTH:

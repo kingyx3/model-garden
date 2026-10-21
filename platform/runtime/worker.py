@@ -89,6 +89,8 @@ def _load(name: str, relative: str):
 
 
 MODULES = {
+    "heartbeat": "platform/core/heartbeat.py",
+    "pause": "platform/core/pause.py",
     "govern": "scripts/govern-action.py",
     "schedules": "platform/core/schedules.py",
     "scheduler": "platform/core/scheduler.py",
@@ -353,7 +355,12 @@ class Worker:
             notify=lambda notice: self.queue.add(notice["kind"], notice.get("to"), notice["text"], reference=str(notice.get("taskId", ""))[:40]),
         )
 
+    def _paused(self) -> bool:
+        return _module("pause").PauseStore(self.data).is_paused()
+
     def run_scheduler(self, now: int) -> dict[str, Any]:
+        if self._paused():
+            return {"skipped": "paused"}
         if self.coworker is None:
             return {"skipped": "no-coworker-configured"}
         scheduler = self._scheduler()
@@ -403,6 +410,8 @@ class Worker:
 
     def run_events(self, now: int) -> dict[str, Any]:
         """Fire ``chat.message`` for what the gateway reported and ``ticket.created`` for tickets nobody announced; once per event."""
+        if self._paused():
+            return {"skipped": "paused"}  # events stay in the outbox and fire after resume
         if self.coworker is None:
             return {"skipped": "no-coworker-configured"}  # leave the events where they are until there is something to run them
         state = self._events_state()
@@ -584,6 +593,8 @@ class Worker:
         return self.data / "crm-sync" / "blocked-notified.json"
 
     def run_crm_sync(self, now: int) -> dict[str, Any]:
+        if self._paused():
+            return {"skipped": "paused"}  # filings stay queued; nothing is sent to the CRM while paused
         filing = self._crm_filing()
         if filing is None:
             return {"skipped": "no-built-in-crm-bound"}
@@ -684,6 +695,8 @@ class Worker:
         return _module("spool").MailSpool(self.data / "mail", tenant=self.tenant, addresses=settings["addresses"], audit=self.audit)
 
     def run_mailbox(self, now: int) -> dict[str, Any]:
+        if self._paused():
+            return {"skipped": "paused"}  # mail stays in the spool, unread by the coworker, until resume
         if self.config["mailbox"] is None:
             return {"skipped": "no-mailbox-configured"}
         if self.coworker is None:
@@ -902,31 +915,7 @@ def operational_health(heartbeat: pathlib.Path, *, now: float, max_age: int = 30
     Three failed attempts at the same job mean degradation; a healthy heartbeat is
     still live so restarting the worker cannot obscure a provider outage.
     """
-    unavailable = {"status": "unavailable", "reason": "missing-or-invalid", "failedJobs": [], "persistentFailures": []}
-    try:
-        if heartbeat.is_symlink() or heartbeat.stat().st_size > 4096:
-            return unavailable
-        document = json.loads(heartbeat.read_text(encoding="utf-8"))
-    except (OSError, ValueError, TypeError):
-        return unavailable
-    if not isinstance(document, dict):
-        return unavailable
-    at = document.get("at")
-    if isinstance(at, bool) or not isinstance(at, (int, float)) or not math.isfinite(at):
-        return {**unavailable, "reason": "invalid"}
-    failed = document.get("failed", [])
-    persistent = document.get("persistentFailures", [])
-    def name_ok(value: Any) -> bool:
-        return isinstance(value, str) and re.fullmatch(r"[a-z][a-z0-9-]{0,39}", value) is not None
-    if not isinstance(failed, list) or not isinstance(persistent, list) or not all(name_ok(x) for x in failed + persistent):
-        return {**unavailable, "reason": "invalid"}
-    age = now - at
-    if age < -30:
-        return {**unavailable, "reason": "future"}
-    if age > max_age:
-        return {**unavailable, "reason": "stale"}
-    return {"status": "degraded" if persistent else "healthy", "reason": "persistent-job-failures" if persistent else "recent",
-            "failedJobs": sorted(set(failed)), "persistentFailures": sorted(set(persistent))}
+    return _module("heartbeat").check(heartbeat, now=now, max_age=max_age)
 
 
 def healthy(heartbeat: pathlib.Path, *, now: float, max_age: int = 300) -> bool:

@@ -44,6 +44,7 @@ MAX_SEEN = 5000
 MAX_REPLY_CHARS = 3500
 MAX_ATTACHMENTS = 3
 INBOX_COMMAND = re.compile(r"^/?inbox$", re.IGNORECASE)
+PAUSE_COMMAND = re.compile(r"^/?(pause|resume)\s+(?:the\s+)?coworker\b[\s:.-]*(.*)$", re.IGNORECASE | re.DOTALL)
 ASSIGN_COMMAND = re.compile(r"^/?(?:assign|delegate)\s+(?:to\s+)?([a-z0-9][a-z0-9-]{0,62})\s*(?::|\s-\s)\s*(.+)$", re.IGNORECASE | re.DOTALL)
 Audit = Callable[[str, str, dict[str, Any]], Any]
 
@@ -101,9 +102,11 @@ class ChannelIngress:
         inbox: Callable[[Any, Any], str] | None = None,
         assign: Callable[[str, str, str], str] | None = None,
         observed: Callable[[Any], None] | None = None,
+        pause: Callable[[str, str, str], str] | None = None,
     ) -> None:
         self._adapters = dict(adapters)
         self._inbox = inbox
+        self._pause = pause  # (admin, "pause" | "resume", reason) -> reply; only a mapped admin in a direct conversation reaches it
         self._assign = assign  # (person, agent, goal) -> reply; raises ValueError with a safe message when refused
         self._observed = observed  # told once about each fresh conversational message (not a command or a redelivery), e.g. to raise an event
         self._deliverables = deliverables
@@ -202,6 +205,16 @@ class ChannelIngress:
                 )
                 self._send(adapter, inbound, reply or "")
                 return "schedule-command"
+            pause_command = PAUSE_COMMAND.match(text.strip()) if self._pause is not None else None
+            if pause_command is not None:
+                if principal.mapped and "admin" in principal.roles and self._is_direct(inbound):
+                    verb = pause_command.group(1).lower()
+                    reply = self._pause(principal.identity, verb, pause_command.group(2).strip())
+                    self._note(f"channel.coworker-{verb}", principal.identity, {"channel": inbound.channel})
+                else:  # the same words for everyone else, in any channel: nothing is revealed and nothing changes
+                    reply = "Only an administrator can pause or resume me, in a direct message."
+                self._send(adapter, inbound, reply)
+                return "pause-command"
             if self._inbox is not None and INBOX_COMMAND.match(text.strip()):
                 if principal.mapped and self._is_direct(inbound):
                     reply = self._inbox(inbound, principal)

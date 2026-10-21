@@ -159,6 +159,30 @@ Creating and closing a hand-off each write a chained `handoff` ledger event with
 
 Delivery today is the built-in inbox (the operator commands above). Delivery to Slack, Teams or email, reminders/escalation when a deadline passes, and a person's confirmation arriving through their own channel are not implemented; the operator records the outcome on the person's behalf.
 
+## Emergency pause (v0.8.75)
+
+An owner can stop one AI coworker quickly without tearing the deployment down. The state is one file, `pause.json` on the governance volume (written atomically, mode 0600), holding who paused, when and why (the reason is trimmed to 300 characters, control characters removed). A file that exists but cannot be read, or is malformed, counts as **paused**: the control fails safe, never open. Nothing is stored per message and the state survives a restart of any container.
+
+**Who can.** `pause coworker [reason]` and `resume coworker` in a *direct* chat, honoured only for a person the directory maps to the `admin` role; a member, a stranger and a shared channel all get the same neutral refusal and nothing changes. Only those exact words count (an ordinary sentence that mentions pausing goes to the coworker). The operator can run `client-operator.py pause|resume --project-name <env> --by <person> [--reason ...]` and `pause-status`. Both ways are ledgered (`coworker.pause`, `coworker.resume`: who, when, reason, via chat or operator).
+
+**What stops.** At the shared governed boundary every Tool whose risk is not `read` (a Tool that cannot be found counts as material) is denied before an approval is claimed and the denial is ledgered with reason `coworker-paused`; an approval already granted stays unused until resume or its own expiry. The worker's scheduler, event, mailbox and CRM-sync jobs skip with `paused` (mail and events stay queued and nothing is dropped; reminders, notices and retention still run so people keep hearing about hand-offs and expiries). The gateway answers every incoming message with a holding message instead of calling the coworker (default text, or `pausedMessage` in the gateway config / `paused_message` in the EnvironmentBinding gateway block) and ledgers `channel.held-while-paused`. Hand-offs and reads still work, so a person can be told. The inbox shows a `PAUSED` item first, with who and why.
+
+**In-flight and racing calls.** A call that has already passed the check completes; nothing new starts after it. There is no cancellation of a running upstream call, and a call that passed the check an instant before the file was written is not undone.
+
+Honest limits: this is a per-client control, tested in-process and with fakes. It has not been proven against a live deployment (see [live proof](live-proof.md)), it does not stop actions a person takes directly in a provider, and spend caps and a status dashboard remain separate work.
+
+## Gateway heartbeat and readiness (v0.8.76)
+
+The channel gateway now writes the same payload-free heartbeat as the worker (`gateway/heartbeat.json` on the governance volume: a time, the fixed names of the periodic jobs that failed on the last pass, and those that failed on three passes in a row; shared code in `platform/core/heartbeat.py`, which the worker's `operational_health` also uses). It is written by the gateway's own loop every 15 seconds, so a wedged process is detected even though its port still answers. `python3 platform/runtime/gateway.py --readiness` prints `healthy`, `degraded` (a job failed three passes running) or `unavailable` (missing, malformed, a symlink, from the future, or older than 120 seconds) and exits non-zero unless healthy. The Docker health check is unchanged and is liveness only. A full or read-only volume does not stop the gateway; the missing beat is the signal.
+
+Not done, and not claimed: Cloud Monitoring uptime checks and alert policies, notification channels and routing, deduplicated failure and recovery alerts, the optional voice runtime, runbooks and retirement controls, and a real notification drill (#231 stays open). The heartbeat is a file inside the private VM; nothing is exposed publicly.
+
+## Chat task assignment in the gateway (v0.8.76)
+
+A deployed gateway accepts `assign <agent>: <goal>` (or `delegate ...`) in a direct chat from a mapped person once `gateway.assign` is configured in the EnvironmentBinding: `assign: {permissions: {"<person>": ["<Tool name>", ...]}}` (the Tools that person may ask an Agent to use; a person with no entry cannot assign anything). The gateway builds a `TeamRuntime` over the governance volume with the Agent it serves, so the task tree (`tasks/`), the Agent's inbox (`inbox.json`) and the shared Action Ledger are the runtime's own, a restarted gateway sees them again, and the ledger records `task.assigned` under the person's name with the Agent and task id, never the goal. The delegation rules apply: the Agent can do only what it holds and the person may ask for, otherwise the refusal says so and nothing is stored. A stranger and a shared channel get the same neutral words. Without `assign` configured the words go to the coworker as before.
+
+Not done, and not claimed (#229 stays open): the Agent starting on the task by itself, telling the person in the same channel when it reports done, declined or failed, task state shared between the gateway, worker and sidecar processes while they run, and any live evidence.
+
 ## Enterprise audit contract
 
 Governed material actions emit versioned JSONL records with `schemaVersion: 3`. Depending on the stage, records capture:
