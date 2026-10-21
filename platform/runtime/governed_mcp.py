@@ -54,6 +54,7 @@ def _load_module(name: str, path: pathlib.Path):
 GOVERN = _load_module("model_garden_govern_action", ROOT / "scripts" / "govern-action.py")
 CAPABILITIES = _load_module("model_garden_runtime_capabilities", ROOT / "platform" / "core" / "capabilities.py")
 TEXT_CHANNEL = _load_module("model_garden_text_channel", ROOT / "platform" / "channels" / "text_channel.py")
+UNANSWERED = _load_module("model_garden_runtime_unanswered", ROOT / "platform" / "core" / "unanswered.py")
 PAUSE = _load_module("model_garden_runtime_pause", ROOT / "platform" / "core" / "pause.py")
 HANDOFF = _load_module("model_garden_runtime_handoff", ROOT / "platform" / "core" / "handoff.py")
 KNOWLEDGE = _load_module("model_garden_runtime_knowledge", ROOT / "platform" / "core" / "knowledge.py")
@@ -593,7 +594,7 @@ class GovernedToolRuntime:
                 raise ValueError("locale must be a language tag such as en or en-SG")
             arguments["locale"] = locale
         access = "member" if self._caller()[2] == "member" else "public"
-        return self._execute(
+        found = self._execute(
             "kb.search",
             arguments,
             lambda exact: KNOWLEDGE.search_selected(
@@ -605,6 +606,20 @@ class GovernedToolRuntime:
             justification=justification,
             read_receipt=KNOWLEDGE.read_receipt,
         )
+        if found.get("status") == "executed" and isinstance(found.get("result"), dict) and not found["result"].get("documents"):
+            self._note_unanswered(arguments["query"], found["result"].get("reason"))
+        return found
+
+    def _note_unanswered(self, query: str, reason: Any) -> None:
+        """Keep a bounded, masked sample of a question no approved source answered, for the owner's feedback loop (#237); never blocks the answer."""
+        try:
+            principal = self.principal_resolver() if self.principal_resolver is not None else None
+            tenant = re.sub(r"[^a-z0-9-]+", "-", str(self.desired_state.get("source", {}).get("client") or "").lower()).strip("-")[:63] or "default"
+            UNANSWERED.UnansweredStore(self.governance_root / "unanswered", tenant=tenant).record(
+                query, channel=getattr(principal, "channel", None), reason=str(reason or "no-match"), now=int(self.clock()),
+                agent=str(self.desired_state.get("source", {}).get("name") or ""))
+        except (OSError, ValueError):
+            pass  # the answer matters more than the note
 
     def _require_crm(self) -> "CONTACTS.ContactStore":
         """The Tier 0 log, only when the manifest binds `crm` to the built-in provider."""
