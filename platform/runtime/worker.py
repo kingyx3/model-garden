@@ -66,7 +66,7 @@ from collections.abc import Callable, Mapping
 from typing import Any
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
-DEFAULT_INTERVALS = {"scheduler": 60, "mailbox": 30, "notices": 60, "retention": 3600, "usage": 300, "export": 300, "crm-sync": 120, "calls": 120, "changes": 60, "events": 30, "knowledge": 21_600}
+DEFAULT_INTERVALS = {"scheduler": 60, "mailbox": 30, "notices": 60, "retention": 3600, "usage": 300, "export": 300, "crm-sync": 120, "calls": 120, "changes": 60, "events": 30, "knowledge": 21_600, "task-reports": 60}
 MIN_INTERVAL, MAX_INTERVAL = 10, 86_400
 # A stalled export alerts the escalation contact when the ledger is this far ahead of it, or has waited this long.
 EXPORT_MAX_LAG_EVENTS = 100
@@ -89,6 +89,7 @@ def _load(name: str, relative: str):
 
 
 MODULES = {
+    "task_inbox": "platform/core/task_inbox.py",
     "heartbeat": "platform/core/heartbeat.py",
     "pause": "platform/core/pause.py",
     "govern": "scripts/govern-action.py",
@@ -553,6 +554,25 @@ class Worker:
         os.replace(temporary, path)
         return True
 
+    def run_task_reports(self, now: int) -> dict[str, Any]:
+        """Tell each person whose task an Agent has reported (done, declined or failed), once, through their own channel (#229).
+
+        Only the task reference, the Agent and the outcome go in the notice; the report text stays in the task inbox and never reaches the
+        ledger or the notice queue. It keeps running while the coworker is paused, because a person is waiting to hear.
+        """
+        path = self.data / "inbox.json"
+        if not path.is_file():
+            return {"told": 0}
+        told = 0
+        for entry in _module("task_inbox").TaskInbox(path).reported():
+            if not self._told_once("task-report", f"{entry['taskId']}|{entry['state']}"):
+                continue
+            self.queue.add("task-report", entry["person"],
+                           f"Your task {entry['taskId']} for {entry['agent']} is {entry['state']}. Ask for the result in a direct chat or from the operator.",
+                           reference=entry["taskId"][:40])
+            told += 1
+        return {"told": told}
+
     def run_knowledge(self, now: int) -> dict[str, Any]:
         """Tell the contact when an approved business-rules source is due for review or has passed its ``reviewBy`` date (declared dates only)."""
         to = self.config["escalateTo"] or (self.config["mailbox"] or {}).get("owner")
@@ -856,7 +876,7 @@ class Worker:
 
     def jobs(self) -> list[tuple[str, Callable[[int], dict[str, Any]]]]:
         return [
-            ("scheduler", self.run_scheduler), ("mailbox", self.run_mailbox), ("crm-sync", self.run_crm_sync), ("calls", self.run_calls), ("changes", self.run_changes), ("events", self.run_events), ("knowledge", self.run_knowledge),
+            ("scheduler", self.run_scheduler), ("mailbox", self.run_mailbox), ("crm-sync", self.run_crm_sync), ("calls", self.run_calls), ("changes", self.run_changes), ("events", self.run_events), ("knowledge", self.run_knowledge), ("task-reports", self.run_task_reports),
             ("notices", self.deliver_notices), ("retention", self.run_retention), ("usage", self.run_usage),
             ("export", self.run_export),
         ]
