@@ -752,6 +752,35 @@ def runtime_subject_access(project_name: str, command: str, *, contact: str | No
     return 0
 
 
+def runtime_notification_prefs(project_name: str, command: str, *, channel: str | None = None, address: str | None = None, purpose: str | None = None,
+                               state: str | None = None, verified_via: str | None = None, by: str | None = None) -> int:
+    """Record, show or delete a customer's booking-notice consent or opt-out (#240); the address is kept only as a digest and changes are ledgered."""
+    if command not in {"record", "status", "forget", "counts"}:
+        raise ValueError("notification-prefs command must be record, status, forget or counts")
+    if command != "counts" and not (channel and address):
+        raise ValueError("--channel and --address are required")
+    if command in {"record", "forget"} and not (isinstance(by, str) and ARTIFACT_PERSON.fullmatch(by.strip())):
+        raise ValueError("--by must name the person recording this")
+    if command == "record" and not (purpose and state):
+        raise ValueError("record needs --purpose and --state")
+    container = _governed_tool_container(project_name)
+    inner = ["python", "/opt/model-garden-platform/scripts/runtime-notification-prefs.py", "/opt/data/.modelgarden/notification-prefs", command]
+    if command != "counts":
+        inner.extend(["--channel", channel, "--address", address])
+    if command == "record":
+        inner.extend(["--purpose", purpose, "--state", state])
+        if verified_via:
+            inner.extend(["--verified-via", verified_via])
+    if command in {"record", "forget"}:
+        inner.extend(["--by", by.strip()])
+    result = _run(["docker", "exec", container, *inner])
+    if result.returncode != 0:
+        raise ValueError(result.stderr.strip() or result.stdout.strip() or "runtime notification-prefs command failed")
+    if result.stdout:
+        print(result.stdout.strip())
+    return 0
+
+
 def runtime_inbox(project_name: str, as_json: bool = False) -> int:
     """Show everything waiting for a person: approvals, hand-offs and records to review (no personal data)."""
     container = _governed_tool_container(project_name)
@@ -1028,6 +1057,15 @@ def main() -> int:
     subject.add_argument("--approved-by", help="a different person who approves the request")
     subject.add_argument("--reason", help="why, in a short line")
     subject.add_argument("--by", help="the person resolving a correction")
+    prefs = sub.add_parser("notification-prefs", help="record, show or delete a customer's booking-notice consent or opt-out (nothing is sent)")
+    prefs.add_argument("action", choices=["record", "status", "forget", "counts"])
+    prefs.add_argument("--project-name", required=True)
+    prefs.add_argument("--channel", choices=["email", "whatsapp", "sms", "chat"])
+    prefs.add_argument("--address", help="the recipient's address or number (stored only as a digest)")
+    prefs.add_argument("--purpose", choices=["confirmation", "reminder"])
+    prefs.add_argument("--state", choices=["granted", "opted-out"])
+    prefs.add_argument("--verified-via", choices=["recipient-reply", "recipient-code", "named-person"], help="how the recipient was shown to control the destination (needed for granted)")
+    prefs.add_argument("--by", help="the named person recording or deleting the preference")
     inbox = sub.add_parser("inbox", help="show everything waiting for a person: approvals, hand-offs, records to review")
     inbox.add_argument("--project-name", required=True)
     inbox.add_argument("--json", action="store_true")
@@ -1222,6 +1260,9 @@ def main() -> int:
             return runtime_subject_access(
                 args.project_name, args.action, contact=args.contact, email=args.email, phone=args.phone, field=args.field, request_id=args.request_id,
                 status=args.status, verified_by=args.verified_by, method=args.method, approved_by=args.approved_by, reason=args.reason, by=args.by)
+        if args.command == "notification-prefs":
+            return runtime_notification_prefs(args.project_name, args.action, channel=args.channel, address=args.address, purpose=args.purpose,
+                                              state=args.state, verified_via=args.verified_via, by=args.by)
         if args.command == "inbox":
             return runtime_inbox(args.project_name, as_json=args.json)
         if args.command == "file-calls":
