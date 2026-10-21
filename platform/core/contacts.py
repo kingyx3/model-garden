@@ -333,6 +333,14 @@ class ContactStore:
                 if contact.get("keys", {}).get("email") == needle
             )
 
+    def find_by_phone(self, number: str) -> list[str]:
+        """IDs of contacts holding exactly this phone number (normalised the same way as at creation). Internal, like ``find_by_email``."""
+        needle = normalize_phone(number) if isinstance(number, str) else None
+        if needle is None:
+            return []
+        with self._locked() as state:
+            return sorted(contact_id for contact_id, contact in state["contacts"].items() if contact.get("keys", {}).get("phone") == needle)
+
     def identities(self) -> list[tuple[str, str, str]]:
         """``(contactId, kind, normalised value)`` for every email and phone a contact holds, for the platform's own linking step.
 
@@ -385,6 +393,21 @@ class ContactStore:
                 raise ContactError("no such review item")
             state["review"] = kept
         return {"reviewId": review_id}
+
+    def has_contact(self, contact_id: str) -> bool:
+        with self._locked() as state:
+            return contact_id in state["contacts"]
+
+    def export_subject(self, contact_id: str) -> dict[str, Any]:
+        """Everything held about one contact, for a verified access request (internal: not a Tool, never shown to a caller or sender)."""
+        with self._locked() as state:
+            contact = state["contacts"].get(contact_id)
+            if contact is None:
+                raise ContactError("unknown contact")
+            interactions = sorted((dict(item) for item in state["interactions"].values() if item["contact"] == contact_id),
+                                  key=lambda item: (item["timestamp"], item["id"]))
+            return {"id": contact_id, "fields": dict(contact["fields"]), "identityEvidence": contact["identityEvidence"],
+                    "createdAt": contact["createdAt"], "interactions": interactions}
 
     def erase_contact(self, contact_id: str) -> dict[str, int]:
         """Erase a contact, every interaction filed against it and review items that name it."""
