@@ -89,6 +89,7 @@ def _load(name: str, relative: str):
 
 
 MODULES = {
+    "unanswered": "platform/core/unanswered.py",
     "inbox": "platform/core/inbox.py",
     "task_inbox": "platform/core/task_inbox.py",
     "heartbeat": "platform/core/heartbeat.py",
@@ -668,13 +669,14 @@ class Worker:
         counts = self._ledger_counts(end - 7 * 86_400, end)
         inbox = _module("inbox").collect(
             approvals=self.data / "approvals", handoffs=self.data / "handoffs", contacts=self.data / "contacts", governance=self.data,
-            tickets=self.data / "tickets", crm_sync=self.data / "crm-sync", now=now)["counts"]
+            tickets=self.data / "tickets", crm_sync=self.data / "crm-sync", unanswered=self.data / "unanswered", now=now)["counts"]
         channels = ", ".join(f"{name} {count}" for name, count in sorted(counts["channels"].items(), key=lambda item: (-item[1], item[0]))[:3]) or "none"
         text = (f"Weekly summary, 7 days to {day.date().isoformat()}: {counts['executed']} action(s) done, {counts['failed']} failed; approvals "
                 f"{counts['approvalsAsked']} asked, {counts['approved']} approved, {counts['rejected']} rejected; {counts['denied']} denied, "
                 f"{counts['handoffs']} hand-off(s). Model use: {counts['sessions']} session(s) ({channels}), about "
                 f"{counts['costMicros'] / 1_000_000:.2f} USD (estimate). Waiting now: {inbox['approvals']} approval(s), {inbox['handoffs']} hand-off(s) "
-                f"({inbox['overdueHandoffs']} overdue), {inbox['tickets']} ticket(s), {inbox['crmFilings']} CRM filing(s) blocked."
+                f"({inbox['overdueHandoffs']} overdue), {inbox['tickets']} ticket(s), {inbox['crmFilings']} CRM filing(s) blocked, "
+                f"{inbox['unanswered']} unanswered question group(s)."
                 + (" The coworker is paused." if inbox.get("paused") else ""))
         self.queue.add("digest", settings["to"], text, reference=f"digest:{end}"[:40])
         marker.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -912,7 +914,20 @@ class Worker:
         if self.config["mailbox"] is not None:
             out["mail"] = self._spool().purge(now=now)
         out["approvals"] = self.expire_approvals(now)
+        out["unanswered"] = self.purge_unanswered(now)
         return out
+
+    def purge_unanswered(self, now: int) -> int:
+        """Remove unanswered-question groups not seen for 90 days (#237); the text is a bounded sample and is not kept for ever."""
+        directory = self.data / "unanswered"
+        if not directory.is_dir():
+            return 0
+        store_module = _module("unanswered")
+        removed = 0
+        for path in sorted(directory.glob("*.unanswered.json")):
+            store = store_module.UnansweredStore(directory, tenant=path.name[: -len(".unanswered.json")], audit=self.audit)
+            removed += store.purge_expired(now)
+        return removed
 
     def expire_approvals(self, now: int) -> int:
         """Remove approval requests and decisions older than ``MODEL_GARDEN_APPROVAL_TTL_HOURS`` and ledger each (ids only)."""

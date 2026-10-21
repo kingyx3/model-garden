@@ -694,6 +694,29 @@ def runtime_pause(project_name: str, command: str, *, by: str | None = None, rea
     return 0
 
 
+def runtime_unanswered(project_name: str, command: str, *, group: str | None = None, by: str | None = None, status: str | None = None) -> int:
+    """List customer questions no approved knowledge answered, or close or reopen a group (#237); status changes are ledgered under the named person."""
+    if command not in {"list", "dismiss", "reopen", "answered"}:
+        raise ValueError("unanswered command must be list, dismiss, reopen or answered")
+    if command != "list":
+        if not (isinstance(group, str) and re.fullmatch(r"q-[0-9a-f]{12}", group)):
+            raise ValueError("a group id like q-0123456789ab is required")
+        if not (isinstance(by, str) and ARTIFACT_PERSON.fullmatch(by.strip())):
+            raise ValueError("--by must name the person deciding")
+    container = _governed_tool_container(project_name)
+    inner = ["python", "/opt/model-garden-platform/scripts/runtime-unanswered.py", "/opt/data/.modelgarden/unanswered", command]
+    if command == "list" and status:
+        inner.extend(["--status", status])
+    if command != "list":
+        inner.extend([group, "--by", by.strip()])
+    result = _run(["docker", "exec", container, *inner])
+    if result.returncode != 0:
+        raise ValueError(result.stderr.strip() or result.stdout.strip() or "runtime unanswered command failed")
+    if result.stdout:
+        print(result.stdout.strip())
+    return 0
+
+
 def runtime_inbox(project_name: str, as_json: bool = False) -> int:
     """Show everything waiting for a person: approvals, hand-offs and records to review (no personal data)."""
     container = _governed_tool_container(project_name)
@@ -950,6 +973,12 @@ def main() -> int:
             paused.add_argument("--by", required=True, help="the named person deciding")
         if name == "pause":
             paused.add_argument("--reason", default="", help="why, recorded in the ledger and shown in the inbox")
+    unanswered = sub.add_parser("unanswered", help="customer questions no approved knowledge answered: list, dismiss, reopen or mark answered")
+    unanswered.add_argument("action", choices=["list", "dismiss", "reopen", "answered"])
+    unanswered.add_argument("group", nargs="?", help="the group id (q-...) for dismiss, reopen or answered")
+    unanswered.add_argument("--project-name", required=True)
+    unanswered.add_argument("--status", choices=["open", "dismissed", "answered"], help="with list: only groups in this status")
+    unanswered.add_argument("--by", help="the named person deciding, for dismiss, reopen and answered")
     inbox = sub.add_parser("inbox", help="show everything waiting for a person: approvals, hand-offs, records to review")
     inbox.add_argument("--project-name", required=True)
     inbox.add_argument("--json", action="store_true")
@@ -1138,6 +1167,8 @@ def main() -> int:
         if args.command in {"pause", "resume", "pause-status"}:
             return runtime_pause(args.project_name, "status" if args.command == "pause-status" else args.command, by=args.by,
                                  reason=getattr(args, "reason", None))
+        if args.command == "unanswered":
+            return runtime_unanswered(args.project_name, args.action, group=args.group, by=args.by, status=args.status)
         if args.command == "inbox":
             return runtime_inbox(args.project_name, as_json=args.json)
         if args.command == "file-calls":

@@ -173,6 +173,24 @@ def _paused(root: pathlib.Path | None) -> list[dict[str, Any]]:
              "next": "an administrator resumes with `resume coworker` in a direct chat, or `client-operator.py resume`"}]
 
 
+def _unanswered(root: pathlib.Path | None, now: int) -> list[dict[str, Any]]:
+    """Questions no approved knowledge answered (#237), as a count of groups and questions and the oldest age; never the text."""
+    if root is None or not pathlib.Path(root).is_dir():
+        return []
+    store_module = _sibling("model_garden_inbox_unanswered", "unanswered.py")
+    groups = questions = oldest = 0
+    for path in sorted(pathlib.Path(root).glob("*.unanswered.json")):
+        try:
+            summary = store_module.UnansweredStore(pathlib.Path(root), tenant=path.name[: -len(".unanswered.json")]).open_summary(now)
+        except (OSError, ValueError):
+            continue
+        groups, questions, oldest = groups + summary["groups"], questions + summary["questions"], max(oldest, summary["oldestSeconds"])
+    if not groups:
+        return []
+    return [{"kind": "unanswered", "count": groups, "questions": questions, "oldestWaitingSeconds": oldest,
+             "next": "python3 scripts/client-operator.py unanswered list  (an owner reviews the questions and adds an approved knowledge source)"}]
+
+
 def _connections(root: pathlib.Path | None) -> list[dict[str, Any]]:
     if root is None:
         return []
@@ -210,6 +228,7 @@ def collect(
     governance: pathlib.Path | None = None,
     tickets: pathlib.Path | None = None,
     crm_sync: pathlib.Path | None = None,
+    unanswered: pathlib.Path | None = None,
     now: int | None = None,
 ) -> dict[str, Any]:
     """Everything waiting for a person, most urgent first.
@@ -225,15 +244,17 @@ def collect(
     reviews = _review(contacts)
     open_tickets = _tickets(tickets, current)
     filings = _crm_filings(crm_sync, current)
+    questions = _unanswered(unanswered, current)
     connections = _connections(governance)
     paused = _paused(governance)
     down = [item for item in connections if item["health"] in ("failed", "revoked")]
     degraded = [item for item in connections if item["health"] == "degraded"]
     return {
         "generatedAt": current,
-        "items": [*paused, *down, *overdue, *waiting, *due, *degraded, *open_tickets, *filings, *reviews],
+        "items": [*paused, *down, *overdue, *waiting, *due, *degraded, *open_tickets, *filings, *questions, *reviews],
         "counts": {
             "paused": len(paused),
+            "unanswered": sum(item["count"] for item in questions),
             "approvals": len(waiting),
             "handoffs": len(open_handoffs),
             "overdueHandoffs": len(overdue),
@@ -272,6 +293,8 @@ def format_text(inbox: dict[str, Any]) -> str:
         elif item["kind"] == "connection":
             why = f" ({item['reason']})" if item.get("reason") else ""
             lines.append(f"  CONNECTION  {item['family']} is {item['health'].upper()}{why}")
+        elif item["kind"] == "unanswered":
+            lines.append(f"  UNANSWERED  {item['count']} question group(s) ({item['questions']} ask(s)), oldest waiting {_age(item['oldestWaitingSeconds'])}")
         elif item["kind"] == "tickets":
             lines.append(f"  TICKETS   {item['count']} open, oldest waiting {_age(item['oldestWaitingSeconds'])}")
         elif item["kind"] == "crm-filing":
@@ -296,7 +319,7 @@ def for_person(inbox: dict[str, Any], identity: str, *, everything: bool) -> dic
     mine = [item for item in inbox["items"] if item["kind"] == "handoff" and item.get("assignee") == identity]
     return {
         "generatedAt": inbox["generatedAt"], "items": mine,
-        "counts": {"approvals": 0, "handoffs": len(mine), "overdueHandoffs": sum(1 for item in mine if item["overdue"]), "reviews": 0, "paused": 0,
+        "counts": {"approvals": 0, "handoffs": len(mine), "overdueHandoffs": sum(1 for item in mine if item["overdue"]), "reviews": 0, "paused": 0, "unanswered": 0,
                    "tickets": 0, "crmFilings": 0, "connections": 0},
     }
 
@@ -307,7 +330,7 @@ def format_chat(inbox: dict[str, Any]) -> str:
         return "Nothing is waiting for you."
     counts = inbox["counts"]
     parts = [f"{counts[key]} {label}" for key, label in (("approvals", "approval(s)"), ("handoffs", "hand-off(s)"), ("tickets", "open ticket(s)"),
-                                                          ("crmFilings", "CRM filing(s) blocked"), ("reviews", "record(s) to review"), ("connections", "connection(s) not healthy")) if counts[key]]
+                                                          ("crmFilings", "CRM filing(s) blocked"), ("unanswered", "unanswered question group(s)"), ("reviews", "record(s) to review"), ("connections", "connection(s) not healthy")) if counts[key]]
     if counts["overdueHandoffs"]:
         parts.append(f"{counts['overdueHandoffs']} overdue")
     lines = ["Waiting: " + ", ".join(parts) + "."]
@@ -326,6 +349,9 @@ def format_chat(inbox: dict[str, Any]) -> str:
         elif item["kind"] == "connection":
             why = f" ({item['reason']})" if item.get("reason") else ""
             lines.append(f"- Connection {item['family']} is {item['health'].upper()}{why}. Ask its owner to reconnect it.")
+        elif item["kind"] == "unanswered":
+            lines.append(f"- {item['count']} customer question(s) had no approved answer, the oldest waiting {_age(item['oldestWaitingSeconds'])}. "
+                         "An operator can review them on the client host.")
         elif item["kind"] == "tickets":
             lines.append(f"- {item['count']} open ticket(s), the oldest waiting {_age(item['oldestWaitingSeconds'])}. Ask the coworker to search tickets.")
         elif item["kind"] == "crm-filing":
