@@ -91,7 +91,7 @@ def _module(key: str):
         "handoff_reply": "platform/core/handoff_reply.py", "schedules": "platform/core/schedules.py",
         "artifacts": "platform/core/artifacts.py", "coworker": "platform/runtime/coworker_client.py",
         "enrollment": "platform/core/secret_enrollment.py", "vault": "platform/core/sealed_vault.py",
-        "receipts": "platform/channels/receipts.py", "inbox": "platform/core/inbox.py", "event_outbox": "platform/core/event_outbox.py", "oauth": "platform/core/oauth_consent.py", "readiness": "platform/core/grant_readiness.py", "studio": "platform/runtime/studio.py",
+        "receipts": "platform/channels/receipts.py", "pause": "platform/core/pause.py", "inbox": "platform/core/inbox.py", "event_outbox": "platform/core/event_outbox.py", "oauth": "platform/core/oauth_consent.py", "readiness": "platform/core/grant_readiness.py", "studio": "platform/runtime/studio.py",
     }
     # Shared names, so an error class raised in one module is the class another module catches.
     shared = {"text": "model_garden_text_channel", "schedules": "model_garden_schedule_commands_store"}
@@ -111,7 +111,7 @@ def load_config(document: Mapping[str, Any]) -> dict[str, Any]:
     """Validate the non-secret configuration rendered from ``EnvironmentBinding.spec.gateway``."""
     if not isinstance(document, Mapping):
         raise GatewayConfigError("gateway configuration must be an object")
-    allowed = {"publicOrigin", "directory", "people", "escalateTo", "web", "slack", "teams", "approvals", "mailbox", "coworker", "agent", "enrollment", "oauth", "studio"}
+    allowed = {"publicOrigin", "directory", "people", "escalateTo", "web", "slack", "teams", "approvals", "mailbox", "coworker", "agent", "enrollment", "oauth", "studio", "pausedMessage"}
     unknown = sorted(set(document) - allowed)
     if unknown:
         raise GatewayConfigError(f"unknown gateway settings: {', '.join(unknown)}")
@@ -120,6 +120,9 @@ def load_config(document: Mapping[str, Any]) -> dict[str, Any]:
         raise GatewayConfigError("publicOrigin must be an https origin such as https://chat.client.example")
     _module("delivery").Directory(document.get("people") or {})
     _module("text").PrincipalDirectory(document.get("directory") or {})
+    held = document.get("pausedMessage")
+    if held is not None and not (isinstance(held, str) and 1 <= len(held.strip()) <= 500):
+        raise GatewayConfigError("pausedMessage must be 1-500 characters of text")
     sections: dict[str, Any] = {}
     for name, required in (("web", {"allowedAddresses"}), ("slack", {"botUserId"}), ("teams", {"appId", "tenants"}),
                            ("approvals", set()), ("mailbox", {"addresses"}), ("coworker", {"url"}), ("enrollment", {"vaultPublicKey"}), ("oauth", {"providers"}), ("studio", {"owner"})):
@@ -168,7 +171,7 @@ def load_config(document: Mapping[str, Any]) -> dict[str, Any]:
             raise GatewayConfigError(str(exc)) from None
     return {
         "publicOrigin": origin, "directory": dict(document.get("directory") or {}), "people": dict(document.get("people") or {}),
-        "escalateTo": document.get("escalateTo"), "agent": document.get("agent") or "coworker", **{k: sections.get(k) for k in
+        "escalateTo": document.get("escalateTo"), "pausedMessage": held.strip() if held else None, "agent": document.get("agent") or "coworker", **{k: sections.get(k) for k in
         ("web", "slack", "teams", "approvals", "mailbox", "coworker", "enrollment", "oauth", "studio")},
     }
 
@@ -410,7 +413,7 @@ class Gateway:
         self.ingress = _module("ingress").ChannelIngress(
             self.adapters, self.directory, respond=self._respond, decide=self._decide, handoff_replies=self._handoff_replies(),
             schedules=self._schedule_store(), agent=self.config["agent"], executor=executor, audit=self.audit,
-            deliverables=self._deliverables, inbox=self._inbox_text, observed=self._chat_event,
+            deliverables=self._deliverables, inbox=self._inbox_text, observed=self._chat_event, pause=self._pause_command,
         )
 
     # -- shared -------------------------------------------------------------------------------------------
@@ -496,6 +499,18 @@ class Gateway:
         if not _module("event_outbox").EventOutbox(self.data / "events").append("chat.message", reference, at=int(self.clock())):
             self.audit("channel.event-dropped", IDENTITY, {"channel": inbound.channel, "reason": "outbox-full"})
 
+    def _pause_command(self, admin: str, verb: str, reason: str) -> str:
+        """``pause coworker [reason]`` / ``resume coworker`` from a mapped admin: the state is written, then ledgered with who and why."""
+        pause = _module("pause")
+        store, now = pause.PauseStore(self.data), int(self.clock())
+        if verb == "pause":
+            status = store.pause(admin, reason, now)
+            self.audit("coworker.pause", admin, {"reason": status.get("reason", ""), "via": "chat", "at": now})
+            return "Paused. I will not act on anything that changes something until an administrator says `resume coworker`."
+        store.resume(admin, now)
+        self.audit("coworker.resume", admin, {"via": "chat", "at": now})
+        return "Resumed. I am working normally again."
+
     def _inbox_text(self, inbound: Any, principal: Any) -> str:
         """What is waiting, for the mapped person asking: everything for an approver or admin, otherwise their own hand-offs."""
         inbox = _module("inbox")
@@ -519,6 +534,10 @@ class Gateway:
     # -- answering ----------------------------------------------------------------------------------------
 
     def _respond(self, inbound: Any, principal: Any) -> str | None:
+        pause = _module("pause")
+        if pause.PauseStore(self.data).is_paused():
+            self.audit("channel.held-while-paused", IDENTITY, {"channel": inbound.channel})
+            return self.config.get("pausedMessage") or pause.HOLDING
         if self.coworker is None:
             return "The coworker is not connected yet. A person has been told."
         notes = []
