@@ -163,6 +163,16 @@ def _crm_filings(root: pathlib.Path | None, now: int) -> list[dict[str, Any]]:
     }]
 
 
+def _paused(root: pathlib.Path | None) -> list[dict[str, Any]]:
+    if root is None:
+        return []
+    state = _sibling("model_garden_inbox_pause", "pause.py").PauseStore(pathlib.Path(root)).status()
+    if not state["paused"]:
+        return []
+    return [{"kind": "paused", "by": state.get("by"), "at": state.get("at"), "reason": state.get("reason") or "",
+             "next": "an administrator resumes with `resume coworker` in a direct chat, or `client-operator.py resume`"}]
+
+
 def _connections(root: pathlib.Path | None) -> list[dict[str, Any]]:
     if root is None:
         return []
@@ -216,12 +226,14 @@ def collect(
     open_tickets = _tickets(tickets, current)
     filings = _crm_filings(crm_sync, current)
     connections = _connections(governance)
+    paused = _paused(governance)
     down = [item for item in connections if item["health"] in ("failed", "revoked")]
     degraded = [item for item in connections if item["health"] == "degraded"]
     return {
         "generatedAt": current,
-        "items": [*down, *overdue, *waiting, *due, *degraded, *open_tickets, *filings, *reviews],
+        "items": [*paused, *down, *overdue, *waiting, *due, *degraded, *open_tickets, *filings, *reviews],
         "counts": {
+            "paused": len(paused),
             "approvals": len(waiting),
             "handoffs": len(open_handoffs),
             "overdueHandoffs": len(overdue),
@@ -252,7 +264,10 @@ def format_text(inbox: dict[str, Any]) -> str:
         f" {counts['crmFilings']} CRM filing(s) blocked",
     ]
     for item in inbox["items"]:
-        if item["kind"] == "approval":
+        if item["kind"] == "paused":
+            lines.append(f"  PAUSED    by {item.get('by') or 'unknown'}" + (f": {item['reason']}" if item.get("reason") else "")
+                         + " - no new action or scheduled work runs")
+        elif item["kind"] == "approval":
             lines.append(f"  APPROVAL  {item['tool'] or 'unknown tool'}  waiting {_age(item['waitingSeconds'])}  id {item['id']}")
         elif item["kind"] == "connection":
             why = f" ({item['reason']})" if item.get("reason") else ""
@@ -281,7 +296,7 @@ def for_person(inbox: dict[str, Any], identity: str, *, everything: bool) -> dic
     mine = [item for item in inbox["items"] if item["kind"] == "handoff" and item.get("assignee") == identity]
     return {
         "generatedAt": inbox["generatedAt"], "items": mine,
-        "counts": {"approvals": 0, "handoffs": len(mine), "overdueHandoffs": sum(1 for item in mine if item["overdue"]), "reviews": 0,
+        "counts": {"approvals": 0, "handoffs": len(mine), "overdueHandoffs": sum(1 for item in mine if item["overdue"]), "reviews": 0, "paused": 0,
                    "tickets": 0, "crmFilings": 0, "connections": 0},
     }
 
@@ -297,7 +312,10 @@ def format_chat(inbox: dict[str, Any]) -> str:
         parts.append(f"{counts['overdueHandoffs']} overdue")
     lines = ["Waiting: " + ", ".join(parts) + "."]
     for item in inbox["items"]:
-        if item["kind"] == "approval":
+        if item["kind"] == "paused":
+            lines.append("- I am PAUSED" + (f" by {item['by']}" if item.get("by") else "") + (f" ({item['reason']})" if item.get("reason") else "")
+                         + ". Reply `resume coworker` to restart me.")
+        elif item["kind"] == "approval":
             lines.append(f"- Approval: {item['tool'] or 'an action'}, waiting {_age(item['waitingSeconds'])} (ref {item['id'][:12]}). "
                          "Use the Approve or Reject buttons on its approval message.")
         elif item["kind"] == "handoff":

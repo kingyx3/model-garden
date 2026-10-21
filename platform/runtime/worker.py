@@ -89,6 +89,7 @@ def _load(name: str, relative: str):
 
 
 MODULES = {
+    "pause": "platform/core/pause.py",
     "govern": "scripts/govern-action.py",
     "schedules": "platform/core/schedules.py",
     "scheduler": "platform/core/scheduler.py",
@@ -353,7 +354,12 @@ class Worker:
             notify=lambda notice: self.queue.add(notice["kind"], notice.get("to"), notice["text"], reference=str(notice.get("taskId", ""))[:40]),
         )
 
+    def _paused(self) -> bool:
+        return _module("pause").PauseStore(self.data).is_paused()
+
     def run_scheduler(self, now: int) -> dict[str, Any]:
+        if self._paused():
+            return {"skipped": "paused"}
         if self.coworker is None:
             return {"skipped": "no-coworker-configured"}
         scheduler = self._scheduler()
@@ -403,6 +409,8 @@ class Worker:
 
     def run_events(self, now: int) -> dict[str, Any]:
         """Fire ``chat.message`` for what the gateway reported and ``ticket.created`` for tickets nobody announced; once per event."""
+        if self._paused():
+            return {"skipped": "paused"}  # events stay in the outbox and fire after resume
         if self.coworker is None:
             return {"skipped": "no-coworker-configured"}  # leave the events where they are until there is something to run them
         state = self._events_state()
@@ -584,6 +592,8 @@ class Worker:
         return self.data / "crm-sync" / "blocked-notified.json"
 
     def run_crm_sync(self, now: int) -> dict[str, Any]:
+        if self._paused():
+            return {"skipped": "paused"}  # filings stay queued; nothing is sent to the CRM while paused
         filing = self._crm_filing()
         if filing is None:
             return {"skipped": "no-built-in-crm-bound"}
@@ -684,6 +694,8 @@ class Worker:
         return _module("spool").MailSpool(self.data / "mail", tenant=self.tenant, addresses=settings["addresses"], audit=self.audit)
 
     def run_mailbox(self, now: int) -> dict[str, Any]:
+        if self._paused():
+            return {"skipped": "paused"}  # mail stays in the spool, unread by the coworker, until resume
         if self.config["mailbox"] is None:
             return {"skipped": "no-mailbox-configured"}
         if self.coworker is None:

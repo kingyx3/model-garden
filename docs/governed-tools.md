@@ -159,6 +159,18 @@ Creating and closing a hand-off each write a chained `handoff` ledger event with
 
 Delivery today is the built-in inbox (the operator commands above). Delivery to Slack, Teams or email, reminders/escalation when a deadline passes, and a person's confirmation arriving through their own channel are not implemented; the operator records the outcome on the person's behalf.
 
+## Emergency pause (v0.8.75)
+
+An owner can stop one AI coworker quickly without tearing the deployment down. The state is one file, `pause.json` on the governance volume (written atomically, mode 0600), holding who paused, when and why (the reason is trimmed to 300 characters, control characters removed). A file that exists but cannot be read, or is malformed, counts as **paused**: the control fails safe, never open. Nothing is stored per message and the state survives a restart of any container.
+
+**Who can.** `pause coworker [reason]` and `resume coworker` in a *direct* chat, honoured only for a person the directory maps to the `admin` role; a member, a stranger and a shared channel all get the same neutral refusal and nothing changes. Only those exact words count (an ordinary sentence that mentions pausing goes to the coworker). The operator can run `client-operator.py pause|resume --project-name <env> --by <person> [--reason ...]` and `pause-status`. Both ways are ledgered (`coworker.pause`, `coworker.resume`: who, when, reason, via chat or operator).
+
+**What stops.** At the shared governed boundary every Tool whose risk is not `read` (a Tool that cannot be found counts as material) is denied before an approval is claimed and the denial is ledgered with reason `coworker-paused`; an approval already granted stays unused until resume or its own expiry. The worker's scheduler, event, mailbox and CRM-sync jobs skip with `paused` (mail and events stay queued and nothing is dropped; reminders, notices and retention still run so people keep hearing about hand-offs and expiries). The gateway answers every incoming message with a holding message instead of calling the coworker (default text, or `pausedMessage` in the gateway config / `paused_message` in the EnvironmentBinding gateway block) and ledgers `channel.held-while-paused`. Hand-offs and reads still work, so a person can be told. The inbox shows a `PAUSED` item first, with who and why.
+
+**In-flight and racing calls.** A call that has already passed the check completes; nothing new starts after it. There is no cancellation of a running upstream call, and a call that passed the check an instant before the file was written is not undone.
+
+Honest limits: this is a per-client control, tested in-process and with fakes. It has not been proven against a live deployment (see [live proof](live-proof.md)), it does not stop actions a person takes directly in a provider, and spend caps and a status dashboard remain separate work.
+
 ## Enterprise audit contract
 
 Governed material actions emit versioned JSONL records with `schemaVersion: 3`. Depending on the stage, records capture:

@@ -45,6 +45,8 @@ RUNTIME_SOURCE_PATHS = (
     pathlib.Path("requirements-runtime.txt"),
     pathlib.Path("platform/runtime/governed_mcp.py"),
     pathlib.Path("platform/runtime/worker.py"),
+    pathlib.Path("platform/core/pause.py"),
+    pathlib.Path("scripts/runtime-pause.py"),
     pathlib.Path("platform/runtime/coworker_client.py"),
     pathlib.Path("platform/metering/usage.py"),
     pathlib.Path("platform/runtime/gateway.py"),
@@ -590,7 +592,7 @@ def _gateway_settings(binding: dict[str, Any]) -> tuple[dict[str, Any] | None, d
     config: dict[str, Any] = {
         "publicOrigin": gateway.get("public_origin"), "directory": gateway.get("directory") or {}, "people": gateway.get("people") or {},
     }
-    for source, target in (("escalate_to", "escalateTo"), ("agent", "agent")):
+    for source, target in (("escalate_to", "escalateTo"), ("agent", "agent"), ("paused_message", "pausedMessage")):
         if gateway.get(source):
             config[target] = gateway[source]
     web = gateway.get("web")
