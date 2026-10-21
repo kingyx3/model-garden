@@ -461,6 +461,14 @@ def search_selected(
     if not result["documents"]:
         result["reason"] = next(iter(reasons.values()), "no-matching-section")
         result["sources"] = reasons
+        if locale and "source-other-locale" in reasons.values():
+            # Name the languages that ARE covered (declared tags only) so the coworker can say so or offer a person; it must never present
+            # another language's approved text as if it were approved in the requested one (#239).
+            result["availableLocales"] = sorted({str(item["spec"]["locale"]) for item in selected.values() if item.get("spec", {}).get("locale")})
+            result["localeGuidance"] = (
+                "No approved source covers the requested language. Do not translate another language's approved text and present it as approved "
+                "in the requested one: say which languages are covered and answer in one of them, or offer a message or a person."
+            )
     return result
 
 
