@@ -84,7 +84,7 @@ resource "google_monitoring_alert_policy" "gateway_uptime" {
       duration                = "180s"
       evaluation_missing_data = "EVALUATION_MISSING_DATA_ACTIVE"
       aggregations {
-        alignment_period   = "60s"
+        alignment_period     = "60s"
         per_series_aligner   = "ALIGN_FRACTION_TRUE"
         cross_series_reducer = "REDUCE_MEAN"
       }
