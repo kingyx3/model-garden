@@ -112,6 +112,13 @@ class TaskInbox:
             found = [dict(e) for e in state["tasks"].values() if e["agent"] == agent and e["state"] in OPEN_STATES]
         return sorted(found, key=lambda e: (e["createdAt"], e["taskId"]))
 
+    def reported(self) -> list[dict[str, Any]]:
+        """Tasks a person handed over whose Agent has reported (done, declined or failed), oldest report first. No report text."""
+        with self._locked() as state:
+            found = [{"taskId": e["taskId"], "agent": e["agent"], "state": e["state"], "person": e["assigner"][len("person:"):], "updatedAt": e["updatedAt"]}
+                     for e in state["tasks"].values() if e["state"] in OUTCOMES and e["assigner"].startswith("person:")]
+        return sorted(found, key=lambda e: (e["updatedAt"], e["taskId"]))
+
     def take_up(self, agent: str, task_id: str, *, now: int) -> dict[str, Any]:
         """``agent`` starts working on a task addressed to it."""
         with self._locked() as state:

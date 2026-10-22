@@ -66,7 +66,7 @@ from collections.abc import Callable, Mapping
 from typing import Any
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
-DEFAULT_INTERVALS = {"scheduler": 60, "mailbox": 30, "notices": 60, "retention": 3600, "usage": 300, "export": 300, "crm-sync": 120, "calls": 120, "changes": 60, "events": 30, "knowledge": 21_600}
+DEFAULT_INTERVALS = {"scheduler": 60, "mailbox": 30, "notices": 60, "retention": 3600, "usage": 300, "export": 300, "crm-sync": 120, "calls": 120, "changes": 60, "events": 30, "knowledge": 21_600, "task-reports": 60, "spend": 300, "digest": 3600}
 MIN_INTERVAL, MAX_INTERVAL = 10, 86_400
 # A stalled export alerts the escalation contact when the ledger is this far ahead of it, or has waited this long.
 EXPORT_MAX_LAG_EVENTS = 100
@@ -89,6 +89,9 @@ def _load(name: str, relative: str):
 
 
 MODULES = {
+    "unanswered": "platform/core/unanswered.py",
+    "inbox": "platform/core/inbox.py",
+    "task_inbox": "platform/core/task_inbox.py",
     "heartbeat": "platform/core/heartbeat.py",
     "pause": "platform/core/pause.py",
     "govern": "scripts/govern-action.py",
@@ -146,7 +149,7 @@ def load_config(document: Mapping[str, Any]) -> dict[str, Any]:
     """Validate the non-secret worker configuration rendered from ``EnvironmentBinding.spec.worker``."""
     if not isinstance(document, Mapping):
         raise WorkerConfigError("worker configuration must be an object")
-    allowed = {"deployedBy", "intervals", "people", "escalateTo", "owners", "mailbox", "coworker", "connectors", "artifactRetentionDays", "export"}
+    allowed = {"deployedBy", "intervals", "people", "escalateTo", "owners", "mailbox", "coworker", "connectors", "artifactRetentionDays", "export", "spend", "digest"}
     unknown = sorted(set(document) - allowed)
     if unknown:
         raise WorkerConfigError(f"unknown worker settings: {', '.join(unknown)}")
@@ -178,6 +181,27 @@ def load_config(document: Mapping[str, Any]) -> dict[str, Any]:
         _module("ledger").GcsSink(str(export["gcsBucket"]), lambda: "", prefix=str(export.get("prefix") or ""))  # validates the names
         if export.get("impersonate") is not None:
             _module("ledger").impersonated_token(str(export["impersonate"]), lambda: "", scope="x")
+    spend = document.get("spend")
+    if spend is not None:
+        if not isinstance(spend, Mapping) or set(spend) - {"capCents", "warnAtPercent"}:
+            raise WorkerConfigError("spend holds capCents and optional warnAtPercent")
+        cap = spend.get("capCents")
+        if isinstance(cap, bool) or not isinstance(cap, int) or not 1 <= cap <= 100_000_000:
+            raise WorkerConfigError("spend.capCents must be a whole number of US cents, 1 or more")
+        warn = spend.get("warnAtPercent", [80])
+        if not isinstance(warn, list) or len(warn) > 5 or not all(isinstance(item, int) and not isinstance(item, bool) and 1 <= item <= 99 for item in warn):
+            raise WorkerConfigError("spend.warnAtPercent is up to five whole percentages from 1 to 99")
+        spend = {"capCents": cap, "warnAtPercent": sorted(set(warn))}
+    digest = document.get("digest")
+    if digest is not None:
+        if not isinstance(digest, Mapping) or set(digest) - {"to", "weekday", "hour", "utcOffsetMinutes"}:
+            raise WorkerConfigError("digest holds to, weekday, hour and utcOffsetMinutes")
+        _person(digest.get("to"), "digest.to")
+        weekday, hour, offset = digest.get("weekday", 0), digest.get("hour", 8), digest.get("utcOffsetMinutes", 0)
+        for name, value, low, high in (("weekday", weekday, 0, 6), ("hour", hour, 0, 23), ("utcOffsetMinutes", offset, -720, 840)):
+            if isinstance(value, bool) or not isinstance(value, int) or not low <= value <= high:
+                raise WorkerConfigError(f"digest.{name} must be a whole number from {low} to {high}" + (" (Monday is 0)" if name == "weekday" else ""))
+        digest = {"to": digest["to"], "weekday": weekday, "hour": hour, "utcOffsetMinutes": offset}
     escalate_to = document.get("escalateTo")
     if escalate_to is not None:
         _person(escalate_to, "escalateTo")
@@ -190,7 +214,7 @@ def load_config(document: Mapping[str, Any]) -> dict[str, Any]:
         "deployedBy": document.get("deployedBy") or None, "intervals": intervals, "people": dict(people), "escalateTo": escalate_to,
         "owners": owners, "mailbox": dict(mailbox) if mailbox else None, "coworker": dict(coworker) if coworker else None,
         "connectors": dict(connectors), "artifactRetentionDays": document.get("artifactRetentionDays"),
-        "export": dict(export) if export else None,
+        "export": dict(export) if export else None, "spend": spend, "digest": digest,
     }
 
 
@@ -553,6 +577,166 @@ class Worker:
         os.replace(temporary, path)
         return True
 
+    def month_to_date_micros(self, window: str) -> int:
+        """Model cost metered into the ledger so far in the UTC calendar month ``window`` (``YYYY-MM``), in micro-dollars (an estimate)."""
+        total = 0
+        try:
+            lines = self.audit_path.open(encoding="utf-8")
+        except FileNotFoundError:
+            return 0
+        with lines:
+            for line in lines:
+                if '"usage.recorded"' not in line:
+                    continue
+                try:
+                    event = json.loads(line)
+                except ValueError:
+                    continue
+                cost = (event.get("details") or {}).get("costMicrosUsd")
+                if (event.get("action") == "usage.recorded" and str(event.get("timestamp", ""))[:7] == window
+                        and isinstance(cost, int) and not isinstance(cost, bool) and cost > 0):
+                    total += cost
+        return total
+
+    def run_spend(self, now: int) -> dict[str, Any]:
+        """Warn at configured percentages of a monthly cap, and at the cap pause the coworker (#238, using the #232 pause).
+
+        The month is the UTC calendar month and the figure is what Hermes estimated for each session, so it is a guard rail, not an
+        invoice. A pause the cap caused is re-applied while spending is still at or over the cap (resuming by hand does not outrun it;
+        raise the cap or wait for the next month) and clears itself when a new month starts under the cap; a pause an owner made is never
+        cleared here. Notices go to ``escalateTo`` (else the mailbox owner) once per threshold per month.
+        """
+        settings = self.config["spend"]
+        if settings is None:
+            return {"skipped": "no-spend-cap-configured"}
+        window = dt.datetime.fromtimestamp(now, dt.timezone.utc).strftime("%Y-%m")
+        cap_micros = settings["capCents"] * 10_000
+        spent = self.month_to_date_micros(window)
+        percent = spent * 100 // cap_micros
+        to = self.config["escalateTo"] or (self.config["mailbox"] or {}).get("owner")
+        store = _module("pause").PauseStore(self.data)
+        state = store.status()
+        if state["paused"] and state.get("cause") == "spend-cap" and state.get("window") != window and spent < cap_micros:
+            store.resume(IDENTITY, now)
+            self.audit("spend.cap-cleared", IDENTITY, {"window": window, "previousWindow": state.get("window")})
+            state = {"paused": False}
+        told = 0
+        for threshold in settings["warnAtPercent"]:
+            if percent >= threshold and spent < cap_micros and self._told_once("spend-warn", f"{window}|{threshold}|{settings['capCents']}"):
+                told += 1
+                self.audit("spend.warning", IDENTITY, {"window": window, "threshold": threshold, "percent": int(percent)})
+                if to:
+                    self.queue.add("spend-warning", to, f"Model spend this month is about {int(percent)}% of the {settings['capCents'] / 100:.2f} USD cap "
+                                   f"(an estimate). At the cap the coworker stops new actions.", reference=f"{window}:{threshold}")
+        paused_now = False
+        if spent >= cap_micros:
+            if not state["paused"]:
+                store.pause(IDENTITY, f"monthly spend cap reached ({settings['capCents'] / 100:.2f} USD)", now, cause="spend-cap", window=window)
+                paused_now = True
+                self.audit("spend.cap-reached", IDENTITY, {"window": window, "capCents": settings["capCents"], "spentMicrosUsd": spent})
+                if to and self._told_once("spend-cap", f"{window}|{settings['capCents']}"):
+                    self.queue.add("spend-cap", to, f"The monthly model-spend cap of {settings['capCents'] / 100:.2f} USD (an estimate) was reached, so the coworker "
+                                   "has stopped new actions. Raise the cap or wait for next month; then it resumes.", reference=f"{window}:cap")
+        return {"window": window, "spentMicrosUsd": spent, "percent": int(percent), "warned": told, "paused": paused_now}
+
+    DIGEST_GRACE = 2 * 86_400  # a digest later than this after its time is skipped rather than back-filled
+
+    def run_digest(self, now: int) -> dict[str, Any]:
+        """Send the owner one short weekly summary of counts from the ledger and the inbox (#236); once per window, counts only.
+
+        The window is the seven days before the most recent configured weekday and hour in the configured fixed UTC offset (no daylight
+        saving). A window that was missed by more than two days is skipped, not back-filled. The text holds no message, customer or
+        file; conversations are approximated by metered model sessions.
+        """
+        settings = self.config["digest"]
+        if settings is None:
+            return {"skipped": "no-digest-configured"}
+        offset = settings["utcOffsetMinutes"] * 60
+        local = dt.datetime.fromtimestamp(now + offset, dt.timezone.utc)
+        day = local.replace(hour=settings["hour"], minute=0, second=0, microsecond=0) - dt.timedelta(days=(local.weekday() - settings["weekday"]) % 7)
+        if day > local:
+            day -= dt.timedelta(days=7)
+        end = int(day.timestamp()) - offset
+        if now - end > self.DIGEST_GRACE:
+            return {"skipped": "window-missed"}
+        marker = self.data / "worker" / "digest-sent.json"
+        try:
+            last = int(json.loads(marker.read_text(encoding="utf-8")).get("last", 0))
+        except (OSError, ValueError, TypeError, AttributeError):
+            last = 0
+        if end <= last:
+            return {"skipped": "already-sent"}
+        counts = self._ledger_counts(end - 7 * 86_400, end)
+        inbox = _module("inbox").collect(
+            approvals=self.data / "approvals", handoffs=self.data / "handoffs", contacts=self.data / "contacts", governance=self.data,
+            tickets=self.data / "tickets", crm_sync=self.data / "crm-sync", unanswered=self.data / "unanswered", now=now)["counts"]
+        channels = ", ".join(f"{name} {count}" for name, count in sorted(counts["channels"].items(), key=lambda item: (-item[1], item[0]))[:3]) or "none"
+        text = (f"Weekly summary, 7 days to {day.date().isoformat()}: {counts['executed']} action(s) done, {counts['failed']} failed; approvals "
+                f"{counts['approvalsAsked']} asked, {counts['approved']} approved, {counts['rejected']} rejected; {counts['denied']} denied, "
+                f"{counts['handoffs']} hand-off(s). Model use: {counts['sessions']} session(s) ({channels}), about "
+                f"{counts['costMicros'] / 1_000_000:.2f} USD (estimate). Waiting now: {inbox['approvals']} approval(s), {inbox['handoffs']} hand-off(s) "
+                f"({inbox['overdueHandoffs']} overdue), {inbox['tickets']} ticket(s), {inbox['crmFilings']} CRM filing(s) blocked, "
+                f"{inbox['unanswered']} unanswered question group(s)."
+                + (" The coworker is paused." if inbox.get("paused") else ""))
+        self.queue.add("digest", settings["to"], text, reference=f"digest:{end}"[:40])
+        marker.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        temporary = marker.with_suffix(".tmp")
+        temporary.write_text(json.dumps({"last": end}) + "\n", encoding="utf-8")
+        os.replace(temporary, marker)
+        self.audit("digest.sent", IDENTITY, {"windowEnd": end, "recipient": settings["to"], "counts": {k: v for k, v in counts.items() if k != "channels"}})
+        return {"windowEnd": end, "sent": True}
+
+    def _ledger_counts(self, start: int, end: int) -> dict[str, Any]:
+        """Counts of what the ledger recorded in ``[start, end)``: outcomes only, never arguments or text."""
+        counts: dict[str, Any] = {"executed": 0, "failed": 0, "approvalsAsked": 0, "approved": 0, "rejected": 0, "denied": 0, "handoffs": 0,
+                                  "sessions": 0, "costMicros": 0, "channels": {}}
+        try:
+            lines = self.audit_path.open(encoding="utf-8")
+        except FileNotFoundError:
+            return counts
+        with lines:
+            for line in lines:
+                try:
+                    event = json.loads(line)
+                    moment = dt.datetime.fromisoformat(str(event.get("timestamp", "")).replace("Z", "+00:00")).timestamp()
+                except (ValueError, AttributeError):
+                    continue
+                if not start <= moment < end:
+                    continue
+                kind, outcome = event.get("event"), event.get("outcome")
+                key = {("execution", "succeeded"): "executed", ("execution", "failed"): "failed", ("approval", "pending"): "approvalsAsked",
+                       ("approval", "approved"): "approved", ("approval", "rejected"): "rejected", ("authorization", "deny"): "denied",
+                       ("authorization", "hand-off"): "handoffs"}.get((kind, outcome))
+                if key:
+                    counts[key] += 1
+                elif kind == "operator-action" and event.get("action") == "usage.recorded":
+                    details = event.get("details") or {}
+                    counts["sessions"] += 1
+                    cost = details.get("costMicrosUsd")
+                    counts["costMicros"] += cost if isinstance(cost, int) and not isinstance(cost, bool) and cost > 0 else 0
+                    channel = re.sub(r"[^a-z0-9-]", "", str(details.get("channel") or "unknown").lower())[:20] or "unknown"
+                    counts["channels"][channel] = counts["channels"].get(channel, 0) + 1
+        return counts
+
+    def run_task_reports(self, now: int) -> dict[str, Any]:
+        """Tell each person whose task an Agent has reported (done, declined or failed), once, through their own channel (#229).
+
+        Only the task reference, the Agent and the outcome go in the notice; the report text stays in the task inbox and never reaches the
+        ledger or the notice queue. It keeps running while the coworker is paused, because a person is waiting to hear.
+        """
+        path = self.data / "inbox.json"
+        if not path.is_file():
+            return {"told": 0}
+        told = 0
+        for entry in _module("task_inbox").TaskInbox(path).reported():
+            if not self._told_once("task-report", f"{entry['taskId']}|{entry['state']}"):
+                continue
+            self.queue.add("task-report", entry["person"],
+                           f"Your task {entry['taskId']} for {entry['agent']} is {entry['state']}. Ask for the result in a direct chat or from the operator.",
+                           reference=entry["taskId"][:40])
+            told += 1
+        return {"told": told}
+
     def run_knowledge(self, now: int) -> dict[str, Any]:
         """Tell the contact when an approved business-rules source is due for review or has passed its ``reviewBy`` date (declared dates only)."""
         to = self.config["escalateTo"] or (self.config["mailbox"] or {}).get("owner")
@@ -730,7 +914,20 @@ class Worker:
         if self.config["mailbox"] is not None:
             out["mail"] = self._spool().purge(now=now)
         out["approvals"] = self.expire_approvals(now)
+        out["unanswered"] = self.purge_unanswered(now)
         return out
+
+    def purge_unanswered(self, now: int) -> int:
+        """Remove unanswered-question groups not seen for 90 days (#237); the text is a bounded sample and is not kept for ever."""
+        directory = self.data / "unanswered"
+        if not directory.is_dir():
+            return 0
+        store_module = _module("unanswered")
+        removed = 0
+        for path in sorted(directory.glob("*.unanswered.json")):
+            store = store_module.UnansweredStore(directory, tenant=path.name[: -len(".unanswered.json")], audit=self.audit)
+            removed += store.purge_expired(now)
+        return removed
 
     def expire_approvals(self, now: int) -> int:
         """Remove approval requests and decisions older than ``MODEL_GARDEN_APPROVAL_TTL_HOURS`` and ledger each (ids only)."""
@@ -856,7 +1053,7 @@ class Worker:
 
     def jobs(self) -> list[tuple[str, Callable[[int], dict[str, Any]]]]:
         return [
-            ("scheduler", self.run_scheduler), ("mailbox", self.run_mailbox), ("crm-sync", self.run_crm_sync), ("calls", self.run_calls), ("changes", self.run_changes), ("events", self.run_events), ("knowledge", self.run_knowledge),
+            ("scheduler", self.run_scheduler), ("mailbox", self.run_mailbox), ("crm-sync", self.run_crm_sync), ("calls", self.run_calls), ("changes", self.run_changes), ("events", self.run_events), ("knowledge", self.run_knowledge), ("task-reports", self.run_task_reports), ("spend", self.run_spend), ("digest", self.run_digest),
             ("notices", self.deliver_notices), ("retention", self.run_retention), ("usage", self.run_usage),
             ("export", self.run_export),
         ]
@@ -892,6 +1089,10 @@ class Worker:
         for name in report:  # do not reset a long-interval job on ticks when it did not run
             self._failure_streaks[name] = self._failure_streaks.get(name, 0) + 1 if name in failed else 0
         persistent = sorted(name for name, count in self._failure_streaks.items() if count >= 3)
+        try:
+            self._failure_alerts(now, persistent, ran={name for name in report if name not in failed})
+        except Exception:  # noqa: BLE001 - an alert that cannot be queued must never stop the heartbeat
+            pass
         # Heartbeat carries ONLY fixed job names and counts, never provider errors or user data.
         document = {"at": now, "failed": failed, "persistentFailures": persistent}
         temporary = self.heartbeat.with_suffix(".tmp")
@@ -902,6 +1103,32 @@ class Worker:
             stream.flush()
             os.fsync(stream.fileno())
         os.replace(temporary, self.heartbeat)
+
+    def _failure_alerts(self, now: int, persistent: list[str], *, ran: set[str]) -> None:
+        """One notice when a job starts failing three passes in a row and one when it recovers; state, not time, deduplicates flapping.
+
+        The notice names only the job. A job that did not run this pass keeps its state, so a restart (which forgets the streaks) is not
+        reported as a recovery. With nobody to tell, the state is still kept.
+        """
+        path = self.data / "worker" / "alerts.json"
+        try:
+            known = {item for item in json.loads(path.read_text(encoding="utf-8")).get("persistent", []) if isinstance(item, str)}
+        except (OSError, ValueError, TypeError, AttributeError):
+            known = set()
+        current = (known - ran) | set(persistent)
+        if current == known:
+            return
+        to = self.config["escalateTo"] or (self.config["mailbox"] or {}).get("owner")
+        if to:
+            for job in sorted(set(persistent) - known):
+                self.queue.add("worker-failing", to, f"The worker job {job} has failed three passes in a row. Customers may be affected; an operator should check the "
+                               "runtime (the ledger shows `worker.job-failed`).", reference=f"{job}:{now}"[:40])
+            for job in sorted(known - current):
+                self.queue.add("worker-recovered", to, f"The worker job {job} is working again.", reference=f"{job}:{now}"[:40])
+        path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        temporary = path.with_suffix(".tmp")
+        temporary.write_text(json.dumps({"persistent": sorted(current)}) + "\n", encoding="utf-8")
+        os.replace(temporary, path)
 
     def run_forever(self, stop: threading.Event, *, pause: int = MIN_INTERVAL) -> None:
         while not stop.is_set():

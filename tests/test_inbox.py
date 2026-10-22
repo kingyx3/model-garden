@@ -90,7 +90,7 @@ class TicketsInInboxTests(InboxCase):
 class CollectTests(InboxCase):
     def test_an_empty_runtime_says_so(self):
         result = self.collect()
-        self.assertEqual((result["items"], result["counts"]), ([], {"paused": 0, "approvals": 0, "handoffs": 0, "overdueHandoffs": 0, "reviews": 0, "tickets": 0, "crmFilings": 0, "connections": 0}))
+        self.assertEqual((result["items"], result["counts"]), ([], {"paused": 0, "unanswered": 0, "approvals": 0, "handoffs": 0, "overdueHandoffs": 0, "reviews": 0, "tickets": 0, "crmFilings": 0, "connections": 0}))
         self.assertEqual(inbox.format_text(result), "Nothing is waiting for a person.\n")
 
     def test_items_are_ordered_overdue_handoffs_then_oldest_approvals_then_open_handoffs_then_reviews(self):
@@ -106,7 +106,7 @@ class CollectTests(InboxCase):
         self.assertEqual([(item["kind"], item.get("id")) for item in result["items"][:4]],
                          [("handoff", late), ("approval", old), ("approval", recent), ("handoff", soon)])
         self.assertEqual([item["what"] for item in result["items"][4:]], ["unmatched-interactions", "possible-duplicate-contacts"])
-        self.assertEqual(result["counts"], {"paused": 0, "approvals": 2, "handoffs": 2, "overdueHandoffs": 1, "reviews": 2, "tickets": 0, "crmFilings": 0, "connections": 0})
+        self.assertEqual(result["counts"], {"paused": 0, "unanswered": 0, "approvals": 2, "handoffs": 2, "overdueHandoffs": 1, "reviews": 2, "tickets": 0, "crmFilings": 0, "connections": 0})
         self.assertTrue(result["items"][0]["overdue"])
         self.assertFalse(result["items"][3]["overdue"])
 
