@@ -39,7 +39,7 @@ resource "google_monitoring_uptime_check_config" "gateway" {
   display_name = "${local.name}-gateway-https"
   timeout      = "10s"
   period       = "60s"
-  user_labels  = {
+  user_labels = {
     client      = var.client_slug
     environment = var.environment
     component   = "gateway"
