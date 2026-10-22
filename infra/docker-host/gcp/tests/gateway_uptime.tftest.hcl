@@ -48,6 +48,28 @@ run "rejects_cross_project_channel" {
   expect_failures = [var.gateway_uptime_notification_channels]
 }
 
+run "rejects_malformed_channel" {
+  command = plan
+  variables {
+    gateway_ingress_enabled              = true
+    gateway_domain                       = "gateway.example.com"
+    gateway_uptime_alert_enabled         = true
+    gateway_uptime_notification_channels = ["projects/sample-project-123/notificationChannels/not-numeric"]
+  }
+  expect_failures = [var.gateway_uptime_notification_channels]
+}
+
+run "rejects_mixed_project_channels" {
+  command = plan
+  variables {
+    gateway_ingress_enabled              = true
+    gateway_domain                       = "gateway.example.com"
+    gateway_uptime_alert_enabled         = true
+    gateway_uptime_notification_channels = ["projects/sample-project-123/notificationChannels/123", "projects/foreign-project-123/notificationChannels/999"]
+  }
+  expect_failures = [var.gateway_uptime_notification_channels]
+}
+
 run "valid_gateway_uptime_alert" {
   command = plan
   variables {
@@ -65,8 +87,20 @@ run "valid_gateway_uptime_alert" {
     error_message = "Gateway probe must validate HTTPS certificates and use healthz."
   }
   assert {
-    condition     = google_monitoring_alert_policy.gateway_uptime[0].conditions[0].condition_threshold[0].comparison == "COMPARISON_LT" && google_monitoring_alert_policy.gateway_uptime[0].conditions[0].condition_threshold[0].threshold_value == 1 && google_monitoring_alert_policy.gateway_uptime[0].conditions[0].condition_threshold[0].duration == "180s"
+    condition     = google_monitoring_alert_policy.gateway_uptime[0].conditions[0].condition_threshold[0].comparison == "COMPARISON_LT" && google_monitoring_alert_policy.gateway_uptime[0].conditions[0].condition_threshold[0].threshold_value == 0.5 && google_monitoring_alert_policy.gateway_uptime[0].conditions[0].condition_threshold[0].duration == "180s"
     error_message = "Gateway degradation threshold and duration must remain explicit."
+  }
+  assert {
+    condition     = google_monitoring_alert_policy.gateway_uptime[0].conditions[0].condition_threshold[0].aggregations[0].per_series_aligner == "ALIGN_FRACTION_TRUE" && google_monitoring_alert_policy.gateway_uptime[0].conditions[0].condition_threshold[0].aggregations[0].cross_series_reducer == "REDUCE_MEAN" && google_monitoring_alert_policy.gateway_uptime[0].conditions[0].condition_threshold[0].aggregations[0].alignment_period == "60s"
+    error_message = "Aggregate the check pass fractions across locations before evaluating majority failure."
+  }
+  assert {
+    condition     = google_monitoring_alert_policy.gateway_uptime[0].conditions[0].condition_threshold[0].evaluation_missing_data == "EVALUATION_MISSING_DATA_ACTIVE" && google_monitoring_alert_policy.gateway_uptime[0].alert_strategy[0].auto_close == "1800s"
+    error_message = "Missing telemetry and auto-closure must remain explicit; closure is not recovery proof."
+  }
+  assert {
+    condition     = google_monitoring_uptime_check_config.gateway[0].monitored_resource[0].labels["project_id"] == var.project_id && google_monitoring_uptime_check_config.gateway[0].monitored_resource[0].labels["host"] == var.gateway_domain && google_monitoring_alert_policy.gateway_uptime[0].notification_channels == var.gateway_uptime_notification_channels
+    error_message = "Gateway monitoring must target only the supplied project, domain, and authorized channels."
   }
   assert {
     condition     = contains(google_monitoring_alert_policy.gateway_uptime[0].alert_strategy[0].notification_prompts, "OPENED") && contains(google_monitoring_alert_policy.gateway_uptime[0].alert_strategy[0].notification_prompts, "CLOSED")
