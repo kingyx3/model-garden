@@ -72,6 +72,9 @@ jobs:
         run: terraform -chdir=${{ matrix.path }} init -backend=false -input=false
       - name: Validate
         run: terraform -chdir=${{ matrix.path }} validate
+      - name: Test Docker-host Terraform monitoring
+        if: matrix.path == 'infra/docker-host/gcp'
+        run: terraform -chdir=infra/docker-host/gcp test
 
   contracts-and-runtime:
     runs-on: ubuntu-latest
