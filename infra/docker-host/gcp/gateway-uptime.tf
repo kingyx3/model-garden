@@ -39,7 +39,7 @@ resource "google_monitoring_uptime_check_config" "gateway" {
   display_name = "${local.name}-gateway-https"
   timeout      = "10s"
   period       = "60s"
-  user_labels = {
+  user_labels  = {
     client      = var.client_slug
     environment = var.environment
     component   = "gateway"
@@ -65,34 +65,35 @@ resource "google_monitoring_uptime_check_config" "gateway" {
 resource "google_monitoring_alert_policy" "gateway_uptime" {
   count = var.gateway_uptime_alert_enabled ? 1 : 0
 
-  display_name          = "${local.name}-gateway-unavailable"
+  display_name          = "${local.name}-gateway-degraded"
   combiner              = "OR"
   severity              = "ERROR"
   notification_channels = var.gateway_uptime_notification_channels
-  user_labels  = {
+  user_labels           = {
     client      = var.client_slug
     environment = var.environment
     component   = "gateway"
   }
 
   conditions {
-    display_name = "Gateway HTTPS health probe fails for three minutes"
+    display_name = "Gateway HTTPS probe pass fraction below 50% for three minutes"
     condition_threshold {
       filter                  = "metric.type=\"monitoring.googleapis.com/uptime_check/check_passed\" AND resource.type=\"uptime_url\" AND metric.label.check_id=\"${google_monitoring_uptime_check_config.gateway[0].uptime_check_id}\""
       comparison              = "COMPARISON_LT"
-      threshold_value         = 1
+      threshold_value         = 0.5
       duration                = "180s"
       evaluation_missing_data = "EVALUATION_MISSING_DATA_ACTIVE"
       aggregations {
         alignment_period   = "60s"
-        per_series_aligner = "ALIGN_FRACTION_TRUE"
+        per_series_aligner   = "ALIGN_FRACTION_TRUE"
+        cross_series_reducer = "REDUCE_MEAN"
       }
     }
   }
 
   documentation {
     mime_type = "text/markdown"
-    content   = "Gateway HTTPS health failed for ${var.client_slug}/${var.environment}. Confirm Cloud Monitoring probe status and client ingress/DNS, then inspect gateway/worker on the private host through approved operator access. Escalate to the client owner; do not expose logs, credentials or customer payloads. An incident closing is not proof of worker or voice recovery."
+    content   = "Gateway HTTPS probe pass fraction below 50% for three minutes, or probe telemetry missing, for ${var.client_slug}/${var.environment}. Verify Cloud Monitoring probe samples, DNS/TLS and gateway health before classifying as an outage. Escalate through approved operator access. A CLOSED incident, especially after auto-close, is not proof of gateway, worker or voice recovery. Do not expose secrets or customer payloads."
   }
 
   alert_strategy {
