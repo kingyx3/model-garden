@@ -60,4 +60,16 @@ run "valid_gateway_uptime_alert" {
     condition     = length(google_monitoring_uptime_check_config.gateway) == 1 && length(google_monitoring_alert_policy.gateway_uptime) == 1
     error_message = "An opted-in client gateway must have exactly one check and one alert policy."
   }
+  assert {
+    condition     = google_monitoring_uptime_check_config.gateway[0].http_check[0].validate_ssl == true && google_monitoring_uptime_check_config.gateway[0].http_check[0].path == "/healthz"
+    error_message = "Gateway probe must validate HTTPS certificates and use healthz."
+  }
+  assert {
+    condition     = google_monitoring_alert_policy.gateway_uptime[0].conditions[0].condition_threshold[0].comparison == "COMPARISON_LT" && google_monitoring_alert_policy.gateway_uptime[0].conditions[0].condition_threshold[0].threshold_value == 1 && google_monitoring_alert_policy.gateway_uptime[0].conditions[0].condition_threshold[0].duration == "180s"
+    error_message = "Gateway degradation threshold and duration must remain explicit."
+  }
+  assert {
+    condition     = contains(google_monitoring_alert_policy.gateway_uptime[0].alert_strategy[0].notification_prompts, "OPENED") && contains(google_monitoring_alert_policy.gateway_uptime[0].alert_strategy[0].notification_prompts, "CLOSED")
+    error_message = "Gateway incidents must request opening and closing notifications."
+  }
 }
