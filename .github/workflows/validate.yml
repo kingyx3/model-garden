@@ -67,7 +67,7 @@ jobs:
           terraform_version: "1.14.6"
           terraform_wrapper: false
       - name: Format
-        run: terraform -chdir=${{ matrix.path }} fmt -check
+        run: terraform -chdir=${{ matrix.path }} fmt -check -diff
       - name: Init without backend
         run: terraform -chdir=${{ matrix.path }} init -backend=false -input=false
       - name: Validate
