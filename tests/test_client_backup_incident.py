@@ -89,6 +89,25 @@ class BackupIncidentTests(unittest.TestCase):
                                                         tzinfo=UTC))["event"],
                          "backup.incident.unchanged")
 
+    def test_latest_success_deterioration_reopens_but_old_miss_does_not(self):
+        self.run_monitor()  # Earlier due slot is missed.
+        later = "20261030T120000Z"
+        self.receipt(later)
+        at_later = dt.datetime(2026, 10, 30, 12, 6, tzinfo=UTC)
+        self.assertEqual(self.run_monitor(now=at_later)["event"],
+                         "backup.incident.recovered")
+        # The historical missed slot remains in the overlapping audit window.
+        self.assertEqual(self.run_monitor(now=at_later)["event"],
+                         "backup.incident.unchanged")
+        # A newly unsafe receipt for the latest slot must still open an incident.
+        latest_receipt = self.root / "claims" / f"{self.project}-{later}.result.json"
+        latest_receipt.chmod(0o644)
+        reopened = self.run_monitor(now=at_later)
+        self.assertEqual(reopened["event"], "backup.incident.opened")
+        self.assertTrue(reopened["incidentActive"])
+        self.assertEqual(self.run_monitor(now=at_later)["event"],
+                         "backup.incident.unchanged")
+
     def test_same_slot_receipt_change_cannot_falsely_recover(self):
         self.run_monitor()
         self.receipt(self.stamp)
