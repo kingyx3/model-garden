@@ -137,7 +137,42 @@ class BackupScheduleTests(unittest.TestCase):
         with mock.patch.object(SCHEDULE.WINDOW, "run", side_effect=SCHEDULE.WINDOW.WindowError("upload failed")):
             with self.assertRaises(SCHEDULE.WINDOW.WindowError):
                 SCHEDULE.dispatch(**self.kwargs)
-        self.assertEqual(len(list((self.root / "claims").iterdir())), 1)
+        self.assertEqual(len(list((self.root / "claims").iterdir())), 2)
+        receipt = self.root / "claims" / "acme-dev-20261023T120000Z.result.json"
+        self.assertEqual(json.loads(receipt.read_text())["status"], "failed-not-recovery-proven")
+        self.assertNotIn("upload failed", receipt.read_text())
+        with self.assertRaisesRegex(SCHEDULE.ScheduleError, "already attempted"):
+            self.execute()
+
+    def test_success_has_durable_private_result_receipt_without_recovery_claim(self):
+        result, _ = self.execute()
+        self.assertEqual(result["status"], "uploaded-not-recovery-proven")
+        receipt = self.root / "claims" / "acme-dev-20261023T120000Z.result.json"
+        self.assertEqual(json.loads(receipt.read_text()), {
+            "clientProject": "acme-dev", "slotUTC": "20261023T120000Z",
+            "status": "uploaded-not-recovery-proven",
+        })
+        self.assertEqual(receipt.stat().st_mode & 0o777, 0o600)
+        with self.assertRaisesRegex(SCHEDULE.ScheduleError, "already attempted"):
+            self.execute()
+
+    def test_preexisting_result_receipt_is_not_overwritten(self):
+        receipt = self.root / "claims" / "acme-dev-20261023T120000Z.result.json"
+        self.write(receipt, {"sentinel": True})
+        with self.assertRaisesRegex(SCHEDULE.ScheduleError, "record backup result"):
+            self.execute()
+        self.assertEqual(json.loads(receipt.read_text()), {"sentinel": True})
+        with self.assertRaisesRegex(SCHEDULE.ScheduleError, "already attempted"):
+            self.execute()
+
+    def test_symlinked_result_receipt_is_not_followed(self):
+        target = self.root / "claims" / "operator-data.json"
+        self.write(target, {"sentinel": True})
+        receipt = self.root / "claims" / "acme-dev-20261023T120000Z.result.json"
+        receipt.symlink_to(target)
+        with self.assertRaisesRegex(SCHEDULE.ScheduleError, "record backup result"):
+            self.execute()
+        self.assertEqual(json.loads(target.read_text()), {"sentinel": True})
         with self.assertRaisesRegex(SCHEDULE.ScheduleError, "already attempted"):
             self.execute()
 
