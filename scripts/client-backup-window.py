@@ -22,6 +22,8 @@ import sys
 import time
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "scripts"))
+import client_operation_lock
 SLUG = re.compile(r"^[a-z][a-z0-9-]{0,30}[a-z0-9]$")
 GCP_PROJECT = re.compile(r"^[a-z][a-z0-9-]{4,28}[a-z0-9]$")
 AGE_RECIPIENT = re.compile(r"^age1[a-z0-9]{50,}$")
@@ -164,29 +166,30 @@ def run(*, compose: pathlib.Path, project: str, slug: str, environment: str,
                           gcp_project=gcp_project, recipient=recipient,
                           now=dt.datetime.now(dt.timezone.utc))
     deadline = time.monotonic() + remaining
-    lock_fd = _lock(output_parent, project)
-    try:
-        _stopped(project, deadline)
-        snapshot_script = ROOT / "scripts" / "client-volume-snapshot.py"
-        upload_script = ROOT / "scripts" / "client-backup-upload.py"
-        _run([sys.executable, str(snapshot_script), "inventory", "--compose", str(compose),
-              "--project", project], _remaining(deadline))
-        _stopped(project, deadline)
-        run_id = f"{project}-{int(time.time())}-{secrets.token_hex(5)}"
-        destination = output_parent / run_id
-        _run([sys.executable, str(snapshot_script), "snapshot", "--compose", str(compose),
-              "--project", project, "--output", str(destination), "--recipient", recipient,
-              "--image", image], _remaining(deadline))
-        _stopped(project, deadline)
-        _run([sys.executable, str(upload_script), "--compose", str(compose), "--project", project,
-              "--source", str(destination), "--gcp-project-id", gcp_project,
-              "--client-slug", slug, "--environment", environment], _remaining(deadline))
-        _stopped(project, deadline)
-        _remaining(deadline)
-        return {"event": "backup.window.completed", "clientProject": project,
-                "status": "uploaded-not-recovery-proven", "runId": run_id}
-    finally:
-        os.close(lock_fd)
+    with client_operation_lock.project_operation_lock(project):
+        lock_fd = _lock(output_parent, project)
+        try:
+            _stopped(project, deadline)
+            snapshot_script = ROOT / "scripts" / "client-volume-snapshot.py"
+            upload_script = ROOT / "scripts" / "client-backup-upload.py"
+            _run([sys.executable, str(snapshot_script), "inventory", "--compose", str(compose),
+                  "--project", project], _remaining(deadline))
+            _stopped(project, deadline)
+            run_id = f"{project}-{int(time.time())}-{secrets.token_hex(5)}"
+            destination = output_parent / run_id
+            _run([sys.executable, str(snapshot_script), "snapshot", "--compose", str(compose),
+                  "--project", project, "--output", str(destination), "--recipient", recipient,
+                  "--image", image], _remaining(deadline))
+            _stopped(project, deadline)
+            _run([sys.executable, str(upload_script), "--compose", str(compose), "--project", project,
+                  "--source", str(destination), "--gcp-project-id", gcp_project,
+                  "--client-slug", slug, "--environment", environment], _remaining(deadline))
+            _stopped(project, deadline)
+            _remaining(deadline)
+            return {"event": "backup.window.completed", "clientProject": project,
+                    "status": "uploaded-not-recovery-proven", "runId": run_id}
+        finally:
+            os.close(lock_fd)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -204,7 +207,7 @@ def main(argv: list[str] | None = None) -> int:
     except (WindowError, OSError, ValueError) as exc:
         # No cloud stderr, payloads, credentials, recipient, paths or approval details.
         print(json.dumps({"event": "backup.window.failed", "status": "not-recovery-proven",
-                          "reason": "window-refused" if isinstance(exc, WindowError) else "unexpected-failure"},
+                          "reason": "window-refused" if isinstance(exc, (WindowError, client_operation_lock.OperationLockError)) else "unexpected-failure"},
                          sort_keys=True), file=sys.stderr)
         return 2
     print(json.dumps(result, sort_keys=True))

@@ -30,6 +30,8 @@ from typing import Any
 import yaml
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "scripts"))
+import client_operation_lock
 PROJECT_NAME = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
 BASE_IMAGE = "python:3.12.14-slim-bookworm@sha256:782412e85d0f0984994c290652577d4018aff08145c85b262bb63dc0c7522254"
 PROVIDER_ENV = {
@@ -1064,51 +1066,52 @@ def apply_bundle(
     secrets_json: str | None,
     timeout: int = 90,
 ) -> None:
-    _, model_ref = _validate_binding(binding)
-    resolved = resolve_secrets(binding, secrets_json)
-    model_secret = resolved[model_ref]
-
-    runtime_env = os.environ.copy()
-    runtime_env.pop("MODEL_GARDEN_RUNTIME_SECRETS_JSON", None)
-    runtime_env["MODEL_GARDEN_MODEL_CREDENTIAL"] = model_secret
-    _, coworker_key_ref = _worker_settings(binding)
-    if coworker_key_ref is not None:
-        runtime_env["MODEL_GARDEN_COWORKER_API_KEY"] = resolved[coworker_key_ref]
-    for name, ref in _upstream_env(_upstream_settings(binding) or []).items():
-        runtime_env[name] = resolved[ref]
-    vault_ref = _vault_key_ref(binding)
-    if vault_ref is not None:
-        runtime_env["MODEL_GARDEN_VAULT_PRIVATE_KEY"] = resolved[vault_ref]
-    gateway_config, gateway_secrets, _ = _gateway_settings(binding)
-    _check_vault_pair(gateway_config, resolved[vault_ref] if vault_ref is not None else None)
-    for name, ref in gateway_secrets.items():
-        runtime_env[name] = resolved[ref]
-
-    compose = ["docker", "compose", "-p", project_name, "-f", str(bundle_dir / "compose.yaml")]
-    image = f"model-garden-{project_name}:current"
-    rollback = f"model-garden-{project_name}:rollback"
-
-    _run(["docker", "compose", "version"], env=runtime_env)
-    had_previous = _image_exists(image, runtime_env)
-    if had_previous:
-        _run(["docker", "tag", image, rollback], env=runtime_env)
-
-    try:
-        _run([*compose, "build"], env=runtime_env)
-        _run([*compose, "up", "-d", "--remove-orphans"], env=runtime_env)
-        if not _wait_healthy(project_name, bundle_dir, runtime_env, timeout):
-            raise RuntimeError("candidate client runtime did not become healthy")
-    except (OSError, subprocess.CalledProcessError, RuntimeError) as exc:
+    with client_operation_lock.project_operation_lock(project_name):
+        _, model_ref = _validate_binding(binding)
+        resolved = resolve_secrets(binding, secrets_json)
+        model_secret = resolved[model_ref]
+    
+        runtime_env = os.environ.copy()
+        runtime_env.pop("MODEL_GARDEN_RUNTIME_SECRETS_JSON", None)
+        runtime_env["MODEL_GARDEN_MODEL_CREDENTIAL"] = model_secret
+        _, coworker_key_ref = _worker_settings(binding)
+        if coworker_key_ref is not None:
+            runtime_env["MODEL_GARDEN_COWORKER_API_KEY"] = resolved[coworker_key_ref]
+        for name, ref in _upstream_env(_upstream_settings(binding) or []).items():
+            runtime_env[name] = resolved[ref]
+        vault_ref = _vault_key_ref(binding)
+        if vault_ref is not None:
+            runtime_env["MODEL_GARDEN_VAULT_PRIVATE_KEY"] = resolved[vault_ref]
+        gateway_config, gateway_secrets, _ = _gateway_settings(binding)
+        _check_vault_pair(gateway_config, resolved[vault_ref] if vault_ref is not None else None)
+        for name, ref in gateway_secrets.items():
+            runtime_env[name] = resolved[ref]
+    
+        compose = ["docker", "compose", "-p", project_name, "-f", str(bundle_dir / "compose.yaml")]
+        image = f"model-garden-{project_name}:current"
+        rollback = f"model-garden-{project_name}:rollback"
+    
+        _run(["docker", "compose", "version"], env=runtime_env)
+        had_previous = _image_exists(image, runtime_env)
         if had_previous:
-            _run(["docker", "tag", rollback, image], env=runtime_env, check=False)
-            _run([*compose, "up", "-d", "--no-build", "--force-recreate"], env=runtime_env, check=False)
-            restored = _wait_healthy(project_name, bundle_dir, runtime_env, timeout)
-            suffix = "; previous runtime restored" if restored else "; rollback also failed health verification"
-        else:
-            _run([*compose, "down"], env=runtime_env, check=False)
-            suffix = "; no previous runtime existed"
-        detail = exc.stderr.strip() if isinstance(exc, subprocess.CalledProcessError) and exc.stderr else str(exc)
-        raise ValueError(f"Docker target failed: deployment verification failed: {detail}{suffix}") from exc
+            _run(["docker", "tag", image, rollback], env=runtime_env)
+    
+        try:
+            _run([*compose, "build"], env=runtime_env)
+            _run([*compose, "up", "-d", "--remove-orphans"], env=runtime_env)
+            if not _wait_healthy(project_name, bundle_dir, runtime_env, timeout):
+                raise RuntimeError("candidate client runtime did not become healthy")
+        except (OSError, subprocess.CalledProcessError, RuntimeError) as exc:
+            if had_previous:
+                _run(["docker", "tag", rollback, image], env=runtime_env, check=False)
+                _run([*compose, "up", "-d", "--no-build", "--force-recreate"], env=runtime_env, check=False)
+                restored = _wait_healthy(project_name, bundle_dir, runtime_env, timeout)
+                suffix = "; previous runtime restored" if restored else "; rollback also failed health verification"
+            else:
+                _run([*compose, "down"], env=runtime_env, check=False)
+                suffix = "; no previous runtime existed"
+            detail = exc.stderr.strip() if isinstance(exc, subprocess.CalledProcessError) and exc.stderr else str(exc)
+            raise ValueError(f"Docker target failed: deployment verification failed: {detail}{suffix}") from exc
 
 
 def main() -> int:
