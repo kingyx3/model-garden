@@ -1070,7 +1070,7 @@ def apply_bundle(
         _, model_ref = _validate_binding(binding)
         resolved = resolve_secrets(binding, secrets_json)
         model_secret = resolved[model_ref]
-    
+
         runtime_env = os.environ.copy()
         runtime_env.pop("MODEL_GARDEN_RUNTIME_SECRETS_JSON", None)
         runtime_env["MODEL_GARDEN_MODEL_CREDENTIAL"] = model_secret
@@ -1086,16 +1086,16 @@ def apply_bundle(
         _check_vault_pair(gateway_config, resolved[vault_ref] if vault_ref is not None else None)
         for name, ref in gateway_secrets.items():
             runtime_env[name] = resolved[ref]
-    
+
         compose = ["docker", "compose", "-p", project_name, "-f", str(bundle_dir / "compose.yaml")]
         image = f"model-garden-{project_name}:current"
         rollback = f"model-garden-{project_name}:rollback"
-    
+
         _run(["docker", "compose", "version"], env=runtime_env)
         had_previous = _image_exists(image, runtime_env)
         if had_previous:
             _run(["docker", "tag", image, rollback], env=runtime_env)
-    
+
         try:
             _run([*compose, "build"], env=runtime_env)
             _run([*compose, "up", "-d", "--remove-orphans"], env=runtime_env)
