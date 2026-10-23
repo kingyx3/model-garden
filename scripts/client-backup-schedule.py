@@ -100,7 +100,7 @@ def _record_result(claims: pathlib.Path, *, project: str, stamp: str, status: st
         with os.fdopen(os.open(receipt, flags, 0o600), "w", encoding="utf-8") as stream:
             os.fchmod(stream.fileno(), 0o600)
             stream.write(json.dumps({"clientProject": project, "slotUTC": stamp,
-                                     "status": status}, sort_keys=True) + "\\n")
+                                     "status": status}, sort_keys=True) + "\n")
             stream.flush()
             os.fsync(stream.fileno())
         dirfd = os.open(claims, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) |
