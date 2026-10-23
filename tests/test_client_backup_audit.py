@@ -180,7 +180,7 @@ class BackupSlotAuditTests(unittest.TestCase):
                           "recoveryProven": False, "notificationsDelivered": False,
                           "slots": [{"slotUTC": self.stamp, "status": s} for s in statuses]}
                 output = io.StringIO()
-                with mock.patch.object(AUDIT, "audit", return_value=report), \\
+                with mock.patch.object(AUDIT, "audit", return_value=report), \
                      contextlib.redirect_stdout(output):
                     self.assertEqual(AUDIT.main(args + ["--strict-slots"]), expected)
                 self.assertEqual(json.loads(output.getvalue()), report)
@@ -196,7 +196,7 @@ class BackupSlotAuditTests(unittest.TestCase):
         report = {"event": "backup.schedule.audit", "clientProject": "acme-dev",
                   "recoveryProven": False, "notificationsDelivered": False,
                   "slots": [{"slotUTC": self.stamp, "status": "missed"}]}
-        with mock.patch.object(AUDIT, "audit", return_value=report), \\
+        with mock.patch.object(AUDIT, "audit", return_value=report), \
              contextlib.redirect_stdout(io.StringIO()):
             self.assertEqual(AUDIT.main(args), 0)
 
