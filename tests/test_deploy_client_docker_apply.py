@@ -17,6 +17,20 @@ spec.loader.exec_module(deployer)
 
 
 class DeployClientDockerApplyTests(unittest.TestCase):
+    def setUp(self):
+        self.host_tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.host_tmp.cleanup)
+        host_root = pathlib.Path(self.host_tmp.name) / "host-locks"
+        host_root.mkdir(mode=0o700)
+        patch = mock.patch.object(deployer.client_operation_lock, "LOCK_ROOT", host_root)
+        patch.start()
+        self.addCleanup(patch.stop)
+
+    def test_active_backup_lock_blocks_deploy_before_docker(self):
+        with deployer.client_operation_lock.project_operation_lock("acme-dev"):
+            with self.assertRaises(deployer.client_operation_lock.OperationLockError):
+                deployer.apply_bundle(pathlib.Path("/not-used"), {}, "acme-dev", secrets_json=None)
+
     def test_aggregate_secret_map_is_not_forwarded_to_docker(self):
         binding = {
             "apiVersion": "modelgarden.ai/v1",

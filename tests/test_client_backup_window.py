@@ -26,6 +26,11 @@ class BackupWindowTests(unittest.TestCase):
         self.root = pathlib.Path(self.tmp.name)
         self.private = self.root / "private"
         self.private.mkdir(mode=0o700)
+        host_root = self.root / "host-locks"
+        host_root.mkdir(mode=0o700)
+        patch = mock.patch.object(WINDOW.client_operation_lock, "LOCK_ROOT", host_root)
+        patch.start()
+        self.addCleanup(patch.stop)
         self.compose = self.root / "compose.yaml"
         self.compose.write_text("services: {}\n", encoding="utf-8")
         self.approval = self.private / "approval.json"
@@ -175,6 +180,12 @@ class BackupWindowTests(unittest.TestCase):
             with self.assertRaises(WINDOW.WindowError):
                 WINDOW.run(**self.args)
         self.assertFalse(any("client-backup-upload.py" in cmd[1] for cmd in self.calls if len(cmd)>1))
+
+    def test_active_deploy_lock_blocks_backup_before_inventory(self):
+        with WINDOW.client_operation_lock.project_operation_lock("acme-dev"):
+            with self.assertRaises(WINDOW.client_operation_lock.OperationLockError):
+                self.execute()
+        self.assertEqual(self.calls, [])
 
     def test_subprocess_is_bounded_and_errors_are_redacted(self):
         self.assertEqual(WINDOW._run([sys.executable, "-c", "print('ok')"], 2, capture=True).strip(), "ok")
