@@ -25,6 +25,8 @@ from typing import Any
 import yaml
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "scripts"))
+import client_operation_lock
 
 
 def _load_deployer():
@@ -147,10 +149,17 @@ def worker_overlay(base: dict[str, Any]) -> dict[str, Any] | None:
 
 
 def apply(binding_path: pathlib.Path, bundle_dir: pathlib.Path, project: str, secrets_json: str | None, timeout: int) -> str:
+    """Guard the entire voice overlay, health wait and rollback against backup."""
     binding = _load_json(binding_path)
     voice = _voice(binding)
     if voice is None:
         return "voice not selected; base runtime unchanged"
+    with client_operation_lock.project_operation_lock(project):
+        return _apply_selected_voice(binding, voice, bundle_dir, project, secrets_json, timeout)
+
+
+def _apply_selected_voice(binding: dict[str, Any], voice: dict[str, Any], bundle_dir: pathlib.Path,
+                          project: str, secrets_json: str | None, timeout: int) -> str:
     _, model_ref = DEPLOY._validate_binding(binding)
     resolved = DEPLOY.resolve_secrets(binding, secrets_json)
     model_secret = resolved[model_ref]
