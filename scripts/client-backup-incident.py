@@ -151,9 +151,14 @@ def monitor(*, schedule: pathlib.Path, claims: pathlib.Path,
         if fresh:
             condition = "healthy" if all(slot["status"] == GOOD for slot in fresh) else "unhealthy"
         else:
-            # Same-slot receipt changes cannot clear an incident; deterioration may open one.
+            # Only the latest observed slot may deteriorate on a repeated poll.
+            # Older missed slots are already accounted for by a newer successful
+            # recovery; re-reading them must not reopen a resolved incident.
+            # Same-slot receipt changes still cannot clear an active incident.
+            latest_bad = any(slot["slotUTC"] == latest and slot["status"] in BAD
+                             for slot in slots)
             condition = "unhealthy" if (prior["condition"] == "unhealthy" or
-                        any(slot["status"] in BAD for slot in slots)) else "healthy"
+                                      latest_bad) else "healthy"
         previous = prior["condition"] if prior is not None else "healthy"
         event = ("backup.incident.opened" if condition == "unhealthy" and previous == "healthy"
                  else "backup.incident.recovered" if condition == "healthy" and
