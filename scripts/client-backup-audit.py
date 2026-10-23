@@ -109,6 +109,8 @@ def main(argv: list[str] | None = None) -> int:
     for key in ("schedule", "claims", "project", "client-slug", "environment",
                 "gcp-project-id", "recipient", "confirm-project", "since-utc"):
         parser.add_argument("--" + key, required=True)
+    parser.add_argument("--strict-slots", action="store_true",
+                        help="exit nonzero on missing, unsafe or failed slots; 3 if no due slots")
     args = parser.parse_args(argv)
     try:
         result = audit(schedule=pathlib.Path(args.schedule), claims=pathlib.Path(args.claims),
@@ -122,6 +124,14 @@ def main(argv: list[str] | None = None) -> int:
                           "reason": "unsafe-or-invalid-input"}, sort_keys=True), file=sys.stderr)
         return 2
     print(json.dumps(result, sort_keys=True))
+    if args.strict_slots:
+        # Exit codes: 0 = all due slots uploaded, 1 = unhealthy, 3 = no due
+        # slot to assess. Uploaded is never evidence of a successful restore.
+        statuses = [slot["status"] for slot in result["slots"]]
+        if not statuses:
+            return 3
+        if any(status != "uploaded-not-recovery-proven" for status in statuses):
+            return 1
     return 0
 
 
