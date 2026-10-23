@@ -161,5 +161,45 @@ class BackupSlotAuditTests(unittest.TestCase):
             self.assertNotIn("must-not-log", str(stderr.write.call_args_list))
 
 
+    def test_strict_cli_fails_on_problem_slots_and_indeterminate_empty_audit(self):
+        import contextlib
+        import io
+        args = []
+        for key in ("schedule", "claims", "project", "client-slug", "environment",
+                    "gcp-project-id", "recipient", "confirm-project", "since-utc"):
+            args.extend(["--" + key, "2026-10-23T00:00:00Z" if key == "since-utc"
+                         else "placeholder"])
+        for statuses, expected in (
+            (["missed"], 1), (["unknown"], 1),
+            (["failed-not-recovery-proven"], 1),
+            (["uploaded-not-recovery-proven", "missed"], 1),
+            (["uploaded-not-recovery-proven"], 0), ([], 3),
+        ):
+            with self.subTest(statuses=statuses):
+                report = {"event": "backup.schedule.audit", "clientProject": "acme-dev",
+                          "recoveryProven": False, "notificationsDelivered": False,
+                          "slots": [{"slotUTC": self.stamp, "status": s} for s in statuses]}
+                output = io.StringIO()
+                with mock.patch.object(AUDIT, "audit", return_value=report), \\
+                     contextlib.redirect_stdout(output):
+                    self.assertEqual(AUDIT.main(args + ["--strict-slots"]), expected)
+                self.assertEqual(json.loads(output.getvalue()), report)
+
+    def test_default_cli_keeps_observation_only_exit_status(self):
+        import contextlib
+        import io
+        args = []
+        for key in ("schedule", "claims", "project", "client-slug", "environment",
+                    "gcp-project-id", "recipient", "confirm-project", "since-utc"):
+            args.extend(["--" + key, "2026-10-23T00:00:00Z" if key == "since-utc"
+                         else "placeholder"])
+        report = {"event": "backup.schedule.audit", "clientProject": "acme-dev",
+                  "recoveryProven": False, "notificationsDelivered": False,
+                  "slots": [{"slotUTC": self.stamp, "status": "missed"}]}
+        with mock.patch.object(AUDIT, "audit", return_value=report), \\
+             contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(AUDIT.main(args), 0)
+
+
 if __name__ == "__main__":
     unittest.main()
