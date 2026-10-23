@@ -86,6 +86,33 @@ def _slot(policy: dict, now: dt.datetime) -> dt.datetime | None:
     return slot
 
 
+def _record_result(claims: pathlib.Path, *, project: str, stamp: str, status: str) -> None:
+    """Persist a terminal outcome separately from the irreversible attempt claim.
+
+    A missing or damaged result is UNKNOWN, never permission to retry the slot.
+    """
+    if status not in ("uploaded-not-recovery-proven", "failed-not-recovery-proven"):
+        raise ScheduleError("unrecognized backup result")
+    _private_owned(claims, directory=True)
+    receipt = claims / f"{project}-{stamp}.result.json"
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        with os.fdopen(os.open(receipt, flags, 0o600), "w", encoding="utf-8") as stream:
+            os.fchmod(stream.fileno(), 0o600)
+            stream.write(json.dumps({"clientProject": project, "slotUTC": stamp,
+                                     "status": status}, sort_keys=True) + "\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        dirfd = os.open(claims, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) |
+                        getattr(os, "O_NOFOLLOW", 0))
+        try:
+            os.fsync(dirfd)
+        finally:
+            os.close(dirfd)
+    except OSError as exc:
+        raise ScheduleError("unable to durably record backup result") from exc
+
+
 def dispatch(*, schedule: pathlib.Path, approvals: pathlib.Path, claims: pathlib.Path,
              compose: pathlib.Path, project: str, slug: str, environment: str,
              gcp_project: str, recipient: str, image: str, output_parent: pathlib.Path,
@@ -133,10 +160,19 @@ def dispatch(*, schedule: pathlib.Path, approvals: pathlib.Path, claims: pathlib
     except OSError as exc:
         raise ScheduleError("unable to durably record backup slot") from exc
     # A failed attempt is never silently retried. Review partial objects and issue a new approval.
-    result = WINDOW.run(compose=compose, project=project, slug=slug, environment=environment,
-                        gcp_project=gcp_project, recipient=recipient, image=image,
-                        approval=approval, output_parent=output_parent,
-                        confirm_project=confirm_project)
+    try:
+        result = WINDOW.run(compose=compose, project=project, slug=slug, environment=environment,
+                            gcp_project=gcp_project, recipient=recipient, image=image,
+                            approval=approval, output_parent=output_parent,
+                            confirm_project=confirm_project)
+        if result.get("status") != "uploaded-not-recovery-proven":
+            raise ScheduleError("backup upload status was not confirmed")
+    except Exception:
+        _record_result(claims, project=project, stamp=stamp,
+                       status="failed-not-recovery-proven")
+        raise
+    _record_result(claims, project=project, stamp=stamp,
+                   status="uploaded-not-recovery-proven")
     return {"event": "backup.schedule.dispatched", "status": result["status"],
             "slotUTC": stamp, "runId": result["runId"]}
 
