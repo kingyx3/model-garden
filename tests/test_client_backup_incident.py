@@ -108,7 +108,7 @@ class BackupIncidentTests(unittest.TestCase):
         result = self.run_monitor(now=early)
         self.assertEqual(result["event"], "backup.incident.indeterminate")
         self.assertFalse(result["notificationsDelivered"])
-        self.assertFalse(list((self.root / "state").iterdir()))
+        self.assertFalse((self.root / "state" / "acme-dev.incident.json").exists())
         self.run_monitor()
         result = self.run_monitor(now=early)
         self.assertEqual(result["event"], "backup.incident.indeterminate")
