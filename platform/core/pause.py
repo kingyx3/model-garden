@@ -86,6 +86,10 @@ class PauseStore:
             # A concurrent pause may create the state between the missing
             # lookup and the first-boot decision. Never return unpaused from
             # an observed transition: the next read can retry safely.
+            # Check the root *before* probing again: a mount replaced during
+            # the first lookup may be replaced yet again on the second.
+            if not self._same_root(root_info):
+                return _fail_closed()
             try:
                 self.path.lstat()
             except FileNotFoundError:
