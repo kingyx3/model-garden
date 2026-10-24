@@ -6,12 +6,14 @@ but cannot be read counts as paused: the control fails safe, never open.
 """
 from __future__ import annotations
 
+import fcntl
 import json
 import os
 import pathlib
 import re
 import tempfile
-from typing import Any
+from contextlib import contextmanager
+from typing import Any, Iterator
 
 FILE = "pause.json"
 MAX_REASON = 300
@@ -53,6 +55,21 @@ class PauseStore:
     def is_paused(self) -> bool:
         return bool(self.status()["paused"])
 
+    @contextmanager
+    def _transaction(self) -> Iterator[None]:
+        """Serialize check-and-write transitions across gateway, worker and CLI.
+
+        The lock file stays at a stable inode; do not unlink it after use.
+        Readers need no lock because _write atomically replaces pause.json.
+        """
+        self.root.mkdir(parents=True, exist_ok=True, mode=0o700)
+        descriptor = os.open(self.root / ".pause.lock", os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX)
+            yield
+        finally:
+            os.close(descriptor)
+
     def _write(self, document: dict[str, Any]) -> None:
         self.root.mkdir(parents=True, exist_ok=True, mode=0o700)
         descriptor, temporary = tempfile.mkstemp(dir=self.root, prefix=".pause-")
@@ -74,32 +91,35 @@ class PauseStore:
         by = clean(by)
         if not by:
             raise ValueError("who is pausing is required")
-        # A manual pause must not replace a metering hold and then be manually
-        # resumed, bypassing the monthly cap until the next worker pass.
-        if self.status().get("cause") == "spend-cap":
-            raise ValueError("monthly spend cap is active; operator pause cannot replace it")
-        extra = {key: value for key, value in (("cause", cause), ("window", window)) if value}
-        self._write({"paused": True, "by": by, "at": int(now), "reason": clean(reason), **extra})
-        return self.status()
+        with self._transaction():
+            # Re-check while holding the lock: a worker may have imposed a cap
+            # between the caller's last read and this transition.
+            if self.status().get("cause") == "spend-cap":
+                raise ValueError("monthly spend cap is active; operator pause cannot replace it")
+            extra = {key: value for key, value in (("cause", cause), ("window", window)) if value}
+            self._write({"paused": True, "by": by, "at": int(now), "reason": clean(reason), **extra})
+            return self.status()
 
     def resume(self, by: str, now: int) -> dict[str, Any]:
         by = clean(by)
         if not by:
             raise ValueError("who is resuming is required")
-        if self.status().get("cause") == "spend-cap":
-            raise ValueError("monthly spend cap is active; wait for metering reconciliation")
-        self._write({"paused": False, "by": by, "at": int(now)})
-        return self.status()
+        with self._transaction():
+            if self.status().get("cause") == "spend-cap":
+                raise ValueError("monthly spend cap is active; wait for metering reconciliation")
+            self._write({"paused": False, "by": by, "at": int(now)})
+            return self.status()
 
     def clear_spend_cap(self, now: int, *, expected_window: str) -> bool:
-        """Metering worker only: clear its own hold after checking current spend.
+        """Worker reconciliation of its own cap; never clear an owner pause.
 
-        Never release an independent owner's pause or a hold for a different
-        billing window. This is an internal worker API, not a Tool or CLI action.
+        All state checks and the replace must share the same lock as manual
+        commands or the check can become stale before the write.
         """
-        state = self.status()
-        if not (state["paused"] and state.get("cause") == "spend-cap"
-                and state.get("window") == expected_window):
-            return False
-        self._write({"paused": False, "by": "runtime:worker", "at": int(now)})
-        return True
+        with self._transaction():
+            state = self.status()
+            if not (state["paused"] and state.get("cause") == "spend-cap"
+                    and state.get("window") == expected_window):
+                return False
+            self._write({"paused": False, "by": "runtime:worker", "at": int(now)})
+            return True
