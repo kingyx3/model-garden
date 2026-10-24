@@ -124,8 +124,8 @@ class ClientSnapshotTests(unittest.TestCase):
 
     def test_volume_attachment_guard_refuses_invalid_unbounded_and_failed_inventory(self):
         cid = "d" * 64
-        for listing in ("not-an-id", cid + "\\n" + cid,
-                        "\\n".join(f"{i:064x}" for i in range(65)), "x" * 10000):
+        for listing in ("not-an-id", cid + "\n" + cid,
+                        "\n".join(f"{i:064x}" for i in range(65)), "x" * 10000):
             with self.subTest(length=len(listing)):
                 with mock.patch.object(SNAP, "_docker", return_value=listing):
                     with self.assertRaises(SNAP.SnapshotError):
@@ -148,7 +148,7 @@ class ClientSnapshotTests(unittest.TestCase):
                 return f"{cid}|other-dev|exited|false|no"
             raise AssertionError("unexpected Docker call")
         output = self.root / "foreign"
-        with mock.patch.object(SNAP.shutil, "which", return_value="/usr/bin/tool"), \\
+        with mock.patch.object(SNAP.shutil, "which", return_value="/usr/bin/tool"), \
              mock.patch.object(SNAP, "_docker", side_effect=docker):
             with self.assertRaisesRegex(SNAP.SnapshotError, "foreign"):
                 SNAP.snapshot(self.compose, "acme-dev", output, "age1" + "q" * 55,
