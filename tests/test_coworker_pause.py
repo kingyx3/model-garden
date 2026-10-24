@@ -109,6 +109,49 @@ class StoreTests(unittest.TestCase):
                                  (True, "spend-cap", "runtime:worker"))
                 self.assertEqual((root / ".pause.lock").stat().st_mode & 0o777, 0o600)
 
+    def test_owner_pause_after_reconciliation_is_not_lost(self):
+        # Reconciliation and a new owner pause must be one ordered sequence.
+        worker, owner = pause.PauseStore(self.root), pause.PauseStore(self.root)
+        worker.pause("runtime:worker", "cap", NOW, cause="spend-cap", window="2027-01")
+        original_write = worker._write
+        ready, release = threading.Event(), threading.Event()
+        errors = []
+
+        def delayed_write(document):
+            ready.set()
+            if not release.wait(5):
+                raise TimeoutError("test did not release reconciliation")
+            return original_write(document)
+
+        def run(action):
+            try:
+                action()
+            except BaseException as exc:
+                errors.append(exc)
+
+        clearing = threading.Thread(target=run, args=(lambda: worker.clear_spend_cap(
+            NOW + 1, expected_window="2027-01"),), daemon=True)
+        pausing = threading.Thread(target=run, args=(lambda: owner.pause(
+            "owner@client.example", "incident", NOW + 2),), daemon=True)
+        with mock.patch.object(worker, "_write", side_effect=delayed_write):
+            clearing.start()
+            try:
+                self.assertTrue(ready.wait(3))
+                pausing.start()
+                pausing.join(0.1)
+                self.assertTrue(pausing.is_alive(), "owner transition must wait for the worker's transaction")
+            finally:
+                release.set()
+                clearing.join(5)
+                if pausing.ident is not None:
+                    pausing.join(5)
+        self.assertEqual(errors, [])
+        self.assertFalse(clearing.is_alive())
+        self.assertFalse(pausing.is_alive())
+        state = owner.status()
+        self.assertEqual((state["paused"], state["by"]), (True, "owner@client.example"))
+        self.assertNotIn("cause", state)
+
     def test_lock_acquisition_failure_preserves_the_existing_pause(self):
         store = pause.PauseStore(self.root)
         store.pause("owner@client.example", "incident", NOW)
