@@ -85,6 +85,14 @@ class StoreTests(unittest.TestCase):
                     state.chmod(0o600)
                 self.assertTrue(pause.PauseStore(root).is_paused(), tamper)
 
+    def test_pause_state_disappearing_after_inspection_fails_closed(self):
+        store = pause.PauseStore(self.root)
+        store.pause("owner@client.example", "incident", NOW)
+        # A removed file during the reader's open is not an untouched new
+        # workspace; it must not be confused with the initial missing state.
+        with mock.patch.object(pause.os, "open", side_effect=FileNotFoundError("vanished")):
+            self.assertTrue(store.is_paused())
+
     def test_pause_reader_rejects_untrusted_parent_and_foreign_state_owner(self):
         with tempfile.TemporaryDirectory(dir=self.root) as tmp:
             root = pathlib.Path(tmp)
