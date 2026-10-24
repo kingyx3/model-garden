@@ -424,7 +424,8 @@ def verify_export(
 
     ``ok`` is true only when the exported chain is intact and contiguous, matches the local
     chain over their common range, the local log is not shorter than the exported head, and
-    every head manifest agrees with its exported record and the newest head covers the\n    latest exported record (otherwise a failed head upload must be retried).
+    every head manifest agrees with its exported record and the newest head covers the
+    latest exported record (otherwise a failed head upload must be retried).
 
     Two optional delivery alarms catch an exporter that has quietly stopped: ``max_lag_events``
     flags a local ledger that is more than that many events ahead of the export, and
