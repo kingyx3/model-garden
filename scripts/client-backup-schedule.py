@@ -78,12 +78,17 @@ def _slot(policy: dict, now: dt.datetime) -> dt.datetime | None:
         raise ScheduleError("timezone-aware clock required")
     now = now.astimezone(dt.timezone.utc)
     start, end = WINDOW._utc(policy["validFrom"]), WINDOW._utc(policy["expiresAt"])
-    slot = now.replace(hour=policy["hourUTC"], minute=policy["minuteUTC"], second=0, microsecond=0)
-    if not start <= slot < end or slot.weekday() not in policy["weekdaysUTC"]:
-        return None
-    if not 0 <= (now - slot).total_seconds() < SLOT_GRACE_SECONDS:
-        return None
-    return slot
+    # A timer tick just after UTC midnight may belong to the previous day's
+    # approved 23:55-23:59 slot. Use the SLOT date for weekday/approval/claim
+    # identity, never the execution date. The five-minute grace remains strict.
+    for day in (now.date(), (now - dt.timedelta(days=1)).date()):
+        slot = dt.datetime.combine(
+            day, dt.time(policy["hourUTC"], policy["minuteUTC"]), tzinfo=dt.timezone.utc
+        )
+        if start <= slot < end and slot.weekday() in policy["weekdaysUTC"] and \
+           0 <= (now - slot).total_seconds() < SLOT_GRACE_SECONDS:
+            return slot
+    return None
 
 
 def _record_result(claims: pathlib.Path, *, project: str, stamp: str, status: str) -> None:

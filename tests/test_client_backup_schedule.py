@@ -72,6 +72,54 @@ class BackupScheduleTests(unittest.TestCase):
         with self.assertRaisesRegex(SCHEDULE.ScheduleError, "already attempted"):
             self.execute()
 
+    def test_approved_friday_slot_runs_after_utc_midnight_once(self):
+        # Friday 23:59 UTC is still due on Saturday 00:02 UTC. The slot
+        # identity, approval and irreversible claim must remain Friday's.
+        self.policy_doc.update(hourUTC=23, minuteUTC=59)
+        self.write(self.policy, self.policy_doc)
+        self.approval.unlink()
+        self.approval = self.root / "approvals" / "acme-dev-20261023T235900Z.json"
+        self.approval_doc.update(validFrom="2026-10-23T23:59:00Z",
+                                 expiresAt="2026-10-24T00:20:00Z")
+        self.write(self.approval, self.approval_doc)
+        moment = dt.datetime(2026, 10, 24, 0, 2, tzinfo=dt.timezone.utc)
+        result, run = self.execute(now=moment)
+        self.assertEqual(result["slotUTC"], "20261023T235900Z")
+        self.assertEqual(run.call_count, 1)
+        self.assertEqual(run.call_args.kwargs["approval"], self.approval)
+        claim = self.root / "claims" / "acme-dev-20261023T235900Z.claimed"
+        receipt = self.root / "claims" / "acme-dev-20261023T235900Z.result.json"
+        self.assertEqual(json.loads(claim.read_text())["slotUTC"], "20261023T235900Z")
+        self.assertEqual(json.loads(receipt.read_text())["status"],
+                         "uploaded-not-recovery-proven")
+        with self.assertRaisesRegex(SCHEDULE.ScheduleError, "already attempted"):
+            self.execute(now=moment)
+
+    def test_cross_midnight_grace_refuses_wrong_weekday_and_policy_bounds(self):
+        policy = dict(self.policy_doc, hourUTC=23, minuteUTC=59)
+        moment = dt.datetime(2026, 10, 24, 0, 2, tzinfo=dt.timezone.utc)
+        expected = dt.datetime(2026, 10, 23, 23, 59, tzinfo=dt.timezone.utc)
+        self.assertEqual(SCHEDULE._slot(policy, moment), expected)
+        self.assertEqual(SCHEDULE._slot(policy, moment.replace(minute=3, second=59)),
+                         expected)
+        # At exactly five minutes, the grace period is closed.
+        self.assertIsNone(SCHEDULE._slot(policy, moment.replace(minute=4)))
+        self.assertIsNone(SCHEDULE._slot(dict(policy, weekdaysUTC=[5]), moment))
+        self.assertIsNone(SCHEDULE._slot(dict(policy, validFrom="2026-10-24T00:00:00Z"),
+                                         moment))
+        self.assertIsNone(SCHEDULE._slot(dict(policy, expiresAt="2026-10-23T23:59:00Z"),
+                                         moment))
+
+    def test_previous_utc_slot_across_year_boundary_and_timezone(self):
+        policy = dict(self.policy_doc, validFrom="2026-12-30T00:00:00Z",
+                      expiresAt="2027-01-03T00:00:00Z", weekdaysUTC=[3],
+                      hourUTC=23, minuteUTC=59)
+        now = dt.datetime(2027, 1, 1, 0, 1, tzinfo=dt.timezone.utc)
+        expected = dt.datetime(2026, 12, 31, 23, 59, tzinfo=dt.timezone.utc)
+        self.assertEqual(SCHEDULE._slot(policy, now), expected)
+        self.assertEqual(SCHEDULE._slot(policy, now.astimezone(dt.timezone(dt.timedelta(hours=8)))),
+                         expected)
+
     def test_outside_utc_slot_and_weekday_skip_without_claim(self):
         for moment in (self.now - dt.timedelta(minutes=1),
                        self.now + dt.timedelta(minutes=5),

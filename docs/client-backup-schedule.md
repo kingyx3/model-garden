@@ -30,7 +30,7 @@ A recurrence policy (maximum 31 days) binds the client, environment, GCP project
 
 ## Operator-managed timer invocation
 
-Use a separately reviewed timer that invokes the following command at least once in the first five minutes of each approved slot; a once-per-minute systemd timer is suitable. A call outside the scheduled UTC weekday and five-minute grace interval skips without cloud work. Run only as the same dedicated host UID that owns the private directories and the existing /run/lock/model-garden cooperative project lock. No timer or production service is installed by this repository change.
+Use a separately reviewed timer that invokes the following command at least once in the first five minutes of each approved slot; a once-per-minute systemd timer is suitable. A call outside the scheduled UTC weekday and five-minute grace interval skips without cloud work. The five-minute grace may cross UTC midnight (for example, Friday 23:59 through Saturday 00:03:59). The dispatcher checks the **slot's UTC weekday and policy bounds**, not the timer invocation date; the approval filename, durable claim and receipt retain the prior UTC slot date. At exactly five minutes after the slot, execution skips. The previous-day slot is never accepted without its own matching, still-active approval. Run only as the same dedicated host UID that owns the private directories and the existing /run/lock/model-garden cooperative project lock. No timer or production service is installed by this repository change.
 
 ~~~bash
 python3 scripts/client-backup-schedule.py \
