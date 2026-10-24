@@ -198,17 +198,23 @@ def restore(
     try:
         SNAPSHOT.assert_quiescent(project)
         owned = [(name, SNAPSHOT.assert_volume_owner(project, name)) for name in names]
-        for _name, volume in owned:
+        for name, volume in owned:
+            SNAPSHOT.assert_volume_exclusive(project, name)
             _assert_empty(volume, image)
         for name, volume in owned:
             SNAPSHOT.assert_quiescent(project)
+            SNAPSHOT.assert_volume_exclusive(project, name)
             _assert_empty(volume, image)
+            SNAPSHOT.assert_volume_exclusive(project, name)
             archive = source / f"{name}.tar.age"
             recorded = next(r for r in json.loads((source / "manifest.json").read_text())["volumes"] if r["volume"] == name)
             if SNAPSHOT._digest(archive) != (recorded["sha256"], recorded["bytes"]):
                 raise RestoreError("encrypted archive changed during restore; keep stack stopped")
             _extract(volume, archive, identity, image)
+            SNAPSHOT.assert_volume_exclusive(project, name)
         SNAPSHOT.assert_quiescent(project)
+        for name, _volume in owned:
+            SNAPSHOT.assert_volume_exclusive(project, name)
     except SNAPSHOT.SnapshotError as exc:
         raise RestoreError(str(exc)) from exc
     # Deliberately no docker compose start: the authorized operator audits
