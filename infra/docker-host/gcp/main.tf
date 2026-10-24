@@ -183,6 +183,11 @@ resource "google_compute_instance" "runtime" {
 variable "project_id" {
   type        = string
   description = "GCP project containing the client runtime."
+
+  validation {
+    condition     = can(regex("^[a-z][a-z0-9-]{4,28}[a-z0-9]$", var.project_id))
+    error_message = "project_id must be a valid 6-30 character GCP project ID."
+  }
 }
 
 variable "region" {
