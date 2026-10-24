@@ -91,6 +91,39 @@ class StoreTests(unittest.TestCase):
                                        side_effect=mutate_on_state_lookup):
                     self.assertTrue(pause.PauseStore(root).is_paused())
 
+    def test_existing_unpaused_state_fails_closed_after_governance_root_swap(self):
+        # A legitimate false state must not authorize work after the mounted
+        # directory disappears or is replaced *after* JSON was read. Earlier
+        # inode checks alone cannot catch this race.
+        original_loads = pause.json.loads
+        for mutation in ("removed", "replaced"):
+            with self.subTest(mutation=mutation), tempfile.TemporaryDirectory(dir=self.root) as tmp:
+                root = pathlib.Path(tmp) / "governance"
+                root.mkdir(mode=0o700)
+                store = pause.PauseStore(root)
+                store.resume("owner@client.example", NOW)
+                self.assertFalse(store.is_paused())
+                swapped = False
+
+                def swap_after_decode(raw):
+                    nonlocal swapped
+                    document = original_loads(raw)
+                    if not swapped:
+                        swapped = True
+                        root.rename(root.with_name("detached"))
+                        if mutation == "replaced":
+                            root.mkdir(mode=0o700)
+                            replacement = root / "pause.json"
+                            replacement.write_text('{"paused": false}', encoding="utf-8")
+                            replacement.chmod(0o600)
+                    return document
+
+                with mock.patch.object(pause.json, "loads", side_effect=swap_after_decode):
+                    state = store.status()
+                self.assertTrue(swapped, "test must force the mount race")
+                self.assertTrue(state["paused"], "stale unpaused state must not grant authority")
+                self.assertIsNone(state["by"], "an untrusted read must be reported fail-closed")
+
     def test_an_unreadable_or_malformed_state_fails_safe_as_paused(self):
         for bad in (b"{not json", b"[]", b'{"paused": "no"}', b""):
             (self.root / "pause.json").write_bytes(bad)
