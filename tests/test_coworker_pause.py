@@ -51,6 +51,46 @@ class StoreTests(unittest.TestCase):
         pause.PauseStore(self.root).resume("alice@acme.example", NOW + 5)
         self.assertFalse(pause.PauseStore(self.root).is_paused())
 
+    def test_missing_governance_volume_fails_closed_and_admin_cannot_recreate_it(self):
+        missing = self.root / "not-mounted"
+        store = pause.PauseStore(missing)
+        self.assertTrue(store.is_paused())
+        self.assertIsNone(store.status()["by"])
+        for command in ("pause", "resume"):
+            with self.subTest(command=command), self.assertRaises(OSError):
+                if command == "pause":
+                    store.pause("owner@client.example", "incident", NOW)
+                else:
+                    store.resume("owner@client.example", NOW)
+        self.assertFalse(missing.exists(), "pause command must not invent a replacement volume")
+        # First boot with a real mounted volume and no pause.json is still allowed.
+        missing.mkdir(mode=0o700)
+        self.assertEqual(store.status(), {"paused": False})
+        store.pause("owner@client.example", "incident", NOW)
+        self.assertTrue(store.is_paused())
+
+    def test_governance_root_disappearing_or_replaced_during_first_boot_read_fails_closed(self):
+        original_lstat = pathlib.Path.lstat
+        for mutation in ("removed", "replaced"):
+            with self.subTest(mutation=mutation), tempfile.TemporaryDirectory(dir=self.root) as tmp:
+                root = pathlib.Path(tmp) / "governance"
+                root.mkdir(mode=0o700)
+                state = root / "pause.json"
+
+                def mutate_on_state_lookup(path):
+                    if path == state:
+                        if mutation == "removed":
+                            root.rmdir()
+                        else:
+                            root.rename(root.with_name("detached"))
+                            root.mkdir(mode=0o700)
+                        raise FileNotFoundError("pause state absent during mount change")
+                    return original_lstat(path)
+
+                with mock.patch.object(pathlib.Path, "lstat", autospec=True,
+                                       side_effect=mutate_on_state_lookup):
+                    self.assertTrue(pause.PauseStore(root).is_paused())
+
     def test_an_unreadable_or_malformed_state_fails_safe_as_paused(self):
         for bad in (b"{not json", b"[]", b'{"paused": "no"}', b""):
             (self.root / "pause.json").write_bytes(bad)

@@ -55,7 +55,8 @@ class PauseStore:
             if not stat.S_ISDIR(root_info.st_mode) or root_info.st_mode & 0o022:
                 return _fail_closed()
         except FileNotFoundError:
-            return {"paused": False}
+            # A missing governance mount is not an untouched, initialized volume.
+            return _fail_closed()
         except OSError:
             return _fail_closed()
         try:
@@ -69,7 +70,18 @@ class PauseStore:
         try:
             path_info = self.path.lstat()
         except FileNotFoundError:
-            # First-time tenant volumes start with no pause state at all.
+            # A newly provisioned *existing* volume may have no state file.
+            # If its directory disappeared or was replaced during this read,
+            # treating that missing file as first boot would allow writes.
+            try:
+                current_root = self.root.lstat()
+                if (not stat.S_ISDIR(current_root.st_mode) or
+                        current_root.st_mode & 0o022 or
+                        (current_root.st_dev, current_root.st_ino) !=
+                        (root_info.st_dev, root_info.st_ino)):
+                    return _fail_closed()
+            except OSError:
+                return _fail_closed()
             return {"paused": False}
         except OSError:
             return _fail_closed()
@@ -109,7 +121,8 @@ class PauseStore:
         The lock file stays at a stable inode; do not unlink it after use.
         Readers need no lock because _write atomically replaces pause.json.
         """
-        self.root.mkdir(parents=True, exist_ok=True, mode=0o700)
+        # Never create a replacement directory if the governance mount is absent.
+        # Deployment/bootstrap must provision the intended persistent volume.
         root_info = self.root.lstat()
         if not stat.S_ISDIR(root_info.st_mode) or root_info.st_mode & 0o022:
             raise OSError("pause governance directory is untrusted")
@@ -126,7 +139,7 @@ class PauseStore:
             os.close(descriptor)
 
     def _write(self, document: dict[str, Any]) -> None:
-        self.root.mkdir(parents=True, exist_ok=True, mode=0o700)
+        # Do not resurrect a missing governance directory while a pause changes.
         descriptor, temporary = tempfile.mkstemp(dir=self.root, prefix=".pause-")
         try:
             with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
