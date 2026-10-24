@@ -74,6 +74,10 @@ class PauseStore:
         by = clean(by)
         if not by:
             raise ValueError("who is pausing is required")
+        # A manual pause must not replace a metering hold and then be manually
+        # resumed, bypassing the monthly cap until the next worker pass.
+        if self.status().get("cause") == "spend-cap":
+            raise ValueError("monthly spend cap is active; operator pause cannot replace it")
         extra = {key: value for key, value in (("cause", cause), ("window", window)) if value}
         self._write({"paused": True, "by": by, "at": int(now), "reason": clean(reason), **extra})
         return self.status()
@@ -82,5 +86,20 @@ class PauseStore:
         by = clean(by)
         if not by:
             raise ValueError("who is resuming is required")
+        if self.status().get("cause") == "spend-cap":
+            raise ValueError("monthly spend cap is active; wait for metering reconciliation")
         self._write({"paused": False, "by": by, "at": int(now)})
         return self.status()
+
+    def clear_spend_cap(self, now: int, *, expected_window: str) -> bool:
+        """Metering worker only: clear its own hold after checking current spend.
+
+        Never release an independent owner's pause or a hold for a different
+        billing window. This is an internal worker API, not a Tool or CLI action.
+        """
+        state = self.status()
+        if not (state["paused"] and state.get("cause") == "spend-cap"
+                and state.get("window") == expected_window):
+            return False
+        self._write({"paused": False, "by": "runtime:worker", "at": int(now)})
+        return True
