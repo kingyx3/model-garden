@@ -80,6 +80,32 @@ class BackupWindowTests(unittest.TestCase):
         self.assertNotIn("--recipient", scripts[2])
         self.assertFalse(list(self.private.glob("*/manifest.json")))  # mocks, no cloud proof
 
+    def test_scheduled_recurrence_deadline_bounds_backup_steps(self):
+        # A 15-minute occurrence approval cannot extend a 90-second
+        # recurrence: all subprocess deadlines must use the tighter bound.
+        limit = dt.datetime.now(dt.timezone.utc) + dt.timedelta(seconds=90)
+        timeouts = []
+        def capture(command, timeout, *, capture=False):
+            timeouts.append((command, timeout))
+            return ""
+        with mock.patch.object(WINDOW, "_run", side_effect=capture):
+            WINDOW.run(**(self.args | {"not_after": limit}))
+        self.assertEqual(len(timeouts), 7)
+        for command, timeout in timeouts:
+            self.assertGreater(timeout, 0)
+            self.assertLessEqual(timeout, 90)
+        self.assertEqual(sum(command[0] == sys.executable for command, _ in timeouts), 3)
+
+    def test_scheduled_deadline_rejects_expired_near_expired_and_naive(self):
+        now = dt.datetime.now(dt.timezone.utc)
+        for deadline in (now - dt.timedelta(seconds=1),
+                         now + dt.timedelta(seconds=10),
+                         (now + dt.timedelta(minutes=5)).replace(tzinfo=None),
+                         "2026-10-24T00:00:00Z"):
+            with self.subTest(deadline=str(deadline)), self.assertRaises(WINDOW.WindowError):
+                self.execute(not_after=deadline)
+        self.assertEqual(self.calls, [])  # Never inspected Docker or touched cloud.
+
     def test_wrong_tenant_environment_key_and_confirmation_fail_before_docker(self):
         for override in ({"project": "other-dev"}, {"environment": "prod"},
                          {"slug": "other"}, {"gcp_project": "other-project-123"},

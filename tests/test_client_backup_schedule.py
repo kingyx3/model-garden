@@ -66,11 +66,23 @@ class BackupScheduleTests(unittest.TestCase):
         self.assertEqual(result["status"], "uploaded-not-recovery-proven")
         self.assertEqual(run.call_count, 1)
         self.assertEqual(run.call_args.kwargs["approval"], self.approval)
+        self.assertEqual(run.call_args.kwargs["not_after"],
+                         dt.datetime(2026, 11, 15, tzinfo=dt.timezone.utc))
         claim = self.root / "claims" / "acme-dev-20261023T120000Z.claimed"
         self.assertEqual(json.loads(claim.read_text())["status"], "attempted")
         self.assertEqual(claim.stat().st_mode & 0o777, 0o600)
         with self.assertRaisesRegex(SCHEDULE.ScheduleError, "already attempted"):
             self.execute()
+
+    def test_dispatch_caps_long_occurrence_at_short_recurrence_expiry(self):
+        self.policy_doc["expiresAt"] = "2026-10-23T12:02:00Z"
+        self.write(self.policy, self.policy_doc)
+        result, run = self.execute()
+        self.assertEqual(result["event"], "backup.schedule.dispatched")
+        self.assertEqual(run.call_args.kwargs["not_after"],
+                         dt.datetime(2026, 10, 23, 12, 2, tzinfo=dt.timezone.utc))
+        self.assertNotEqual(run.call_args.kwargs["not_after"],
+                            SCHEDULE.WINDOW._utc(self.approval_doc["expiresAt"]))
 
     def test_approved_friday_slot_runs_after_utc_midnight_once(self):
         # Friday 23:59 UTC is still due on Saturday 00:02 UTC. The slot

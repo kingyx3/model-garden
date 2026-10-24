@@ -171,7 +171,8 @@ def dispatch(*, schedule: pathlib.Path, approvals: pathlib.Path, claims: pathlib
         result = WINDOW.run(compose=compose, project=project, slug=slug, environment=environment,
                             gcp_project=gcp_project, recipient=recipient, image=image,
                             approval=approval, output_parent=output_parent,
-                            confirm_project=confirm_project)
+                            confirm_project=confirm_project,
+                            not_after=WINDOW._utc(doc["expiresAt"]))
         if result.get("status") != "uploaded-not-recovery-proven":
             raise ScheduleError("backup upload status was not confirmed")
     except Exception:
