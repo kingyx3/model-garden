@@ -70,6 +70,7 @@ def read_chained_events(path: pathlib.Path) -> list[dict[str, Any]]:
         return events
     previous: str | None = None
     records = 0  # sequence numbers count every record, legacy ones included
+    last_version = 1
     with path.open("r", encoding="utf-8") as handle:
         for line_number, raw in enumerate(handle, start=1):
             if not raw.strip():
@@ -81,7 +82,13 @@ def read_chained_events(path: pathlib.Path) -> list[dict[str, Any]]:
             if not isinstance(event, dict):
                 raise LedgerExportError(f"local ledger line {line_number} is not an object")
             records += 1
-            if event.get("schemaVersion", 1) not in CHAINED_SCHEMA_VERSIONS:
+            schema_version = event.get("schemaVersion", 1)
+            if type(schema_version) is not int or schema_version not in (1, *CHAINED_SCHEMA_VERSIONS):
+                raise LedgerExportError(f"local ledger line {line_number}: unsupported schemaVersion {schema_version!r}")
+            if schema_version < last_version:
+                raise LedgerExportError(f"local ledger line {line_number}: schemaVersion moved backwards")
+            last_version = schema_version
+            if schema_version == 1:
                 previous = hashlib.sha256(_canonical(event).encode("utf-8")).hexdigest()
                 continue
             if event.get("sequence") != records:
