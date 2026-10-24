@@ -131,9 +131,11 @@ run "valid_scoped_failure_and_recovery_alerts" {
         google_monitoring_alert_policy.backup_health_failure[0],
         google_monitoring_alert_policy.backup_health_recovery[0],
       ] : policy.project == var.project_id &&
-      policy.notification_channels == var.backup_health_notification_channels &&
+      length(policy.notification_channels) == length(var.backup_health_notification_channels) &&
+      alltrue([for channel in var.backup_health_notification_channels : contains(policy.notification_channels, channel)]) &&
       policy.alert_strategy[0].notification_rate_limit[0].period == "3600s" &&
-      policy.alert_strategy[0].notification_prompts == ["OPENED"]
+      length(policy.alert_strategy[0].notification_prompts) == 1 &&
+      contains(policy.alert_strategy[0].notification_prompts, "OPENED")
     ])
     error_message = "Both policies must be scoped to the exact project and channels, rate-limited, and OPENED-only."
   }
