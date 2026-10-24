@@ -304,11 +304,11 @@ class StoreTests(unittest.TestCase):
                 manual_ready, allow_manual = threading.Event(), threading.Event()
                 errors = []
 
-                def delayed_write(document):
+                def delayed_write(document, *transaction):
                     manual_ready.set()
                     if not allow_manual.wait(5):
                         raise TimeoutError("test did not release manual pause write")
-                    return original_write(document)
+                    return original_write(document, *transaction)
 
                 def run(action):
                     try:
@@ -349,11 +349,11 @@ class StoreTests(unittest.TestCase):
         ready, release = threading.Event(), threading.Event()
         errors = []
 
-        def delayed_write(document):
+        def delayed_write(document, *transaction):
             ready.set()
             if not release.wait(5):
                 raise TimeoutError("test did not release reconciliation")
-            return original_write(document)
+            return original_write(document, *transaction)
 
         def run(action):
             try:
@@ -383,6 +383,90 @@ class StoreTests(unittest.TestCase):
         state = owner.status()
         self.assertEqual((state["paused"], state["by"]), (True, "owner@client.example"))
         self.assertNotIn("cause", state)
+
+    def test_root_swap_after_lock_acquisition_refuses_resume_of_replacement(self):
+        # A lock on a detached governance mount must not authorize the new
+        # mount's state, even if both directories have private permissions.
+        with tempfile.TemporaryDirectory(dir=self.root) as tmp:
+            root = pathlib.Path(tmp) / "governance"
+            root.mkdir(mode=0o700)
+            store = pause.PauseStore(root)
+            store.pause("owner@client.example", "incident", NOW)
+            original_flock = pause.fcntl.flock
+            swapped = False
+
+            def replace_mount_after_lock(fd, operation):
+                nonlocal swapped
+                result = original_flock(fd, operation)
+                if not swapped:
+                    swapped = True
+                    root.rename(root.with_name("detached"))
+                    root.mkdir(mode=0o700)
+                    state = root / "pause.json"
+                    state.write_text('{"paused": true, "by": "owner@client.example"}',
+                                     encoding="utf-8")
+                    state.chmod(0o600)
+                return result
+
+            with mock.patch.object(pause.fcntl, "flock", side_effect=replace_mount_after_lock):
+                with self.assertRaises(OSError):
+                    store.resume("owner@client.example", NOW + 1)
+            self.assertTrue(swapped)
+            self.assertTrue(store.is_paused())
+            self.assertTrue(pause.PauseStore(root.with_name("detached")).is_paused())
+
+    def test_lock_replacement_while_acquiring_cannot_split_pause_transactions(self):
+        store = pause.PauseStore(self.root)
+        store.pause("owner@client.example", "incident", NOW)
+        lock = self.root / ".pause.lock"
+        original_flock = pause.fcntl.flock
+        replaced = False
+
+        def replace_lock_after_acquire(fd, operation):
+            nonlocal replaced
+            result = original_flock(fd, operation)
+            if not replaced:
+                replaced = True
+                lock.unlink()
+                lock.write_text("", encoding="utf-8")
+                lock.chmod(0o600)
+            return result
+
+        with mock.patch.object(pause.fcntl, "flock", side_effect=replace_lock_after_acquire):
+            with self.assertRaises(OSError):
+                store.resume("owner@client.example", NOW + 1)
+        self.assertTrue(replaced)
+        self.assertTrue(store.is_paused())
+
+    def test_mount_swap_at_atomic_replace_cannot_unpause_new_volume(self):
+        # Pinning the directory fd prevents a TOCTOU redirect between the
+        # final root check and os.replace. The detached mount may be updated,
+        # but the newly attached volume must remain paused and caller fails.
+        with tempfile.TemporaryDirectory(dir=self.root) as tmp:
+            root = pathlib.Path(tmp) / "governance"
+            root.mkdir(mode=0o700)
+            store = pause.PauseStore(root)
+            store.pause("owner@client.example", "incident", NOW)
+            original_replace = pause.os.replace
+            swapped = False
+
+            def swap_during_replace(src, dst, **kwargs):
+                nonlocal swapped
+                if not swapped:
+                    swapped = True
+                    root.rename(root.with_name("detached"))
+                    root.mkdir(mode=0o700)
+                    state = root / "pause.json"
+                    state.write_text('{"paused": true, "by": "owner@client.example"}',
+                                     encoding="utf-8")
+                    state.chmod(0o600)
+                return original_replace(src, dst, **kwargs)
+
+            with mock.patch.object(pause.os, "replace", side_effect=swap_during_replace):
+                with self.assertRaises(OSError):
+                    store.resume("owner@client.example", NOW + 1)
+            self.assertTrue(swapped)
+            self.assertTrue(store.is_paused())
 
     def test_lock_acquisition_failure_preserves_the_existing_pause(self):
         store = pause.PauseStore(self.root)

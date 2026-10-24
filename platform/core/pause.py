@@ -11,8 +11,8 @@ import json
 import os
 import pathlib
 import re
+import secrets
 import stat
-import tempfile
 from contextlib import contextmanager
 from typing import Any, Iterator
 
@@ -146,42 +146,66 @@ class PauseStore:
         return bool(self.status()["paused"])
 
     @contextmanager
-    def _transaction(self) -> Iterator[None]:
-        """Serialize check-and-write transitions across gateway, worker and CLI.
+    def _transaction(self) -> Iterator[tuple[int, os.stat_result]]:
+        """Hold the trusted mount and lock inode for a complete state transition.
 
-        The lock file stays at a stable inode; do not unlink it after use.
-        Readers need no lock because _write atomically replaces pause.json.
+        A replaced mount must never let a lock from the old volume authorize
+        a write into a newly attached volume. All writes use the pinned dirfd.
         """
-        # Never create a replacement directory if the governance mount is absent.
-        # Deployment/bootstrap must provision the intended persistent volume.
         root_info = self.root.lstat()
         if not stat.S_ISDIR(root_info.st_mode) or root_info.st_mode & 0o022:
             raise OSError("pause governance directory is untrusted")
-        flags = os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW | os.O_NONBLOCK
-        descriptor = os.open(self.root / LOCK_FILE, flags, 0o600)
+        root_fd = os.open(self.root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
         try:
-            if not _private_regular(os.fstat(descriptor)):
-                raise OSError("pause transaction lock is untrusted")
-            fcntl.flock(descriptor, fcntl.LOCK_EX)
-            if not _private_regular(os.fstat(descriptor)):
-                raise OSError("pause transaction lock changed")
-            yield
+            opened_root = os.fstat(root_fd)
+            if ((opened_root.st_dev, opened_root.st_ino) !=
+                    (root_info.st_dev, root_info.st_ino) or not self._same_root(root_info)):
+                raise OSError("pause governance directory changed")
+            flags = os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW | os.O_NONBLOCK
+            descriptor = os.open(LOCK_FILE, flags, 0o600, dir_fd=root_fd)
+            try:
+                if not _private_regular(os.fstat(descriptor)):
+                    raise OSError("pause transaction lock is untrusted")
+                fcntl.flock(descriptor, fcntl.LOCK_EX)
+                locked = os.fstat(descriptor)
+                current_lock = os.stat(LOCK_FILE, dir_fd=root_fd, follow_symlinks=False)
+                if (not _private_regular(locked) or not _private_regular(current_lock)
+                        or (locked.st_dev, locked.st_ino) !=
+                        (current_lock.st_dev, current_lock.st_ino)):
+                    raise OSError("pause transaction lock changed")
+                if not self._same_root(root_info):
+                    raise OSError("pause governance directory changed during lock")
+                yield root_fd, root_info
+                if not self._same_root(root_info):
+                    raise OSError("pause governance directory changed during transition")
+            finally:
+                os.close(descriptor)
         finally:
-            os.close(descriptor)
+            os.close(root_fd)
 
-    def _write(self, document: dict[str, Any]) -> None:
-        # Do not resurrect a missing governance directory while a pause changes.
-        descriptor, temporary = tempfile.mkstemp(dir=self.root, prefix=".pause-")
+    def _write(self, document: dict[str, Any], root_fd: int, root_info: os.stat_result) -> None:
+        """Atomically replace pause state in the locked directory, not a raced path."""
+        if not self._same_root(root_info):
+            raise OSError("pause governance directory changed before write")
+        temporary = ".pause-" + secrets.token_hex(16)
+        flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW
+        descriptor = os.open(temporary, flags, 0o600, dir_fd=root_fd)
         try:
             with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+                if not _private_regular(os.fstat(handle.fileno())):
+                    raise OSError("pause temporary state is untrusted")
                 json.dump(document, handle, sort_keys=True)
                 handle.flush()
                 os.fsync(handle.fileno())
-            os.chmod(temporary, 0o600)
-            os.replace(temporary, self.path)
+            if not self._same_root(root_info):
+                raise OSError("pause governance directory changed before replace")
+            os.replace(temporary, FILE, src_dir_fd=root_fd, dst_dir_fd=root_fd)
+            os.fsync(root_fd)
+            if not self._same_root(root_info):
+                raise OSError("pause governance directory changed after replace")
         except BaseException:
             try:
-                os.unlink(temporary)
+                os.unlink(temporary, dir_fd=root_fd)
             except OSError:
                 pass
             raise
@@ -190,7 +214,7 @@ class PauseStore:
         by = clean(by)
         if not by:
             raise ValueError("who is pausing is required")
-        with self._transaction():
+        with self._transaction() as transaction:
             # Re-check while holding the lock: a worker may have imposed a cap
             # between the caller's last read and this transition.
             state = self.status()
@@ -199,20 +223,20 @@ class PauseStore:
             if state.get("cause") == "spend-cap":
                 raise ValueError("monthly spend cap is active; operator pause cannot replace it")
             extra = {key: value for key, value in (("cause", cause), ("window", window)) if value}
-            self._write({"paused": True, "by": by, "at": int(now), "reason": clean(reason), **extra})
+            self._write({"paused": True, "by": by, "at": int(now), "reason": clean(reason), **extra}, *transaction)
             return self.status()
 
     def resume(self, by: str, now: int) -> dict[str, Any]:
         by = clean(by)
         if not by:
             raise ValueError("who is resuming is required")
-        with self._transaction():
+        with self._transaction() as transaction:
             state = self.status()
             if state["paused"] and state.get("by") is None:
                 raise ValueError("untrusted pause state; operator must repair it before controls resume")
             if state.get("cause") == "spend-cap":
                 raise ValueError("monthly spend cap is active; wait for metering reconciliation")
-            self._write({"paused": False, "by": by, "at": int(now)})
+            self._write({"paused": False, "by": by, "at": int(now)}, *transaction)
             return self.status()
 
     def clear_spend_cap(self, now: int, *, expected_window: str) -> bool:
@@ -221,10 +245,10 @@ class PauseStore:
         All state checks and the replace must share the same lock as manual
         commands or the check can become stale before the write.
         """
-        with self._transaction():
+        with self._transaction() as transaction:
             state = self.status()
             if not (state["paused"] and state.get("cause") == "spend-cap"
                     and state.get("window") == expected_window):
                 return False
-            self._write({"paused": False, "by": "runtime:worker", "at": int(now)})
+            self._write({"paused": False, "by": "runtime:worker", "at": int(now)}, *transaction)
             return True
