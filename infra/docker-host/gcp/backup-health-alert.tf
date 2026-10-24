@@ -8,7 +8,7 @@ variable "backup_health_alert_enabled" {
   default     = false
 
   validation {
-    condition     = !var.backup_health_alert_enabled || (
+    condition = !var.backup_health_alert_enabled || (
       var.runtime_backup_enabled &&
       can(regex("^[a-z][a-z0-9-]{4,28}[a-z0-9]$", var.project_id)) &&
       length(var.backup_health_notification_channels) >= 1 &&
@@ -25,7 +25,7 @@ variable "backup_health_notification_channels" {
   default     = []
 
   validation {
-    condition     = alltrue([
+    condition = alltrue([
       for channel in var.backup_health_notification_channels :
       can(regex("^projects/[a-z][a-z0-9-]{4,28}[a-z0-9]/notificationChannels/[0-9]+$", channel)) &&
       try(split("/", channel)[1] == var.project_id, false)
@@ -118,7 +118,7 @@ resource "google_monitoring_alert_policy" "backup_health_recovery" {
 
 output "backup_health_alert_policy_names" {
   description = "Optional client-scoped alert policy names; no proof of live log ingestion or notification delivery."
-  value       = var.backup_health_alert_enabled ? [
+  value = var.backup_health_alert_enabled ? [
     google_monitoring_alert_policy.backup_health_failure[0].name,
     google_monitoring_alert_policy.backup_health_recovery[0].name,
   ] : []
