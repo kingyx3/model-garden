@@ -8,7 +8,9 @@ import re
 import subprocess
 import sys
 import tempfile
+import threading
 import unittest
+from unittest import mock
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 
@@ -55,6 +57,65 @@ class StoreTests(unittest.TestCase):
         (self.root / "pause.json").unlink()
         (self.root / "pause.json").mkdir()  # a directory cannot be read as a file
         self.assertTrue(pause.PauseStore(self.root).is_paused())
+
+    def test_manual_resume_or_repause_racing_worker_cannot_erase_spend_cap(self):
+        # A manual command has already checked the old state, then the worker
+        # tries to assert the cap. Without an interprocess transaction lock,
+        # the worker can write first and the delayed manual write erases it.
+        for command in ("resume", "pause"):
+            with self.subTest(command=command), tempfile.TemporaryDirectory(dir=self.root) as tmp:
+                root = pathlib.Path(tmp)
+                manual, worker = pause.PauseStore(root), pause.PauseStore(root)
+                if command == "resume":
+                    manual.pause("owner@client.example", "incident", NOW)
+                original_write = manual._write
+                manual_ready, allow_manual = threading.Event(), threading.Event()
+                errors = []
+
+                def delayed_write(document):
+                    manual_ready.set()
+                    if not allow_manual.wait(5):
+                        raise TimeoutError("test did not release manual pause write")
+                    return original_write(document)
+
+                def run(action):
+                    try:
+                        action()
+                    except BaseException as exc:
+                        errors.append(exc)
+
+                owner_action = (lambda: manual.resume("owner@client.example", NOW + 1)) if command == "resume" else (
+                    lambda: manual.pause("owner@client.example", "manual override", NOW + 1))
+                first = threading.Thread(target=run, args=(owner_action,), daemon=True)
+                second = threading.Thread(target=run, args=(lambda: worker.pause(
+                    "runtime:worker", "monthly cap", NOW + 2, cause="spend-cap", window="2027-01"),), daemon=True)
+                with mock.patch.object(manual, "_write", side_effect=delayed_write):
+                    first.start()
+                    try:
+                        self.assertTrue(manual_ready.wait(3), "manual action did not reach the write")
+                        second.start()
+                        second.join(0.1)
+                        self.assertTrue(second.is_alive(), "worker must wait for the manual state transaction")
+                    finally:
+                        allow_manual.set()
+                        first.join(5)
+                        if second.ident is not None:
+                            second.join(5)
+                self.assertFalse(first.is_alive())
+                self.assertFalse(second.is_alive())
+                self.assertEqual(errors, [])
+                state = pause.PauseStore(root).status()
+                self.assertEqual((state["paused"], state["cause"], state["by"]),
+                                 (True, "spend-cap", "runtime:worker"))
+                self.assertEqual((root / ".pause.lock").stat().st_mode & 0o777, 0o600)
+
+    def test_lock_acquisition_failure_preserves_the_existing_pause(self):
+        store = pause.PauseStore(self.root)
+        store.pause("owner@client.example", "incident", NOW)
+        with mock.patch.object(pause.fcntl, "flock", side_effect=OSError("lock unavailable")):
+            with self.assertRaises(OSError):
+                store.resume("owner@client.example", NOW + 1)
+        self.assertTrue(store.is_paused())
 
     def test_who_is_required_and_the_reason_is_bounded(self):
         with self.assertRaises(ValueError):
