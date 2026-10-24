@@ -424,7 +424,7 @@ def verify_export(
 
     ``ok`` is true only when the exported chain is intact and contiguous, matches the local
     chain over their common range, the local log is not shorter than the exported head, and
-    the newest head manifest agrees with the exported record at its sequence.
+    every head manifest agrees with its exported record and the newest head covers the\n    latest exported record (otherwise a failed head upload must be retried).
 
     Two optional delivery alarms catch an exporter that has quietly stopped: ``max_lag_events``
     flags a local ledger that is more than that many events ahead of the export, and
@@ -463,13 +463,34 @@ def verify_export(
         problems.append(f"local ledger differs from the export at sequence {diverged_at}")
     heads = sink.heads()
     newest: dict[str, Any] | None = None
-    if heads:
-        newest = max(heads, key=lambda head: (head.get("sequence", 0), head.get("exportedAt", 0)))
-        record = by_sequence.get(newest.get("sequence"))
-        if record is None or record["recordId"] != newest.get("headHash"):
-            problems.append(f"head manifest at sequence {newest.get('sequence')} does not match the exported record")
-    elif exported:
+    for head in heads:
+        if not isinstance(head, dict):
+            problems.append("head manifest has invalid structure")
+            continue
+        sequence = head.get("sequence")
+        exported_at = head.get("exportedAt")
+        count = head.get("events")
+        if not isinstance(sequence, int) or isinstance(sequence, bool) or sequence < 1:
+            problems.append("head manifest has invalid sequence")
+            continue
+        if (head.get("kind") != "head" or head.get("exportSchema") != EXPORT_SCHEMA_VERSION
+                or not isinstance(count, int) or isinstance(count, bool) or not 1 <= count <= sequence):
+            problems.append(f"head manifest at sequence {sequence} has invalid metadata")
+        if not isinstance(exported_at, int) or isinstance(exported_at, bool) or exported_at < 0:
+            problems.append(f"head manifest at sequence {sequence} has invalid timestamp")
+        else:
+            if newest is None or (sequence, exported_at) > (newest["sequence"], newest["exportedAt"]):
+                newest = head
+        record = by_sequence.get(sequence)
+        if record is None or record["recordId"] != head.get("headHash"):
+            problems.append(f"head manifest at sequence {sequence} does not match the exported record")
+    if exported and not heads:
         problems.append("no head manifest has been exported")
+    if exported and newest is not None and newest["sequence"] < exported_head:
+        problems.append(
+            f"head manifest is behind exported records: latest manifest sequence {newest['sequence']}, "
+            f"latest exported record sequence {exported_head}"
+        )
     lag = max(0, local_head - exported_head) if not truncated else 0
     if max_lag_events is not None and lag > max_lag_events:
         problems.append(f"export lag: the local ledger is {lag} event(s) ahead of the export (limit {max_lag_events})")
