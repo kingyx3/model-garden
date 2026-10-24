@@ -67,3 +67,9 @@ This is **not** an atomic or cross-host maintenance freeze: a privileged actor, 
 ## Stage-boundary approval revocation (v0.8.110)
 
 The window runner now pins the private approval file's device/inode and size/mtime/ctime before work starts. It refuses linked or foreign-owned approvals, and revalidates the exact tenant, recipient, operator/change reference and active window before inventory, snapshot, create-only upload and completion. Removing, editing or atomically replacing the approval file (even with identical JSON) fails closed at the next stage boundary. This protects against **local approval revocation between stages**, not a distributed lease: a revocation during a long-running subprocess cannot cancel an already accepted cloud write, and an upload may have succeeded even if the final completion check fails. Reconcile the private receipt and remote manifest under change control; never blindly retry. The host-local project lock, external deployment freeze, separately retained client authorization and real restore drill are still required.
+
+## Host operation lock acquisition identity (v0.8.111)
+
+The shared host-local project lock now rechecks the operator-owned 0700 lock directory and the exact 0600 project-lock inode **after** acquiring `flock` and **before** entering protected backup/deploy work. A directory swap, lock-file replacement, unlink, or permission/owner change during acquisition fails closed. Credential-free adversarial tests force these races.
+
+This is **not** a distributed or durable freeze: a privileged actor can still replace paths after the check, bypass the cooperative entrypoints, or restart containers directly. Maintain the independently authorized deployment-wide maintenance exclusion and do not claim real recovery until the replacement-host RPO/RTO drill succeeds.

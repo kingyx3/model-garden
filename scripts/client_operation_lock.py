@@ -45,6 +45,24 @@ def project_operation_lock(project: str) -> Iterator[None]:
                info.st_nlink != 1 or stat.S_IMODE(info.st_mode) != 0o600:
                 raise OperationLockError("host operation lock file is unsafe")
             fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            # The directory or lock name may have been atomically replaced
+            # while opening/flocking. Never authorize work under a detached
+            # inode that a second process cannot see or lock.
+            current_root = os.stat(LOCK_ROOT, follow_symlinks=False)
+            current_lock = os.stat(project + ".lock", dir_fd=directory_fd,
+                                   follow_symlinks=False)
+            if (not stat.S_ISDIR(current_root.st_mode) or
+                    current_root.st_uid != os.geteuid() or
+                    stat.S_IMODE(current_root.st_mode) != 0o700 or
+                    (current_root.st_dev, current_root.st_ino) !=
+                    (directory.st_dev, directory.st_ino) or
+                    not stat.S_ISREG(current_lock.st_mode) or
+                    current_lock.st_uid != os.geteuid() or
+                    current_lock.st_nlink != 1 or
+                    stat.S_IMODE(current_lock.st_mode) != 0o600 or
+                    (current_lock.st_dev, current_lock.st_ino) !=
+                    (info.st_dev, info.st_ino)):
+                raise OperationLockError("host operation lock replaced during acquisition")
         except OSError as exc:
             raise OperationLockError("host operation lock unavailable or another operation is active") from exc
         yield

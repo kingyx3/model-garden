@@ -72,6 +72,53 @@ class OperationLockTests(unittest.TestCase):
             with lock.project_operation_lock("acme-dev"):
                 pass
 
+    def test_directory_replacement_during_lock_acquisition_fails_closed(self):
+        moved = self.root.parent / "old-locks"
+        real_flock = lock.fcntl.flock
+        entered = []
+
+        def replace_directory(fd, flags):
+            real_flock(fd, flags)
+            self.root.rename(moved)
+            self.root.mkdir(mode=0o700)
+
+        with mock.patch.object(lock.fcntl, "flock", side_effect=replace_directory):
+            with self.assertRaisesRegex(lock.OperationLockError, "replaced"):
+                with lock.project_operation_lock("acme-dev"):
+                    entered.append(True)
+        self.assertEqual(entered, [])
+
+    def test_lock_inode_replacement_during_acquisition_fails_closed(self):
+        real_flock = lock.fcntl.flock
+        entered = []
+
+        def replace_lock(fd, flags):
+            real_flock(fd, flags)
+            path = self.root / "acme-dev.lock"
+            path.rename(self.root / "old.lock")
+            path.write_text("")
+            path.chmod(0o600)
+
+        with mock.patch.object(lock.fcntl, "flock", side_effect=replace_lock):
+            with self.assertRaisesRegex(lock.OperationLockError, "replaced"):
+                with lock.project_operation_lock("acme-dev"):
+                    entered.append(True)
+        self.assertEqual(entered, [])
+
+    def test_lock_unlinked_during_acquisition_fails_closed(self):
+        real_flock = lock.fcntl.flock
+        entered = []
+
+        def unlink_lock(fd, flags):
+            real_flock(fd, flags)
+            (self.root / "acme-dev.lock").unlink()
+
+        with mock.patch.object(lock.fcntl, "flock", side_effect=unlink_lock):
+            with self.assertRaises(lock.OperationLockError):
+                with lock.project_operation_lock("acme-dev"):
+                    entered.append(True)
+        self.assertEqual(entered, [])
+
     def test_invalid_project(self):
         for project in ("../other", "acme/dev", "", "UPPER", "-acme"):
             with self.assertRaises(lock.OperationLockError):
