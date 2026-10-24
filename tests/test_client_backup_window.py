@@ -106,6 +106,51 @@ class BackupWindowTests(unittest.TestCase):
                 self.execute(not_after=deadline)
         self.assertEqual(self.calls, [])  # Never inspected Docker or touched cloud.
 
+
+    def test_removed_or_modified_approval_before_snapshot_blocks_further_work(self):
+        for action in ("remove", "edit"):
+            with self.subTest(action=action):
+                self.calls.clear()
+                self.write_approval()
+
+                def revoke_after_inventory(command, timeout, *, capture=False):
+                    self.calls.append(command)
+                    if len(command) > 2 and command[2] == "inventory":
+                        if action == "remove":
+                            self.approval.unlink()
+                        else:
+                            self.doc["changeRef"] = "CHG-REVOKED"
+                            self.write_approval()
+                    return ""
+
+                with mock.patch.object(WINDOW, "_run", side_effect=revoke_after_inventory):
+                    with self.assertRaises(WINDOW.WindowError):
+                        WINDOW.run(**self.args)
+                self.assertFalse(any("snapshot" in cmd for cmd in self.calls))
+                self.assertFalse(any("client-backup-upload.py" in cmd[1] for cmd in self.calls if len(cmd) > 1))
+                self.doc["changeRef"] = "CHG-123"
+
+    def test_identical_atomic_approval_replacement_after_snapshot_blocks_upload(self):
+        def replace_after_snapshot(command, timeout, *, capture=False):
+            self.calls.append(command)
+            if len(command) > 2 and command[2] == "snapshot":
+                replacement = self.private / "replacement.json"
+                replacement.write_text(self.approval.read_text(encoding="utf-8"), encoding="utf-8")
+                replacement.chmod(0o600)
+                os.replace(replacement, self.approval)
+            return ""
+
+        with mock.patch.object(WINDOW, "_run", side_effect=replace_after_snapshot):
+            with self.assertRaisesRegex(WINDOW.WindowError, "replaced or modified"):
+                WINDOW.run(**self.args)
+        self.assertFalse(any("client-backup-upload.py" in cmd[1] for cmd in self.calls if len(cmd) > 1))
+
+    def test_hardlinked_approval_rejected_before_docker(self):
+        os.link(self.approval, self.private / "linked-approval.json")
+        with self.assertRaisesRegex(WINDOW.WindowError, "private, unlinked"):
+            self.execute()
+        self.assertEqual(self.calls, [])
+
     def test_wrong_tenant_environment_key_and_confirmation_fail_before_docker(self):
         for override in ({"project": "other-dev"}, {"environment": "prod"},
                          {"slug": "other"}, {"gcp_project": "other-project-123"},
