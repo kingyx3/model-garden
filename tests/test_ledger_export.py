@@ -257,6 +257,19 @@ class TamperDetectionTests(unittest.TestCase):
             self.assertFalse(report["ok"])
             self.assertTrue(any("head manifest" in problem and "invalid" in problem for problem in report["problems"]))
 
+    def test_older_head_event_count_must_match_exported_prefix(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ws = self.exported(tmp, 2)
+            write_ledger(ws.ledger, 1, start=3)
+            ws.export(exported_at=20)
+            older = next(path for path in (ws.sink.root / "heads").glob("*.json") if "-10-" in path.name)
+            head = json.loads(older.read_text(encoding="utf-8"))
+            head["events"] = 1
+            older.write_text(json.dumps(head), encoding="utf-8")
+            report = export.verify_export(ws.ledger, ws.sink)
+            self.assertFalse(report["ok"])
+            self.assertTrue(any("head manifest at sequence 2 has invalid metadata" in problem for problem in report["problems"]))
+
     def test_a_tampered_local_chain_is_refused_for_export(self):
         with tempfile.TemporaryDirectory() as tmp:
             ws = Workspace(tmp)
