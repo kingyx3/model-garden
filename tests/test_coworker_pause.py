@@ -224,7 +224,7 @@ class GatewayConfigTests(unittest.TestCase):
                 self.assertIn("Still paused", reply)
                 self.assertTrue(store.is_paused())
                 self.assertEqual(store.status()["cause"], "spend-cap")
-            self.assertEqual([event[0] for event in audit], ["coworker.pause-denied", "coworker.pause-denied"])
+            self.assertEqual([event[0] for event in audit], ["coworker.pause-denied", "coworker.resume-denied"])
 
     def test_the_holding_message_is_validated_and_the_deployer_ships_the_pause_files(self):
         gateway = _load("gateway_for_pause", "platform/runtime/gateway.py")
