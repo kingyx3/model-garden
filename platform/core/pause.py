@@ -142,7 +142,10 @@ class PauseStore:
         with self._transaction():
             # Re-check while holding the lock: a worker may have imposed a cap
             # between the caller's last read and this transition.
-            if self.status().get("cause") == "spend-cap":
+            state = self.status()
+            if state["paused"] and state.get("by") is None:
+                raise ValueError("untrusted pause state; operator must repair it before controls resume")
+            if state.get("cause") == "spend-cap":
                 raise ValueError("monthly spend cap is active; operator pause cannot replace it")
             extra = {key: value for key, value in (("cause", cause), ("window", window)) if value}
             self._write({"paused": True, "by": by, "at": int(now), "reason": clean(reason), **extra})
@@ -153,7 +156,10 @@ class PauseStore:
         if not by:
             raise ValueError("who is resuming is required")
         with self._transaction():
-            if self.status().get("cause") == "spend-cap":
+            state = self.status()
+            if state["paused"] and state.get("by") is None:
+                raise ValueError("untrusted pause state; operator must repair it before controls resume")
+            if state.get("cause") == "spend-cap":
                 raise ValueError("monthly spend cap is active; wait for metering reconciliation")
             self._write({"paused": False, "by": by, "at": int(now)})
             return self.status()
