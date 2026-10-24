@@ -64,7 +64,7 @@ run "valid_worker_readiness_monitor" {
     error_message = "Worker incidents must reuse the approved channels and fail closed on missing telemetry."
   }
   assert {
-    condition     = google_monitoring_alert_policy.worker_uptime[0].alert_strategy[0].notification_prompts == ["OPENED"]
+    condition     = length(google_monitoring_alert_policy.worker_uptime[0].alert_strategy[0].notification_prompts) == 1 && contains(google_monitoring_alert_policy.worker_uptime[0].alert_strategy[0].notification_prompts, "OPENED") && !contains(google_monitoring_alert_policy.worker_uptime[0].alert_strategy[0].notification_prompts, "CLOSED")
     error_message = "Do not mistake an automatically closed worker incident for verified recovery."
   }
 }
