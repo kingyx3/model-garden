@@ -7,7 +7,8 @@ is asked through the Hermes API server (``coworker_client.py``) and governed Too
 
 Routes (everything else is 404):
 
-- ``GET /healthz``
+- ``GET /healthz`` (gateway liveness)
+- ``GET /health/worker`` (payload-free, fail-closed worker readiness for an opt-in HTTPS uptime probe)
 - ``GET /studio`` (when ``studio`` is configured) the owner's Employee Studio and ``/studio/api/*`` (``platform/runtime/studio.py``): everyone
   on the web allow-list can read; only the named owner can propose, approve, reject or roll back a change request.
 - ``GET /chat`` the built-in web chat page, with its script and style served from this origin (the CSP allows nothing else).
@@ -62,6 +63,7 @@ HTTP_PORT = 8080
 SMTP_PORT = 2525
 ANNOUNCE_EVERY = 15
 READINESS_MAX_AGE = 120  # eight missed beats
+WORKER_READINESS_MAX_AGE = 300  # worker loop; do not confuse Docker liveness with readiness
 IDENTITY = "runtime:gateway"
 _ENROLL_TOKEN = re.compile(r"[A-Za-z0-9_-]{32,128}")
 _CSP = "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
@@ -707,6 +709,17 @@ class Gateway:
 
         if route == "/healthz" and method == "GET":
             return Response(200, b"ok", "text/plain")
+        if route == "/health/worker" and method == "GET":
+            # Public Cloud Monitoring probes get a status code only. No worker
+            # job names, tenant identifiers, or customer content cross the ingress.
+            # A responsive gateway is not evidence that its worker loop is alive.
+            health = _module("heartbeat").check(
+                self.data / "worker" / "heartbeat.json",
+                now=time.time(), max_age=WORKER_READINESS_MAX_AGE,
+            )
+            ready = health["status"] == "healthy"
+            return Response(200 if ready else 503, b"ok" if ready else b"unavailable",
+                            "text/plain", {"Cache-Control": "no-store"})
         if route == "/chat" and method == "GET" and self.auth is not None:
             return Response(200, CHAT_HTML.encode("utf-8"), "text/html; charset=utf-8", _PAGE_HEADERS)
         if route == "/chat/app.js" and method == "GET" and self.auth is not None:
