@@ -139,26 +139,128 @@ class BackupWindowTests(unittest.TestCase):
         self.assertEqual(self.calls, [])
 
     def test_running_or_restarted_client_prevents_snapshot_or_upload(self):
+        cid = "a" * 64
+
         def running_first(command, timeout, *, capture=False):
             self.calls.append(command)
-            return "running-container" if command[0] == "docker" else ""
+            if command[1] == "ps":
+                return cid
+            if command[1] == "inspect":
+                return f"{cid}|running|true|no|acme-dev"
+            return ""
+
         with mock.patch.object(WINDOW, "_run", side_effect=running_first):
             with self.assertRaisesRegex(WINDOW.WindowError, "running"):
                 WINDOW.run(**self.args)
-        self.assertEqual(len(self.calls), 1)
+        self.assertEqual(len(self.calls), 2)
         self.calls.clear()
         checks = 0
+
         def restart_after_snapshot(command, timeout, *, capture=False):
             nonlocal checks
             self.calls.append(command)
-            if command[0] == "docker":
+            if command[1] == "ps":
                 checks += 1
-                return "running-container" if checks == 3 else ""
+                return cid if checks == 3 else ""
+            if command[1] == "inspect":
+                return f"{cid}|running|true|no|acme-dev"
             return ""
+
         with mock.patch.object(WINDOW, "_run", side_effect=restart_after_snapshot):
             with self.assertRaisesRegex(WINDOW.WindowError, "running"):
                 WINDOW.run(**self.args)
         self.assertFalse(any("client-backup-upload.py" in cmd[1] for cmd in self.calls if len(cmd)>1))
+
+    def test_stopped_containers_with_no_restart_policy_are_accepted(self):
+        cid = "b" * 64
+        for status in ("exited", "created"):
+            with self.subTest(status=status):
+                self.calls.clear()
+
+                def stopped(command, timeout, *, capture=False):
+                    self.calls.append(command)
+                    if command[1] == "ps":
+                        self.assertIn("--all", command)
+                        self.assertIn("--no-trunc", command)
+                        return cid
+                    if command[1] == "inspect":
+                        self.assertIn("container", command)
+                        return f"{cid}|{status}|false|no|acme-dev"
+                    return ""
+
+                with mock.patch.object(WINDOW, "_run", side_effect=stopped):
+                    self.assertEqual(WINDOW.run(**self.args)["status"], "uploaded-not-recovery-proven")
+                self.assertEqual(sum(cmd[1] == "inspect" for cmd in self.calls), 4)
+
+    def test_restart_policies_refused_before_inventory_or_upload(self):
+        cid = "c" * 64
+        for policy in ("always", "unless-stopped", "on-failure", ""):
+            with self.subTest(policy=policy):
+                self.calls.clear()
+
+                def unsafe(command, timeout, *, capture=False):
+                    self.calls.append(command)
+                    if command[1] == "ps":
+                        return cid
+                    if command[1] == "inspect":
+                        return f"{cid}|exited|false|{policy}|acme-dev"
+                    return ""
+
+                with mock.patch.object(WINDOW, "_run", side_effect=unsafe):
+                    with self.assertRaisesRegex(WINDOW.WindowError, "restart policy"):
+                        WINDOW.run(**self.args)
+                self.assertFalse(any(cmd[0] == sys.executable for cmd in self.calls))
+
+    def test_inspection_tenant_state_and_identity_fail_closed(self):
+        cid = "d" * 64
+        invalid = (
+            f"{cid}|exited|false|no|other-dev",
+            f"{'e' * 64}|exited|false|no|acme-dev",
+            f"{cid}|paused|false|no|acme-dev",
+            f"{cid}|exited|true|no|acme-dev",
+            f"{cid}|exited|false|no",
+            "secret-data-that-must-not-appear",
+        )
+        for record in invalid:
+            with self.subTest(record=record[:12]):
+                self.calls.clear()
+
+                def unsafe(command, timeout, *, capture=False):
+                    self.calls.append(command)
+                    return cid if command[1] == "ps" else record
+
+                with mock.patch.object(WINDOW, "_run", side_effect=unsafe):
+                    with self.assertRaises(WINDOW.WindowError):
+                        WINDOW.run(**self.args)
+                self.assertFalse(any(cmd[0] == sys.executable for cmd in self.calls))
+
+    def test_invalid_duplicate_and_unbounded_container_lists_fail_closed(self):
+        cid = "f" * 64
+        for listing in ("../../wrong", cid + "\n" + cid,
+                        "\n".join(f"{n:064x}" for n in range(65))):
+            with self.subTest(length=len(listing)):
+                self.calls.clear()
+
+                def unsafe(command, timeout, *, capture=False):
+                    self.calls.append(command)
+                    return listing
+
+                with mock.patch.object(WINDOW, "_run", side_effect=unsafe):
+                    with self.assertRaisesRegex(WINDOW.WindowError, "inventory"):
+                        WINDOW.run(**self.args)
+                self.assertEqual(len(self.calls), 1)
+
+    def test_docker_inspection_failure_refuses_backup_without_retry(self):
+        cid = "1" * 64
+        def fail_inspect(command, timeout, *, capture=False):
+            self.calls.append(command)
+            if command[1] == "ps":
+                return cid
+            raise WINDOW.WindowError("backup step failed")
+        with mock.patch.object(WINDOW, "_run", side_effect=fail_inspect):
+            with self.assertRaises(WINDOW.WindowError):
+                WINDOW.run(**self.args)
+        self.assertEqual(len(self.calls), 2)
 
     def test_upload_failure_has_no_retry_and_lock_is_released(self):
         def fail_upload(command, timeout, *, capture=False):

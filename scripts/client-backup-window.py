@@ -32,6 +32,9 @@ REFERENCE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:/-]{2,127}$")
 ENVIRONMENTS = {"dev", "uat", "prod"}
 MAX_WINDOW_SECONDS = 3600
 MIN_REMAINING_SECONDS = 30
+MAX_PROJECT_CONTAINERS = 64
+CONTAINER_ID = re.compile(r"^[0-9a-f]{64}$")
+INSPECT_FORMAT = '{{.Id}}|{{.State.Status}}|{{.State.Running}}|{{.HostConfig.RestartPolicy.Name}}|{{index .Config.Labels "com.docker.compose.project"}}'
 
 
 class WindowError(ValueError):
@@ -148,10 +151,29 @@ def _remaining(deadline: float) -> float:
 
 
 def _stopped(project: str, deadline: float) -> None:
-    output = _run(["docker", "ps", "--filter", f"label=com.docker.compose.project={project}",
+    """Refuse live, restarting, mislabelled or uninspectable project containers.
+
+    This read-only guard checks every existing Compose-labelled container, not
+    just running ones. It is not an atomic cross-host deployment freeze.
+    """
+    output = _run(["docker", "ps", "--all", "--no-trunc",
+                   "--filter", f"label=com.docker.compose.project={project}",
                    "--format", "{{.ID}}"], min(20, _remaining(deadline)), capture=True)
-    if output.strip():
-        raise WindowError("client containers are running; deployment freeze is required")
+    ids = output.splitlines()
+    if len(ids) > MAX_PROJECT_CONTAINERS or len(set(ids)) != len(ids) or \
+       any(not CONTAINER_ID.fullmatch(cid) for cid in ids):
+        raise WindowError("Docker project container inventory is invalid or unbounded")
+    for cid in ids:
+        # Select only safe fields; never read Config.Env or Docker credentials.
+        fields = _run(["docker", "inspect", "--type", "container", "--format",
+                       INSPECT_FORMAT, cid], min(20, _remaining(deadline)),
+                      capture=True).strip().split("|")
+        if len(fields) != 5 or fields[0] != cid or fields[4] != project:
+            raise WindowError("Docker container inspection or tenant binding failed")
+        if fields[1] not in ("created", "exited") or fields[2] != "false":
+            raise WindowError("client containers are running or not safely stopped")
+        if fields[3] != "no":
+            raise WindowError("client container automatic restart policy must be disabled")
 
 
 def run(*, compose: pathlib.Path, project: str, slug: str, environment: str,
