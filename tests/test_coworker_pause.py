@@ -210,6 +210,22 @@ class InboxTests(unittest.TestCase):
 
 
 class GatewayConfigTests(unittest.TestCase):
+    def test_gateway_refuses_to_claim_a_cap_pause_was_resumed_or_replaced(self):
+        import types
+        gateway = _load("gateway_spend_cap_control", "platform/runtime/gateway.py")
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            audit = []
+            service = types.SimpleNamespace(data=root, clock=lambda: NOW, audit=lambda *event: audit.append(event))
+            store = pause.PauseStore(root)
+            store.pause("runtime:worker", "monthly cap", NOW, cause="spend-cap", window="2027-01")
+            for verb in ("pause", "resume"):
+                reply = gateway.Gateway._pause_command(service, "alice@acme.example", verb, "override")
+                self.assertIn("Still paused", reply)
+                self.assertTrue(store.is_paused())
+                self.assertEqual(store.status()["cause"], "spend-cap")
+            self.assertEqual([event[0] for event in audit], ["coworker.pause-denied", "coworker.resume-denied"])
+
     def test_the_holding_message_is_validated_and_the_deployer_ships_the_pause_files(self):
         gateway = _load("gateway_for_pause", "platform/runtime/gateway.py")
         self.assertEqual(gateway.load_config({"pausedMessage": " Back soon. "})["pausedMessage"], "Back soon.")
@@ -226,6 +242,18 @@ class OperatorScriptTests(unittest.TestCase):
     def run_script(self, root, *args):
         return subprocess.run([sys.executable, str(ROOT / "scripts/runtime-pause.py"), str(root), "--audit-path", str(root / "audit.jsonl"), *args],
                               capture_output=True, text=True)
+
+    def test_operator_cannot_clear_or_replace_a_metering_spend_cap(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            store = pause.PauseStore(root)
+            store.pause("runtime:worker", "monthly cap", NOW, cause="spend-cap", window="2027-01")
+            resume = self.run_script(root, "resume", "--by", "jordan@acme.example")
+            repause = self.run_script(root, "pause", "--by", "jordan@acme.example", "--reason", "bypass")
+            self.assertEqual((resume.returncode, repause.returncode), (2, 2))
+            self.assertTrue(store.status()["paused"])
+            self.assertEqual(store.status()["cause"], "spend-cap")
+            self.assertFalse((root / "audit.jsonl").exists())  # neither action was recorded as successful
 
     def test_pause_status_and_resume_are_ledgered_under_the_named_person(self):
         with tempfile.TemporaryDirectory() as tmp:

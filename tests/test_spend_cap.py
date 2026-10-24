@@ -86,14 +86,28 @@ class SpendCapTests(base.Case):
         self.assertFalse(runtime.run_spend(T0 + 1)["paused"])  # already paused: nothing more happens
         self.assertEqual(len(self.notices("spend-cap")), 1)
 
-    def test_resuming_by_hand_while_over_the_cap_is_undone_without_a_second_notice(self):
+    def test_manual_resume_and_repause_cannot_bypass_a_spend_cap(self):
         runtime = self.make_runtime()
         self.spend(runtime, 1200)
         runtime.run_spend(T0)
-        base.worker._module("pause").PauseStore(self.data).resume(OWNER, T0 + 5)
-        self.assertTrue(runtime.run_spend(T0 + 10)["paused"])
+        store = base.worker._module("pause").PauseStore(self.data)
+        with self.assertRaisesRegex(ValueError, "spend cap"):
+            store.resume(OWNER, T0 + 5)
+        with self.assertRaisesRegex(ValueError, "spend cap"):
+            store.pause(OWNER, "replace the cap with an owner pause", T0 + 6)
         self.assertEqual(self.pause_state()["cause"], "spend-cap")
+        self.assertTrue(self.pause_state()["paused"])
+        self.assertFalse(runtime.run_spend(T0 + 10)["paused"])  # still paused: no new transition
         self.assertEqual(len(self.notices("spend-cap")), 1)
+
+    def test_only_worker_reconciliation_can_clear_a_cap_after_an_authorized_cap_increase(self):
+        runtime = self.make_runtime()
+        self.spend(runtime, 1200)
+        runtime.run_spend(T0)
+        runtime.config["spend"]["capCents"] = 2000
+        self.assertFalse(runtime.run_spend(T0 + 10)["paused"])
+        self.assertFalse(self.pause_state()["paused"])
+        self.assertEqual(len([e for e in self.events() if e.get("action") == "spend.cap-cleared"]), 1)
 
     def test_a_new_month_under_the_cap_clears_a_cap_pause_but_never_an_owner_pause(self):
         runtime = self.make_runtime()
@@ -144,7 +158,14 @@ class SpendCapPlumbingTests(unittest.TestCase):
             pause.PauseStore(root).pause("runtime:worker", "monthly spend cap reached", T0, cause="spend-cap", window="2027-01")
             state = pause.PauseStore(root).status()
             self.assertEqual((state["cause"], state["window"]), ("spend-cap", "2027-01"))
-            pause.PauseStore(root).pause("alice@acme.example", "incident", T0)
+            # An owner cannot replace the active metering hold.
+            with self.assertRaisesRegex(ValueError, "spend cap"):
+                pause.PauseStore(root).pause("alice@acme.example", "incident", T0)
+            self.assertEqual(pause.PauseStore(root).status()["cause"], "spend-cap")
+            # Once the worker has reconciled the cap, an owner's independent
+            # incident pause remains a normal, separately tracked control.
+            self.assertTrue(pause.PauseStore(root).clear_spend_cap(T0 + 1, expected_window="2027-01"))
+            pause.PauseStore(root).pause("alice@acme.example", "incident", T0 + 2)
             self.assertNotIn("cause", pause.PauseStore(root).status())
 
     def test_the_deployer_maps_the_binding_setting_and_refuses_unknown_keys(self):
