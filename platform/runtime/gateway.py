@@ -540,14 +540,16 @@ class Gateway:
         try:
             if verb == "pause":
                 status = store.pause(admin, reason, now)
-                self.audit("coworker.pause", admin, {"reason": status.get("reason", ""), "via": "chat", "at": now})
-                return "Paused. I will not act on anything that changes something until an administrator says `resume coworker`."
-            store.resume(admin, now)
+            else:
+                store.resume(admin, now)
         except ValueError:
             # The metering worker owns its cap hold: an owner cannot disguise
             # the cap as a manual pause or temporarily resume it in chat.
-            self.audit("coworker.pause-denied", admin, {"via": "chat", "at": now, "reason": "spend-cap-active"})
+            self.audit(f"coworker.{verb}-denied", admin, {"via": "chat", "at": now, "reason": "spend-cap-active"})
             return "Still paused by the monthly spend cap. An operator must increase the cap or wait for the next month."
+        if verb == "pause":
+            self.audit("coworker.pause", admin, {"reason": status.get("reason", ""), "via": "chat", "at": now})
+            return "Paused. I will not act on anything that changes something until an administrator says `resume coworker`."
         self.audit("coworker.resume", admin, {"via": "chat", "at": now})
         return "Resumed. I am working normally again."
 
