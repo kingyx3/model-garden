@@ -108,7 +108,6 @@ class HeartbeatTests(unittest.TestCase):
             self.assertEqual(json.loads((root / "data" / "gateway" / "heartbeat.json").read_text())["failed"], ["announce-receipts"])
             self.assertEqual(gateway.main(["--readiness", "--data-root", str(root / "data")]), 1)  # not healthy against the real clock (the beat is dated in the test's fake time)
 
-
     def test_worker_uptime_probe_is_payload_free_and_fails_closed(self):
         # The public HTTPS monitor must not mistake an answering gateway for
         # a healthy worker, nor reveal job names or tenant data in its response.
@@ -127,6 +126,8 @@ class HeartbeatTests(unittest.TestCase):
             self.assertEqual((probe(T0 + 30).status, probe(T0 + 30).body), (200, b"ok"))
             self.assertEqual(probe(T0 + 301).status, 503)
             self.assertEqual(probe(T0 - 31).status, 503)
+            beat.path.write_text("not-json", encoding="utf-8")
+            self.assertEqual(probe(T0 + 1).status, 503)
             for step in range(3):
                 beat.write(T0 + step, {"scheduler": True})
             degraded = probe(T0 + 3)
