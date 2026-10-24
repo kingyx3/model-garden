@@ -100,6 +100,33 @@ class StoreTests(unittest.TestCase):
             with mock.patch.object(pause.os, "geteuid", return_value=os.geteuid() + 1):
                 self.assertTrue(pause.PauseStore(root).is_paused())
 
+    def test_untrusted_state_cannot_be_replaced_by_a_normal_resume_or_pause(self):
+        # Read-side deny is not enough: a valid admin command must not turn a
+        # corrupt/linked state with an unknown cap cause into an unpaused state.
+        for damaged in ("invalid-json", "symlink"):
+            with self.subTest(damaged=damaged), tempfile.TemporaryDirectory(dir=self.root) as tmp:
+                root = pathlib.Path(tmp)
+                store = pause.PauseStore(root)
+                store.pause("runtime:worker", "monthly cap", NOW,
+                            cause="spend-cap", window="2027-01")
+                state = root / "pause.json"
+                state.unlink()
+                if damaged == "invalid-json":
+                    state.write_bytes(b"{broken")
+                    state.chmod(0o600)
+                else:
+                    outside = root / "external.json"
+                    outside.write_text('{"paused": false}', encoding="utf-8")
+                    outside.chmod(0o600)
+                    state.symlink_to(outside)
+                for method in ("pause", "resume"):
+                    with self.subTest(method=method), self.assertRaisesRegex(ValueError, "untrusted"):
+                        if method == "pause":
+                            store.pause("owner@client.example", "override", NOW + 1)
+                        else:
+                            store.resume("owner@client.example", NOW + 1)
+                self.assertTrue(store.is_paused())
+
     def test_untrusted_lock_fails_closed_and_blocks_state_changes(self):
         for tamper in ("symlink", "hardlink", "permissive", "fifo"):
             with self.subTest(tamper=tamper), tempfile.TemporaryDirectory(dir=self.root) as tmp:
