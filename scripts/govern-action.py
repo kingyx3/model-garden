@@ -575,15 +575,15 @@ def verify_audit_chain(path: pathlib.Path) -> dict[str, Any]:
                     raise ValueError(f"Audit chain invalid at line {line_number}: record is not an object")
                 events += 1
                 schema_version = event.get("schemaVersion", 1)
-                if schema_version == 1:
-                    previous_hash = _sha256_json(event)
-                    expected_sequence = events + 1
-                    continue
-                if schema_version not in CHAINED_SCHEMA_VERSIONS:
+                if type(schema_version) is not int or schema_version not in (1, *CHAINED_SCHEMA_VERSIONS):
                     raise ValueError(f"Audit chain invalid at line {line_number}: unsupported schemaVersion {schema_version!r}")
                 if schema_version < last_version:
                     raise ValueError(f"Audit chain invalid at line {line_number}: schemaVersion moved backwards")
                 last_version = schema_version
+                if schema_version == 1:
+                    previous_hash = _sha256_json(event)
+                    expected_sequence = events + 1
+                    continue
                 if event.get("sequence") != expected_sequence:
                     raise ValueError(f"Audit chain invalid at line {line_number}: sequence mismatch")
                 if event.get("previousEventHash") != previous_hash:
