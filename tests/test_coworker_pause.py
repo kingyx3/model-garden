@@ -227,6 +227,18 @@ class OperatorScriptTests(unittest.TestCase):
         return subprocess.run([sys.executable, str(ROOT / "scripts/runtime-pause.py"), str(root), "--audit-path", str(root / "audit.jsonl"), *args],
                               capture_output=True, text=True)
 
+    def test_operator_cannot_clear_or_replace_a_metering_spend_cap(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            store = pause.PauseStore(root)
+            store.pause("runtime:worker", "monthly cap", NOW, cause="spend-cap", window="2027-01")
+            resume = self.run_script(root, "resume", "--by", "jordan@acme.example")
+            repause = self.run_script(root, "pause", "--by", "jordan@acme.example", "--reason", "bypass")
+            self.assertEqual((resume.returncode, repause.returncode), (2, 2))
+            self.assertTrue(store.status()["paused"])
+            self.assertEqual(store.status()["cause"], "spend-cap")
+            self.assertFalse((root / "audit.jsonl").exists())  # neither action was recorded as successful
+
     def test_pause_status_and_resume_are_ledgered_under_the_named_person(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = pathlib.Path(tmp)
