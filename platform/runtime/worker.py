@@ -616,10 +616,13 @@ class Worker:
         to = self.config["escalateTo"] or (self.config["mailbox"] or {}).get("owner")
         store = _module("pause").PauseStore(self.data)
         state = store.status()
-        if state["paused"] and state.get("cause") == "spend-cap" and state.get("window") != window and spent < cap_micros:
-            store.resume(IDENTITY, now)
-            self.audit("spend.cap-cleared", IDENTITY, {"window": window, "previousWindow": state.get("window")})
-            state = {"paused": False}
+        if state["paused"] and state.get("cause") == "spend-cap" and spent < cap_micros:
+            # The worker alone reconciles a cap pause after confirming usage is
+            # below the *current* limit (a new month or an approved cap increase).
+            # An owner resume/repause cannot erase this hold between worker passes.
+            if store.clear_spend_cap(now, expected_window=state["window"]):
+                self.audit("spend.cap-cleared", IDENTITY, {"window": window, "previousWindow": state["window"]})
+                state = {"paused": False}
         told = 0
         for threshold in settings["warnAtPercent"]:
             if percent >= threshold and spent < cap_micros and self._told_once("spend-warn", f"{window}|{threshold}|{settings['capCents']}"):
