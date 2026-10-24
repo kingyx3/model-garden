@@ -18,7 +18,9 @@ ownership and agreed incident escalation owner. Set:
   using 1–16 distinct, existing, verified channels from **that same GCP project**.
 
 The configuration rejects missing buckets/channels, duplicate channels,
-malformed/cross-project channel references and malformed project IDs.
+malformed/cross-project channel references and malformed project IDs. The
+root GCP project ID is validated even when alerting is disabled, preventing
+log-filter injection from reaching optional monitoring resources.
 It creates **no** notification channels, IAM roles, timers or host agents.
 Do not apply or emit live samples without client authorization. The Cloud
 Logging adapter itself remains opt-in and must be run under an existing

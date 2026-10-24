@@ -88,18 +88,30 @@ run "rejects_duplicate_channels" {
   expect_failures = [var.backup_health_alert_enabled]
 }
 
+# A malformed project ID must fail at the root variable boundary even if
+# backup alerting is disabled. Channel checks also reject foreign project IDs.
 run "rejects_filter_injection_project_id" {
   command = plan
   variables {
-    project_id                          = "sample-project-123\" OR true"
-    runtime_backup_enabled              = true
-    backup_health_alert_enabled         = true
-    backup_health_notification_channels = ["projects/sample-project-123/notificationChannels/123"]
+    project_id = "sample-project-123\" OR true"
   }
-  expect_failures = [
-    var.backup_health_alert_enabled,
-    var.backup_health_notification_channels,
-  ]
+  expect_failures = [var.project_id]
+}
+
+run "rejects_short_project_id" {
+  command = plan
+  variables {
+    project_id = "a"
+  }
+  expect_failures = [var.project_id]
+}
+
+run "rejects_project_id_with_path_suffix" {
+  command = plan
+  variables {
+    project_id = "sample-project-123/extra"
+  }
+  expect_failures = [var.project_id]
 }
 
 run "valid_scoped_failure_and_recovery_alerts" {
