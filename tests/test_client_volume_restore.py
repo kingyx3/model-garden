@@ -122,6 +122,7 @@ class ClientVolumeRestoreTests(unittest.TestCase):
                 RESTORE.restore(self.compose, "acme-dev", self.archive, self.identity, IMAGE, apply=True, confirmation="acme-dev")
         with mock.patch.object(RESTORE.SNAPSHOT, "assert_quiescent"), \
              mock.patch.object(RESTORE.SNAPSHOT, "assert_volume_owner", return_value="acme-dev_hermes-data"), \
+             mock.patch.object(RESTORE.SNAPSHOT, "assert_volume_exclusive"), \
              mock.patch.object(RESTORE, "_docker", side_effect=RESTORE.RestoreError("not empty")):
             with self.assertRaisesRegex(RESTORE.RestoreError, "not empty"):
                 RESTORE.restore(self.compose, "acme-dev", self.archive, self.identity, IMAGE, apply=True, confirmation="acme-dev")
@@ -131,12 +132,54 @@ class ClientVolumeRestoreTests(unittest.TestCase):
             RESTORE.restore(self.compose, "acme-dev", self.archive, self.identity, IMAGE, apply=True, confirmation="wrong")
         with mock.patch.object(RESTORE.SNAPSHOT, "assert_quiescent"), \
              mock.patch.object(RESTORE.SNAPSHOT, "assert_volume_owner", return_value="acme-dev_hermes-data"), \
+             mock.patch.object(RESTORE.SNAPSHOT, "assert_volume_exclusive"), \
              mock.patch.object(RESTORE, "_docker", return_value=""), \
              mock.patch.object(RESTORE, "_extract") as extract:
             result = RESTORE.restore(self.compose, "acme-dev", self.archive, self.identity, IMAGE, apply=True, confirmation="acme-dev")
         self.assertEqual(result, ["hermes-data"])
         extract.assert_called_once()
         self.assertEqual(extract.call_args.args[0], "acme-dev_hermes-data")
+
+    def test_restore_refuses_foreign_volume_attachment_before_writing(self):
+        with mock.patch.object(RESTORE.SNAPSHOT, "assert_quiescent"), \
+             mock.patch.object(RESTORE.SNAPSHOT, "assert_volume_owner", return_value="acme-dev_hermes-data"), \
+             mock.patch.object(RESTORE.SNAPSHOT, "assert_volume_exclusive", side_effect=RESTORE.SNAPSHOT.SnapshotError("foreign attachment")), \
+             mock.patch.object(RESTORE, "_docker", return_value=""), \
+             mock.patch.object(RESTORE, "_extract") as extract:
+            with self.assertRaisesRegex(RESTORE.RestoreError, "foreign attachment"):
+                RESTORE.restore(self.compose, "acme-dev", self.archive, self.identity, IMAGE, apply=True, confirmation="acme-dev")
+            extract.assert_not_called()
+
+    def test_restore_rechecks_attachment_after_empty_check_before_writing(self):
+        with mock.patch.object(RESTORE.SNAPSHOT, "assert_quiescent"), \
+             mock.patch.object(RESTORE.SNAPSHOT, "assert_volume_owner", return_value="acme-dev_hermes-data"), \
+             mock.patch.object(RESTORE.SNAPSHOT, "assert_volume_exclusive", side_effect=[None, None, RESTORE.SNAPSHOT.SnapshotError("new foreign attachment")]) as inspect, \
+             mock.patch.object(RESTORE, "_docker", return_value=""), \
+             mock.patch.object(RESTORE, "_extract") as extract:
+            with self.assertRaisesRegex(RESTORE.RestoreError, "new foreign attachment"):
+                RESTORE.restore(self.compose, "acme-dev", self.archive, self.identity, IMAGE, apply=True, confirmation="acme-dev")
+            self.assertEqual(inspect.call_count, 3)
+            extract.assert_not_called()
+
+    def test_restore_checks_attachments_after_extract_and_refuses_success(self):
+        with mock.patch.object(RESTORE.SNAPSHOT, "assert_quiescent"), \
+             mock.patch.object(RESTORE.SNAPSHOT, "assert_volume_owner", return_value="acme-dev_hermes-data"), \
+             mock.patch.object(RESTORE.SNAPSHOT, "assert_volume_exclusive", side_effect=[None, None, None, RESTORE.SNAPSHOT.SnapshotError("post-extract foreign attachment")]), \
+             mock.patch.object(RESTORE, "_docker", return_value=""), \
+             mock.patch.object(RESTORE, "_extract") as extract:
+            with self.assertRaisesRegex(RESTORE.RestoreError, "post-extract foreign attachment"):
+                RESTORE.restore(self.compose, "acme-dev", self.archive, self.identity, IMAGE, apply=True, confirmation="acme-dev")
+            extract.assert_called_once()
+
+    def test_restore_checks_attachments_through_final_preflight(self):
+        with mock.patch.object(RESTORE.SNAPSHOT, "assert_quiescent"), \
+             mock.patch.object(RESTORE.SNAPSHOT, "assert_volume_owner", return_value="acme-dev_hermes-data"), \
+             mock.patch.object(RESTORE.SNAPSHOT, "assert_volume_exclusive") as inspect, \
+             mock.patch.object(RESTORE, "_docker", return_value=""), \
+             mock.patch.object(RESTORE, "_extract"):
+            RESTORE.restore(self.compose, "acme-dev", self.archive, self.identity, IMAGE, apply=True, confirmation="acme-dev")
+            self.assertEqual(inspect.call_count, 5)
+            inspect.assert_any_call("acme-dev", "hermes-data")
 
     def test_refuses_non_digest_pinned_helper(self):
         with self.assertRaisesRegex(RESTORE.RestoreError, "pinned"):
