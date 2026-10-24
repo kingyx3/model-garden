@@ -43,6 +43,16 @@ class PauseStore:
         self.root = pathlib.Path(root)
         self.path = self.root / FILE
 
+    def _same_root(self, expected: os.stat_result) -> bool:
+        """An absent or replaced governance mount cannot authorize an unpause."""
+        try:
+            current = self.root.lstat()
+        except OSError:
+            return False
+        return (stat.S_ISDIR(current.st_mode) and not current.st_mode & 0o022
+                and (current.st_dev, current.st_ino) ==
+                (expected.st_dev, expected.st_ino))
+
     def status(self) -> dict[str, Any]:
         """Read only a trusted, bounded state file; suspicious paths mean paused.
 
@@ -73,14 +83,7 @@ class PauseStore:
             # A newly provisioned *existing* volume may have no state file.
             # If its directory disappeared or was replaced during this read,
             # treating that missing file as first boot would allow writes.
-            try:
-                current_root = self.root.lstat()
-                if (not stat.S_ISDIR(current_root.st_mode) or
-                        current_root.st_mode & 0o022 or
-                        (current_root.st_dev, current_root.st_ino) !=
-                        (root_info.st_dev, root_info.st_ino)):
-                    return _fail_closed()
-            except OSError:
+            if not self._same_root(root_info):
                 return _fail_closed()
             return {"paused": False}
         except OSError:
@@ -102,6 +105,11 @@ class PauseStore:
                 return _fail_closed()
         except (OSError, ValueError, UnicodeError):
             # A file that disappears *after* lstat is suspicious, not fresh.
+            return _fail_closed()
+        # The root may be unmounted or swapped after the state inode was
+        # inspected and decoded. Never trust an unpaused result from a
+        # detached governance volume.
+        if not self._same_root(root_info):
             return _fail_closed()
         if not document["paused"]:
             return {"paused": False, "by": document.get("by"), "at": document.get("at")}
