@@ -84,6 +84,84 @@ class ClientSnapshotTests(unittest.TestCase):
         with mock.patch.object(SNAP, "_docker", return_value='{"com.docker.compose.project":"acme-dev", "com.docker.compose.volume":"hermes-data"}'):
             self.assertEqual(SNAP.assert_volume_owner("acme-dev", "hermes-data"), "acme-dev_hermes-data")
 
+
+    def test_volume_attachment_guard_accepts_only_stopped_same_project_containers(self):
+        cid = "a" * 64
+        for state in ("exited", "created"):
+            with self.subTest(state=state):
+                def docker(*args):
+                    if args[0] == "ps":
+                        self.assertIn("--all", args)
+                        self.assertIn("--no-trunc", args)
+                        self.assertIn("volume=acme-dev_hermes-data", args)
+                        return cid
+                    self.assertEqual(args[:3], ("inspect", "--type", "container"))
+                    return f"{cid}|acme-dev|{state}|false|no"
+                with mock.patch.object(SNAP, "_docker", side_effect=docker):
+                    SNAP.assert_volume_exclusive("acme-dev", "hermes-data")
+        with mock.patch.object(SNAP, "_docker", return_value=""):
+            SNAP.assert_volume_exclusive("acme-dev", "hermes-data")
+
+    def test_volume_attachment_guard_rejects_foreign_unlabelled_running_and_restartable(self):
+        cid = "b" * 64
+        invalid = (
+            f"{cid}|other-dev|exited|false|no",
+            f"{cid}|<no value>|exited|false|no",
+            f"{cid}||exited|false|no",
+            f"{cid}|acme-dev|running|true|no",
+            f"{cid}|acme-dev|paused|false|no",
+            f"{cid}|acme-dev|exited|false|always",
+            f"{cid}|acme-dev|created|false|on-failure",
+            f"{cid}|acme-dev|exited|false|",
+            f"{'c' * 64}|acme-dev|exited|false|no",
+            "malformed|record",
+        )
+        for record in invalid:
+            with self.subTest(record=record[:25]):
+                with mock.patch.object(SNAP, "_docker", side_effect=[cid, record]):
+                    with self.assertRaises(SNAP.SnapshotError):
+                        SNAP.assert_volume_exclusive("acme-dev", "hermes-data")
+
+    def test_volume_attachment_guard_refuses_invalid_unbounded_and_failed_inventory(self):
+        cid = "d" * 64
+        for listing in ("not-an-id", cid + "\n" + cid,
+                        "\n".join(f"{i:064x}" for i in range(65)), "x" * 10000):
+            with self.subTest(length=len(listing)):
+                with mock.patch.object(SNAP, "_docker", return_value=listing):
+                    with self.assertRaises(SNAP.SnapshotError):
+                        SNAP.assert_volume_exclusive("acme-dev", "hermes-data")
+        with mock.patch.object(SNAP, "_docker", side_effect=SNAP.SnapshotError("inspect unavailable")):
+            with self.assertRaises(SNAP.SnapshotError):
+                SNAP.assert_volume_exclusive("acme-dev", "hermes-data")
+
+    def test_foreign_volume_mount_blocks_snapshot_before_any_output(self):
+        cid = "e" * 64
+        def docker(*args):
+            if args[:2] == ("volume", "inspect"):
+                actual = args[2]
+                project, name = actual.split("_", 1)
+                return json.dumps({"com.docker.compose.project": project,
+                                   "com.docker.compose.volume": name})
+            if args[0] == "ps":
+                return cid if any(str(arg).startswith("volume=") for arg in args) else ""
+            if args[0] == "inspect":
+                return f"{cid}|other-dev|exited|false|no"
+            raise AssertionError("unexpected Docker call")
+        output = self.root / "foreign"
+        with mock.patch.object(SNAP.shutil, "which", return_value="/usr/bin/tool"), \
+             mock.patch.object(SNAP, "_docker", side_effect=docker):
+            with self.assertRaisesRegex(SNAP.SnapshotError, "foreign"):
+                SNAP.snapshot(self.compose, "acme-dev", output, "age1" + "q" * 55,
+                              "busybox@sha256:" + "a" * 64)
+        self.assertFalse(output.exists())
+
+    def test_docker_inspection_timeout_is_redacted_and_fails_closed(self):
+        import subprocess
+        with mock.patch.object(SNAP.subprocess, "run",
+                               side_effect=subprocess.TimeoutExpired(["docker", "ps"], 30)):
+            with self.assertRaisesRegex(SNAP.SnapshotError, "timed out"):
+                SNAP.assert_volume_exclusive("acme-dev", "hermes-data")
+
     def test_refuses_insecure_destination_unpinned_image_and_invalid_recipient(self):
         output = self.root / "new"
         with self.assertRaisesRegex(SNAP.SnapshotError, "age recipient"):
@@ -131,7 +209,10 @@ pathlib.Path(args[args.index("-o")+1]).write_bytes(b"FAKE-CIPHER-FOR-TESTS:" + h
                 with self.assertRaisesRegex(SNAP.SnapshotError, "running"):
                     SNAP.snapshot(self.compose, "acme-dev", self.root / "rejected", recipient, image)
             output = self.root / "encrypted"
-            manifest = SNAP.snapshot(self.compose, "acme-dev", output, recipient, image)
+            with mock.patch.object(SNAP, "assert_volume_exclusive",
+                                   wraps=SNAP.assert_volume_exclusive) as guard:
+                manifest = SNAP.snapshot(self.compose, "acme-dev", output, recipient, image)
+            self.assertEqual(guard.call_count, 12)
         self.assertEqual(manifest["clientProject"], "acme-dev")
         self.assertEqual(len(manifest["volumes"]), 3)
         self.assertEqual((output / "manifest.json").stat().st_mode & 0o777, 0o600)
