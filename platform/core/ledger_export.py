@@ -31,6 +31,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from bisect import bisect_right
 from collections.abc import Callable, Iterable, Iterator, Mapping
 from typing import Any
 
@@ -463,6 +464,7 @@ def verify_export(
     if diverged_at is not None:
         problems.append(f"local ledger differs from the export at sequence {diverged_at}")
     heads = sink.heads()
+    exported_sequences = [record["sequence"] for record in exported if type(record.get("sequence")) is int]
     newest: dict[str, Any] | None = None
     for head in heads:
         if not isinstance(head, dict):
@@ -475,7 +477,8 @@ def verify_export(
             problems.append("head manifest has invalid sequence")
             continue
         if (head.get("kind") != "head" or head.get("exportSchema") != EXPORT_SCHEMA_VERSION
-                or not isinstance(count, int) or isinstance(count, bool) or not 1 <= count <= sequence):
+                or not isinstance(count, int) or isinstance(count, bool)
+                or count != bisect_right(exported_sequences, sequence)):
             problems.append(f"head manifest at sequence {sequence} has invalid metadata")
         if not isinstance(exported_at, int) or isinstance(exported_at, bool) or exported_at < 0:
             problems.append(f"head manifest at sequence {sequence} has invalid timestamp")
