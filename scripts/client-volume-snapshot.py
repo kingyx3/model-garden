@@ -27,6 +27,9 @@ IMAGE = re.compile(r"^[a-zA-Z0-9_.:/-]+@sha256:[0-9a-f]{64}$")
 RECIPIENT = re.compile(r"^age1[a-z0-9]{50,}$")
 LABEL_PROJECT = "com.docker.compose.project"
 LABEL_VOLUME = "com.docker.compose.volume"
+MAX_VOLUME_ATTACHMENTS = 64
+CONTAINER_ID = re.compile(r"^[0-9a-f]{64}$")
+VOLUME_MOUNT_INSPECT_FORMAT = '{{.Id}}|{{index .Config.Labels "com.docker.compose.project"}}|{{.State.Status}}|{{.State.Running}}|{{.HostConfig.RestartPolicy.Name}}'
 
 
 class SnapshotError(ValueError):
@@ -92,7 +95,11 @@ def inventory(compose_path: pathlib.Path) -> list[str]:
 
 
 def _docker(*args: str) -> str:
-    result = subprocess.run(["docker", *args], capture_output=True, text=True, check=False, timeout=30)
+    try:
+        result = subprocess.run(["docker", *args], capture_output=True, text=True,
+                                check=False, timeout=30)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise SnapshotError("Docker inspection unavailable or timed out") from exc
     if result.returncode:
         raise SnapshotError("Docker inspection failed (check daemon access and client project)")
     return result.stdout.strip()
@@ -111,6 +118,33 @@ def assert_volume_owner(project: str, name: str) -> str:
     if not isinstance(labels, dict) or labels.get(LABEL_PROJECT) != project or labels.get(LABEL_VOLUME) != name:
         raise SnapshotError(f"volume {name} has no matching Compose project/volume ownership labels")
     return actual
+
+
+def assert_volume_exclusive(project: str, name: str) -> None:
+    """Reject other-project, unlabelled or restartable mounts on this Docker daemon.
+
+    This is read-only evidence at inspection time, NOT a cross-host/atomic freeze.
+    Check before, between and after archive stages; retain external restart controls.
+    """
+    _name(project, "client project")
+    _name(name, "volume name")
+    actual = f"{project}_{name}"
+    listing = _docker("ps", "--all", "--no-trunc", "--filter", f"volume={actual}",
+                      "--format", "{{.ID}}")
+    if len(listing) > MAX_VOLUME_ATTACHMENTS * 65:
+        raise SnapshotError("volume attachment inventory is unbounded")
+    ids = listing.splitlines()
+    if len(ids) > MAX_VOLUME_ATTACHMENTS or len(set(ids)) != len(ids) or \
+       any(not CONTAINER_ID.fullmatch(cid) for cid in ids):
+        raise SnapshotError("volume attachment inventory is invalid or unbounded")
+    for cid in ids:
+        # Only inspect identity, project label, state and restart policy; never Env.
+        fields = _docker("inspect", "--type", "container", "--format",
+                         VOLUME_MOUNT_INSPECT_FORMAT, cid).strip().split("|")
+        if len(fields) != 5 or fields[0] != cid or fields[1] != project:
+            raise SnapshotError("volume is attached to a foreign or unverified container")
+        if fields[2] not in ("created", "exited") or fields[3] != "false" or fields[4] != "no":
+            raise SnapshotError("volume is attached to a running or restartable container")
 
 
 def _digest(path: pathlib.Path) -> tuple[str, int]:
@@ -135,6 +169,8 @@ def snapshot(
         raise SnapshotError("operator host requires docker and age; no fallback to plaintext")
     assert_quiescent(project)
     owned = [(name, assert_volume_owner(project, name)) for name in volumes]
+    for name, _ in owned:
+        assert_volume_exclusive(project, name)
     parent = output.parent
     if parent.is_symlink() or not parent.is_dir() or parent.stat().st_mode & 0o022:
         raise SnapshotError("backup parent directory must exist, not be a symlink and not be group/world writable")
@@ -146,6 +182,7 @@ def snapshot(
         records: list[dict[str, Any]] = []
         for name, docker_name in owned:
             assert_quiescent(project)
+            assert_volume_exclusive(project, name)
             target = output / f"{name}.tar.age"
             tar_cmd = [
                 "docker", "run", "--rm", "--network", "none", "--read-only",
@@ -175,6 +212,9 @@ def snapshot(
                 raise SnapshotError(f"encrypted snapshot is empty for volume {name}")
             records.append({"volume": name, "object": target.name, "sha256": digest, "bytes": size})
             assert_quiescent(project)
+            assert_volume_exclusive(project, name)
+        for name, _ in owned:
+            assert_volume_exclusive(project, name)
         manifest = {
             "schemaVersion": 1, "clientProject": project, "type": "stopped-compose-volume-snapshot",
             "createdAt": dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
