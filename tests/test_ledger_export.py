@@ -215,6 +215,61 @@ class TamperDetectionTests(unittest.TestCase):
             report = export.verify_export(ws.ledger, ws.sink)
             self.assertTrue(any("head manifest" in problem for problem in report["problems"]))
 
+    def test_an_older_tampered_head_is_not_hidden_by_a_newer_valid_head(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ws = self.exported(tmp, 2)
+            write_ledger(ws.ledger, 1, start=3)
+            ws.export(exported_at=20)
+            older = next(path for path in (ws.sink.root / "heads").glob("*.json") if "-10-" in path.name)
+            head = json.loads(older.read_text(encoding="utf-8"))
+            head["headHash"] = "0" * 64
+            older.write_text(json.dumps(head), encoding="utf-8")
+            report = export.verify_export(ws.ledger, ws.sink)
+            self.assertFalse(report["ok"])
+            self.assertTrue(any("head manifest at sequence 2" in problem for problem in report["problems"]))
+
+    def test_unacknowledged_newest_head_is_an_integrity_failure(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ws = self.exported(tmp, 2)
+            write_ledger(ws.ledger, 2, start=3)
+
+            class HeadFailure(export.DirectorySink):
+                def put_head(self, head):
+                    raise export.LedgerExportError("head delivery failed")
+
+            with self.assertRaisesRegex(export.LedgerExportError, "head delivery failed"):
+                export.export_ledger(ws.ledger, HeadFailure(ws.sink.root), ws.state, exported_at=20)
+            self.assertEqual(json.loads(ws.state.read_text(encoding="utf-8"))["sequence"], 4)
+            report = export.verify_export(ws.ledger, ws.sink)
+            self.assertFalse(report["ok"])
+            self.assertTrue(any("head manifest" in problem and "behind" in problem for problem in report["problems"]))
+
+    def test_invalid_older_head_metadata_fails_closed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ws = self.exported(tmp, 2)
+            write_ledger(ws.ledger, 1, start=3)
+            ws.export(exported_at=20)
+            older = next(path for path in (ws.sink.root / "heads").glob("*.json") if "-10-" in path.name)
+            head = json.loads(older.read_text(encoding="utf-8"))
+            head["sequence"] = "2"
+            older.write_text(json.dumps(head), encoding="utf-8")
+            report = export.verify_export(ws.ledger, ws.sink)
+            self.assertFalse(report["ok"])
+            self.assertTrue(any("head manifest" in problem and "invalid" in problem for problem in report["problems"]))
+
+    def test_older_head_event_count_must_match_exported_prefix(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ws = self.exported(tmp, 2)
+            write_ledger(ws.ledger, 1, start=3)
+            ws.export(exported_at=20)
+            older = next(path for path in (ws.sink.root / "heads").glob("*.json") if "-10-" in path.name)
+            head = json.loads(older.read_text(encoding="utf-8"))
+            head["events"] = 1
+            older.write_text(json.dumps(head), encoding="utf-8")
+            report = export.verify_export(ws.ledger, ws.sink)
+            self.assertFalse(report["ok"])
+            self.assertTrue(any("head manifest at sequence 2 has invalid metadata" in problem for problem in report["problems"]))
+
     def test_a_tampered_local_chain_is_refused_for_export(self):
         with tempfile.TemporaryDirectory() as tmp:
             ws = Workspace(tmp)
