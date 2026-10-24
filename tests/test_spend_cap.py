@@ -158,7 +158,14 @@ class SpendCapPlumbingTests(unittest.TestCase):
             pause.PauseStore(root).pause("runtime:worker", "monthly spend cap reached", T0, cause="spend-cap", window="2027-01")
             state = pause.PauseStore(root).status()
             self.assertEqual((state["cause"], state["window"]), ("spend-cap", "2027-01"))
-            pause.PauseStore(root).pause("alice@acme.example", "incident", T0)
+            # An owner cannot replace the active metering hold.
+            with self.assertRaisesRegex(ValueError, "spend cap"):
+                pause.PauseStore(root).pause("alice@acme.example", "incident", T0)
+            self.assertEqual(pause.PauseStore(root).status()["cause"], "spend-cap")
+            # Once the worker has reconciled the cap, an owner's independent
+            # incident pause remains a normal, separately tracked control.
+            self.assertTrue(pause.PauseStore(root).clear_spend_cap(T0 + 1, expected_window="2027-01"))
+            pause.PauseStore(root).pause("alice@acme.example", "incident", T0 + 2)
             self.assertNotIn("cause", pause.PauseStore(root).status())
 
     def test_the_deployer_maps_the_binding_setting_and_refuses_unknown_keys(self):
