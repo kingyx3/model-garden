@@ -83,9 +83,18 @@ class PauseStore:
             # A newly provisioned *existing* volume may have no state file.
             # If its directory disappeared or was replaced during this read,
             # treating that missing file as first boot would allow writes.
-            if not self._same_root(root_info):
+            # A concurrent pause may create the state between the missing
+            # lookup and the first-boot decision. Never return unpaused from
+            # an observed transition: the next read can retry safely.
+            try:
+                self.path.lstat()
+            except FileNotFoundError:
+                if not self._same_root(root_info):
+                    return _fail_closed()
+                return {"paused": False}
+            except OSError:
                 return _fail_closed()
-            return {"paused": False}
+            return _fail_closed()
         except OSError:
             return _fail_closed()
         try:
@@ -105,6 +114,16 @@ class PauseStore:
                 return _fail_closed()
         except (OSError, ValueError, UnicodeError):
             # A file that disappears *after* lstat is suspicious, not fresh.
+            return _fail_closed()
+        # Atomic pause/resume replaces pause.json. If that happened while
+        # decoding the previous inode, its stale "paused: false" cannot
+        # authorize a new side effect. A fresh read will see the new state.
+        try:
+            current = self.path.lstat()
+            if (not _private_regular(current) or
+                    (current.st_dev, current.st_ino) != (opened.st_dev, opened.st_ino)):
+                return _fail_closed()
+        except OSError:
             return _fail_closed()
         # The root may be unmounted or swapped after the state inode was
         # inspected and decoded. Never trust an unpaused result from a
