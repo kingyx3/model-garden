@@ -82,6 +82,9 @@ class PauseStore:
             document = json.loads(raw)
             if not isinstance(document, dict) or not isinstance(document.get("paused"), bool):
                 return _fail_closed()
+        except FileNotFoundError:
+            # First-time tenant volumes start with no pause state at all.
+            return {"paused": False}
         except (OSError, ValueError, UnicodeError):
             return _fail_closed()
         if not document["paused"]:
