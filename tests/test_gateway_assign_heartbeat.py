@@ -6,6 +6,7 @@ import pathlib
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 sys.path.insert(0, str(pathlib.Path(__file__).parent))
 import test_channel_gateway as base  # noqa: E402
@@ -106,6 +107,34 @@ class HeartbeatTests(unittest.TestCase):
             instance.beat(T0, ["announce-receipts"])
             self.assertEqual(json.loads((root / "data" / "gateway" / "heartbeat.json").read_text())["failed"], ["announce-receipts"])
             self.assertEqual(gateway.main(["--readiness", "--data-root", str(root / "data")]), 1)  # not healthy against the real clock (the beat is dated in the test's fake time)
+
+
+    def test_worker_uptime_probe_is_payload_free_and_fails_closed(self):
+        # The public HTTPS monitor must not mistake an answering gateway for
+        # a healthy worker, nor reveal job names or tenant data in its response.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            instance = gateway.Gateway(base.compiled(root), root / "data", {}, {},
+                                       clock=lambda: T0)
+            def probe(at, method="GET"):
+                with mock.patch.object(gateway.time, "time", return_value=at):
+                    return instance.handle(method, "/health/worker", {}, b"")
+            missing = probe(T0)
+            self.assertEqual((missing.status, missing.body), (503, b"unavailable"))
+            self.assertEqual(instance.handle("GET", "/healthz", {}, b"").status, 200)
+            beat = heartbeat.Beat(root / "data" / "worker" / "heartbeat.json")
+            beat.write(T0, {"scheduler": False})
+            self.assertEqual((probe(T0 + 30).status, probe(T0 + 30).body), (200, b"ok"))
+            self.assertEqual(probe(T0 + 301).status, 503)
+            self.assertEqual(probe(T0 - 31).status, 503)
+            for step in range(3):
+                beat.write(T0 + step, {"scheduler": True})
+            degraded = probe(T0 + 3)
+            self.assertEqual((degraded.status, degraded.body), (503, b"unavailable"))
+            self.assertNotIn(b"scheduler", degraded.body)
+            beat.write(T0 + 4, {"scheduler": False})
+            self.assertEqual(probe(T0 + 5).status, 200)
+            self.assertEqual(probe(T0 + 5, method="POST").status, 404)
 
 
 if __name__ == "__main__":
