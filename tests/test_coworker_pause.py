@@ -124,6 +124,66 @@ class StoreTests(unittest.TestCase):
                 self.assertTrue(state["paused"], "stale unpaused state must not grant authority")
                 self.assertIsNone(state["by"], "an untrusted read must be reported fail-closed")
 
+    def test_state_replaced_or_removed_during_decode_never_authorizes_stale_unpause(self):
+        # pause/resume atomically replace pause.json; a reader that already
+        # opened the old unpaused inode must not return stale authority.
+        original_loads = pause.json.loads
+        for mutation in ("replaced", "removed"):
+            with self.subTest(mutation=mutation), tempfile.TemporaryDirectory(dir=self.root) as tmp:
+                root = pathlib.Path(tmp)
+                store = pause.PauseStore(root)
+                store.resume("owner@client.example", NOW)
+                old_inode = (root / "pause.json").stat().st_ino
+                changed = False
+
+                def mutate_after_decode(raw):
+                    nonlocal changed
+                    document = original_loads(raw)
+                    if not changed:
+                        changed = True
+                        state = root / "pause.json"
+                        if mutation == "removed":
+                            state.unlink()
+                        else:
+                            replacement = root / "replacement.json"
+                            replacement.write_text('{"paused": true, "by": "owner@client.example"}',
+                                                   encoding="utf-8")
+                            replacement.chmod(0o600)
+                            os.replace(replacement, state)
+                            self.assertNotEqual(state.stat().st_ino, old_inode)
+                    return document
+
+                with mock.patch.object(pause.json, "loads", side_effect=mutate_after_decode):
+                    result = store.status()
+                self.assertTrue(changed, "the test must force the state transition")
+                self.assertTrue(result["paused"], "stale unpause must fail closed")
+                self.assertIsNone(result["by"], "a raced read must not report trusted authority")
+
+    def test_first_boot_state_appearing_during_missing_lookup_fails_closed(self):
+        with tempfile.TemporaryDirectory(dir=self.root) as tmp:
+            root = pathlib.Path(tmp)
+            state = root / "pause.json"
+            original_lstat = pathlib.Path.lstat
+            appeared = False
+
+            def create_pause_during_lookup(path):
+                nonlocal appeared
+                if path == state and not appeared:
+                    appeared = True
+                    state.write_text('{"paused": true, "by": "owner@client.example"}',
+                                     encoding="utf-8")
+                    state.chmod(0o600)
+                    raise FileNotFoundError("state was absent at the first lookup")
+                return original_lstat(path)
+
+            with mock.patch.object(pathlib.Path, "lstat", autospec=True,
+                                   side_effect=create_pause_during_lookup):
+                result = pause.PauseStore(root).status()
+            self.assertTrue(appeared)
+            self.assertTrue(result["paused"], "first-boot absence must not mask a new pause")
+            self.assertIsNone(result["by"])
+            self.assertTrue(pause.PauseStore(root).is_paused())
+
     def test_an_unreadable_or_malformed_state_fails_safe_as_paused(self):
         for bad in (b"{not json", b"[]", b'{"paused": "no"}', b""):
             (self.root / "pause.json").write_bytes(bad)
