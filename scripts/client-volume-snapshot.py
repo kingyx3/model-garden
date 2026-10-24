@@ -169,13 +169,13 @@ def snapshot(
         raise SnapshotError("operator host requires docker and age; no fallback to plaintext")
     assert_quiescent(project)
     owned = [(name, assert_volume_owner(project, name)) for name in volumes]
-    for name, _ in owned:
-        assert_volume_exclusive(project, name)
     parent = output.parent
     if parent.is_symlink() or not parent.is_dir() or parent.stat().st_mode & 0o022:
         raise SnapshotError("backup parent directory must exist, not be a symlink and not be group/world writable")
     if output.exists() or output.is_symlink():
         raise SnapshotError("snapshot destination must not exist (never overwrite prior evidence)")
+    for name, _ in owned:
+        assert_volume_exclusive(project, name)
     previous_umask = os.umask(0o077)
     try:
         output.mkdir(mode=0o700)
