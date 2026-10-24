@@ -110,6 +110,49 @@ class BackupScheduleTests(unittest.TestCase):
         self.assertIsNone(SCHEDULE._slot(dict(policy, expiresAt="2026-10-23T23:59:00Z"),
                                          moment))
 
+    def test_recurring_authorization_expires_during_grace_without_claim(self):
+        # A still-valid per-occurrence approval cannot extend the recurrence.
+        self.policy_doc["expiresAt"] = "2026-10-23T12:01:00Z"
+        self.write(self.policy, self.policy_doc)
+        before_expiry = dt.datetime(2026, 10, 23, 12, 0, 59,
+                                    tzinfo=dt.timezone.utc)
+        self.assertEqual(SCHEDULE._slot(self.policy_doc, before_expiry), self.slot)
+        at_expiry = dt.datetime(2026, 10, 23, 12, 1, tzinfo=dt.timezone.utc)
+        self.assertIsNone(SCHEDULE._slot(self.policy_doc, at_expiry))
+        self.assertIsNone(SCHEDULE._slot(self.policy_doc, at_expiry +
+                                         dt.timedelta(seconds=30)))
+        result, run = self.execute(now=at_expiry)
+        self.assertEqual(result["event"], "backup.schedule.skipped")
+        run.assert_not_called()
+        self.assertEqual(list((self.root / "claims").iterdir()), [])
+
+    def test_dispatch_before_policy_expiry_still_requires_approval(self):
+        self.policy_doc["expiresAt"] = "2026-10-23T12:01:00Z"
+        self.write(self.policy, self.policy_doc)
+        moment = dt.datetime(2026, 10, 23, 12, 0, 59,
+                             tzinfo=dt.timezone.utc)
+        result, run = self.execute(now=moment)
+        self.assertEqual(result["event"], "backup.schedule.dispatched")
+        run.assert_called_once()
+        # The same timer tick at expiry must skip even if the earlier
+        # invocation already claimed the slot and the occurrence is valid.
+        result, run = self.execute(now=moment + dt.timedelta(seconds=1))
+        self.assertEqual(result["event"], "backup.schedule.skipped")
+        run.assert_not_called()
+
+    def test_previous_day_grace_cannot_outlive_recurring_authorization(self):
+        policy = dict(self.policy_doc, hourUTC=23, minuteUTC=59,
+                      expiresAt="2026-10-24T00:01:00Z")
+        before = dt.datetime(2026, 10, 24, 0, 0, 59,
+                             tzinfo=dt.timezone.utc)
+        slot = dt.datetime(2026, 10, 23, 23, 59,
+                           tzinfo=dt.timezone.utc)
+        self.assertEqual(SCHEDULE._slot(policy, before), slot)
+        self.assertIsNone(SCHEDULE._slot(
+            policy, before + dt.timedelta(seconds=1)))
+        self.assertIsNone(SCHEDULE._slot(
+            policy, before + dt.timedelta(minutes=2)))
+
     def test_previous_utc_slot_across_year_boundary_and_timezone(self):
         policy = dict(self.policy_doc, validFrom="2026-12-30T00:00:00Z",
                       expiresAt="2027-01-03T00:00:00Z", weekdaysUTC=[3],
