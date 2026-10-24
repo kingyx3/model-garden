@@ -178,7 +178,8 @@ def _stopped(project: str, deadline: float) -> None:
 
 def run(*, compose: pathlib.Path, project: str, slug: str, environment: str,
         gcp_project: str, recipient: str, image: str, approval: pathlib.Path,
-        output_parent: pathlib.Path, confirm_project: str) -> dict:
+        output_parent: pathlib.Path, confirm_project: str,
+        not_after: dt.datetime | None = None) -> dict:
     if confirm_project != project or not IMAGE.fullmatch(image):
         raise WindowError("explicit exact-project confirmation and pinned helper image are required")
     if compose.is_symlink() or not compose.is_file() or compose.stat().st_mode & 0o022:
@@ -187,6 +188,16 @@ def run(*, compose: pathlib.Path, project: str, slug: str, environment: str,
     remaining = _approved(approval, project=project, slug=slug, environment=environment,
                           gcp_project=gcp_project, recipient=recipient,
                           now=dt.datetime.now(dt.timezone.utc))
+    # A scheduled occurrence cannot borrow time from its longer per-slot
+    # approval after the independently authorized recurrence has expired.
+    # Use a monotonic deadline so wall-clock changes cannot extend work.
+    if not_after is not None:
+        if not isinstance(not_after, dt.datetime) or not_after.tzinfo is None or \
+           not_after.utcoffset() is None:
+            raise WindowError("scheduled authorization deadline must be timezone-aware")
+        remaining = min(remaining, (not_after - dt.datetime.now(dt.timezone.utc)).total_seconds())
+        if remaining < MIN_REMAINING_SECONDS:
+            raise WindowError("scheduled authorization deadline is too close or expired")
     deadline = time.monotonic() + remaining
     with client_operation_lock.project_operation_lock(project):
         lock_fd = _lock(output_parent, project)
