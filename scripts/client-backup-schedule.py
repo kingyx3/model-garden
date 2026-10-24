@@ -80,7 +80,9 @@ def _slot(policy: dict, now: dt.datetime) -> dt.datetime | None:
     start, end = WINDOW._utc(policy["validFrom"]), WINDOW._utc(policy["expiresAt"])
     # A timer tick just after UTC midnight may belong to the previous day's
     # approved 23:55-23:59 slot. Use the SLOT date for weekday/approval/claim
-    # identity, never the execution date. The five-minute grace remains strict.\n    # Recurrence authorization must also remain active at execution time;\n    # a slot beginning before expiresAt cannot extend that authorization.
+    # identity, never the execution date. The five-minute grace remains strict.
+    # Recurrence authorization must also remain active at execution time;
+    # a slot beginning before expiresAt cannot extend that authorization.
     for day in (now.date(), (now - dt.timedelta(days=1)).date()):
         slot = dt.datetime.combine(
             day, dt.time(policy["hourUTC"], policy["minuteUTC"]), tzinfo=dt.timezone.utc
