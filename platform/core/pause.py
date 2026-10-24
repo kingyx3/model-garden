@@ -11,11 +11,14 @@ import json
 import os
 import pathlib
 import re
+import stat
 import tempfile
 from contextlib import contextmanager
 from typing import Any, Iterator
 
 FILE = "pause.json"
+LOCK_FILE = ".pause.lock"
+MAX_STATE_BYTES = 8192
 MAX_REASON = 300
 CONTROL = re.compile(r"[\x00-\x1f\x7f]+")
 HOLDING = "I am paused by my owner for now, so I cannot act on this. A person has been told and will pick it up."
@@ -25,29 +28,73 @@ def clean(reason: Any) -> str:
     return CONTROL.sub(" ", str(reason or "")).strip()[:MAX_REASON]
 
 
+def _private_regular(info: os.stat_result) -> bool:
+    """Require a single, private, current-UID-owned regular state/lock inode."""
+    return (stat.S_ISREG(info.st_mode) and info.st_nlink == 1
+            and info.st_uid == os.geteuid() and not info.st_mode & 0o077)
+
+
+def _fail_closed() -> dict[str, Any]:
+    return {"paused": True, "by": None, "at": None, "reason": "pause state unreadable (failing safe)"}
+
+
 class PauseStore:
     def __init__(self, root: str | os.PathLike[str]) -> None:
         self.root = pathlib.Path(root)
         self.path = self.root / FILE
 
     def status(self) -> dict[str, Any]:
-        """``{"paused": bool, "by", "at", "reason"}``; an unreadable or malformed file reports paused."""
+        """Read only a trusted, bounded state file; suspicious paths mean paused.
+
+        New workspaces have no pause file and start unpaused. Once a state or
+        lock path exists, however, a symlink, hardlink, foreign owner, permissive
+        mode, FIFO or invalid JSON cannot be used to impersonate an unpaused state.
+        """
         try:
-            raw = self.path.read_bytes()
+            root_info = self.root.lstat()
+            if not stat.S_ISDIR(root_info.st_mode) or root_info.st_mode & 0o022:
+                return _fail_closed()
         except FileNotFoundError:
             return {"paused": False}
         except OSError:
-            return {"paused": True, "by": None, "at": None, "reason": "pause state unreadable (failing safe)"}
+            return _fail_closed()
         try:
+            lock_info = (self.root / LOCK_FILE).lstat()
+            if not _private_regular(lock_info):
+                return _fail_closed()
+        except FileNotFoundError:
+            pass  # no transaction has run yet
+        except OSError:
+            return _fail_closed()
+        try:
+            path_info = self.path.lstat()
+        except FileNotFoundError:
+            # First-time tenant volumes start with no pause state at all.
+            return {"paused": False}
+        except OSError:
+            return _fail_closed()
+        try:
+            if not _private_regular(path_info):
+                return _fail_closed()
+            flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
+            with os.fdopen(os.open(self.path, flags), "rb") as source:
+                opened = os.fstat(source.fileno())
+                if (not _private_regular(opened) or
+                        (opened.st_dev, opened.st_ino) != (path_info.st_dev, path_info.st_ino)):
+                    return _fail_closed()
+                raw = source.read(MAX_STATE_BYTES + 1)
+            if len(raw) > MAX_STATE_BYTES:
+                return _fail_closed()
             document = json.loads(raw)
             if not isinstance(document, dict) or not isinstance(document.get("paused"), bool):
-                raise ValueError("shape")
-        except ValueError:
-            return {"paused": True, "by": None, "at": None, "reason": "pause state unreadable (failing safe)"}
+                return _fail_closed()
+        except (OSError, ValueError, UnicodeError):
+            # A file that disappears *after* lstat is suspicious, not fresh.
+            return _fail_closed()
         if not document["paused"]:
             return {"paused": False, "by": document.get("by"), "at": document.get("at")}
         found = {"paused": True, "by": document.get("by"), "at": document.get("at"), "reason": clean(document.get("reason"))}
-        for key in ("cause", "window"):  # set only by a system-initiated pause (the monthly spend cap); an owner's pause has neither
+        for key in ("cause", "window"):
             if isinstance(document.get(key), str):
                 found[key] = clean(document[key])[:40]
         return found
@@ -63,9 +110,17 @@ class PauseStore:
         Readers need no lock because _write atomically replaces pause.json.
         """
         self.root.mkdir(parents=True, exist_ok=True, mode=0o700)
-        descriptor = os.open(self.root / ".pause.lock", os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+        root_info = self.root.lstat()
+        if not stat.S_ISDIR(root_info.st_mode) or root_info.st_mode & 0o022:
+            raise OSError("pause governance directory is untrusted")
+        flags = os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW | os.O_NONBLOCK
+        descriptor = os.open(self.root / LOCK_FILE, flags, 0o600)
         try:
+            if not _private_regular(os.fstat(descriptor)):
+                raise OSError("pause transaction lock is untrusted")
             fcntl.flock(descriptor, fcntl.LOCK_EX)
+            if not _private_regular(os.fstat(descriptor)):
+                raise OSError("pause transaction lock changed")
             yield
         finally:
             os.close(descriptor)
@@ -94,7 +149,10 @@ class PauseStore:
         with self._transaction():
             # Re-check while holding the lock: a worker may have imposed a cap
             # between the caller's last read and this transition.
-            if self.status().get("cause") == "spend-cap":
+            state = self.status()
+            if state["paused"] and state.get("by") is None:
+                raise ValueError("untrusted pause state; operator must repair it before controls resume")
+            if state.get("cause") == "spend-cap":
                 raise ValueError("monthly spend cap is active; operator pause cannot replace it")
             extra = {key: value for key, value in (("cause", cause), ("window", window)) if value}
             self._write({"paused": True, "by": by, "at": int(now), "reason": clean(reason), **extra})
@@ -105,7 +163,10 @@ class PauseStore:
         if not by:
             raise ValueError("who is resuming is required")
         with self._transaction():
-            if self.status().get("cause") == "spend-cap":
+            state = self.status()
+            if state["paused"] and state.get("by") is None:
+                raise ValueError("untrusted pause state; operator must repair it before controls resume")
+            if state.get("cause") == "spend-cap":
                 raise ValueError("monthly spend cap is active; wait for metering reconciliation")
             self._write({"paused": False, "by": by, "at": int(now)})
             return self.status()

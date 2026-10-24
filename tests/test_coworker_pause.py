@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 import pathlib
 import re
 import subprocess
@@ -57,6 +58,104 @@ class StoreTests(unittest.TestCase):
         (self.root / "pause.json").unlink()
         (self.root / "pause.json").mkdir()  # a directory cannot be read as a file
         self.assertTrue(pause.PauseStore(self.root).is_paused())
+
+    def test_pause_reader_refuses_untrusted_false_state_without_following_links(self):
+        # A valid-looking 'paused: false' must never override a safety hold
+        # through an externally controlled symlink, hardlink or public file.
+        for tamper in ("symlink", "dangling", "hardlink", "permissive", "fifo", "oversized"):
+            with self.subTest(tamper=tamper), tempfile.TemporaryDirectory(dir=self.root) as tmp:
+                root = pathlib.Path(tmp)
+                state = root / "pause.json"
+                forged = root / "external.json"
+                forged.write_text('{"paused": false}', encoding="utf-8")
+                forged.chmod(0o600)
+                if tamper == "symlink":
+                    state.symlink_to(forged)
+                elif tamper == "dangling":
+                    state.symlink_to(root / "missing.json")
+                elif tamper == "hardlink":
+                    os.link(forged, state)
+                elif tamper == "permissive":
+                    state.write_text('{"paused": false}', encoding="utf-8")
+                    state.chmod(0o644)
+                elif tamper == "fifo":
+                    os.mkfifo(state)
+                else:
+                    state.write_text('{"paused": false}' + " " * 10000, encoding="utf-8")
+                    state.chmod(0o600)
+                self.assertTrue(pause.PauseStore(root).is_paused(), tamper)
+
+    def test_pause_state_disappearing_after_inspection_fails_closed(self):
+        store = pause.PauseStore(self.root)
+        store.pause("owner@client.example", "incident", NOW)
+        # A removed file during the reader's open is not an untouched new
+        # workspace; it must not be confused with the initial missing state.
+        with mock.patch.object(pause.os, "open", side_effect=FileNotFoundError("vanished")):
+            self.assertTrue(store.is_paused())
+
+    def test_pause_reader_rejects_untrusted_parent_and_foreign_state_owner(self):
+        with tempfile.TemporaryDirectory(dir=self.root) as tmp:
+            root = pathlib.Path(tmp)
+            pause.PauseStore(root).resume("owner@client.example", NOW)
+            alias = self.root / "fake-governance-root"
+            alias.symlink_to(root, target_is_directory=True)
+            try:
+                self.assertTrue(pause.PauseStore(alias).is_paused())
+                with self.assertRaises(OSError):
+                    pause.PauseStore(alias).resume("owner@client.example", NOW + 1)
+            finally:
+                alias.unlink()
+            with mock.patch.object(pause.os, "geteuid", return_value=os.geteuid() + 1):
+                self.assertTrue(pause.PauseStore(root).is_paused())
+
+    def test_untrusted_state_cannot_be_replaced_by_a_normal_resume_or_pause(self):
+        # Read-side deny is not enough: a valid admin command must not turn a
+        # corrupt/linked state with an unknown cap cause into an unpaused state.
+        for damaged in ("invalid-json", "symlink"):
+            with self.subTest(damaged=damaged), tempfile.TemporaryDirectory(dir=self.root) as tmp:
+                root = pathlib.Path(tmp)
+                store = pause.PauseStore(root)
+                store.pause("runtime:worker", "monthly cap", NOW,
+                            cause="spend-cap", window="2027-01")
+                state = root / "pause.json"
+                state.unlink()
+                if damaged == "invalid-json":
+                    state.write_bytes(b"{broken")
+                    state.chmod(0o600)
+                else:
+                    outside = root / "external.json"
+                    outside.write_text('{"paused": false}', encoding="utf-8")
+                    outside.chmod(0o600)
+                    state.symlink_to(outside)
+                for method in ("pause", "resume"):
+                    with self.subTest(method=method), self.assertRaisesRegex(ValueError, "untrusted"):
+                        if method == "pause":
+                            store.pause("owner@client.example", "override", NOW + 1)
+                        else:
+                            store.resume("owner@client.example", NOW + 1)
+                self.assertTrue(store.is_paused())
+
+    def test_untrusted_lock_fails_closed_and_blocks_state_changes(self):
+        for tamper in ("symlink", "hardlink", "permissive", "fifo"):
+            with self.subTest(tamper=tamper), tempfile.TemporaryDirectory(dir=self.root) as tmp:
+                root = pathlib.Path(tmp)
+                store = pause.PauseStore(root)
+                store.pause("owner@client.example", "incident", NOW)
+                lock = root / ".pause.lock"
+                if tamper == "symlink":
+                    lock.rename(root / "backing.lock")
+                    lock.symlink_to(root / "backing.lock")
+                elif tamper == "hardlink":
+                    os.link(lock, root / "other-lock")
+                elif tamper == "permissive":
+                    lock.chmod(0o666)
+                else:
+                    lock.unlink()
+                    os.mkfifo(lock)
+                self.assertTrue(store.is_paused())
+                with self.assertRaises(OSError):
+                    store.resume("owner@client.example", NOW + 1)
+                self.assertTrue(store.is_paused())
 
     def test_manual_resume_or_repause_racing_worker_cannot_erase_spend_cap(self):
         # A manual command has already checked the old state, then the worker
