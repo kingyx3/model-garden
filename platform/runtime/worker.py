@@ -620,8 +620,9 @@ class Worker:
             # The worker alone reconciles a cap pause after confirming usage is
             # below the *current* limit (a new month or an approved cap increase).
             # An owner resume/repause cannot erase this hold between worker passes.
-            if store.clear_spend_cap(now, expected_window=state["window"]):
-                self.audit("spend.cap-cleared", IDENTITY, {"window": window, "previousWindow": state["window"]})
+            cap_window = state.get("window")
+            if isinstance(cap_window, str) and store.clear_spend_cap(now, expected_window=cap_window):
+                self.audit("spend.cap-cleared", IDENTITY, {"window": window, "previousWindow": cap_window})
                 state = {"paused": False}
         told = 0
         for threshold in settings["warnAtPercent"]:
