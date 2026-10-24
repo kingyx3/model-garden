@@ -537,11 +537,17 @@ class Gateway:
         """``pause coworker [reason]`` / ``resume coworker`` from a mapped admin: the state is written, then ledgered with who and why."""
         pause = _module("pause")
         store, now = pause.PauseStore(self.data), int(self.clock())
-        if verb == "pause":
-            status = store.pause(admin, reason, now)
-            self.audit("coworker.pause", admin, {"reason": status.get("reason", ""), "via": "chat", "at": now})
-            return "Paused. I will not act on anything that changes something until an administrator says `resume coworker`."
-        store.resume(admin, now)
+        try:
+            if verb == "pause":
+                status = store.pause(admin, reason, now)
+                self.audit("coworker.pause", admin, {"reason": status.get("reason", ""), "via": "chat", "at": now})
+                return "Paused. I will not act on anything that changes something until an administrator says `resume coworker`."
+            store.resume(admin, now)
+        except ValueError:
+            # The metering worker owns its cap hold: an owner cannot disguise
+            # the cap as a manual pause or temporarily resume it in chat.
+            self.audit("coworker.pause-denied", admin, {"via": "chat", "at": now, "reason": "spend-cap-active"})
+            return "Still paused by the monthly spend cap. An operator must increase the cap or wait for the next month."
         self.audit("coworker.resume", admin, {"via": "chat", "at": now})
         return "Resumed. I am working normally again."
 
