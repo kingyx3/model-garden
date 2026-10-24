@@ -299,10 +299,13 @@ class GcsSink:
     def _list(self, kind: str, start: str = "") -> list[str]:
         names: list[str] = []
         token = ""
+        # A GCS prefix is not a directory: "records" also matches "records-shadow".
+        # The slash must be part of the server-side prefix and start offset.
+        folder = self._name(kind, "") + "/"
         while True:
-            query = {"prefix": self._name(kind, "")}
+            query = {"prefix": folder}
             if start:
-                query["startOffset"] = self._name(kind, start)
+                query["startOffset"] = folder + start
             if token:
                 query["pageToken"] = token
             url = f"https://storage.googleapis.com/storage/v1/b/{self.bucket}/o?" + urllib.parse.urlencode(query)
@@ -310,7 +313,11 @@ class GcsSink:
             if status != 200:
                 raise LedgerExportError(f"GCS listing refused with status {status}")
             page = json.loads(raw)
-            names.extend(item["name"] for item in page.get("items", []))
+            for item in page.get("items", []):
+                name = item.get("name") if isinstance(item, dict) else None
+                if not isinstance(name, str) or not name.startswith(folder):
+                    raise LedgerExportError("GCS listing returned an object outside the requested ledger namespace")
+                names.append(name)
             token = page.get("nextPageToken", "")
             if not token:
                 return sorted(names)
@@ -447,6 +454,10 @@ def verify_export(
     by_sequence = {record["sequence"]: record for record in exported if isinstance(record.get("sequence"), int)}
     exported_head = max(by_sequence, default=0)
     local_head = local[-1]["sequence"] if local else 0
+    if local and not exported:
+        # No baseline means there is no independent chain to verify. Optional lag
+        # thresholds apply only after at least one record has been exported.
+        problems.append("no exported records for nonempty local ledger")
     # The chain starts at the first chained record (legacy records may precede it).
     first = local[0]["sequence"] if local else min(by_sequence, default=1)
     chain_problems, gaps = _exported_chain_problems(exported, first)
