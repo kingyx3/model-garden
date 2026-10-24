@@ -68,6 +68,12 @@ class PauseStore:
             return _fail_closed()
         try:
             path_info = self.path.lstat()
+        except FileNotFoundError:
+            # First-time tenant volumes start with no pause state at all.
+            return {"paused": False}
+        except OSError:
+            return _fail_closed()
+        try:
             if not _private_regular(path_info):
                 return _fail_closed()
             flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
@@ -82,10 +88,8 @@ class PauseStore:
             document = json.loads(raw)
             if not isinstance(document, dict) or not isinstance(document.get("paused"), bool):
                 return _fail_closed()
-        except FileNotFoundError:
-            # First-time tenant volumes start with no pause state at all.
-            return {"paused": False}
         except (OSError, ValueError, UnicodeError):
+            # A file that disappears *after* lstat is suspicious, not fresh.
             return _fail_closed()
         if not document["paused"]:
             return {"paused": False, "by": document.get("by"), "at": document.get("at")}
