@@ -66,6 +66,18 @@ def _private_json(path: pathlib.Path) -> dict:
     return doc
 
 
+def _approval_token(path: pathlib.Path) -> tuple[int, ...]:
+    """Pin the operator's private approval inode and mutation metadata."""
+    try:
+        info = path.lstat()
+    except OSError as exc:
+        raise WindowError("backup approval is missing or revoked") from exc
+    if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or \
+       info.st_uid != os.geteuid() or info.st_mode & 0o077:
+        raise WindowError("backup approval must be an owned, private, unlinked regular file")
+    return (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+
+
 def _utc(value: str) -> dt.datetime:
     if not isinstance(value, str):
         raise WindowError("approval times must be UTC seconds with Z suffix")
@@ -185,9 +197,20 @@ def run(*, compose: pathlib.Path, project: str, slug: str, environment: str,
     if compose.is_symlink() or not compose.is_file() or compose.stat().st_mode & 0o022:
         raise WindowError("Compose input must be a regular, non-writable-by-others file")
     _private_dir(output_parent)
-    remaining = _approved(approval, project=project, slug=slug, environment=environment,
-                          gcp_project=gcp_project, recipient=recipient,
-                          now=dt.datetime.now(dt.timezone.utc))
+    bindings = dict(project=project, slug=slug, environment=environment,
+                    gcp_project=gcp_project, recipient=recipient)
+    approval_token = _approval_token(approval)
+    remaining = _approved(approval, **bindings, now=dt.datetime.now(dt.timezone.utc))
+    if _approval_token(approval) != approval_token:
+        raise WindowError("backup approval changed during initial validation")
+
+    def ensure_approved() -> None:
+        # Stage-boundary check only: this cannot revoke an in-flight cloud write.
+        if _approval_token(approval) != approval_token:
+            raise WindowError("backup approval was replaced or modified")
+        _approved(approval, **bindings, now=dt.datetime.now(dt.timezone.utc))
+        if _approval_token(approval) != approval_token:
+            raise WindowError("backup approval changed while being validated")
     # A scheduled occurrence cannot borrow time from its longer per-slot
     # approval after the independently authorized recurrence has expired.
     # Use a monotonic deadline so wall-clock changes cannot extend work.
@@ -203,21 +226,25 @@ def run(*, compose: pathlib.Path, project: str, slug: str, environment: str,
         lock_fd = _lock(output_parent, project)
         try:
             _stopped(project, deadline)
+            ensure_approved()
             snapshot_script = ROOT / "scripts" / "client-volume-snapshot.py"
             upload_script = ROOT / "scripts" / "client-backup-upload.py"
             _run([sys.executable, str(snapshot_script), "inventory", "--compose", str(compose),
                   "--project", project], _remaining(deadline))
             _stopped(project, deadline)
+            ensure_approved()
             run_id = f"{project}-{int(time.time())}-{secrets.token_hex(5)}"
             destination = output_parent / run_id
             _run([sys.executable, str(snapshot_script), "snapshot", "--compose", str(compose),
                   "--project", project, "--output", str(destination), "--recipient", recipient,
                   "--image", image], _remaining(deadline))
             _stopped(project, deadline)
+            ensure_approved()
             _run([sys.executable, str(upload_script), "--compose", str(compose), "--project", project,
                   "--source", str(destination), "--gcp-project-id", gcp_project,
                   "--client-slug", slug, "--environment", environment], _remaining(deadline))
             _stopped(project, deadline)
+            ensure_approved()
             _remaining(deadline)
             return {"event": "backup.window.completed", "clientProject": project,
                     "status": "uploaded-not-recovery-proven", "runId": run_id}
