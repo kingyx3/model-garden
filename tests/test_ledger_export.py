@@ -73,6 +73,19 @@ class ExportTests(unittest.TestCase):
             self.assertTrue(report["ok"], report["problems"])
             self.assertEqual((report["localChainedEvents"], report["exportedRecords"]), (5, 5))
 
+    def test_nonempty_local_ledger_without_any_export_fails_verification(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ws = Workspace(tmp)
+            write_ledger(ws.ledger, 2)
+            report = export.verify_export(ws.ledger, ws.sink)
+            self.assertFalse(report["ok"])
+            self.assertIn("no exported records for nonempty local ledger", report["problems"])
+
+    def test_empty_ledger_and_empty_sink_are_a_valid_first_boot_state(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ws = Workspace(tmp)
+            self.assertTrue(export.verify_export(ws.ledger, ws.sink)["ok"])
+
     def test_export_is_incremental_and_rerunnable(self):
         with tempfile.TemporaryDirectory() as tmp:
             ws = Workspace(tmp)

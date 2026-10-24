@@ -109,6 +109,26 @@ class GcsSinkTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 export.GcsSink(bucket, lambda: "t", prefix=prefix, http=self.api)
 
+    def test_sibling_prefix_objects_cannot_poison_a_valid_client_export(self):
+        sink = self.sink(prefix="acme/prod")
+        export.export_ledger(self.ledger, sink, self.root / "state.json")
+        self.api.objects["acme/prod/records-shadow/bogus.json"] = b"not json"
+        self.api.objects["acme/prod/heads-shadow/bogus.json"] = b"not json"
+        self.assertTrue(export.verify_export(self.ledger, sink)["ok"])
+
+    def test_shadow_prefix_cannot_substitute_for_missing_real_export(self):
+        sink = self.sink(prefix="acme/prod")
+        export.export_ledger(self.ledger, sink, self.root / "state.json")
+        self.api.objects = {
+            name.replace("/records/", "/records-shadow/").replace("/heads/", "/heads-shadow/"): data
+            for name, data in self.api.objects.items()
+        }
+        self.assertEqual(sink.records(), [])
+        self.assertEqual(sink.heads(), [])
+        report = export.verify_export(self.ledger, sink)
+        self.assertFalse(report["ok"])
+        self.assertIn("no exported records for nonempty local ledger", report["problems"])
+
     def test_the_export_identity_is_minted_by_impersonation_and_must_be_a_service_account(self):
         base = export.metadata_token(self.api)
         token = export.impersonated_token(SA, base, scope="https://www.googleapis.com/auth/devstorage.read_write", http=self.api)
