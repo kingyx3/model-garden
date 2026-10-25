@@ -91,6 +91,41 @@ class VoiceNativeHealthTests(unittest.TestCase):
             self.assertFalse(VOICE._health("client-dev", [], {}, timeout=10))
         sleep.assert_not_called()
 
+    def test_declared_governed_service_missing_does_not_count_as_ready(self):
+        expected = {"hermes": True, "voice": True, "governed-tools": True, "governed-worker": True}
+        # A healthy voice container cannot hide a missing governed Tool or worker.
+        for absent in ("governed-tools", "governed-worker"):
+            with self.subTest(absent=absent):
+                rows = [service(name) for name in expected if name != absent]
+                with mock.patch.object(VOICE, "_run", return_value=ps(*rows)), \
+                     mock.patch.object(VOICE.time, "monotonic", side_effect=[0, 1, 2]), \
+                     mock.patch.object(VOICE.time, "sleep"):
+                    self.assertFalse(VOICE._health("client-dev", [], {}, timeout=2, required_services=expected))
+
+    def test_declared_worker_unhealthy_or_without_health_is_not_ready(self):
+        expected = {"hermes": True, "voice": True, "governed-worker": True}
+        for health in ("unhealthy", ""):
+            with self.subTest(health=health):
+                rows = [service("hermes"), service("voice"), service("governed-worker", health=health)]
+                with mock.patch.object(VOICE, "_run", return_value=ps(*rows)), \
+                     mock.patch.object(VOICE.time, "monotonic", side_effect=[0, 1, 2]), \
+                     mock.patch.object(VOICE.time, "sleep"):
+                    self.assertFalse(VOICE._health("client-dev", [], {}, timeout=2, required_services=expected))
+
+    def test_declared_optional_services_are_checked_but_absent_optional_is_allowed(self):
+        expected = {"hermes": True, "voice": True, "governed-tools": True}
+        rows = [service("hermes"), service("voice"), service("governed-tools")]
+        with mock.patch.object(VOICE, "_run", return_value=ps(*rows)), \
+             mock.patch.object(VOICE.time, "monotonic", side_effect=[0, 1]):
+            self.assertTrue(VOICE._health("client-dev", [], {}, timeout=10, required_services=expected))
+        # Duplicate Compose service records must not masquerade as one healthy service.
+        rows.append(service("voice", health="starting"))
+        with mock.patch.object(VOICE, "_run", return_value=ps(*rows)), \
+             mock.patch.object(VOICE.time, "monotonic", side_effect=[0, 1]), \
+             mock.patch.object(VOICE.time, "sleep") as sleep:
+            self.assertFalse(VOICE._health("client-dev", [], {}, timeout=10, required_services=expected))
+        sleep.assert_not_called()
+
     def test_compose_json_lines_and_invalid_output_fail_closed(self):
         rows = [service("hermes"), service("voice")]
         ndjson = "\n".join(json.dumps(row) for row in rows)
@@ -126,8 +161,10 @@ class VoiceNativeHealthTests(unittest.TestCase):
                  mock.patch.object(VOICE, "transcript_environment", return_value={}), \
                  mock.patch.object(VOICE, "_context", return_value=bundle), \
                  mock.patch.object(VOICE, "_run", side_effect=record), \
-                 mock.patch.object(VOICE, "_health", return_value=True):
+                 mock.patch.object(VOICE, "_health", return_value=True) as health:
                 VOICE._apply_selected_voice(binding, binding["spec"]["channels"]["voice"], bundle, "client-dev", None, 10)
+            self.assertEqual(health.call_args.kwargs["required_services"],
+                             {"hermes": True, "governed-tools": False, "voice": True})
             self.assertEqual(len(captured), 1)
             voice = captured[0]["services"]["voice"]
             self.assertEqual(voice["healthcheck"], VOICE.voice_healthcheck())
