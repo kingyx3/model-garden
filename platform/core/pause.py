@@ -146,6 +146,18 @@ class PauseStore:
         return bool(self.status()["paused"])
 
     @contextmanager
+    def effect_guard(self) -> Iterator[None]:
+        """Serialize a governed material effect with owner pause/resume.
+
+        An already admitted effect finishes before a pause is acknowledged.
+        A new effect must acquire the same trusted local lock and recheck the
+        pause state while holding it. This is host-local and cooperative:
+        it cannot cancel cloud writes or protect independent remote workers.
+        """
+        with self._transaction():
+            yield
+
+    @contextmanager
     def _transaction(self) -> Iterator[tuple[int, os.stat_result]]:
         """Hold the trusted mount and lock inode for a complete state transition.
 
