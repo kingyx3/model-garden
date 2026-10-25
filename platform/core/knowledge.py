@@ -274,7 +274,8 @@ def availability(
     return None
 
 
-def source_state(spec: Mapping[str, Any], *, agent: str | None = None, today: dt.date | None = None) -> str:
+def source_state(spec: Mapping[str, Any], *, agent: str | None = None, today: dt.date | None = None,
+                 access: str = "member") -> str:
     """Whether one KnowledgeSource declaration may ground answers for an Agent, without reading its file.
 
     ``usable`` or the reason it is not: ``draft``, ``retired``, ``not-yet-effective``,
@@ -288,7 +289,7 @@ def source_state(spec: Mapping[str, Any], *, agent: str | None = None, today: dt
         {"status": spec.get("status", "draft"), "effectiveDate": spec.get("effectiveDate"),
          "reviewBy": spec.get("reviewBy"), "audiences": spec.get("audiences", []),
          "classification": spec.get("classification", "internal")},
-        agent=agent, today=today, access="member",
+        agent=agent, today=today, access=access,
     )
     return "usable" if reason is None else reason.removeprefix("source-")
 
