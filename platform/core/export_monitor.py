@@ -35,11 +35,12 @@ from typing import Any
 
 SCHEMA_VERSION = 1
 DEFAULT_REMINDER_SECONDS = 6 * 3600
-CONDITIONS = ("export-integrity", "export-lag", "export-stale")
+CONDITIONS = ("export-integrity", "export-failure", "export-lag", "export-stale")
 _PERSON = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:@/+-]{0,127}$")
 Audit = Callable[[str, str, dict[str, Any]], Any]
 _ACTIONS = {
     "export-integrity": "the exported audit trail cannot be trusted until a person checks it: run the ledger export verifier, compare with the local ledger and restore from a known-good copy if needed",
+    "export-failure": "cannot confirm that ledger export completed: inspect the export job and approved sink, then verify the exported chain independently",
     "export-lag": "the exporter is falling behind: check that the export job is running and can reach its sink",
     "export-stale": "events are waiting and the export has not run recently: check the export job and its credentials, then run it",
 }
@@ -47,6 +48,8 @@ _ACTIONS = {
 
 def classify(problem: str) -> str:
     """Which condition one ``verify_export`` problem line belongs to."""
+    if problem.startswith("export failure"):
+        return "export-failure"
     if problem.startswith("export lag"):
         return "export-lag"
     if problem.startswith("export stale"):
@@ -118,6 +121,10 @@ class ExportMonitor:
         active: dict[str, list[str]] = {}
         for problem in report.get("problems", []):
             active.setdefault(classify(str(problem)), []).append(str(problem))
+        # A verifier can fail without producing a detailed problem line. Never
+        # turn that incomplete result into a healthy/recovered notification.
+        if report.get("ok") is False and not active:
+            active["export-failure"] = ["export failure: verifier reported an unsuccessful check"]
         lag = int(report.get("lagEvents") or 0)
         notices: list[dict[str, Any]] = []
         started: list[str] = []
