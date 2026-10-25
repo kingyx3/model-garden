@@ -535,6 +535,176 @@ class BoundaryTests(unittest.TestCase):
         self.assertFalse(runtime_module.GovernedToolRuntime(self.root / "desired.json", other / "audit.jsonl", other / "approvals", environ={})._paused_for("crm.create"))
 
 
+    def test_owner_pause_waits_for_inflight_governed_effect_and_denies_new_effects(self):
+        # A pause must not acknowledge while an already admitted side effect is
+        # still running. Once acknowledged, no subsequent effect may start.
+        entered, release, paused = threading.Event(), threading.Event(), threading.Event()
+        effects, failures, results = [], [], []
+        arguments = {
+            "objectType": "contact", "objectId": "unmatched", "interactionType": "call",
+            "channel": "voice", "direction": "inbound", "timestamp": "2026-10-20T10:00:00+08:00",
+            "summary": "Synthetic call for pause-race testing",
+        }
+
+        def executor(_arguments):
+            entered.set()
+            if not release.wait(5):
+                raise TimeoutError("test did not release the in-flight effect")
+            effects.append("completed")
+            return {"externalObjectRef": "built-in-crm:interaction/test"}
+
+        def write():
+            try:
+                results.append(self.runtime._execute("crm.log-interaction", arguments, executor, tier=0))
+            except BaseException as exc:
+                failures.append(exc)
+
+        def owner_pause():
+            try:
+                pause.PauseStore(self.root).pause("owner@client.example", "incident", NOW)
+            except BaseException as exc:
+                failures.append(exc)
+            finally:
+                paused.set()
+
+        writing = threading.Thread(target=write, daemon=True)
+        stopping = threading.Thread(target=owner_pause, daemon=True)
+        writing.start()
+        try:
+            self.assertTrue(entered.wait(3), "governed executor was not entered")
+            stopping.start()
+            self.assertFalse(paused.wait(0.15), "pause must wait for the admitted effect to finish")
+        finally:
+            release.set()
+            writing.join(5)
+            if stopping.ident is not None:
+                stopping.join(5)
+        self.assertFalse(writing.is_alive())
+        self.assertFalse(stopping.is_alive())
+        self.assertEqual(failures, [])
+        self.assertEqual(effects, ["completed"])
+        self.assertEqual(results[0]["status"], "executed")
+        self.assertTrue(paused.is_set())
+        self.assertTrue(pause.PauseStore(self.root).is_paused())
+        with self.assertRaisesRegex(PermissionError, "paused by its owner"):
+            self.runtime._execute("crm.log-interaction", arguments, lambda _: effects.append("late"), tier=0)
+        self.assertEqual(effects, ["completed"])
+        self.assertEqual(self.events()[-1]["details"]["reason"], "coworker-paused")
+
+    def test_concurrent_admitted_effects_share_the_read_lease_before_pause(self):
+        # The pause fence must not serialize independent provider calls.
+        # An exclusive owner pause waits until *both* admitted effects finish.
+        entered = [threading.Event(), threading.Event()]
+        release, paused = threading.Event(), threading.Event()
+        results, failures = [], []
+        arguments = {
+            "objectType": "contact", "objectId": "unmatched", "interactionType": "call",
+            "channel": "voice", "direction": "inbound", "timestamp": "2026-10-20T10:00:00+08:00",
+        }
+
+        def write(index):
+            def executor(_):
+                entered[index].set()
+                if not release.wait(5):
+                    raise TimeoutError("test did not release the admitted effect")
+                return {"externalObjectRef": f"built-in-crm:interaction/{index}"}
+            try:
+                results.append(self.runtime._execute("crm.log-interaction",
+                               {**arguments, "summary": f"Synthetic call {index}"}, executor, tier=0))
+            except BaseException as exc:
+                failures.append(exc)
+
+        def owner_pause():
+            try:
+                pause.PauseStore(self.root).pause("owner@client.example", "incident", NOW)
+            except BaseException as exc:
+                failures.append(exc)
+            finally:
+                paused.set()
+
+        writers = [threading.Thread(target=write, args=(i,), daemon=True) for i in range(2)]
+        stopping = threading.Thread(target=owner_pause, daemon=True)
+        for writer in writers:
+            writer.start()
+        try:
+            self.assertTrue(all(event.wait(3) for event in entered), "both governed effects must be admitted concurrently")
+            stopping.start()
+            self.assertFalse(paused.wait(0.15), "owner pause cannot acknowledge while effects remain")
+        finally:
+            release.set()
+            for writer in writers:
+                writer.join(5)
+            if stopping.ident is not None:
+                stopping.join(5)
+        self.assertTrue(all(not writer.is_alive() for writer in writers))
+        self.assertFalse(stopping.is_alive())
+        self.assertEqual(failures, [])
+        self.assertEqual([result["status"] for result in results], ["executed", "executed"])
+        self.assertTrue(pause.PauseStore(self.root).is_paused())
+
+    def test_write_queued_behind_owner_pause_cannot_run_after_pause(self):
+        # Force a pause transaction to hold the lock before the write arrives.
+        store = pause.PauseStore(self.root)
+        original_write = store._write
+        ready, release, finished = threading.Event(), threading.Event(), threading.Event()
+        effects, failures = [], []
+
+        def delayed_write(document, *transaction):
+            ready.set()
+            if not release.wait(5):
+                raise TimeoutError("test did not release the pause transition")
+            return original_write(document, *transaction)
+
+        def owner_pause():
+            try:
+                store.pause("owner@client.example", "incident", NOW)
+            except BaseException as exc:
+                failures.append(exc)
+
+        def attempt():
+            try:
+                self.runtime._execute("crm.log-interaction", {"summary": "Synthetic"},
+                                      lambda _: effects.append("unauthorized"), tier=0)
+            except PermissionError:
+                pass
+            except BaseException as exc:
+                failures.append(exc)
+            finally:
+                finished.set()
+
+        stopping = threading.Thread(target=owner_pause, daemon=True)
+        writing = threading.Thread(target=attempt, daemon=True)
+        with mock.patch.object(store, "_write", side_effect=delayed_write):
+            stopping.start()
+            try:
+                self.assertTrue(ready.wait(3))
+                writing.start()
+                self.assertFalse(finished.wait(0.15), "material write must wait for the pause transition")
+            finally:
+                release.set()
+                stopping.join(5)
+                if writing.ident is not None:
+                    writing.join(5)
+        self.assertFalse(stopping.is_alive())
+        self.assertFalse(writing.is_alive())
+        self.assertEqual(failures, [])
+        self.assertEqual(effects, [])
+        self.assertEqual(self.events()[-1]["details"]["reason"], "coworker-paused")
+
+    def test_untrusted_pause_transaction_lock_fails_closed_before_effect(self):
+        store = pause.PauseStore(self.root)
+        store.resume("owner@client.example", NOW)
+        lock = self.root / ".pause.lock"
+        lock.rename(self.root / "detached.lock")
+        lock.symlink_to(self.root / "detached.lock")
+        effects = []
+        with self.assertRaises(OSError):
+            self.runtime._execute("crm.log-interaction", {"summary": "Synthetic"},
+                                  lambda _: effects.append("unauthorized"), tier=0)
+        self.assertEqual(effects, [])
+
+
+
 class WorkerTests(worker_tests.Case):
     def test_scheduled_event_mailbox_and_crm_work_start_nothing_while_paused_and_resume_afterwards(self):
         runtime = self.make({"mailbox": {"addresses": ["help@acme.example"], "trustedAuthservId": "mx.acme.example", "owner": "owner@acme.example"}, "owners": {"owner@acme.example": ["kb.search"]}}, coworker=object())
