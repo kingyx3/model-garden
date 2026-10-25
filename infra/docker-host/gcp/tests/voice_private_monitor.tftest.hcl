@@ -29,6 +29,13 @@ run "rejects_voice_without_authorized_channels" {
 
 run "valid_private_voice_monitor_without_public_gateway" {
   command = plan
+  override_resource {
+    target          = google_compute_instance.runtime
+    override_during = plan
+    values = {
+      instance_id = "123456789"
+    }
+  }
   variables {
     voice_private_alert_enabled          = true
     gateway_uptime_notification_channels = ["projects/sample-project-123/notificationChannels/123"]
