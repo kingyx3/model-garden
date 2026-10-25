@@ -41,6 +41,18 @@ def _private_owned(path: pathlib.Path, *, directory: bool) -> None:
         raise ScheduleError("schedule paths must be private, owned, and not symlinks")
 
 
+def _recurrence_token(path: pathlib.Path) -> tuple[int, ...]:
+    """Pin both the schedule directory and its private policy file.
+
+    A pathname is not an authorization: a replaced or revoked inode must
+    never authorize later backup stages, even if its JSON is identical.
+    """
+    _private_owned(path.parent, directory=True)
+    _private_owned(path, directory=False)
+    parent = path.parent.lstat()
+    return (parent.st_dev, parent.st_ino, *WINDOW._approval_token(path))
+
+
 def _policy(path: pathlib.Path, *, project: str, slug: str, environment: str,
             gcp_project: str, recipient: str) -> dict:
     _private_owned(path.parent, directory=True)
@@ -126,11 +138,28 @@ def dispatch(*, schedule: pathlib.Path, approvals: pathlib.Path, claims: pathlib
              confirm_project: str, now: dt.datetime | None = None) -> dict:
     if confirm_project != project:
         raise ScheduleError("exact project confirmation required")
+    policy_token = _recurrence_token(schedule)
     doc = _policy(schedule, project=project, slug=slug, environment=environment,
                   gcp_project=gcp_project, recipient=recipient)
+
+    def assert_recurrence() -> None:
+        # The window runner invokes this before each irreversible stage.
+        # Its monotonic not_after deadline independently enforces expiry.
+        try:
+            if _recurrence_token(schedule) != policy_token:
+                raise ScheduleError("recurring authorization changed")
+            current = _policy(schedule, project=project, slug=slug, environment=environment,
+                              gcp_project=gcp_project, recipient=recipient)
+            if current != doc or _recurrence_token(schedule) != policy_token:
+                raise ScheduleError("recurring authorization changed")
+        except (ScheduleError, WINDOW.WindowError, OSError, ValueError, TypeError) as exc:
+            raise ScheduleError("recurring authorization revoked or modified") from exc
+
+    assert_recurrence()
     slot = _slot(doc, now if now is not None else dt.datetime.now(dt.timezone.utc))
     if slot is None:
         return {"event": "backup.schedule.skipped", "reason": "outside-approved-slot"}
+    assert_recurrence()
     _private_owned(approvals, directory=True)
     _private_owned(claims, directory=True)
     stamp = slot.strftime("%Y%m%dT%H%M%SZ")
@@ -172,7 +201,9 @@ def dispatch(*, schedule: pathlib.Path, approvals: pathlib.Path, claims: pathlib
                             gcp_project=gcp_project, recipient=recipient, image=image,
                             approval=approval, output_parent=output_parent,
                             confirm_project=confirm_project,
-                            not_after=WINDOW._utc(doc["expiresAt"]))
+                            not_after=WINDOW._utc(doc["expiresAt"]),
+                            authorization_guard=assert_recurrence)
+        assert_recurrence()
         if result.get("status") != "uploaded-not-recovery-proven":
             raise ScheduleError("backup upload status was not confirmed")
     except Exception:

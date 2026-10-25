@@ -20,6 +20,7 @@ import stat
 import subprocess
 import sys
 import time
+from collections.abc import Callable
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
@@ -191,7 +192,8 @@ def _stopped(project: str, deadline: float) -> None:
 def run(*, compose: pathlib.Path, project: str, slug: str, environment: str,
         gcp_project: str, recipient: str, image: str, approval: pathlib.Path,
         output_parent: pathlib.Path, confirm_project: str,
-        not_after: dt.datetime | None = None) -> dict:
+        not_after: dt.datetime | None = None,
+        authorization_guard: Callable[[], None] | None = None) -> dict:
     if confirm_project != project or not IMAGE.fullmatch(image):
         raise WindowError("explicit exact-project confirmation and pinned helper image are required")
     if compose.is_symlink() or not compose.is_file() or compose.stat().st_mode & 0o022:
@@ -211,6 +213,8 @@ def run(*, compose: pathlib.Path, project: str, slug: str, environment: str,
         _approved(approval, **bindings, now=dt.datetime.now(dt.timezone.utc))
         if _approval_token(approval) != approval_token:
             raise WindowError("backup approval changed while being validated")
+        if authorization_guard is not None:
+            authorization_guard()
     # A scheduled occurrence cannot borrow time from its longer per-slot
     # approval after the independently authorized recurrence has expired.
     # Use a monotonic deadline so wall-clock changes cannot extend work.
@@ -222,6 +226,8 @@ def run(*, compose: pathlib.Path, project: str, slug: str, environment: str,
         if remaining < MIN_REMAINING_SECONDS:
             raise WindowError("scheduled authorization deadline is too close or expired")
     deadline = time.monotonic() + remaining
+    if authorization_guard is not None:
+        authorization_guard()
     with client_operation_lock.project_operation_lock(project) as assert_host_lock:
         lock_fd = _lock(output_parent, project)
         try:
