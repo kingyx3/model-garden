@@ -1,7 +1,7 @@
 """Attach ledger request ids to stored voice calls (#107, #115).
 
 An authorization event explicitly tagged with ``governance.correlationId =
-call:<callHash>`` is authoritative even when calls overlap or ledger delivery is
+call:<callHash>`` is preferred even when calls overlap or ledger delivery is
 delayed. A request id tagged to two different calls is ambiguous and omitted.
 
 For older untagged runtime events, retain the labelled time-window heuristic
@@ -66,7 +66,7 @@ def attach_request_ids(
     """Attach exact call-correlated ids first; conservatively infer older untagged requests."""
     calls = [dict(record) for record in records]
     windows = [_window(call) for call in calls]
-    exact: list[tuple[float, str, str]] = []
+    exact_by_call: dict[str, list[tuple[float, str]]] = {}
     untagged: list[tuple[float, str]] = []
     request_tags: dict[str, set[str]] = {}
     for event in events:
@@ -75,13 +75,14 @@ def attach_request_ids(
             continue
         correlation = _event_correlation(event)
         if isinstance(correlation, str) and _CALL_CORRELATION.fullmatch(correlation):
-            exact.append((at, request_id, correlation))
+            exact_by_call.setdefault(correlation, []).append((at, request_id))
             request_tags.setdefault(request_id, set()).add(correlation)
         elif correlation is None and event.get("initiatingUser") == identity:
             untagged.append((at, request_id))
         # Malformed or unrelated correlation never falls back to time guessing.
 
-    exact.sort()
+    for events_for_call in exact_by_call.values():
+        events_for_call.sort()
     untagged.sort()
     for index, call in enumerate(calls):
         if call.get("requestIds"):
@@ -90,8 +91,8 @@ def attach_request_ids(
         if isinstance(call_hash, str) and _CALL_HASH.fullmatch(call_hash):
             tag = "call:" + call_hash
             ids = list(dict.fromkeys(
-                request_id for _, request_id, correlation in exact
-                if correlation == tag and request_tags[request_id] == {tag}
+                request_id for _, request_id in exact_by_call.get(tag, ())
+                if request_tags[request_id] == {tag}
             ))[:MAX_REQUEST_IDS]
             if ids:
                 call["requestIds"], call["requestIdsSource"] = ids, EXACT_SOURCE
