@@ -106,6 +106,39 @@ class Case(unittest.TestCase):
                 self.apply(proposal)
         self.assertEqual(self.registry.list(), [])
 
+    def test_unconnectable_preview_cannot_be_activated_by_forging_connectable(self):
+        # The preview digest historically omitted connectable/status. It is not a capability token.
+        for preview in (
+            self.plan(family="crm", provider="hubspot", tools=["crm.read"]),
+            self.plan(family="crm", provider="built-in-crm", tools=["crm.read"]),
+        ):
+            forged = {**preview, "connectable": True}
+            calls = []
+            with self.subTest(provider=preview["provider"]), self.assertRaisesRegex(Error, "no longer approved"):
+                self.apply(forged, connection_test=lambda: calls.append("called") or passing())
+            self.assertEqual(calls, [])
+        self.assertEqual(self.registry.list(), [])
+
+    def test_recomputed_digest_cannot_authorize_extra_provider_scopes(self):
+        preview = self.plan()
+        forged = {**preview, "scopes": [*preview["scopes"], "https://www.googleapis.com/auth/calendar.events"]}
+        forged["digest"] = connect.digest_of(forged)
+        calls = []
+        with self.assertRaisesRegex(Error, "no longer approved"):
+            self.apply(forged, owner_consent=forged["digest"],
+                       connection_test=lambda: calls.append("called") or passing())
+        self.assertEqual((calls, self.registry.list()), ([], []))
+
+    def test_provider_demotion_after_preview_blocks_connection_before_test(self):
+        preview = self.plan()
+        with mock.patch.object(connect._integrations(), "plan", return_value={
+            "tier": 2, "status": "in-development", "scopes": [], "blocker": "connector disabled",
+        }):
+            calls = []
+            with self.assertRaisesRegex(Error, "no longer approved"):
+                self.apply(preview, connection_test=lambda: calls.append("called") or passing())
+        self.assertEqual((calls, self.registry.list()), ([], []))
+
     def test_a_personal_mailbox_needs_an_explicit_exception_and_a_shared_one_does_not(self):
         base = dict(family="mail", provider="gmail", tools=["mail.draft"])
         for mailbox in (None, {}, {"kind": "shared"}, {"kind": "company", "address": "support@acme.example"}, {"kind": "shared", "address": "nobody"}):
