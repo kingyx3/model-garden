@@ -62,6 +62,10 @@ class VoiceNativeHealthTests(unittest.TestCase):
             with self.assertRaises(TimeoutError):
                 exec(script, {})
 
+    def test_livekit_health_server_is_not_listening_on_compose_network(self):
+        worker = (ROOT / "platform" / "channels" / "livekit_receptionist.py").read_text()
+        self.assertIn('server = AgentServer(host="127.0.0.1", port=8081)', worker)
+
     def test_running_but_starting_voice_waits_until_native_health_is_healthy(self):
         rows = [
             ps(service("hermes"), service("voice", health="starting"), service("governed-tools")),
