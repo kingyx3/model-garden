@@ -47,3 +47,20 @@ provider-native/private signal and a client-approved live failure/recovery
 drill. Do not mistake a successful offline test or a Docker healthy state for
 real inbound-call proof. Keep #231 and #107 open until their live criteria
 are satisfied.
+
+## Voice overlay whole-stack readiness (v0.8.130)
+
+The optional voice deployment now derives its required service list from the
+**actual base and voice Compose definitions**, rather than trusting whatever
+`docker compose ps` happens to report. A missing configured governed Tool
+gateway, worker, channel gateway, coworker API or other service cannot be
+mistaken for a successful voice deployment. Each declared healthchecked service
+must be running and `healthy`; a service without a healthcheck must be
+running. An absent optional service is not required. Duplicate/malformed
+service records, a reported unhealthy or exited container, and a native LiveKit
+readiness failure fail closed; startup transitions may wait within the bounded
+deployment timeout. On failure the existing base-runtime restoration is
+attempted. Credential-free tests cover missing, unhealthy, duplicated and
+optional services. This is **deployment-time local readiness only**, not
+continuous Cloud Monitoring voice alerting, real SIP call success or proof of
+recovery; #231 and #107 remain open for approved live evidence.
