@@ -97,6 +97,73 @@ class ExportTests(unittest.TestCase):
             self.assertEqual(len(ws.sink.records()), 5)
             self.assertTrue(export.verify_export(ws.ledger, ws.sink)["ok"])
 
+    def test_legacy_schema_after_chained_event_is_rejected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ws = Workspace(tmp)
+            write_ledger(ws.ledger, 1)
+            with ws.ledger.open("a", encoding="utf-8") as handle:
+                handle.write(json.dumps({"schemaVersion": 1, "event": "synthetic-downgrade"}) + "\n")
+            with self.assertRaisesRegex(export.LedgerExportError, "schemaVersion moved backwards"):
+                ws.export()
+            with self.assertRaisesRegex(ValueError, "schemaVersion moved backwards"):
+                govern.verify_audit_chain(ws.ledger)
+            report = export.verify_export(ws.ledger, ws.sink)
+            self.assertFalse(report["ok"])
+            self.assertTrue(any("local ledger invalid" in p for p in report["problems"]))
+            self.assertFalse(ws.state.exists())
+
+    def test_unsupported_schema_cannot_be_skipped_as_legacy(self):
+        for schema in (0, 99, True, "1"):
+            with self.subTest(schema=schema), tempfile.TemporaryDirectory() as tmp:
+                ws = Workspace(tmp)
+                ws.ledger.write_text(
+                    json.dumps({"schemaVersion": schema, "event": "synthetic-unknown"}) + "\n",
+                    encoding="utf-8",
+                )
+                with self.assertRaisesRegex(export.LedgerExportError, "unsupported schemaVersion"):
+                    ws.export()
+                with self.assertRaisesRegex(ValueError, "unsupported schemaVersion"):
+                    govern.verify_audit_chain(ws.ledger)
+                self.assertFalse(ws.state.exists())
+
+    def test_schema_three_to_two_downgrade_is_rejected_even_with_valid_hashes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ws = Workspace(tmp)
+            previous = None
+            events = []
+            for index, schema in enumerate((3, 2), start=1):
+                event = govern.make_audit_event("authorization", request(index), outcome="allow")
+                event["schemaVersion"] = schema
+                event["sequence"] = index
+                event["previousEventHash"] = previous
+                event["eventHash"] = export.event_hash(event)
+                previous = event["eventHash"]
+                events.append(event)
+            ws.ledger.write_text("".join(json.dumps(event) + "\n" for event in events), encoding="utf-8")
+            with self.assertRaisesRegex(export.LedgerExportError, "schemaVersion moved backwards"):
+                ws.export()
+            with self.assertRaisesRegex(ValueError, "schemaVersion moved backwards"):
+                govern.verify_audit_chain(ws.ledger)
+            self.assertFalse(ws.state.exists())
+
+    def test_schema_two_to_three_migration_remains_exportable(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ws = Workspace(tmp)
+            previous = None
+            events = []
+            for index, schema in enumerate((2, 3), start=1):
+                event = govern.make_audit_event("authorization", request(index), outcome="allow")
+                event["schemaVersion"] = schema
+                event["sequence"] = index
+                event["previousEventHash"] = previous
+                event["eventHash"] = export.event_hash(event)
+                previous = event["eventHash"]
+                events.append(event)
+            ws.ledger.write_text("".join(json.dumps(event) + "\n" for event in events), encoding="utf-8")
+            self.assertTrue(govern.verify_audit_chain(ws.ledger)["valid"])
+            self.assertEqual(ws.export()["exported"], 2)
+            self.assertTrue(export.verify_export(ws.ledger, ws.sink)["ok"])
+
     def test_batches_and_empty_ledger(self):
         with tempfile.TemporaryDirectory() as tmp:
             ws = Workspace(tmp)
