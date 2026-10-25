@@ -144,6 +144,7 @@ def _health(project: str, compose_files: list[pathlib.Path], env: dict[str, str]
         time.sleep(2)
     return False
 
+
 def _context(root: pathlib.Path) -> pathlib.Path:
     context = root / "voice-build"
     context.mkdir(parents=True, exist_ok=True)
