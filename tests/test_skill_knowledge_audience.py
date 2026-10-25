@@ -66,6 +66,23 @@ class SkillKnowledgeAudienceTests(unittest.TestCase):
             with self.assertRaisesRegex(PermissionError, "trusted Skill context"):
                 runtime.kb_search(query="opening hours")
 
+    def test_restricted_sources_cannot_leak_language_metadata(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            runtime = self.runtime(pathlib.Path(tmp), skillAudiences=["answer-faq"], locale="fr")
+            result = runtime.kb_search(query="opening hours", locale="en")["result"]
+            self.assertEqual(result["reason"], "source-skill-context-required")
+            self.assertNotIn("availableLocales", result)
+        with tempfile.TemporaryDirectory() as tmp:
+            runtime = self.runtime(pathlib.Path(tmp), classification="confidential", locale="fr")
+            result = runtime.kb_search(query="opening hours", locale="en")["result"]
+            self.assertEqual(result["reason"], "source-members-only")
+            self.assertNotIn("availableLocales", result)
+        with tempfile.TemporaryDirectory() as tmp:
+            runtime = self.runtime(pathlib.Path(tmp), locale="fr")
+            result = runtime.kb_search(query="opening hours", locale="en")["result"]
+            self.assertEqual(result["reason"], "source-other-locale")
+            self.assertEqual(result["availableLocales"], ["fr"])
+
     def test_source_state_and_readiness_block_until_trusted_skill_is_available(self):
         knowledge = fixtures.runtime_module.KNOWLEDGE
         spec = {"type": "text-file", "status": "approved", "skillAudiences": ["answer-faq"]}
