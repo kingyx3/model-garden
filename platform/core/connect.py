@@ -15,7 +15,8 @@ itself (the read-only test is injected) or edit a file; it is not wired to the i
   and a Tier 0 provider (which needs no credentials) are not connectable; the plan says why instead of asking for credentials.
 - **Shared or delegated mailboxes.** A mailbox is connected as ``shared`` or ``delegated``; a ``personal`` mailbox needs an explicit
   owner exception, which is recorded.
-- **A preview is not an authorization token.** Before the read-only test, recompute the exact plan from the current registry and refuse any stale, modified or no-longer-connectable provider, even if someone recalculates its unkeyed digest.\n- **The test comes first and failure changes nothing.** ``apply`` runs the injected read-only connection test before touching
+- **A preview is not an authorization token.** Before the read-only test, recompute the exact plan from the current registry and refuse any stale, modified or no-longer-connectable provider, even if someone recalculates its unkeyed digest.
+- **The test comes first and failure changes nothing.** ``apply`` runs the injected read-only connection test before touching
   anything. If it fails, no grant is recorded, the binding is unchanged and the failure is ledgered; on success the grant is
   recorded and the binding fragment (provider, tier, scopes, owner, never a secret) is returned for the caller to merge.
 - **Ledgered with both people.** Connect, failed connect and disconnect each call the audit hook naming the operator and the
