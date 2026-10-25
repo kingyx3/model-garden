@@ -4,7 +4,7 @@ An environment binding saying "calendar is Google" says nothing about whether *t
 coworker's grant, a revoked or expired grant, or a grant that does not cover the Tools the Agent selected would all leave
 a Skill that cannot work shown as ready (#111, #129). This module overlays the per-coworker grant registry
 (``provider_grants.py``) on a capability manifest so a connected Skill is only ready when its Agent holds a usable grant of its
-own for the bound provider that covers the Tools it selected. It reads only the non-secret public view of grants (never a
+own for the bound provider **and capability family** that covers the Tools it selected. It reads only the non-secret public view of grants (never a
 secret reference), holds no credential and changes no grant.
 
 - **Only connected providers.** A Tier 0 dependency needs no credential and is untouched, as is a dependency with no bound
@@ -69,10 +69,10 @@ def _usable(grant: Mapping[str, Any], now: int) -> bool:
 
 
 def _verdict(
-    grants: Iterable[Mapping[str, Any]], *, agent: Any, provider: Any, tools: Iterable[str], now: int
+    grants: Iterable[Mapping[str, Any]], *, agent: Any, family: Any, provider: Any, tools: Iterable[str], now: int
 ) -> tuple[str, dict[str, Any]]:
     """``(status, extra)`` for one connected dependency: ``bound`` with a grant note, or a blocking grant state."""
-    held = [item for item in grants if item.get("agent") == agent and item.get("provider") == provider]
+    held = [item for item in grants if item.get("agent") == agent and item.get("family") == family and item.get("provider") == provider]
     if not held:
         return "no-grant", {}
     usable = [item for item in held if _usable(item, now)]
@@ -110,7 +110,7 @@ def overlay(
                 continue
             family = dependency.get("family")
             status, extra = _verdict(
-                held, agent=agent, provider=dependency.get("provider"), tools=selected.get(family, []), now=now
+                held, agent=agent, family=family, provider=dependency.get("provider"), tools=selected.get(family, []), now=now
             )
             if status == "bound":
                 dependency.update(extra)
