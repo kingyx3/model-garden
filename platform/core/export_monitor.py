@@ -7,8 +7,8 @@ sends nothing and schedules nothing itself. The runtime worker feeds ``evaluate`
 cannot read the bucket back) and delivers the notices to ``escalateTo``; ``check`` runs a full verification for a verifier
 identity that can read the export.
 
-- **Three kinds of condition.** ``export-integrity`` (a broken or truncated chain, a gap, a local ledger that differs from the export,
-  a missing or mismatched head manifest, an unreadable local ledger), ``export-lag`` (the local ledger is more events ahead than the
+- **Four kinds of condition.** ``export-integrity`` (a broken or truncated chain, a gap, a local ledger that differs from the export,
+  a missing or mismatched head manifest, an unreadable local ledger), ``export-failure`` (a configured export attempt failed, even at zero measurable lag, or a verifier returned unsuccessful without details), ``export-lag`` (the local ledger is more events ahead than the
   limit) and ``export-stale`` (events are waiting and the newest head manifest is too old or was never exported). An idle,
   fully exported ledger raises none, and an exporter that was never configured raises nothing because there is nothing to compare.
 - **Once, then reminders, then recovery.** A condition is alerted when it starts, again only after ``reminder_seconds`` while it
