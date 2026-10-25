@@ -7,7 +7,8 @@ is asked through the Hermes API server (``coworker_client.py``) and governed Too
 
 Routes (everything else is 404):
 
-- ``GET /healthz`` (gateway liveness)
+- ``GET /healthz`` (gateway HTTP liveness; load-balancer and Docker health)
+- ``GET /health/gateway`` (payload-free, fail-closed periodic gateway-loop readiness for an opt-in HTTPS uptime probe)
 - ``GET /health/worker`` (payload-free, fail-closed worker readiness for an opt-in HTTPS uptime probe)
 - ``GET /studio`` (when ``studio`` is configured) the owner's Employee Studio and ``/studio/api/*`` (``platform/runtime/studio.py``): everyone
   on the web allow-list can read; only the named owner can propose, approve, reject or roll back a change request.
@@ -709,6 +710,16 @@ class Gateway:
 
         if route == "/healthz" and method == "GET":
             return Response(200, b"ok", "text/plain")
+        if route == "/health/gateway" and method == "GET":
+            # A live HTTP thread cannot prove the periodic gateway loop is
+            # progressing. Expose only status, never failed job names or data.
+            health = _module("heartbeat").check(
+                self.data / "gateway" / "heartbeat.json",
+                now=time.time(), max_age=READINESS_MAX_AGE,
+            )
+            ready = health["status"] == "healthy"
+            return Response(200 if ready else 503, b"ok" if ready else b"unavailable",
+                            "text/plain", {"Cache-Control": "no-store"})
         if route == "/health/worker" and method == "GET":
             # Public Cloud Monitoring probes get a status code only. No worker
             # job names, tenant identifiers, or customer content cross the ingress.
