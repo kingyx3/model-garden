@@ -354,6 +354,41 @@ class BackupWindowTests(unittest.TestCase):
                 WINDOW.run(**self.args)
         self.assertFalse(any("client-backup-upload.py" in cmd[1] for cmd in self.calls if len(cmd)>1))
 
+
+    def test_detached_host_lock_after_inventory_blocks_snapshot(self):
+        root = WINDOW.client_operation_lock.LOCK_ROOT
+
+        def detach_after_inventory(command, timeout, *, capture=False):
+            self.calls.append(command)
+            if len(command) > 2 and command[2] == "inventory":
+                root.rename(root.parent / "detached-host-locks")
+                root.mkdir(mode=0o700)
+            return ""
+
+        with mock.patch.object(WINDOW, "_run", side_effect=detach_after_inventory):
+            with self.assertRaises(WINDOW.client_operation_lock.OperationLockError):
+                WINDOW.run(**self.args)
+        self.assertFalse(any("snapshot" in cmd for cmd in self.calls))
+        self.assertFalse(any("client-backup-upload.py" in cmd[1] for cmd in self.calls if len(cmd) > 1))
+
+    def test_replaced_host_lock_after_snapshot_blocks_upload(self):
+        root = WINDOW.client_operation_lock.LOCK_ROOT
+
+        def replace_after_snapshot(command, timeout, *, capture=False):
+            self.calls.append(command)
+            if len(command) > 2 and command[2] == "snapshot":
+                path = root / "acme-dev.lock"
+                path.rename(root / "detached.lock")
+                path.write_text("")
+                path.chmod(0o600)
+            return ""
+
+        with mock.patch.object(WINDOW, "_run", side_effect=replace_after_snapshot):
+            with self.assertRaises(WINDOW.client_operation_lock.OperationLockError):
+                WINDOW.run(**self.args)
+        self.assertEqual(sum("snapshot" in cmd for cmd in self.calls), 1)
+        self.assertFalse(any("client-backup-upload.py" in cmd[1] for cmd in self.calls if len(cmd) > 1))
+
     def test_active_deploy_lock_blocks_backup_before_inventory(self):
         with WINDOW.client_operation_lock.project_operation_lock("acme-dev"):
             with self.assertRaises(WINDOW.client_operation_lock.OperationLockError):
