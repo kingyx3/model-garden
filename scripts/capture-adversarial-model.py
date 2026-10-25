@@ -149,7 +149,7 @@ def main(argv: list[str] | None = None) -> int:
         client = _client(args.api_url, os.environ.get("MODEL_GARDEN_COWORKER_API_KEY", ""), args.timeout_seconds)
         document = run_cases(suite, client)
         write_capture(args.output, document)
-    except (CaptureError, OSError, UnicodeError, yaml.YAMLError, ValueError) as exc:
+    except Exception:  # noqa: BLE001 - never print exceptions from a provider, key validator or filesystem
         # Never print a provider exception, prompt, response, URL or key.
         print("FAIL: adversarial model capture did not complete (no safety verdict)", file=sys.stderr)
         return 1
