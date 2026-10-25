@@ -890,7 +890,7 @@ class ExportAlertTests(Case):
         runtime.deliver_notices(T0)
         self.assertEqual(sent, [])
 
-    def test_an_unreachable_sink_alerts_once_the_export_is_stale_then_reports_recovery(self):
+    def test_an_unreachable_sink_alerts_failure_and_stale_once_then_reports_recovery(self):
         good = worker._module("ledger").DirectorySink(self.root / "sink")
 
         class Down:
@@ -902,16 +902,17 @@ class ExportAlertTests(Case):
         runtime, sent = self.make_exporting(Down())
         self.assertEqual(runtime._guard("export", runtime.run_export, T0), {"failed": "LedgerExportError"})
         runtime.deliver_notices(T0)
-        self.assertEqual(len(sent), 1)
-        self.assertEqual(sent[0][0], "D0OWNER")
-        self.assertIn("Ledger export stale problem", sent[0][1])
+        self.assertEqual(len(sent), 2)  # immediate failure plus separately stale export
+        self.assertTrue(all(address == "D0OWNER" for address, _ in sent))
+        self.assertTrue(any("Ledger export failure problem" in text for _, text in sent))
+        self.assertTrue(any("Ledger export stale problem" in text for _, text in sent))
         runtime.deliver_notices(T0 + 60)
-        self.assertEqual(len(sent), 1)  # delivered once, not every pass
+        self.assertEqual(len(sent), 2)  # each condition delivered once, not every pass
         runtime.export_sink = good
         runtime.run_export(T0 + 120)
         runtime.deliver_notices(T0 + 120)
-        self.assertEqual(len(sent), 2)
-        self.assertIn("healthy again", sent[1][1])
+        self.assertEqual(len(sent), 3)
+        self.assertIn("healthy again", sent[2][1])
         self.assertNotIn("4111", json.dumps(sent))
 
     def test_a_ledger_shorter_than_the_export_is_an_integrity_alert(self):
