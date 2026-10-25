@@ -196,7 +196,9 @@ def build_session() -> AgentSession:
     )
 
 
-server = AgentServer()
+# The pinned LiveKit server's native readiness endpoint stays inside this container.
+# Registration and media transport are outbound; no inbound port is published.
+server = AgentServer(host="127.0.0.1", port=8081)
 
 
 @server.rtc_session(agent_name=AGENT_NAME)
