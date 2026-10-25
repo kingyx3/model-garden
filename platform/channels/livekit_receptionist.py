@@ -65,9 +65,11 @@ def _safe_digest(value: str | None) -> str | None:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
 
-def _append_message(payload: dict[str, Any]) -> None:
-    """Store private fallback/lifecycle records with pinned paths and bounded retention."""
-    store_private_jsonl(MESSAGE_PATH, payload, retention_seconds=_retention_seconds())
+def _append_message(payload: dict[str, Any]) -> bool:
+    """Store private fallback/lifecycle records; report whether retention allowed saving."""
+    retention = _retention_seconds()
+    store_private_jsonl(MESSAGE_PATH, payload, retention_seconds=retention)
+    return retention > 0
 
 
 def _sip_participant(ctx: JobContext):
@@ -150,7 +152,7 @@ class ReceptionistVoiceAgent(Agent):
             if isinstance(raw, str) and raw.strip():
                 caller_number = raw.strip()
         try:
-            _append_message(
+            stored = _append_message(
                 {
                     "type": "FallbackMessage",
                     "timestamp": int(time.time()),
@@ -163,6 +165,8 @@ class ReceptionistVoiceAgent(Agent):
         except Exception as exc:
             LOGGER.error("fallback message not stored: %s", type(exc).__name__)
             return "The message could not be saved safely. Offer the caller another contact route."
+        if not stored:
+            return "Message retention is disabled; no message was saved. Offer the caller another contact route."
         if self._transcript is not None:
             self._transcript.note_outcome("message-taken")
         return "Message captured for human follow-up."
