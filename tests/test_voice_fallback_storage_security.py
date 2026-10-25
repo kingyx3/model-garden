@@ -6,12 +6,15 @@ no provider credentials or LiveKit runtime are required.
 from __future__ import annotations
 
 import ast
+import asyncio
+import logging
 import importlib.util
 import os
 import pathlib
 import stat
 import sys
 import tempfile
+from types import SimpleNamespace
 import unittest
 from unittest import mock
 
@@ -33,6 +36,23 @@ namespace = {
     "DEFAULT_MESSAGE_RETENTION_SECONDS": 7 * 24 * 60 * 60,
 }
 exec(compile(ast.Module(body=functions, type_ignores=[]), str(source), "exec"), namespace)
+
+# Compile the voice Tool handler against minimal provider stubs so failure
+# responses are exercised without LiveKit, SIP or an actual caller.
+class _Agent:
+    def __init__(self, instructions):
+        self.instructions = instructions
+
+namespace.update({
+    "Agent": _Agent, "CallTranscript": T.CallTranscript, "RunContext": object,
+    "function_tool": lambda: lambda fn: fn,
+    "get_job_context": lambda: SimpleNamespace(room=SimpleNamespace(name="synthetic-room")),
+    "_sip_participant": lambda ctx: None, "_safe_digest": lambda value: "digest",
+    "LOGGER": logging.getLogger("voice-fallback-test"),
+})
+agent_node = next(node for node in tree.body if isinstance(node, ast.ClassDef)
+                  and node.name == "ReceptionistVoiceAgent")
+exec(compile(ast.Module(body=[agent_node], type_ignores=[]), str(source), "exec"), namespace)
 
 
 class PrivateFallbackMessageTests(unittest.TestCase):
@@ -136,6 +156,32 @@ class PrivateFallbackMessageTests(unittest.TestCase):
         with mock.patch.dict(os.environ, {"MODEL_GARDEN_MESSAGE_RETENTION_SECONDS": "0"}):
             self.assertFalse(self.append())
         self.assertEqual(self.path.read_text(), "")
+
+    def test_message_capture_does_not_claim_success_when_retention_is_disabled(self):
+        class Transcript:
+            outcomes = []
+            def note_outcome(self, value):
+                self.outcomes.append(value)
+
+        transcript = Transcript()
+        agent = namespace["ReceptionistVoiceAgent"]("test", transcript)
+        with mock.patch.dict(os.environ, {"MODEL_GARDEN_MESSAGE_RETENTION_SECONDS": "0"}):
+            result = asyncio.run(agent.capture_message(None, "synthetic request"))
+        self.assertIn("no message was saved", result)
+        self.assertEqual(transcript.outcomes, [])
+        self.assertEqual(self.path.read_text(), "")
+
+    def test_message_capture_does_not_claim_success_when_private_store_is_unsafe(self):
+        target = self.root / "other-client.jsonl"
+        target.write_text("untouched\\n")
+        self.path.parent.mkdir()
+        self.path.symlink_to(target)
+        agent = namespace["ReceptionistVoiceAgent"]("test")
+        with self.assertLogs("voice-fallback-test", level="ERROR") as logs:
+            result = asyncio.run(agent.capture_message(None, "synthetic private request"))
+        self.assertIn("could not be saved safely", result)
+        self.assertEqual(target.read_text(), "untouched\\n")
+        self.assertNotIn("synthetic private request", str(logs.output))
 
     def test_existing_owned_regular_file_keeps_bounded_retention_and_private_modes(self):
         self.path.parent.mkdir()
