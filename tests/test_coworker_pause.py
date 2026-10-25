@@ -591,6 +591,57 @@ class BoundaryTests(unittest.TestCase):
         self.assertEqual(effects, ["completed"])
         self.assertEqual(self.events()[-1]["details"]["reason"], "coworker-paused")
 
+    def test_concurrent_admitted_effects_share_the_read_lease_before_pause(self):
+        # The pause fence must not serialize independent provider calls.
+        # An exclusive owner pause waits until *both* admitted effects finish.
+        entered = [threading.Event(), threading.Event()]
+        release, paused = threading.Event(), threading.Event()
+        results, failures = [], []
+        arguments = {
+            "objectType": "contact", "objectId": "unmatched", "interactionType": "call",
+            "channel": "voice", "direction": "inbound", "timestamp": "2026-10-20T10:00:00+08:00",
+        }
+
+        def write(index):
+            def executor(_):
+                entered[index].set()
+                if not release.wait(5):
+                    raise TimeoutError("test did not release the admitted effect")
+                return {"externalObjectRef": f"built-in-crm:interaction/{index}"}
+            try:
+                results.append(self.runtime._execute("crm.log-interaction",
+                               {**arguments, "summary": f"Synthetic call {index}"}, executor, tier=0))
+            except BaseException as exc:
+                failures.append(exc)
+
+        def owner_pause():
+            try:
+                pause.PauseStore(self.root).pause("owner@client.example", "incident", NOW)
+            except BaseException as exc:
+                failures.append(exc)
+            finally:
+                paused.set()
+
+        writers = [threading.Thread(target=write, args=(i,), daemon=True) for i in range(2)]
+        stopping = threading.Thread(target=owner_pause, daemon=True)
+        for writer in writers:
+            writer.start()
+        try:
+            self.assertTrue(all(event.wait(3) for event in entered), "both governed effects must be admitted concurrently")
+            stopping.start()
+            self.assertFalse(paused.wait(0.15), "owner pause cannot acknowledge while effects remain")
+        finally:
+            release.set()
+            for writer in writers:
+                writer.join(5)
+            if stopping.ident is not None:
+                stopping.join(5)
+        self.assertTrue(all(not writer.is_alive() for writer in writers))
+        self.assertFalse(stopping.is_alive())
+        self.assertEqual(failures, [])
+        self.assertEqual([result["status"] for result in results], ["executed", "executed"])
+        self.assertTrue(pause.PauseStore(self.root).is_paused())
+
     def test_write_queued_behind_owner_pause_cannot_run_after_pause(self):
         # Force a pause transaction to hold the lock before the write arrives.
         store = pause.PauseStore(self.root)
