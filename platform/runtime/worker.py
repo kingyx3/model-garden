@@ -1003,7 +1003,10 @@ class Worker:
             raise
         except Exception:
             lag = self._export_lag()
-            problems = []
+            # Even with no measurable lag (or an unreadable cursor), a failed
+            # export attempt is not a healthy export. Never include provider
+            # exception text or credentials in the durable health record.
+            problems = ["export failure: export attempt did not complete"]
             if lag > EXPORT_MAX_LAG_EVENTS:
                 problems.append(f"export lag: {lag} event(s) waiting")
             last = health.get("lastSuccessAt")
