@@ -87,6 +87,36 @@ def _run(command: list[str], *, env: dict[str, str], check: bool = True) -> subp
     return subprocess.run(command, env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=check)
 
 
+def voice_healthcheck() -> dict[str, Any]:
+    """Probe the pinned LiveKit AgentServer's *own* connection/readiness endpoint.
+
+    The server listens on port 8081 in production mode. Probe only container
+    loopback; no host port, credentials, caller content or custom health daemon.
+    A LiveKit 503 or timeout must produce a non-zero Docker health result.
+    """
+    return {
+        "test": ["CMD", "python", "-c",
+                 "import http.client, sys; c=http.client.HTTPConnection('127.0.0.1', 8081, timeout=3); "
+                 "c.request('GET', '/'); status=c.getresponse().status; c.close(); "
+                 "sys.exit(0 if status == 200 else 1)"],
+        "interval": "10s", "timeout": "5s", "retries": 6, "start_period": "30s",
+    }
+
+
+def _compose_ps_rows(raw: str) -> list[dict[str, Any]]:
+    """Docker Compose can emit a JSON array or newline-delimited JSON objects."""
+    try:
+        decoded = json.loads(raw)
+    except json.JSONDecodeError:
+        try:
+            decoded = [json.loads(line) for line in raw.splitlines() if line.strip()]
+        except json.JSONDecodeError:
+            return []
+    if isinstance(decoded, dict):
+        decoded = [decoded]
+    return decoded if isinstance(decoded, list) and decoded and all(isinstance(row, dict) for row in decoded) else []
+
+
 def _health(project: str, compose_files: list[pathlib.Path], env: dict[str, str], timeout: int = 120) -> bool:
     command = ["docker", "compose", "-p", project]
     for path in compose_files:
@@ -94,25 +124,23 @@ def _health(project: str, compose_files: list[pathlib.Path], env: dict[str, str]
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         result = _run([*command, "ps", "--format", "json"], env=env, check=False)
-        if result.returncode == 0 and result.stdout.strip():
-            rows = []
-            for line in result.stdout.splitlines():
-                try:
-                    rows.append(json.loads(line))
-                except json.JSONDecodeError:
-                    rows = []
-                    break
-            if rows and any(row.get("Service") == "voice" for row in rows):
-                bad = {"exited", "dead", "unhealthy"}
-                states = {(row.get("State") or "").lower() for row in rows}
-                health = {(row.get("Health") or "").lower() for row in rows if row.get("Health")}
-                if states & bad or health & bad:
-                    return False
-                hermes_ok = any(row.get("Service") == "hermes" and (row.get("Health") == "healthy" or row.get("State") == "running") for row in rows)
-                voice_ok = any(row.get("Service") == "voice" and row.get("State") == "running" for row in rows)
-                tools_ok = all(row.get("Service") != "governed-tools" or row.get("Health") == "healthy" for row in rows)
-                if hermes_ok and voice_ok and tools_ok:
-                    return True
+        rows = _compose_ps_rows(result.stdout) if result.returncode == 0 else []
+        if rows and any(row.get("Service") == "voice" for row in rows):
+            bad = {"exited", "dead", "unhealthy"}
+            states = {str(row.get("State") or "").lower() for row in rows}
+            health = {str(row.get("Health") or "").lower() for row in rows}
+            if states & bad or health & bad:
+                return False
+            hermes_ok = any(row.get("Service") == "hermes" and
+                            (row.get("Health") == "healthy" or row.get("State") == "running") for row in rows)
+            # A running voice process is not ready: require LiveKit's native
+            # healthy signal, including a successful provider connection.
+            voice_ok = any(row.get("Service") == "voice" and
+                           str(row.get("State") or "").lower() == "running" and
+                           str(row.get("Health") or "").lower() == "healthy" for row in rows)
+            tools_ok = all(row.get("Service") != "governed-tools" or row.get("Health") == "healthy" for row in rows)
+            if hermes_ok and voice_ok and tools_ok:
+                return True
         time.sleep(2)
     return False
 
@@ -219,6 +247,7 @@ def _apply_selected_voice(binding: dict[str, Any], voice: dict[str, Any], bundle
                 "build": {"context": str(context), "args": {"BASE_IMAGE": f"model-garden-{project}:current"}},
                 "image": f"model-garden-{project}-voice:current",
                 "restart": "unless-stopped",
+                "healthcheck": voice_healthcheck(),
                 "environment": voice_environment,
                 "volumes": ["voice-data:/opt/data"],
                 "depends_on": {"hermes": {"condition": "service_healthy"}},

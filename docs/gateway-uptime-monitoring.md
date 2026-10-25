@@ -21,3 +21,29 @@ The mock Terraform plan checks opt-in isolation, channel reuse, TLS/path, thresh
 ## Heartbeat filesystem integrity (v0.8.124)
 
 The shared gateway/worker heartbeat writer now creates a random exclusive mode-0600 temporary file under a pinned, no-follow directory descriptor, fsyncs its content, and atomically replaces the heartbeat. This prevents the former predictable `.tmp` hardlink from truncating an unrelated file. Readiness checks open the directory and heartbeat without following links, reject hardlinks, FIFOs, nonregular and group/world-writable files, bound reads to 4096 bytes, and reject inode/directory replacement or in-place modification detected during a read. Missing or unsafe heartbeat data returns unavailable rather than a false healthy claim. These checks protect the local filesystem signal; they do **not** authenticate Cloud Monitoring probes, establish LiveKit voice readiness, prove live alert delivery, or prevent an attacker with the same filesystem owner privileges from rewriting the heartbeat legitimately. The volume and host access controls remain part of the security boundary. Adversarial regression tests are credential-free; #231 remains open for authorized failure/recovery and optional voice drills.
+
+## Optional LiveKit worker native readiness (v0.8.125)
+
+The reference voice overlay now uses the **pinned LiveKit Agents 1.8.8**
+`AgentServer` built-in HTTP health endpoint on **container loopback only**,
+`127.0.0.1:8081/`. The Python/Docker health check fails on HTTP 503,
+connection refusal or timeout; it never exposes a host port, sends a bearer
+token or publishes caller data. LiveKit's upstream health response checks its
+worker connection and inference process, not whether any calls are in progress.
+An idle but connected receptionist can be healthy. A process merely shown as
+`running` is **not** sufficient: the voice overlay deployment waits for the
+native Docker `healthy` state before declaring success, and restores the base
+runtime if the bounded readiness wait fails. Docker Compose JSON arrays and
+newline-delimited output are both accepted; malformed output fails closed.
+
+For an **authorized** deployed reference host, inspect the private Compose
+service's `voice` health state and the LiveKit control-plane worker
+registration before enabling operational alerts. The check covers the local
+LiveKit agent connection/inference readiness, **not** SIP trunk reachability,
+audio quality, caller disclosure, human transfer, end-to-end call success or
+notification delivery. No new GCP alert or public readiness endpoint was
+enabled; opt-in Cloud Monitoring voice alert routing still needs a
+provider-native/private signal and a client-approved live failure/recovery
+drill. Do not mistake a successful offline test or a Docker healthy state for
+real inbound-call proof. Keep #231 and #107 open until their live criteria
+are satisfied.
