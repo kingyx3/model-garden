@@ -95,6 +95,27 @@ class PrivateTranscriptStorageTests(unittest.TestCase):
         self.assertTrue(replaced)
         self.assertEqual(target.read_text(), "unchanged\n")
 
+    def test_directory_replacement_while_waiting_for_lock_fails_closed(self):
+        self.path.parent.mkdir()
+        self.path.write_text("original\\n")
+        original_flock = T.fcntl.flock
+        replaced = False
+
+        def replace_directory(fd, operation):
+            nonlocal replaced
+            result = original_flock(fd, operation)
+            if operation == T.fcntl.LOCK_EX and not replaced:
+                replaced = True
+                self.path.parent.rename(self.root / "detached")
+                self.path.parent.mkdir()
+            return result
+
+        with mock.patch.object(T.fcntl, "flock", side_effect=replace_directory):
+            self.assert_rejected()
+        self.assertTrue(replaced)
+        self.assertEqual((self.root / "detached" / self.path.name).read_text(), "original\\n")
+        self.assertFalse(self.path.exists())
+
     def test_owned_existing_regular_file_still_supports_retention_and_private_mode(self):
         self.path.parent.mkdir()
         self.path.write_text('{"timestamp":1,"callHash":"expired"}\n')
