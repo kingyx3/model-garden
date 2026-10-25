@@ -279,6 +279,53 @@ class BackupScheduleTests(unittest.TestCase):
         with self.assertRaisesRegex(SCHEDULE.ScheduleError, "already attempted"):
             self.execute()
 
+    def test_replaced_recurrence_during_slot_selection_refused_before_claim(self):
+        original_slot = SCHEDULE._slot
+
+        def replace_policy(doc, now):
+            self.policy.rename(self.policy.with_suffix(".old"))
+            self.write(self.policy, self.policy_doc)
+            return original_slot(doc, now)
+
+        with mock.patch.object(SCHEDULE, "_slot", side_effect=replace_policy):
+            with self.assertRaisesRegex(SCHEDULE.ScheduleError, "recurring authorization"):
+                self.execute()
+        self.assertEqual(list((self.root / "claims").iterdir()), [])
+
+    def test_recurrence_revoked_during_window_blocks_later_stages(self):
+        def revoked(**kwargs):
+            self.policy.unlink()
+            kwargs["authorization_guard"]()
+            return {"status": "uploaded-not-recovery-proven", "runId": "mock"}
+
+        with mock.patch.object(SCHEDULE.WINDOW, "run", side_effect=revoked):
+            with self.assertRaisesRegex(SCHEDULE.ScheduleError, "recurring authorization"):
+                SCHEDULE.dispatch(**self.kwargs)
+        receipt = self.root / "claims" / "acme-dev-20261023T120000Z.result.json"
+        self.assertEqual(json.loads(receipt.read_text())["status"], "failed-not-recovery-proven")
+
+    def test_in_place_recurrence_change_after_upload_never_reports_success(self):
+        def changed(**kwargs):
+            kwargs["authorization_guard"]()
+            self.policy_doc["expiresAt"] = "2026-11-16T00:00:00Z"
+            self.write(self.policy, self.policy_doc)
+            return {"status": "uploaded-not-recovery-proven", "runId": "mock"}
+
+        with mock.patch.object(SCHEDULE.WINDOW, "run", side_effect=changed):
+            with self.assertRaisesRegex(SCHEDULE.ScheduleError, "recurring authorization"):
+                SCHEDULE.dispatch(**self.kwargs)
+        receipt = self.root / "claims" / "acme-dev-20261023T120000Z.result.json"
+        self.assertEqual(json.loads(receipt.read_text())["status"], "failed-not-recovery-proven")
+
+    def test_unchanged_recurrence_guard_allows_success(self):
+        def permitted(**kwargs):
+            kwargs["authorization_guard"]()
+            return {"status": "uploaded-not-recovery-proven", "runId": "mock"}
+
+        with mock.patch.object(SCHEDULE.WINDOW, "run", side_effect=permitted):
+            result = SCHEDULE.dispatch(**self.kwargs)
+        self.assertEqual(result["status"], "uploaded-not-recovery-proven")
+
     def test_cli_redacts_exception_details(self):
         with mock.patch.object(SCHEDULE, "dispatch", side_effect=SCHEDULE.ScheduleError("secret://must-not-log")), \
              mock.patch("sys.stderr") as stderr:
