@@ -46,7 +46,7 @@ resource "google_monitoring_uptime_check_config" "gateway" {
   }
 
   http_check {
-    path           = "/healthz"
+    path           = "/health/gateway"
     port           = 443
     use_ssl        = true
     validate_ssl   = true

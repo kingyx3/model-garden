@@ -83,8 +83,8 @@ run "valid_gateway_uptime_alert" {
     error_message = "An opted-in client gateway must have exactly one check and one alert policy."
   }
   assert {
-    condition     = google_monitoring_uptime_check_config.gateway[0].http_check[0].validate_ssl == true && google_monitoring_uptime_check_config.gateway[0].http_check[0].path == "/healthz"
-    error_message = "Gateway probe must validate HTTPS certificates and use healthz."
+    condition     = google_monitoring_uptime_check_config.gateway[0].http_check[0].validate_ssl == true && google_monitoring_uptime_check_config.gateway[0].http_check[0].path == "/health/gateway"
+    error_message = "Gateway monitoring must validate TLS and check the periodic loop, not just HTTP liveness."
   }
   assert {
     condition     = google_monitoring_alert_policy.gateway_uptime[0].conditions[0].condition_threshold[0].comparison == "COMPARISON_LT" && google_monitoring_alert_policy.gateway_uptime[0].conditions[0].condition_threshold[0].threshold_value == 0.5 && google_monitoring_alert_policy.gateway_uptime[0].conditions[0].condition_threshold[0].duration == "180s"
