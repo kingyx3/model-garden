@@ -96,7 +96,9 @@ def voice_healthcheck() -> dict[str, Any]:
     """
     return {
         "test": ["CMD", "python", "-c",
-                 "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8081/', timeout=3).close()"],
+                 "import http.client, sys; c=http.client.HTTPConnection('127.0.0.1', 8081, timeout=3); "
+                 "c.request('GET', '/'); status=c.getresponse().status; c.close(); "
+                 "sys.exit(0 if status == 200 else 1)"],
         "interval": "10s", "timeout": "5s", "retries": 6, "start_period": "30s",
     }
 
