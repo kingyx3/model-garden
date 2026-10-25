@@ -454,6 +454,7 @@ def search_selected(
         return {"documents": [], "reason": "source-not-selected", "dataOnly": True}
     documents: list[dict[str, Any]] = []
     reasons: dict[str, str] = {}
+    available_locales: set[str] = set()
     for name in names:
         record = contents.get(name)
         if record is None:
@@ -482,11 +483,19 @@ def search_selected(
             if type(record.get("sectionCount")) is not int or section_count < 1 or record["sectionCount"] != section_count:
                 reasons[name] = "source-content-integrity"
                 continue
-        declared = selected[name]["spec"].get("locale")
+        index = build_index(name, record["content"], filename=record["source"], spec=selected[name]["spec"])
+        # Check authorization before locale matching. Otherwise a source that
+        # the caller/Skill cannot read can leak its language through fallback hints.
+        denied = availability(index, agent=agent, skill=skill, today=today, access=access)
+        if denied is not None:
+            reasons[name] = denied
+            continue
+        declared = index.get("locale")
+        if isinstance(declared, str) and declared:
+            available_locales.add(declared)
         if locale and declared and declared.split("-")[0].lower() != locale.split("-")[0].lower():
             reasons[name] = "source-other-locale"
             continue
-        index = build_index(name, record["content"], filename=record["source"], spec=selected[name]["spec"])
         outcome = search(index, query, limit=limit, agent=agent, skill=skill, today=today, access=access)
         documents.extend(outcome["documents"])
         if outcome.get("reason") and not outcome["documents"]:
@@ -503,7 +512,7 @@ def search_selected(
         if locale and "source-other-locale" in reasons.values():
             # Name the languages that ARE covered (declared tags only) so the coworker can say so or offer a person; it must never present
             # another language's approved text as if it were approved in the requested one (#239).
-            result["availableLocales"] = sorted({str(item["spec"]["locale"]) for item in selected.values() if item.get("spec", {}).get("locale")})
+            result["availableLocales"] = sorted(available_locales)
             result["localeGuidance"] = (
                 "No approved source covers the requested language. Do not translate another language's approved text and present it as approved "
                 "in the requested one: say which languages are covered and answer in one of them, or offer a message or a person."
