@@ -64,3 +64,94 @@ attempted. Credential-free tests cover missing, unhealthy, duplicated and
 optional services. This is **deployment-time local readiness only**, not
 continuous Cloud Monitoring voice alerting, real SIP call success or proof of
 recovery; #231 and #107 remain open for approved live evidence.
+
+
+## Private opt-in LiveKit voice metric and alert (v0.8.136 prerequisite)
+
+For an **authorized** GCE Docker host that actually runs the LiveKit voice
+overlay, `scripts/voice-health-metric.py` reads the existing Compose
+`voice` container's **native Docker health state** (the pinned LiveKit
+AgentServer loopback check), then publishes a single boolean sample to
+`custom.googleapis.com/model_garden/voice_ready` with only client and
+environment labels. It uses the VM metadata identity and the already scoped
+`roles/monitoring.metricWriter` service account; it does not expose a VM
+port, reuse a public gateway readiness endpoint, create credentials or
+transmit transcripts. A stopped, missing, duplicated, unhealthchecked or
+unhealthy voice container publishes 0. Docker/metadata/Monitoring failures
+never publish a false healthy sample; missing data is an alert condition
+**after the time series has been initialized**.
+
+This is an **operator-installed, opt-in** host timer. Nothing installs or
+enables it automatically. Before deployment, obtain owner/security approval
+for the client project, monitoring identity, Compose project, recipient
+channel and retention. Confirm the selected `--compose-project` maps to the
+client's actual deployment and that the VM metadata project matches the
+Terraform project. From a trusted, approved repository checkout on the VM,
+install the following service/timer **only after** the voice overlay is
+configured and its local Docker health is verified. Replace the sample
+values with approved, validated client values (never copy secrets into the
+unit); secure the script against unapproved modifications.
+
+```ini
+# /etc/systemd/system/model-garden-voice-health.service
+[Unit]
+Description=Model Garden private voice health sample
+After=docker.service network-online.target
+Requires=docker.service
+
+[Service]
+Type=oneshot
+User=root
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ExecStart=/usr/bin/python3 /opt/model-garden/scripts/voice-health-metric.py --project-id sample-project-123 --client acme --environment dev --compose-project acme-dev
+```
+
+```ini
+# /etc/systemd/system/model-garden-voice-health.timer
+[Unit]
+Description=Sample private LiveKit voice health every minute
+
+[Timer]
+OnBootSec=60s
+OnUnitInactiveSec=60s
+AccuracySec=10s
+Unit=model-garden-voice-health.service
+
+[Install]
+WantedBy=timers.target
+```
+
+Run `systemctl daemon-reload`, then start the service once and inspect
+`systemctl status model-garden-voice-health.service` and the **metric
+sample in Cloud Monitoring**. Only after a valid initial sample exists,
+configure the approved same-project
+`gateway_uptime_notification_channels` and explicitly set
+`voice_private_alert_enabled=true` in
+`infra/docker-host/gcp/voice-private-monitor.tf`. This alert does **not**
+require public gateway ingress or a new IAM grant. The Terraform mock plan
+cannot verify a real metric descriptor or recipient. Once the alert policy
+is approved and applied, enable the timer with
+`systemctl enable --now model-garden-voice-health.timer`.
+Keep the timer running even when voice is unhealthy; it must publish 0,
+not silently disappear. A missing series or broken publisher can also
+trigger an incident; use private host diagnostics to distinguish failures.
+
+The alert requests **OPENED** only. It evaluates a 60-second aligned
+readiness value below 0.5 for 180 seconds or missing telemetry, labels
+client/environment/voice, and points to the private host runbook. A provider
+auto-closed incident is **not** a verified recovery. A healthy sample is
+**not** proof of SIP reachability, incoming calls, transcription, human
+handoff, notification delivery or a working reference employee. Cloud
+Monitoring time-series delays and incident evaluation may extend the
+observed alert latency; record actual times.
+
+For a planned retirement, obtain owner approval, disable
+`voice_private_alert_enabled` and apply the reviewed Terraform change,
+then disable the timer and remove the approved unit files. For an unplanned
+outage leave the alert enabled. Capture a **real** approved failure and
+recovery drill with sample timestamps, actual operator-channel delivery,
+escalation owner and latency before claiming live #231 acceptance. No
+production apply, installation, provider drill or delivered notification
+was performed by this code change.
