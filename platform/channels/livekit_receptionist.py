@@ -19,9 +19,7 @@ Optional:
 """
 from __future__ import annotations
 
-import fcntl
 import hashlib
-import json
 import logging
 import os
 import pathlib
@@ -32,7 +30,7 @@ from livekit import api, rtc
 from livekit.agents import Agent, AgentServer, AgentSession, JobContext, RunContext, cli, function_tool, get_job_context
 from livekit.plugins import openai
 
-from call_transcript import CallTranscript, config_from_env as transcript_config_from_env, finalize as finalize_transcript
+from call_transcript import CallTranscript, config_from_env as transcript_config_from_env, finalize as finalize_transcript, store_private_jsonl
 
 LOGGER = logging.getLogger("model-garden.receptionist")
 # An unsafe transcript configuration (for example no disclosure and no lawful-basis owner) stops the worker at start.
@@ -67,53 +65,9 @@ def _safe_digest(value: str | None) -> str | None:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
 
-def _retained_rows(handle: Any, *, now: int, retention_seconds: int) -> list[dict[str, Any]]:
-    if retention_seconds == 0:
-        return []
-    cutoff = now - retention_seconds
-    handle.seek(0)
-    rows: list[dict[str, Any]] = []
-    for raw in handle:
-        if not raw.strip():
-            continue
-        try:
-            value = json.loads(raw)
-        except json.JSONDecodeError:
-            continue
-        if not isinstance(value, dict):
-            continue
-        timestamp = value.get("timestamp")
-        if isinstance(timestamp, int) and timestamp >= cutoff:
-            rows.append(value)
-    return rows
-
-
 def _append_message(payload: dict[str, Any]) -> None:
-    """Persist minimum fallback data with retention, restrictive mode and durable append."""
-    MESSAGE_PATH.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    try:
-        os.chmod(MESSAGE_PATH.parent, 0o700)
-    except OSError:
-        pass
-    descriptor = os.open(MESSAGE_PATH, os.O_RDWR | os.O_CREAT, 0o600)
-    try:
-        os.fchmod(descriptor, 0o600)
-        with os.fdopen(descriptor, "r+", encoding="utf-8", closefd=False) as handle:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
-            now = int(time.time())
-            retention = _retention_seconds()
-            rows = _retained_rows(handle, now=now, retention_seconds=retention)
-            if retention > 0:
-                rows.append(payload)
-            handle.seek(0)
-            handle.truncate()
-            for row in rows:
-                handle.write(json.dumps(row, sort_keys=True, ensure_ascii=False, separators=(",", ":")) + "\n")
-            handle.flush()
-            os.fsync(handle.fileno())
-            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
-    finally:
-        os.close(descriptor)
+    """Store private fallback/lifecycle records with pinned paths and bounded retention."""
+    store_private_jsonl(MESSAGE_PATH, payload, retention_seconds=_retention_seconds())
 
 
 def _sip_participant(ctx: JobContext):
@@ -164,16 +118,20 @@ class ReceptionistVoiceAgent(Agent):
             )
         except Exception as exc:  # provider failure must fall back safely, not end the call
             return f"Human transfer failed ({type(exc).__name__}). Offer to capture a message instead."
-        _append_message(
-            {
-                "type": "HumanTransfer",
-                "timestamp": int(time.time()),
-                "roomHash": _safe_digest(job_ctx.room.name),
-                "participantHash": _safe_digest(participant.identity),
-                "targetHash": _safe_digest(target),
-                "status": "requested",
-            }
-        )
+        try:
+            _append_message(
+                {
+                    "type": "HumanTransfer",
+                    "timestamp": int(time.time()),
+                    "roomHash": _safe_digest(job_ctx.room.name),
+                    "participantHash": _safe_digest(participant.identity),
+                    "targetHash": _safe_digest(target),
+                    "status": "requested",
+                }
+            )
+        except Exception as exc:
+            # A completed provider transfer cannot be undone by a local storage error.
+            LOGGER.error("human transfer receipt not stored: %s", type(exc).__name__)
         if self._transcript is not None:
             self._transcript.note_transfer()
         return "Human transfer requested successfully."
@@ -191,16 +149,20 @@ class ReceptionistVoiceAgent(Agent):
             raw = participant.attributes.get("sip.phoneNumber")
             if isinstance(raw, str) and raw.strip():
                 caller_number = raw.strip()
-        _append_message(
-            {
-                "type": "FallbackMessage",
-                "timestamp": int(time.time()),
-                "roomHash": _safe_digest(job_ctx.room.name),
-                "caller_name": caller_name.strip() or None,
-                "caller_number": caller_number,
-                "message": message,
-            }
-        )
+        try:
+            _append_message(
+                {
+                    "type": "FallbackMessage",
+                    "timestamp": int(time.time()),
+                    "roomHash": _safe_digest(job_ctx.room.name),
+                    "caller_name": caller_name.strip() or None,
+                    "caller_number": caller_number,
+                    "message": message,
+                }
+            )
+        except Exception as exc:
+            LOGGER.error("fallback message not stored: %s", type(exc).__name__)
+            return "The message could not be saved safely. Offer the caller another contact route."
         if self._transcript is not None:
             self._transcript.note_outcome("message-taken")
         return "Message captured for human follow-up."
@@ -237,18 +199,24 @@ server = AgentServer()
 async def receptionist(ctx: JobContext) -> None:
     ctx.log_context_fields = {"room_hash": _safe_digest(ctx.room.name), "agent": AGENT_NAME}
     started = int(time.time())
-    _append_message({"type": "CallStarted", "timestamp": started, "roomHash": _safe_digest(ctx.room.name), "agent": AGENT_NAME})
+    try:
+        _append_message({"type": "CallStarted", "timestamp": started, "roomHash": _safe_digest(ctx.room.name), "agent": AGENT_NAME})
+    except Exception as exc:
+        LOGGER.error("call start receipt not stored: %s", type(exc).__name__)
 
     async def on_shutdown() -> None:
-        _append_message(
-            {
-                "type": "CallEnded",
-                "timestamp": int(time.time()),
-                "roomHash": _safe_digest(ctx.room.name),
-                "agent": AGENT_NAME,
-                "started": started,
-            }
-        )
+        try:
+            _append_message(
+                {
+                    "type": "CallEnded",
+                    "timestamp": int(time.time()),
+                    "roomHash": _safe_digest(ctx.room.name),
+                    "agent": AGENT_NAME,
+                    "started": started,
+                }
+            )
+        except Exception as exc:
+            LOGGER.error("call end receipt not stored: %s", type(exc).__name__)
 
     transcript = CallTranscript(_safe_digest(ctx.room.name) or "", AGENT_NAME, TRANSCRIPT_CONFIG, started=started)
 
