@@ -119,6 +119,52 @@ class OperationLockTests(unittest.TestCase):
                     entered.append(True)
         self.assertEqual(entered, [])
 
+
+    def test_lease_checks_unchanged_lock_at_stage_boundaries(self):
+        with lock.project_operation_lock("acme-dev") as check_lock:
+            self.assertTrue(callable(check_lock))
+            check_lock()
+            check_lock()
+
+    def test_lease_rejects_directory_swap_while_held(self):
+        moved = self.root.parent / "old-locks"
+        with self.assertRaisesRegex(lock.OperationLockError, "replaced"):
+            with lock.project_operation_lock("acme-dev") as check_lock:
+                self.root.rename(moved)
+                self.root.mkdir(mode=0o700)
+                check_lock()
+
+    def test_lease_rejects_lock_inode_swap_while_held(self):
+        with self.assertRaisesRegex(lock.OperationLockError, "replaced"):
+            with lock.project_operation_lock("acme-dev") as check_lock:
+                path = self.root / "acme-dev.lock"
+                path.rename(self.root / "old.lock")
+                path.write_text("")
+                path.chmod(0o600)
+                check_lock()
+
+    def test_lease_rejects_unlink_or_mode_change_while_held(self):
+        for change in ("unlink", "chmod"):
+            with self.subTest(change=change):
+                path = self.root / "acme-dev.lock"
+                if path.exists():
+                    path.chmod(0o600)
+                with self.assertRaises(lock.OperationLockError):
+                    with lock.project_operation_lock("acme-dev") as check_lock:
+                        if change == "unlink":
+                            path.unlink()
+                        else:
+                            path.chmod(0o644)
+                        check_lock()
+
+    def test_lease_checks_again_on_normal_context_exit(self):
+        with self.assertRaisesRegex(lock.OperationLockError, "replaced"):
+            with lock.project_operation_lock("acme-dev"):
+                path = self.root / "acme-dev.lock"
+                path.rename(self.root / "detached.lock")
+                path.write_text("")
+                path.chmod(0o600)
+
     def test_invalid_project(self):
         for project in ("../other", "acme/dev", "", "UPPER", "-acme"):
             with self.assertRaises(lock.OperationLockError):
