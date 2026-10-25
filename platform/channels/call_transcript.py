@@ -32,6 +32,7 @@ import logging
 import os
 import pathlib
 import re
+import stat
 import time
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
@@ -391,33 +392,70 @@ def _retained(handle: Any, *, now: int, retention_seconds: int) -> list[dict[str
 
 
 def store_record(config: TranscriptConfig, record: dict[str, Any], *, now: int | None = None) -> bool:
-    """Append under an exclusive lock with expiry; returns whether the record was stored."""
+    """Store under a private, pinned directory and regular-file inode.
+
+    A same-host path replacement must fail closed rather than write a detached
+    transcript or follow a symlink into another client's files. The trusted
+    volume and its ancestors remain an operator-owned deployment boundary.
+    """
     if not config.stores:
         return False
     path = config.path
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
     try:
-        os.chmod(path.parent, 0o700)
-    except OSError:
-        pass
-    descriptor = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
-    try:
-        os.fchmod(descriptor, 0o600)
-        with os.fdopen(descriptor, "r+", encoding="utf-8", closefd=False) as handle:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
-            rows = _retained(handle, now=int(time.time()) if now is None else now, retention_seconds=config.retention_seconds)
-            rows.append(record)
-            handle.seek(0)
-            handle.truncate()
-            for row in rows:
-                handle.write(json.dumps(row, sort_keys=True, ensure_ascii=False, separators=(",", ":")) + "\n")
-            handle.flush()
-            os.fsync(handle.fileno())
-            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
-    finally:
-        os.close(descriptor)
-    return True
+        parent_stat = os.fstat(directory)
+        if not stat.S_ISDIR(parent_stat.st_mode) or parent_stat.st_uid != os.geteuid():
+            raise OSError("transcript directory is not owned by this worker")
+        os.fchmod(directory, 0o700)
+        descriptor = os.open(
+            path.name, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC,
+            0o600, dir_fd=directory,
+        )
+        try:
+            file_stat = os.fstat(descriptor)
+            if not stat.S_ISREG(file_stat.st_mode) or file_stat.st_uid != os.geteuid() or file_stat.st_nlink != 1:
+                raise OSError("transcript target must be a singly linked, owned regular file")
+            os.fchmod(descriptor, 0o600)
 
+            def assert_pinned() -> None:
+                current_dir = os.stat(path.parent, follow_symlinks=False)
+                current_file = os.stat(path.name, dir_fd=directory, follow_symlinks=False)
+                held_dir = os.fstat(directory)
+                held_file = os.fstat(descriptor)
+                if (current_dir.st_dev, current_dir.st_ino) != (held_dir.st_dev, held_dir.st_ino):
+                    raise OSError("transcript directory replaced during write")
+                if (current_file.st_dev, current_file.st_ino) != (held_file.st_dev, held_file.st_ino):
+                    raise OSError("transcript file replaced during write")
+                if (not stat.S_ISDIR(held_dir.st_mode) or held_dir.st_uid != os.geteuid()
+                        or stat.S_IMODE(held_dir.st_mode) != 0o700):
+                    raise OSError("transcript directory permissions changed")
+                if (not stat.S_ISREG(held_file.st_mode) or held_file.st_uid != os.geteuid()
+                        or held_file.st_nlink != 1 or stat.S_IMODE(held_file.st_mode) != 0o600):
+                    raise OSError("transcript file ownership or permissions changed")
+
+            with os.fdopen(descriptor, "r+", encoding="utf-8", closefd=False) as handle:
+                fcntl.flock(descriptor, fcntl.LOCK_EX)
+                try:
+                    assert_pinned()
+                    rows = _retained(handle, now=int(time.time()) if now is None else now,
+                                     retention_seconds=config.retention_seconds)
+                    rows.append(record)
+                    assert_pinned()  # refuse replacement while reading existing rows
+                    handle.seek(0)
+                    handle.truncate()
+                    for row in rows:
+                        handle.write(json.dumps(row, sort_keys=True, ensure_ascii=False, separators=(",", ":")) + "\n")
+                    handle.flush()
+                    os.fsync(descriptor)
+                    assert_pinned()  # never acknowledge success for a detached path
+                finally:
+                    fcntl.flock(descriptor, fcntl.LOCK_UN)
+        finally:
+            os.close(descriptor)
+    finally:
+        os.close(directory)
+    return True
 
 def finalize(
     transcript: CallTranscript,
