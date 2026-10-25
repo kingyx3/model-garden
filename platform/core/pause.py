@@ -154,11 +154,11 @@ class PauseStore:
         pause state while holding it. This is host-local and cooperative:
         it cannot cancel cloud writes or protect independent remote workers.
         """
-        with self._transaction():
+        with self._transaction(shared=True):
             yield
 
     @contextmanager
-    def _transaction(self) -> Iterator[tuple[int, os.stat_result]]:
+    def _transaction(self, *, shared: bool = False) -> Iterator[tuple[int, os.stat_result]]:
         """Hold the trusted mount and lock inode for a complete state transition.
 
         A replaced mount must never let a lock from the old volume authorize
@@ -178,7 +178,7 @@ class PauseStore:
             try:
                 if not _private_regular(os.fstat(descriptor)):
                     raise OSError("pause transaction lock is untrusted")
-                fcntl.flock(descriptor, fcntl.LOCK_EX)
+                fcntl.flock(descriptor, fcntl.LOCK_SH if shared else fcntl.LOCK_EX)
                 locked = os.fstat(descriptor)
                 current_lock = os.stat(LOCK_FILE, dir_fd=root_fd, follow_symlinks=False)
                 if (not _private_regular(locked) or not _private_regular(current_lock)
