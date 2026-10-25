@@ -457,6 +457,7 @@ def store_record(config: TranscriptConfig, record: dict[str, Any], *, now: int |
         os.close(directory)
     return True
 
+
 def finalize(
     transcript: CallTranscript,
     *,
