@@ -110,6 +110,46 @@ class ReadinessContentTests(unittest.TestCase):
                 self.assertIn("NO APPROVED CONTENT", text)
                 self.assertIn("BLOCKED", text)
 
+    def test_public_skill_rejects_confidential_only_knowledge_but_member_skill_remains_ready(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = self.workspace(pathlib.Path(tmp), classification="confidential")
+            report = compiler.workspace_readiness(workspace, "receptionist", (), BINDING)
+            skills = {s["name"]: s for s in report[0]["skills"]}
+            faq = skills["answer-faq"]
+            self.assertFalse(faq["ready"])
+            self.assertFalse(faq["canEnable"])
+            self.assertEqual(faq["dependencies"][0]["status"], "no-content")
+            self.assertIn("members-only", [s["state"] for s in faq["dependencies"][0]["content"]["sources"]])
+            self.assertIn("public-facing", faq["remediation"])
+            self.assertTrue(skills["take-message"]["ready"])
+            desired = compiler.compile_workspace(workspace, "receptionist", environment_binding=BINDING)[0]
+            manifest = capabilities.build_manifest(desired, BINDING)
+            compiled_faq = next(s for s in manifest["skills"] if s["name"] == "answer-faq")
+            self.assertFalse(compiled_faq["ready"])
+            self.assertEqual(compiled_faq["dependencies"][0]["status"], "no-content")
+
+    def test_public_skill_accepts_internal_knowledge_and_rejects_other_agent_audience(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertTrue(self.faq(self.workspace(pathlib.Path(tmp), classification="internal"))["ready"])
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertFalse(self.faq(self.workspace(pathlib.Path(tmp), classification="internal",
+                                                     audiences=["other-agent"]))["ready"])
+
+    def test_explicit_member_only_skill_may_use_confidential_knowledge(self):
+        skill = {"metadata": {"name": "staff-faq"}, "spec": {
+            "requiredCapabilities": ["kb"], "knowledgeAccess": "member"}}
+        source = {"metadata": {"name": "staff-rules"}, "spec": {
+            "type": "text-file", "status": "approved", "classification": "confidential"}}
+        states = capabilities.knowledge_states([source], agent="receptionist")
+        report = capabilities.skill_readiness({"metadata": {"name": "receptionist"}, "spec": {}},
+                                              [skill], BINDING, knowledge=states)
+        self.assertTrue(report[0]["ready"])
+        public_skill = {"metadata": {"name": "public-faq"}, "spec": {
+            "requiredCapabilities": ["kb"], "knowledgeAccess": "public"}}
+        public_report = capabilities.skill_readiness({"metadata": {"name": "receptionist"}, "spec": {}},
+                                                     [public_skill], BINDING, knowledge=states)
+        self.assertFalse(public_report[0]["ready"])
+
     def test_compilation_still_succeeds_so_a_draft_can_be_authored_and_reviewed(self):
         with tempfile.TemporaryDirectory() as tmp:
             workspace = self.workspace(pathlib.Path(tmp), status="draft")
