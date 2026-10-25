@@ -275,6 +275,29 @@ def materialize_knowledge_file(workspace, name, resource, source_paths, source_r
     return {"source": label, "content": text, "sha256": report["sha256"], "sectionCount": report["sectionCount"]}, []
 
 
+def _readiness_knowledge_content(workspace, sources, source_paths, source_roots):
+    """Only actually readable and parsed Tier 0 sources can satisfy Skill readiness.
+
+    Operator readiness is intentionally non-throwing for a missing or invalid
+    business-rules file: it reports a blocked Skill and a safe next action.
+    The deployment compiler still raises its ordinary content error.
+    """
+    content = {}
+    for source in sources:
+        if source.get("spec", {}).get("type") != "text-file":
+            continue
+        name = source["metadata"]["name"]
+        try:
+            materialized, errors = materialize_knowledge_file(
+                workspace, name, source, source_paths, source_roots
+            )
+        except (OSError, ValueError):
+            materialized, errors = None, ["unreadable"]
+        if materialized is not None and not errors:
+            content[name] = materialized
+    return content
+
+
 def expand_agent_skillsets(agent, resources):
     """Resolve pinned Skillset references independently for one Agent; no Tool grants are introduced."""
     spec = agent["spec"]
@@ -421,7 +444,7 @@ def resolve_agent(workspace, agent, resources, source_paths, source_roots, envir
                 )
                 capabilities["skills"] = CAPABILITIES.skill_readiness(
                     agent, listed_skills, environment_binding, disabled_skills=disabled,
-                    knowledge=CAPABILITIES.knowledge_states(resolved["knowledge"], agent=name),
+                    knowledge=CAPABILITIES.knowledge_states(resolved["knowledge"], agent=name, content=knowledge_content),
                 )
             except ValueError as exc:
                 errors.append(str(exc))
@@ -528,7 +551,7 @@ def workspace_readiness(
     environment_binding: dict[str, Any],
 ) -> list[dict[str, Any]]:
     """Per-Skill capability readiness for each selected Agent, without failing closed."""
-    resources, _, _ = load_workspace(workspace, library_roots)
+    resources, source_paths, source_roots = load_workspace(workspace, library_roots)
     report = []
     for selected in _selected_agents(resources, agent_name):
         agent, _ = expand_agent_skillsets(selected, resources)
@@ -543,15 +566,18 @@ def workspace_readiness(
         if absent:
             raise ValueError(f"Agent {agent['metadata']['name']!r} refers to missing Skills: {', '.join(absent)}")
         skills = [resources["Skill"][ref] for ref in configured]
+        sources = [
+            resources["KnowledgeSource"][ref] for ref in agent["spec"].get("knowledge", [])
+            if ref in resources["KnowledgeSource"]
+        ]
+        materialized = _readiness_knowledge_content(workspace, sources, source_paths, source_roots)
         report.append({
             "agent": agent["metadata"]["name"],
             "environment": CAPABILITIES.binding_environment(environment_binding),
             "skills": CAPABILITIES.skill_readiness(
                 agent, skills, environment_binding, disabled_skills=disabled,
                 knowledge=CAPABILITIES.knowledge_states(
-                    [resources["KnowledgeSource"][ref] for ref in agent["spec"].get("knowledge", [])
-                     if ref in resources["KnowledgeSource"]],
-                    agent=agent["metadata"]["name"],
+                    sources, agent=agent["metadata"]["name"], content=materialized,
                 ),
             ),
         })

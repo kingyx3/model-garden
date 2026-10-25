@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import copy
 import datetime as dt
+import hashlib
 import importlib.util
 import json
 import os
@@ -275,9 +276,15 @@ def skills_requiring(skills: list[dict[str, Any]]) -> dict[str, list[str]]:
 
 
 def knowledge_states(
-    sources: list[Mapping[str, Any]], *, agent: str | None, today: dt.date | None = None
+    sources: list[Mapping[str, Any]], *, agent: str | None, today: dt.date | None = None,
+    content: Mapping[str, Any] | None = None,
 ) -> list[dict[str, str]]:
-    """Non-secret ``[{name, state}]`` for the KnowledgeSources an Agent selects (see knowledge.source_state)."""
+    """Non-secret source states, optionally verified against compiled Tier 0 content.
+
+    A metadata-only caller may omit ``content``. Compilers and runtime manifests
+    must supply their materialized knowledge map (even when empty), so an approved
+    but missing/empty/tampered file cannot make a dependent Skill look ready.
+    """
     module_name = "model_garden_capabilities_knowledge"
     module = sys.modules.get(module_name)
     if module is None:
@@ -286,11 +293,23 @@ def knowledge_states(
         assert spec.loader is not None
         sys.modules[module_name] = module
         spec.loader.exec_module(module)
-    return [
-        {"name": source.get("metadata", {}).get("name"),
-         "state": module.source_state(source.get("spec", {}), agent=agent, today=today)}
-        for source in sources if isinstance(source, Mapping)
-    ]
+    states: list[dict[str, str]] = []
+    for source in sources:
+        if not isinstance(source, Mapping):
+            continue
+        name = source.get("metadata", {}).get("name")
+        state = module.source_state(source.get("spec", {}), agent=agent, today=today)
+        if content is not None and state == "usable":
+            entry = content.get(name)
+            text = entry.get("content") if isinstance(entry, Mapping) else None
+            sections = entry.get("sectionCount") if isinstance(entry, Mapping) else None
+            expected = hashlib.sha256(text.encode("utf-8")).hexdigest() if isinstance(text, str) else None
+            if (not isinstance(text, str) or not text.strip()
+                    or type(sections) is not int or sections < 1
+                    or entry.get("sha256") != expected):
+                state = "invalid-content"
+        states.append({"name": name, "state": state})
+    return states
 
 
 def remediation_for(dependencies: list[Mapping[str, Any]], *, plain: bool = False) -> str | None:
@@ -311,6 +330,8 @@ def remediation_for(dependencies: list[Mapping[str, Any]], *, plain: bool = Fals
                 return f"Connect {family}: ask your operator or consultant to start the guided connect step for it"
             return f"Connect {family}: run `python3 scripts/client-operator.py connect {family}` to see the options"
         if status == "no-content":
+            if any(source.get("state") == "invalid-content" for source in dependency.get("content", {}).get("sources", [])):
+                return "Repair or upload readable, nonempty approved business knowledge for this coworker, then recompile"
             if any(source.get("state") == "stale" for source in dependency.get("content", {}).get("sources", [])):
                 return (
                     "Review the business knowledge: confirm it is still correct and set a later reviewBy date, "
@@ -482,7 +503,8 @@ def build_manifest(desired_state: dict[str, Any], binding: Mapping[str, Any], ca
             agent, [*executable_skills, *disabled_declarations], binding, catalog,
             disabled_skills=disabled,
             knowledge=(
-                knowledge_states(selected_knowledge, agent=source.get("name"))
+                knowledge_states(selected_knowledge, agent=source.get("name"),
+                                 content=desired_state.get("knowledgeContent") if isinstance(desired_state.get("knowledgeContent"), Mapping) else {})
                 if isinstance(selected_knowledge, list) else None
             ),
         )
