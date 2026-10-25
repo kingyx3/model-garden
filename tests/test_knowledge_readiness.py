@@ -173,6 +173,63 @@ class ReadinessContentTests(unittest.TestCase):
         self.assertNotIn("content", report[0]["dependencies"][0])
 
 
+class MaterializedContentGateTests(unittest.TestCase):
+    """A provider declaration is not proof that approved business rules are actually readable."""
+
+    workspace = ReadinessContentTests.workspace
+
+    def faq(self, workspace: pathlib.Path) -> dict:
+        report = compiler.workspace_readiness(workspace, "receptionist", (), BINDING)
+        return next(skill for skill in report[0]["skills"] if skill["name"] == "answer-faq")
+
+    def test_empty_approved_file_blocks_skill_in_operator_readiness(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = self.workspace(pathlib.Path(tmp))
+            (workspace / "knowledge/rules-of-engagement.md").write_text("  \n", encoding="utf-8")
+            faq = self.faq(workspace)
+        self.assertFalse(faq["ready"])
+        self.assertEqual(faq["dependencies"][0]["status"], "no-content")
+        self.assertEqual(faq["dependencies"][0]["content"]["sources"][-1]["state"], "invalid-content")
+        self.assertIn("Repair or upload", faq["remediation"])
+
+    def test_missing_approved_file_is_blocked_without_leaking_a_host_path(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = self.workspace(pathlib.Path(tmp))
+            (workspace / "knowledge/rules-of-engagement.md").unlink()
+            faq = self.faq(workspace)
+        self.assertFalse(faq["canEnable"])
+        self.assertEqual(faq["dependencies"][0]["content"]["sources"][-1]["state"], "invalid-content")
+        self.assertNotIn(str(workspace), json.dumps(faq))
+
+    def test_manifest_rechecks_missing_materialized_knowledge(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = self.workspace(pathlib.Path(tmp))
+            desired = compiler.compile_workspace(workspace, "receptionist", environment_binding=BINDING)[0]
+            desired.pop("knowledgeContent")
+            manifest = capabilities.build_manifest(desired, BINDING)
+        faq = next(skill for skill in manifest["skills"] if skill["name"] == "answer-faq")
+        self.assertFalse(faq["ready"])
+        self.assertEqual(faq["dependencies"][0]["status"], "no-content")
+
+    def test_manifest_rejects_mismatched_content_digest(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = self.workspace(pathlib.Path(tmp))
+            desired = compiler.compile_workspace(workspace, "receptionist", environment_binding=BINDING)[0]
+            desired["knowledgeContent"]["rules-of-engagement"]["sha256"] = "0" * 64
+            manifest = capabilities.build_manifest(desired, BINDING)
+        faq = next(skill for skill in manifest["skills"] if skill["name"] == "answer-faq")
+        self.assertFalse(faq["ready"])
+        self.assertEqual(faq["dependencies"][0]["content"]["sources"][-1]["state"], "invalid-content")
+
+    def test_valid_materialized_knowledge_remains_ready(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = self.workspace(pathlib.Path(tmp))
+            desired = compiler.compile_workspace(workspace, "receptionist", environment_binding=BINDING)[0]
+            manifest = capabilities.build_manifest(desired, BINDING)
+        faq = next(skill for skill in manifest["skills"] if skill["name"] == "answer-faq")
+        self.assertTrue(faq["ready"])
+
+
 class RemediationTests(unittest.TestCase):
     """Every blocked Skill names the one non-secret action that unblocks it."""
 
