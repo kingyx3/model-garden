@@ -64,6 +64,32 @@ class BackupWindowTests(unittest.TestCase):
         with mock.patch.object(WINDOW, "_run", side_effect=self.fake_run):
             return WINDOW.run(**(self.args | overrides))
 
+    def test_scheduled_guard_revoked_after_snapshot_blocks_upload(self):
+        checks = []
+
+        def guard():
+            checks.append(True)
+            if len(checks) == 4:
+                raise WINDOW.WindowError("recurring authorization revoked")
+
+        with self.assertRaisesRegex(WINDOW.WindowError, "revoked"):
+            self.execute(authorization_guard=guard)
+        self.assertEqual(len(checks), 4)
+        self.assertFalse(any("client-backup-upload.py" in str(cmd) for cmd in self.calls))
+
+    def test_scheduled_guard_revoked_after_upload_never_reports_success(self):
+        checks = []
+
+        def guard():
+            checks.append(True)
+            if len(checks) == 5:
+                raise WINDOW.WindowError("recurring authorization revoked")
+
+        with self.assertRaisesRegex(WINDOW.WindowError, "revoked"):
+            self.execute(authorization_guard=guard)
+        self.assertEqual(len(checks), 5)
+        self.assertTrue(any("client-backup-upload.py" in str(cmd) for cmd in self.calls))
+
     def test_one_approved_window_executes_inventory_snapshot_upload_in_order(self):
         result = self.execute()
         self.assertEqual(result["event"], "backup.window.completed")
