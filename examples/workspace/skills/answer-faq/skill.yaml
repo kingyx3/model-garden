@@ -12,6 +12,7 @@ spec:
     - kb.search
   requiredCapabilities:
     - kb
+  knowledgeAccess: public
   inputs:
     - customer-question
   evaluationSuite: evals/

@@ -208,8 +208,9 @@ class ReadinessTests(unittest.TestCase):
         self.assertIn("classified restricted", faq["remediation"])
         self.assertIn("document-level permissions", faq["remediation"])
 
-    def test_a_confidential_or_default_source_leaves_the_skill_ready(self):
-        self.assertTrue(self.faq(classification="confidential")["ready"])
+    def test_public_receptionist_skill_requires_customer_readable_knowledge(self):
+        self.assertFalse(self.faq(classification="confidential")["ready"])
+        self.assertTrue(self.faq(classification="internal")["ready"])
         self.assertTrue(self.faq()["ready"])
 
 
