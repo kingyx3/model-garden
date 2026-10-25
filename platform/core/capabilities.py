@@ -337,6 +337,10 @@ def remediation_for(dependencies: list[Mapping[str, Any]], *, plain: bool = Fals
                 return f"Connect {family}: ask your operator or consultant to start the guided connect step for it"
             return f"Connect {family}: run `python3 scripts/client-operator.py connect {family}` to see the options"
         if status == "no-content":
+            if any(source.get("state") in ("skill-context-required", "not-for-this-skill", "skill-audience-invalid")
+                   for source in dependency.get("content", {}).get("sources", [])):
+                return ("Skill-scoped knowledge requires a runtime-attested active Skill; the deployed Hermes route cannot "
+                        "supply this yet. Keep this Skill blocked or use a separately scoped Agent source after owner review")
             if any(source.get("state") == "invalid-content" for source in dependency.get("content", {}).get("sources", [])):
                 return "Repair or upload readable, nonempty approved business knowledge for this coworker, then recompile"
             if any(source.get("state") == "stale" for source in dependency.get("content", {}).get("sources", [])):

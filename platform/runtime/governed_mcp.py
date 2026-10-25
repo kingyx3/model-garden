@@ -144,6 +144,7 @@ class GovernedToolRuntime:
         environ: Mapping[str, str] | None = None,
         principal_resolver=None,
         conversation_resolver=None,
+        skill_resolver=None,
         upstream_transport=None,
         upstream_dns_resolver=None,
         upstream_secret_resolver=None,
@@ -174,6 +175,10 @@ class GovernedToolRuntime:
         self.principal_resolver = principal_resolver
         # A channel gateway, not the model, attests the current conversation identifier.
         self.conversation_resolver = conversation_resolver
+        # Only an attested runtime invocation may identify the active Skill.
+        # The deployed Hermes MCP route supplies no such attestation today;
+        # model arguments and Skill prose must never substitute for this resolver.
+        self.skill_resolver = skill_resolver
         # An approved transport is injected by the deployment; no arbitrary model HTTP client.
         self.upstream_transport = upstream_transport
         self.upstream_dns_resolver = upstream_dns_resolver
@@ -605,12 +610,25 @@ class GovernedToolRuntime:
                 raise ValueError("locale must be a language tag such as en or en-SG")
             arguments["locale"] = locale
         access = "member" if self._caller()[2] == "member" else "public"
+        skill = None
+        if self.skill_resolver is not None:
+            try:
+                skill = self.skill_resolver()
+            except Exception:
+                raise PermissionError("trusted Skill context unavailable") from None
+            allowed = {
+                item.get("metadata", {}).get("name")
+                for item in self.desired_state.get("skills", [])
+                if isinstance(item, dict) and "kb.search" in item.get("spec", {}).get("allowedTools", [])
+            }
+            if not isinstance(skill, str) or skill not in allowed:
+                raise PermissionError("trusted Skill context unavailable or lacks kb.search authority")
         found = self._execute(
             "kb.search",
             arguments,
             lambda exact: KNOWLEDGE.search_selected(
                 self.desired_state, exact["query"], source=exact.get("source"), limit=exact["limit"], access=access,
-                locale=exact.get("locale"), require_integrity=True,
+                skill=skill, locale=exact.get("locale"), require_integrity=True,
             ),
             provider="text-knowledge",
             tier=0,

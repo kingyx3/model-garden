@@ -232,13 +232,15 @@ def build_index(name: str, text: str, *, filename: str, spec: Mapping[str, Any] 
         "classification": spec.get("classification", "internal"),
         "locale": spec.get("locale"),
         "audiences": list(spec.get("audiences", [])),
+        "skillAudiences": spec.get("skillAudiences"),
         "sections": sections,
         "df": document_frequency,
     }
 
 
 def availability(
-    index: Mapping[str, Any], *, agent: str | None = None, today: dt.date | None = None, access: str = "public"
+    index: Mapping[str, Any], *, agent: str | None = None, skill: str | None = None,
+    today: dt.date | None = None, access: str = "public"
 ) -> str | None:
     """None when the source may ground answers, else the reason it may not.
 
@@ -266,6 +268,15 @@ def availability(
     audiences = index.get("audiences") or []
     if audiences and agent not in audiences:
         return "source-not-for-this-agent"
+    skill_audiences = index.get("skillAudiences")
+    if skill_audiences is not None:
+        if (not isinstance(skill_audiences, (list, tuple)) or not skill_audiences
+                or any(not isinstance(name, str) or not name for name in skill_audiences)):
+            return "source-skill-audience-invalid"
+        if skill is None:
+            return "source-skill-context-required"
+        if skill not in skill_audiences:
+            return "source-not-for-this-skill"
     classification = index.get("classification", "internal")
     if classification == "restricted":
         return "source-restricted"
@@ -274,8 +285,8 @@ def availability(
     return None
 
 
-def source_state(spec: Mapping[str, Any], *, agent: str | None = None, today: dt.date | None = None,
-                 access: str = "member") -> str:
+def source_state(spec: Mapping[str, Any], *, agent: str | None = None, skill: str | None = None,
+                 today: dt.date | None = None, access: str = "member") -> str:
     """Whether one KnowledgeSource declaration may ground answers for an Agent, without reading its file.
 
     ``usable`` or the reason it is not: ``draft``, ``retired``, ``not-yet-effective``,
@@ -288,8 +299,9 @@ def source_state(spec: Mapping[str, Any], *, agent: str | None = None, today: dt
     reason = availability(
         {"status": spec.get("status", "draft"), "effectiveDate": spec.get("effectiveDate"),
          "reviewBy": spec.get("reviewBy"), "audiences": spec.get("audiences", []),
+         "skillAudiences": spec.get("skillAudiences"),
          "classification": spec.get("classification", "internal")},
-        agent=agent, today=today, access=access,
+        agent=agent, skill=skill, today=today, access=access,
     )
     return "usable" if reason is None else reason.removeprefix("source-")
 
@@ -361,12 +373,13 @@ def search(
     *,
     limit: int = 3,
     agent: str | None = None,
+    skill: str | None = None,
     today: dt.date | None = None,
     access: str = "public",
 ) -> dict[str, Any]:
     """Rank sections for ``query``; returns the `kb.search` result shape plus availability facts."""
     limit = max(1, min(int(limit), MAX_RESULTS))
-    reason = availability(index, agent=agent, today=today, access=access)
+    reason = availability(index, agent=agent, skill=skill, today=today, access=access)
     if reason is not None:
         return {"documents": [], "reason": reason, "dataOnly": True}
     terms = _tokens(query)
@@ -418,6 +431,7 @@ def search_selected(
     limit: int = 3,
     today: dt.date | None = None,
     access: str = "public",
+    skill: str | None = None,
     locale: str | None = None,
     require_integrity: bool = False,
 ) -> dict[str, Any]:
@@ -440,6 +454,7 @@ def search_selected(
         return {"documents": [], "reason": "source-not-selected", "dataOnly": True}
     documents: list[dict[str, Any]] = []
     reasons: dict[str, str] = {}
+    available_locales: set[str] = set()
     for name in names:
         record = contents.get(name)
         if record is None:
@@ -468,12 +483,20 @@ def search_selected(
             if type(record.get("sectionCount")) is not int or section_count < 1 or record["sectionCount"] != section_count:
                 reasons[name] = "source-content-integrity"
                 continue
-        declared = selected[name]["spec"].get("locale")
+        index = build_index(name, record["content"], filename=record["source"], spec=selected[name]["spec"])
+        # Check authorization before locale matching. Otherwise a source that
+        # the caller/Skill cannot read can leak its language through fallback hints.
+        denied = availability(index, agent=agent, skill=skill, today=today, access=access)
+        if denied is not None:
+            reasons[name] = denied
+            continue
+        declared = index.get("locale")
+        if isinstance(declared, str) and declared:
+            available_locales.add(declared)
         if locale and declared and declared.split("-")[0].lower() != locale.split("-")[0].lower():
             reasons[name] = "source-other-locale"
             continue
-        index = build_index(name, record["content"], filename=record["source"], spec=selected[name]["spec"])
-        outcome = search(index, query, limit=limit, agent=agent, today=today, access=access)
+        outcome = search(index, query, limit=limit, agent=agent, skill=skill, today=today, access=access)
         documents.extend(outcome["documents"])
         if outcome.get("reason") and not outcome["documents"]:
             reasons[name] = outcome["reason"]
@@ -489,7 +512,7 @@ def search_selected(
         if locale and "source-other-locale" in reasons.values():
             # Name the languages that ARE covered (declared tags only) so the coworker can say so or offer a person; it must never present
             # another language's approved text as if it were approved in the requested one (#239).
-            result["availableLocales"] = sorted({str(item["spec"]["locale"]) for item in selected.values() if item.get("spec", {}).get("locale")})
+            result["availableLocales"] = sorted(available_locales)
             result["localeGuidance"] = (
                 "No approved source covers the requested language. Do not translate another language's approved text and present it as approved "
                 "in the requested one: say which languages are covered and answer in one of them, or offer a message or a person."
