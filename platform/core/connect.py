@@ -152,6 +152,8 @@ def apply(
     audit: Audit | None = None,
 ) -> dict[str, Any]:
     """Run the read-only test and, only if it passes, record the coworker's own grant and return the binding fragment."""
+    if not isinstance(owner_consent, str) or not _DIGEST.match(owner_consent) or owner_consent != proposal.get("digest") or digest_of(proposal) != proposal["digest"]:
+        raise ConnectError("the owner's consent does not match this plan; show the owner the exact scopes and ask again")
     # A digest is an owner-facing change detector, not a signed capability. Rebuild the
     # preview from the *current* reviewed registry before testing or creating a grant.
     # Otherwise a caller could flip connectable on a planned/Tier 0 provider, or
@@ -166,8 +168,6 @@ def apply(
         raise ConnectError("connection plan is invalid or no longer approved; preview again") from exc
     if not expected["connectable"] or dict(proposal) != expected:
         raise ConnectError("connection plan is invalid or no longer approved; preview again")
-    if not isinstance(owner_consent, str) or not _DIGEST.match(owner_consent) or owner_consent != proposal.get("digest") or digest_of(proposal) != proposal["digest"]:
-        raise ConnectError("the owner's consent does not match this plan; show the owner the exact scopes and ask again")
     base = {"agent": proposal["agent"], "family": proposal["family"], "provider": proposal["provider"], "owner": proposal["owner"],
             "operator": proposal["operator"], "tools": list(proposal["tools"]), "consentDigest": proposal["digest"]}
 
