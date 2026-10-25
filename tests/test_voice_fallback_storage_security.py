@@ -25,8 +25,8 @@ spec.loader.exec_module(T)
 source = ROOT / "platform/channels/livekit_receptionist.py"
 tree = ast.parse(source.read_text(encoding="utf-8"), filename=str(source))
 functions = [node for node in tree.body if isinstance(node, ast.FunctionDef)
-             and node.name in {"_retention_seconds", "_append_message"}]
-assert len(functions) == 2
+             and node.name in {"_retention_seconds", "_retained_rows", "_append_message"}]
+assert len(functions) == 3
 namespace = {
     "os": os, "pathlib": pathlib, "fcntl": T.fcntl, "json": T.json,
     "time": T.time, "Any": object, "store_private_jsonl": getattr(T, "store_private_jsonl", None),
