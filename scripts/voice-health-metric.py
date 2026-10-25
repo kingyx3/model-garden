@@ -13,7 +13,7 @@ import json
 import re
 import subprocess
 import sys
-from urllib.request import Request, urlopen
+from urllib.request import Request, ProxyHandler, HTTPRedirectHandler, build_opener
 
 METRIC = "custom.googleapis.com/model_garden/voice_ready"
 METADATA = "http://metadata.google.internal/computeMetadata/v1/"
@@ -61,6 +61,17 @@ def docker_voice_ready(compose_project: str) -> bool:
         return False
 
 
+class _NoRedirect(HTTPRedirectHandler):
+    def redirect_request(self, *args, **kwargs):
+        raise ValueError("redirected metadata or monitoring endpoint")
+
+
+def _open(request: Request, timeout: int):
+    # Neither metadata credentials nor metric samples may transit a proxy or
+    # follow a redirect to a different host.
+    return build_opener(ProxyHandler({}), _NoRedirect()).open(request, timeout=timeout)
+
+
 def metadata(path: str) -> str:
     # No caller-controlled URL or metadata path; no proxy redirect to an
     # external host. Metadata tokens must never enter logs or time-series.
@@ -68,7 +79,7 @@ def metadata(path: str) -> str:
                     "instance/service-accounts/default/token"}:
         raise ValueError("unsupported metadata field")
     req = Request(METADATA + path, headers={"Metadata-Flavor": "Google"})
-    with urlopen(req, timeout=3) as response:
+    with _open(req, timeout=3) as response:
         return response.read(4096).decode("utf-8").strip()
 
 
@@ -94,7 +105,7 @@ def publish_sample(project_id: str, payload: dict) -> None:
         headers={"Authorization": "Bearer " + token, "Content-Type": "application/json"},
         method="POST",
     )
-    with urlopen(req, timeout=10) as response:
+    with _open(req, timeout=10) as response:
         response.read(4096)
 
 
