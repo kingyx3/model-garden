@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import importlib.util
+import contextlib
+import io
 import json
 import os
 import pathlib
@@ -9,6 +11,7 @@ import stat
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 PATH = ROOT / "scripts" / "capture-adversarial-model.py"
@@ -120,6 +123,17 @@ class CaptureTests(unittest.TestCase):
             parent.chmod(0o777)
             with self.assertRaises(capture.CaptureError):
                 capture.write_capture(output, {"source": "unverified-model-run"})
+
+    def test_cli_never_prints_credential_or_provider_errors(self):
+        with tempfile.TemporaryDirectory() as folder:
+            output = pathlib.Path(folder) / "capture.json"
+            with mock.patch.object(capture, "_client", side_effect=RuntimeError("SECRET-PROVIDER-DETAIL")):
+                errors = io.StringIO()
+                with contextlib.redirect_stderr(errors):
+                    status = capture.main(["--api-url", "http://hermes:8642/v1", "--output", str(output)])
+            self.assertEqual(status, 1)
+            self.assertNotIn("SECRET-PROVIDER-DETAIL", errors.getvalue())
+            self.assertFalse(output.exists())
 
     def test_shipped_suite_is_accepted_but_never_scored_as_live(self):
         import yaml
