@@ -117,7 +117,17 @@ def _compose_ps_rows(raw: str) -> list[dict[str, Any]]:
     return decoded if isinstance(decoded, list) and decoded and all(isinstance(row, dict) for row in decoded) else []
 
 
-def _health(project: str, compose_files: list[pathlib.Path], env: dict[str, str], timeout: int = 120) -> bool:
+def _health(project: str, compose_files: list[pathlib.Path], env: dict[str, str], timeout: int = 120,
+            *, required_services: dict[str, bool] | None = None) -> bool:
+    """All declared Compose services must be present and ready, not just voice.
+
+    Values in required_services indicate whether the merged Compose definition
+    declares a healthcheck. An absent optional service is omitted from this map;
+    an absent *configured* service must never count as a healthy deployment.
+    """
+    expected = required_services if required_services is not None else {"hermes": True, "voice": True}
+    if not {"hermes", "voice"} <= expected.keys() or not expected["voice"]:
+        return False
     command = ["docker", "compose", "-p", project]
     for path in compose_files:
         command.extend(["-f", str(path)])
@@ -125,24 +135,50 @@ def _health(project: str, compose_files: list[pathlib.Path], env: dict[str, str]
     while time.monotonic() < deadline:
         result = _run([*command, "ps", "--format", "json"], env=env, check=False)
         rows = _compose_ps_rows(result.stdout) if result.returncode == 0 else []
-        if rows and any(row.get("Service") == "voice" for row in rows):
-            bad = {"exited", "dead", "unhealthy"}
-            states = {str(row.get("State") or "").lower() for row in rows}
-            health = {str(row.get("Health") or "").lower() for row in rows}
-            if states & bad or health & bad:
+        if rows:
+            by_service: dict[str, dict[str, Any]] = {}
+            for row in rows:
+                name = row.get("Service")
+                if not isinstance(name, str) or not name or name in by_service:
+                    return False  # malformed/duplicate service identity
+                by_service[name] = row
+            if any(str(row.get("State") or "").lower() in {"exited", "dead"} or
+                   str(row.get("Health") or "").lower() == "unhealthy" for row in rows):
                 return False
-            hermes_ok = any(row.get("Service") == "hermes" and
-                            (row.get("Health") == "healthy" or row.get("State") == "running") for row in rows)
-            # A running voice process is not ready: require LiveKit's native
-            # healthy signal, including a successful provider connection.
-            voice_ok = any(row.get("Service") == "voice" and
-                           str(row.get("State") or "").lower() == "running" and
-                           str(row.get("Health") or "").lower() == "healthy" for row in rows)
-            tools_ok = all(row.get("Service") != "governed-tools" or row.get("Health") == "healthy" for row in rows)
-            if hermes_ok and voice_ok and tools_ok:
+            ready = True
+            for name, has_healthcheck in expected.items():
+                row = by_service.get(name)
+                if row is None or str(row.get("State") or "").lower() != "running":
+                    ready = False
+                    break
+                health = str(row.get("Health") or "").lower()
+                if has_healthcheck and health != "healthy":
+                    ready = False
+                    break
+                if not has_healthcheck and health not in {"", "healthy"}:
+                    ready = False
+                    break
+            if ready:
                 return True
         time.sleep(2)
     return False
+
+
+def _required_services(base: dict[str, Any], overlay: dict[str, Any]) -> dict[str, bool]:
+    """Merge declared services and healthchecks without trusting Compose ps output."""
+    required: dict[str, bool] = {}
+    for document in (base, overlay):
+        services = document.get("services") if isinstance(document, dict) else None
+        if not isinstance(services, dict):
+            raise ValueError("voice deployment requires a valid Compose services mapping")
+        for name, definition in services.items():
+            if not isinstance(name, str) or not name or not isinstance(definition, dict):
+                raise ValueError("voice deployment has an invalid Compose service definition")
+            required[name] = required.get(name, False) or "healthcheck" in definition
+    if "hermes" not in required or "voice" not in required:
+        raise ValueError("voice deployment requires Hermes and LiveKit services")
+    required["voice"] = True
+    return required
 
 
 def _context(root: pathlib.Path) -> pathlib.Path:
@@ -255,9 +291,11 @@ def _apply_selected_voice(binding: dict[str, Any], voice: dict[str, Any], bundle
         },
         "volumes": {"voice-data": {}},
     }
-    shared = worker_overlay(yaml.safe_load(base.read_text(encoding="utf-8")))
+    base_document = yaml.safe_load(base.read_text(encoding="utf-8"))
+    shared = worker_overlay(base_document)
     if shared is not None:
         document["services"]["governed-worker"] = shared
+    required_services = _required_services(base_document, document)
     overlay.write_text(yaml.safe_dump(document, sort_keys=False), encoding="utf-8")
 
     runtime_env = os.environ.copy()
@@ -270,7 +308,8 @@ def _apply_selected_voice(binding: dict[str, Any], voice: dict[str, Any], bundle
     compose = ["docker", "compose", "-p", project, "-f", str(base), "-f", str(overlay)]
     try:
         _run([*compose, "up", "-d", "--build", "--remove-orphans"], env=runtime_env)
-        if not _health(project, [base, overlay], runtime_env, timeout=timeout):
+        if not _health(project, [base, overlay], runtime_env, timeout=timeout,
+                       required_services=required_services):
             raise RuntimeError("voice overlay did not become healthy")
     except (OSError, subprocess.CalledProcessError, RuntimeError) as exc:
         base_compose = ["docker", "compose", "-p", project, "-f", str(base)]
