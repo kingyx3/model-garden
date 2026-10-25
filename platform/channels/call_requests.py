@@ -1,36 +1,41 @@
-"""Ledger request ids for a finished voice call (#107, #115).
+"""Attach ledger request ids to stored voice calls (#107, #115).
 
-The voice container cannot see the Action Ledger, so a stored call carries no ``requestIds``. This step runs where the ledger is
-readable (the worker) and attaches the ids of the governed Tool requests the coworker itself started while the call was live, so one
-call reads as one story on the conversation timeline and in ``client-operator.py audit``.
+An authorization event explicitly tagged with ``governance.correlationId =
+call:<callHash>`` is preferred even when calls overlap or ledger delivery is
+delayed. A request id tagged to two different calls is ambiguous and omitted.
 
-The attribution is by time, not by a tag, and is labelled that way (``requestIdsSource: ledger-time-window``):
+For older untagged runtime events, retain the labelled time-window heuristic
+only when the stored call windows do not overlap. Never infer attribution from
+events already correlated to a different task or call. This is NOT proof that
+the voice runtime emits call correlation tags; live call evidence is separate.
 
-- only authorization events whose initiating identity is the runtime's own (a Tool call made on behalf of a named person, a channel
-  principal or a scheduled task carries that person's identity instead) inside the call's window, with a few seconds of grace;
-- a call whose window overlaps another stored call gets no ids, because the ledger cannot say which call a request belonged to;
-- ids a record already carries are never replaced, and nothing is written back to the transcript store.
-
-Pure Python over a list of ledger events; no credentials, no I/O.
+Pure Python over ledger events; no credentials or I/O.
 """
 from __future__ import annotations
 
 import datetime as dt
+import re
 from collections.abc import Iterable, Mapping
 from typing import Any
 
 SOURCE = "ledger-time-window"
+EXACT_SOURCE = "ledger-correlation"
 RUNTIME_IDENTITY = "runtime:hermes"
 GRACE_SECONDS = 5
 MAX_REQUEST_IDS = 200
+_CALL_HASH = re.compile(r"[0-9a-f]{64}")
+_CALL_CORRELATION = re.compile(r"call:[0-9a-f]{64}")
 
 
 def _seconds(value: Any) -> float | None:
     if not isinstance(value, str):
         return None
     try:
-        return dt.datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
-    except ValueError:
+        parsed = dt.datetime.fromisoformat(value.replace("Z", "+00:00"))
+        if parsed.tzinfo is None or parsed.utcoffset() is None:
+            return None  # local-time interpretation would make attribution host-dependent
+        return parsed.timestamp()
+    except (ValueError, OverflowError):
         return None
 
 
@@ -42,27 +47,68 @@ def _window(record: Mapping[str, Any]) -> tuple[int, int] | None:
     return start, end if isinstance(end, int) and not isinstance(end, bool) and end >= start else start
 
 
+def _event_correlation(event: Mapping[str, Any]) -> str | None | bool:
+    """None is untagged; False is malformed; a string is an explicit tag."""
+    governance = event.get("governance")
+    if governance is None:
+        return None
+    if not isinstance(governance, Mapping):
+        return False
+    value = governance.get("correlationId")
+    if value is None or value == "":
+        return None
+    return value if isinstance(value, str) else False
+
+
 def attach_request_ids(
     records: Iterable[Mapping[str, Any]], events: Iterable[Mapping[str, Any]], *, identity: str = RUNTIME_IDENTITY
 ) -> list[dict[str, Any]]:
-    """Each record with ``requestIds`` filled from the ledger when it has none and its window is unambiguous."""
+    """Attach exact call-correlated ids first; conservatively infer older untagged requests."""
     calls = [dict(record) for record in records]
     windows = [_window(call) for call in calls]
-    requests: list[tuple[float, str]] = []
+    exact_by_call: dict[str, list[tuple[float, str]]] = {}
+    untagged: list[tuple[float, str]] = []
+    request_tags: dict[str, set[str]] = {}
     for event in events:
         request_id, at = event.get("requestId"), _seconds(event.get("timestamp"))
-        if event.get("event") == "authorization" and event.get("initiatingUser") == identity and isinstance(request_id, str) and request_id and at is not None:
-            requests.append((at, request_id))
-    requests.sort()
+        if event.get("event") != "authorization" or not isinstance(request_id, str) or not request_id or at is None:
+            continue
+        correlation = _event_correlation(event)
+        if isinstance(correlation, str) and _CALL_CORRELATION.fullmatch(correlation):
+            exact_by_call.setdefault(correlation, []).append((at, request_id))
+            request_tags.setdefault(request_id, set()).add(correlation)
+        elif correlation is None and event.get("initiatingUser") == identity:
+            untagged.append((at, request_id))
+        # Malformed or unrelated correlation never falls back to time guessing.
+
+    for events_for_call in exact_by_call.values():
+        events_for_call.sort()
+    untagged.sort()
     for index, call in enumerate(calls):
+        if call.get("requestIds"):
+            continue
+        call_hash = call.get("callHash")
+        if isinstance(call_hash, str) and _CALL_HASH.fullmatch(call_hash):
+            tag = "call:" + call_hash
+            ids = list(dict.fromkeys(
+                request_id for _, request_id in exact_by_call.get(tag, ())
+                if request_tags[request_id] == {tag}
+            ))[:MAX_REQUEST_IDS]
+            if ids:
+                call["requestIds"], call["requestIdsSource"] = ids, EXACT_SOURCE
+                continue
+
         window = windows[index]
-        if call.get("requestIds") or window is None:
+        if window is None:
             continue
         low, high = window[0] - GRACE_SECONDS, window[1] + GRACE_SECONDS
         if any(other is not None and other[0] - GRACE_SECONDS <= high and low <= other[1] + GRACE_SECONDS
                for position, other in enumerate(windows) if position != index):
             continue
-        ids = list(dict.fromkeys(request_id for at, request_id in requests if low <= at <= high))[:MAX_REQUEST_IDS]
+        ids = list(dict.fromkeys(
+            request_id for at, request_id in untagged
+            if low <= at <= high and request_id not in request_tags
+        ))[:MAX_REQUEST_IDS]
         if ids:
             call["requestIds"], call["requestIdsSource"] = ids, SOURCE
     return calls
