@@ -26,6 +26,7 @@
       "properties": {
         "instructions": {"type": "object", "additionalProperties": false, "required": ["file"], "properties": {"file": {"type": "string"}}},
         "allowedTools": {"type": "array", "items": {"type": "string"}, "uniqueItems": true},
+        "knowledgeAccess": {"enum": ["member", "public"], "description": "When a Skill requires kb, public requires at least one approved source answerable to an unauthenticated customer; member (default) permits confidential team-only sources. This is a readiness assertion, not a retrieval authorization override."},
         "requiredCapabilities": {"type": "array", "items": {"type": "string", "pattern": "^[a-z]+(\\.[a-z][a-z-]*)?$"}, "uniqueItems": true},
         "optionalCapabilities": {"type": "array", "items": {"type": "string", "pattern": "^[a-z]+(\\.[a-z][a-z-]*)?$"}, "uniqueItems": true},
         "inputs": {"type": "array", "items": {"type": "string"}, "uniqueItems": true},
