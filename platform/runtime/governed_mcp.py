@@ -332,16 +332,27 @@ class GovernedToolRuntime:
             governance_context.update(principal_context)
         return identity, governance_context, principal_access
 
-    def _paused_for(self, tool_name: str) -> bool:
-        """True while the owner's pause is on and the Tool is not a read (an unknown Tool counts as material)."""
-        if not PAUSE.PauseStore(self.governance_root).is_paused():
-            return False
+    def _material_tool(self, tool_name: str) -> bool:
+        """Unknown Tools are material; only declared read-only Tools bypass the effect lock."""
         for tool in self.desired_state.get("tools", []) if isinstance(self.desired_state, dict) else []:
             if tool.get("metadata", {}).get("name") == tool_name:
                 return tool.get("spec", {}).get("risk") != "read"
         return True
 
-    def _execute(
+    def _paused_for(self, tool_name: str) -> bool:
+        """The owner pause blocks every material Tool; read-only Tools remain available."""
+        return self._material_tool(tool_name) and PAUSE.PauseStore(self.governance_root).is_paused()
+
+    def _execute(self, tool_name: str, arguments: dict[str, Any], executor, **kwargs) -> dict[str, Any]:
+        # The pause transition and a material effect share one host-local lock.
+        # Check pause and claim approval *inside* it, then retain it through the
+        # actual side effect. Pause acknowledgement waits for admitted effects.
+        if self._material_tool(tool_name):
+            with PAUSE.PauseStore(self.governance_root).effect_guard():
+                return self._execute_guarded(tool_name, arguments, executor, **kwargs)
+        return self._execute_guarded(tool_name, arguments, executor, **kwargs)
+
+    def _execute_guarded(
         self,
         tool_name: str,
         arguments: dict[str, Any],
