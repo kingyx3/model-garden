@@ -391,16 +391,15 @@ def _retained(handle: Any, *, now: int, retention_seconds: int) -> list[dict[str
     return rows
 
 
-def store_record(config: TranscriptConfig, record: dict[str, Any], *, now: int | None = None) -> bool:
-    """Store under a private, pinned directory and regular-file inode.
+def store_private_jsonl(path: pathlib.Path, record: dict[str, Any], *, retention_seconds: int, now: int | None = None) -> None:
+    """Append a retained private voice record under a pinned, owned regular inode.
 
-    A same-host path replacement must fail closed rather than write a detached
-    transcript or follow a symlink into another client's files. The trusted
-    volume and its ancestors remain an operator-owned deployment boundary.
+    Used by both call transcripts and fallback messages. Retention zero clears
+    the existing file rather than silently preserving previously stored PII.
+    Only a trusted deployment-owned volume and ancestors may contain this path.
     """
-    if not config.stores:
-        return False
-    path = config.path
+    if retention_seconds < 0 or retention_seconds > MAX_RETENTION_SECONDS:
+        raise ValueError("invalid voice record retention")
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
     try:
@@ -438,9 +437,11 @@ def store_record(config: TranscriptConfig, record: dict[str, Any], *, now: int |
                 fcntl.flock(descriptor, fcntl.LOCK_EX)
                 try:
                     assert_pinned()
-                    rows = _retained(handle, now=int(time.time()) if now is None else now,
-                                     retention_seconds=config.retention_seconds)
-                    rows.append(record)
+                    rows = ([] if retention_seconds == 0 else
+                            _retained(handle, now=int(time.time()) if now is None else now,
+                                      retention_seconds=retention_seconds))
+                    if retention_seconds > 0:
+                        rows.append(record)
                     assert_pinned()  # refuse replacement while reading existing rows
                     handle.seek(0)
                     handle.truncate()
@@ -455,8 +456,14 @@ def store_record(config: TranscriptConfig, record: dict[str, Any], *, now: int |
             os.close(descriptor)
     finally:
         os.close(directory)
-    return True
 
+
+def store_record(config: TranscriptConfig, record: dict[str, Any], *, now: int | None = None) -> bool:
+    """Store a call transcript if enabled, with the same private file guarantees as fallback messages."""
+    if not config.stores:
+        return False
+    store_private_jsonl(config.path, record, retention_seconds=config.retention_seconds, now=now)
+    return True
 
 def finalize(
     transcript: CallTranscript,
