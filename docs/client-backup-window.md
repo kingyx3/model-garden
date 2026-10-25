@@ -73,3 +73,10 @@ The window runner now pins the private approval file's device/inode and size/mti
 The shared host-local project lock now rechecks the operator-owned 0700 lock directory and the exact 0600 project-lock inode **after** acquiring `flock` and **before** entering protected backup/deploy work. A directory swap, lock-file replacement, unlink, or permission/owner change during acquisition fails closed. Credential-free adversarial tests force these races.
 
 This is **not** a distributed or durable freeze: a privileged actor can still replace paths after the check, bypass the cooperative entrypoints, or restart containers directly. Maintain the independently authorized deployment-wide maintenance exclusion and do not claim real recovery until the replacement-host RPO/RTO drill succeeds.
+
+
+## Held host-lock lease revalidation (v0.8.115)
+
+The cooperative per-project lock now returns a read-only lease check that pins the directory and lock-file identities, owner and private permissions throughout the operation. The backup window calls this check after each stopped-container inspection and before **inventory, encrypted snapshot, create-only upload and success acknowledgement**. A detached/replaced/unlinked or chmod-weakened lock fails closed at the next stage boundary; the context also checks at normal exit. Offline adversarial tests replace the lock directory after inventory and the lock file after snapshot, and assert that no subsequent write stage executes.
+
+**Limitations:** the lease is host-local, cooperative and sampled only at stage boundaries. It cannot prevent a privileged same-host actor from racing between checks, cancel an in-flight snapshot/cloud write, stop direct Docker/restart policies or coordinate other hosts. A failed post-upload check may mean an upload occurred without a success acknowledgement; inspect immutable receipts and manifests before deciding on recovery. Client-approved independent deployment-wide quiescence and a measured live restore drill remain mandatory.
