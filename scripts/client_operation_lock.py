@@ -12,7 +12,7 @@ import os
 import pathlib
 import re
 import stat
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 
 LOCK_ROOT = pathlib.Path("/run/lock/model-garden")
 PROJECT = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
@@ -23,7 +23,7 @@ class OperationLockError(ValueError):
 
 
 @contextmanager
-def project_operation_lock(project: str) -> Iterator[None]:
+def project_operation_lock(project: str) -> Iterator[Callable[[], None]]:
     """Exclude cooperative deploy/backup operations for one exact Compose project."""
     if not isinstance(project, str) or not PROJECT.fullmatch(project):
         raise OperationLockError("invalid client project for host operation lock")
@@ -45,27 +45,48 @@ def project_operation_lock(project: str) -> Iterator[None]:
                info.st_nlink != 1 or stat.S_IMODE(info.st_mode) != 0o600:
                 raise OperationLockError("host operation lock file is unsafe")
             fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            # The directory or lock name may have been atomically replaced
-            # while opening/flocking. Never authorize work under a detached
-            # inode that a second process cannot see or lock.
-            current_root = os.stat(LOCK_ROOT, follow_symlinks=False)
-            current_lock = os.stat(project + ".lock", dir_fd=directory_fd,
-                                   follow_symlinks=False)
-            if (not stat.S_ISDIR(current_root.st_mode) or
-                    current_root.st_uid != os.geteuid() or
-                    stat.S_IMODE(current_root.st_mode) != 0o700 or
-                    (current_root.st_dev, current_root.st_ino) !=
-                    (directory.st_dev, directory.st_ino) or
-                    not stat.S_ISREG(current_lock.st_mode) or
-                    current_lock.st_uid != os.geteuid() or
-                    current_lock.st_nlink != 1 or
-                    stat.S_IMODE(current_lock.st_mode) != 0o600 or
-                    (current_lock.st_dev, current_lock.st_ino) !=
-                    (info.st_dev, info.st_ino)):
-                raise OperationLockError("host operation lock replaced during acquisition")
+            # A held flock protects an inode, not its pathname. A privileged
+            # local actor could replace the name after acquisition, letting
+            # another process lock a different inode. Check before each
+            # backup stage, not just at the beginning of the operation.
+            def assert_current() -> None:
+                try:
+                    held_root = os.fstat(directory_fd)
+                    held_lock = os.fstat(lock_fd)
+                    current_root = os.stat(LOCK_ROOT, follow_symlinks=False)
+                    current_lock = os.stat(project + ".lock", dir_fd=directory_fd,
+                                           follow_symlinks=False)
+                except OSError as exc:
+                    raise OperationLockError("host operation lock disappeared while held") from exc
+                if (not stat.S_ISDIR(held_root.st_mode) or
+                        held_root.st_uid != os.geteuid() or
+                        stat.S_IMODE(held_root.st_mode) != 0o700 or
+                        not stat.S_ISDIR(current_root.st_mode) or
+                        current_root.st_uid != os.geteuid() or
+                        stat.S_IMODE(current_root.st_mode) != 0o700 or
+                        (current_root.st_dev, current_root.st_ino) !=
+                        (directory.st_dev, directory.st_ino) or
+                        (held_root.st_dev, held_root.st_ino) !=
+                        (directory.st_dev, directory.st_ino) or
+                        not stat.S_ISREG(held_lock.st_mode) or
+                        held_lock.st_uid != os.geteuid() or
+                        held_lock.st_nlink != 1 or
+                        stat.S_IMODE(held_lock.st_mode) != 0o600 or
+                        not stat.S_ISREG(current_lock.st_mode) or
+                        current_lock.st_uid != os.geteuid() or
+                        current_lock.st_nlink != 1 or
+                        stat.S_IMODE(current_lock.st_mode) != 0o600 or
+                        (held_lock.st_dev, held_lock.st_ino) !=
+                        (info.st_dev, info.st_ino) or
+                        (current_lock.st_dev, current_lock.st_ino) !=
+                        (info.st_dev, info.st_ino)):
+                    raise OperationLockError("host operation lock replaced or unsafe while held")
+
+            assert_current()
         except OSError as exc:
             raise OperationLockError("host operation lock unavailable or another operation is active") from exc
-        yield
+        yield assert_current
+        assert_current()
     finally:
         if lock_fd is not None:
             os.close(lock_fd)
