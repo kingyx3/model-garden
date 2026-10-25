@@ -454,7 +454,7 @@ def search_selected(
                 reasons[name] = "source-content-integrity"
                 continue
             text, filename = record.get("content"), record.get("source")
-            if not isinstance(text, str) or not isinstance(filename, str) or not filename.endswith(SUFFIXES):
+            if not isinstance(text, str) or not isinstance(filename, str) or not filename.lower().endswith(SUFFIXES):
                 reasons[name] = "source-content-integrity"
                 continue
             if not text.strip() or len(text.encode("utf-8")) > MAX_BYTES or record.get("sha256") != digest(text):
