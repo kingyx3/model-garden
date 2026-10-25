@@ -123,6 +123,45 @@ class RequestIdTests(unittest.TestCase):
         self.assertNotIn("requestIds", record)
 
 
+
+    def test_untagged_duplicate_cannot_override_an_unrelated_task_tag(self):
+        record = call(START, START + 30)
+        events = [event(START + 5, "reused"), event(START + 6, "reused", correlation="task:other")]
+        (result,) = requests.attach_request_ids([record], events)
+        self.assertNotIn("requestIds", result)
+
+    def test_exact_call_tag_is_rejected_when_request_is_also_tagged_to_a_task(self):
+        record = call(START, START + 30)
+        tag = "call:" + record["callHash"]
+        events = [event(START + 5, "reused", correlation=tag),
+                  event(START + 6, "reused", correlation="task:other")]
+        (result,) = requests.attach_request_ids([record], events)
+        self.assertNotIn("requestIds", result)
+
+    def test_blank_or_task_scoped_governance_is_not_untagged_voice_work(self):
+        record = call(START, START + 30)
+        blank = event(START + 5, "blank", correlation="")
+        task = event(START + 6, "task")
+        task["governance"] = {"taskId": "task-elsewhere"}
+        (result,) = requests.attach_request_ids([record], [blank, task])
+        self.assertNotIn("requestIds", result)
+
+    def test_malformed_correlation_on_duplicate_vetoes_exact_attribution(self):
+        record = call(START, START + 30)
+        tagged = event(START + 5, "reused", correlation="call:" + record["callHash"])
+        malformed = event(START + 6, "reused", correlation=123)
+        (result,) = requests.attach_request_ids([record], [tagged, malformed])
+        self.assertNotIn("requestIds", result)
+
+    def test_conflicting_event_with_invalid_timestamp_still_vetoes_attribution(self):
+        record = call(START, START + 30)
+        tagged = event(START + 5, "reused", correlation="call:" + record["callHash"])
+        conflicting = event(START + 6, "reused", correlation="task:elsewhere")
+        conflicting["timestamp"] = "not-a-timestamp"
+        (result,) = requests.attach_request_ids([record], [tagged, conflicting])
+        self.assertNotIn("requestIds", result)
+
+
 class OverlayTests(unittest.TestCase):
     def test_the_worker_reads_the_voice_volume_read_only(self):
         overlay = voice.worker_overlay({"services": {"hermes": {}, "governed-worker": {}}})

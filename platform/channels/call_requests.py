@@ -2,7 +2,9 @@
 
 An authorization event explicitly tagged with ``governance.correlationId =
 call:<callHash>`` is preferred even when calls overlap or ledger delivery is
-delayed. A request id tagged to two different calls is ambiguous and omitted.
+delayed. A request id seen with conflicting tags, an untagged duplicate or
+malformed task/correlation context is ambiguous and omitted, even if the
+conflicting event has an invalid timestamp.
 
 For older untagged runtime events, retain the labelled time-window heuristic
 only when the stored call windows do not overlap. Never infer attribution from
@@ -55,9 +57,14 @@ def _event_correlation(event: Mapping[str, Any]) -> str | None | bool:
     if not isinstance(governance, Mapping):
         return False
     value = governance.get("correlationId")
-    if value is None or value == "":
-        return None
-    return value if isinstance(value, str) else False
+    if "correlationId" in governance:
+        # An explicitly empty/malformed tag is not equivalent to no tag.
+        return value if isinstance(value, str) and value else False
+    # A request already bound to a different task cannot be guessed into a
+    # voice call solely because the authorization happened during that call.
+    if "taskId" in governance or "parentRequestId" in governance:
+        return False
+    return None
 
 
 def attach_request_ids(
@@ -68,15 +75,24 @@ def attach_request_ids(
     windows = [_window(call) for call in calls]
     exact_by_call: dict[str, list[tuple[float, str]]] = {}
     untagged: list[tuple[float, str]] = []
-    request_tags: dict[str, set[str]] = {}
+    # Track every authorization for an ID, including malformed timestamps.
+    # A reused ID with conflicting task/call tags must never be credited to
+    # whichever call happened to be in progress.
+    request_states: dict[str, set[tuple[str, str]]] = {}
     for event in events:
-        request_id, at = event.get("requestId"), _seconds(event.get("timestamp"))
-        if event.get("event") != "authorization" or not isinstance(request_id, str) or not request_id or at is None:
+        request_id = event.get("requestId")
+        if event.get("event") != "authorization" or not isinstance(request_id, str) or not request_id:
             continue
         correlation = _event_correlation(event)
+        state = ("untagged", "") if correlation is None else (
+            ("tag", correlation) if isinstance(correlation, str) else ("invalid", "")
+        )
+        request_states.setdefault(request_id, set()).add(state)
+        at = _seconds(event.get("timestamp"))
+        if at is None:
+            continue
         if isinstance(correlation, str) and _CALL_CORRELATION.fullmatch(correlation):
             exact_by_call.setdefault(correlation, []).append((at, request_id))
-            request_tags.setdefault(request_id, set()).add(correlation)
         elif correlation is None and event.get("initiatingUser") == identity:
             untagged.append((at, request_id))
         # Malformed or unrelated correlation never falls back to time guessing.
@@ -92,7 +108,7 @@ def attach_request_ids(
             tag = "call:" + call_hash
             ids = list(dict.fromkeys(
                 request_id for _, request_id in exact_by_call.get(tag, ())
-                if request_tags[request_id] == {tag}
+                if request_states[request_id] == {("tag", tag)}
             ))[:MAX_REQUEST_IDS]
             if ids:
                 call["requestIds"], call["requestIdsSource"] = ids, EXACT_SOURCE
@@ -107,7 +123,7 @@ def attach_request_ids(
             continue
         ids = list(dict.fromkeys(
             request_id for at, request_id in untagged
-            if low <= at <= high and request_id not in request_tags
+            if low <= at <= high and request_states[request_id] == {("untagged", "")}
         ))[:MAX_REQUEST_IDS]
         if ids:
             call["requestIds"], call["requestIdsSource"] = ids, SOURCE
