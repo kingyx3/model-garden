@@ -138,5 +138,39 @@ class HeartbeatTests(unittest.TestCase):
             self.assertEqual(probe(T0 + 5, method="POST").status, 404)
 
 
+    def test_gateway_uptime_probe_checks_the_real_loop_heartbeat_without_disclosing_jobs(self):
+        # A listening HTTP server is not enough: the periodic gateway loop can
+        # stall or fail persistently while /healthz still answers.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            instance = gateway.Gateway(base.compiled(root), root / "data", {}, {},
+                                       clock=lambda: T0)
+
+            def probe(at, method="GET"):
+                with mock.patch.object(gateway.time, "time", return_value=at):
+                    return instance.handle(method, "/health/gateway", {}, b"")
+
+            self.assertEqual(instance.handle("GET", "/healthz", {}, b"").status, 200)
+            self.assertEqual((probe(T0).status, probe(T0).body), (503, b"unavailable"))
+            beat = heartbeat.Beat(root / "data" / "gateway" / "heartbeat.json")
+            beat.write(T0, {"announce-receipts": False})
+            healthy = probe(T0 + 30)
+            self.assertEqual((healthy.status, healthy.body), (200, b"ok"))
+            self.assertEqual(healthy.headers["Cache-Control"], "no-store")
+            self.assertEqual(probe(T0 + gateway.READINESS_MAX_AGE + 1).status, 503)
+            self.assertEqual(probe(T0 - 31).status, 503)
+
+            for step in range(3):
+                beat.write(T0 + step, {"announce-receipts": True})
+            degraded = probe(T0 + 3)
+            self.assertEqual((degraded.status, degraded.body), (503, b"unavailable"))
+            self.assertNotIn(b"announce-receipts", degraded.body)
+            beat.write(T0 + 4, {"announce-receipts": False})
+            self.assertEqual(probe(T0 + 5).status, 200)
+            beat.path.write_text('{"at": "not a time"}', encoding="utf-8")
+            self.assertEqual(probe(T0 + 5).status, 503)
+            self.assertEqual(probe(T0 + 5, method="POST").status, 404)
+
+
 if __name__ == "__main__":
     unittest.main()
