@@ -166,6 +166,22 @@ class Case(unittest.TestCase):
         self.grant(provider="microsoft")
         self.assertEqual(skill(self.applied(), "book-appointment")["dependencies"][0]["status"], "no-grant")
 
+    def test_a_grant_for_another_capability_family_cannot_authorize_calendar(self):
+        # The provider string alone is not a grant identity: one vendor can
+        # serve mail and calendar with independently scoped authorizations.
+        self.grant(family="mail", provider="google", scopes=BOTH)
+        booking = skill(self.applied(), "book-appointment")
+        self.assertFalse(booking["ready"])
+        self.assertEqual(booking["dependencies"][0]["status"], "no-grant")
+        self.assertIn("its own calendar", booking["remediation"])
+
+    def test_a_same_provider_grant_in_the_correct_family_is_still_accepted(self):
+        self.grant(family="mail", provider="google", scopes=BOTH)
+        self.grant(family="calendar", provider="google", scopes=BOTH)
+        booking = skill(self.applied(), "book-appointment")
+        self.assertTrue(booking["ready"])
+        self.assertEqual(booking["dependencies"][0]["grant"]["state"], "active")
+
     def test_an_optional_dependency_without_a_grant_degrades_instead_of_blocking(self):
         self.grant("other-coworker")
         manifest = copy.deepcopy(self.manifest)
