@@ -13,7 +13,6 @@ import subprocess
 import sys
 import tempfile
 import unittest
-import urllib.error
 from unittest import mock
 
 import yaml
