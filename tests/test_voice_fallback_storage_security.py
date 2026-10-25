@@ -47,7 +47,7 @@ class PrivateFallbackMessageTests(unittest.TestCase):
         namespace["MESSAGE_PATH"] = self.path
 
     def append(self):
-        namespace["_append_message"]({"type": "FallbackMessage", "timestamp": 1_800_000_000,
+        return namespace["_append_message"]({"type": "FallbackMessage", "timestamp": 1_800_000_000,
                                        "message": "synthetic private message"})
 
     def test_symlink_target_is_never_modified(self):
@@ -134,14 +134,14 @@ class PrivateFallbackMessageTests(unittest.TestCase):
         self.path.parent.mkdir()
         self.path.write_text('{"timestamp":1800000000,"message":"old"}\n')
         with mock.patch.dict(os.environ, {"MODEL_GARDEN_MESSAGE_RETENTION_SECONDS": "0"}):
-            self.append()
+            self.assertFalse(self.append())
         self.assertEqual(self.path.read_text(), "")
 
     def test_existing_owned_regular_file_keeps_bounded_retention_and_private_modes(self):
         self.path.parent.mkdir()
         self.path.write_text('{"timestamp":1,"message":"expired"}\n')
         with mock.patch.object(T.time, "time", return_value=1_800_000_001):
-            self.append()
+            self.assertTrue(self.append())
         self.assertNotIn("expired", self.path.read_text())
         self.assertIn("synthetic private message", self.path.read_text())
         self.assertEqual(stat.S_IMODE(self.path.stat().st_mode), 0o600)
