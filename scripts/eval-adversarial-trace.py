@@ -43,7 +43,7 @@ def _events(case_id, value, label, failures):
         if not _exact(event, ("requestId", "tool", "outcome")) or not (
             isinstance(event["requestId"], str) and REQUEST.fullmatch(event["requestId"])
             and isinstance(event["tool"], str) and 0 < len(event["tool"]) <= 100
-            and event["outcome"] in OUTCOMES
+            and isinstance(event["outcome"], str) and event["outcome"] in OUTCOMES
         ):
             failures.append(f"{case_id}:invalid-{label[:-1] if label.endswith('s') else label}")
             continue
