@@ -35,22 +35,30 @@ def service(name, *, health="healthy", state="running"):
 
 
 class VoiceNativeHealthTests(unittest.TestCase):
-    def test_native_probe_uses_only_private_loopback_and_rejects_503_and_timeout(self):
+    def test_native_probe_uses_only_private_loopback_and_rejects_503_redirect_and_timeout(self):
         check = VOICE.voice_healthcheck()
         self.assertEqual(check["test"][:2], ["CMD", "python"])
         self.assertEqual(check["test"][2], "-c")
         self.assertEqual(check["interval"], "10s")
         self.assertEqual(check["timeout"], "5s")
         script = check["test"][3]
-        with mock.patch("urllib.request.urlopen") as get:
-            exec(script, {})
-            get.assert_called_once_with("http://127.0.0.1:8081/", timeout=3)
-        with mock.patch("urllib.request.urlopen", side_effect=urllib.error.HTTPError(
-            "http://127.0.0.1:8081/", 503, "disconnected", {}, None
-        )):
-            with self.assertRaises(urllib.error.HTTPError):
+        # http.client avoids proxy environment variables and does not follow
+        # redirects off loopback, unlike urllib's default URL opener.
+        with mock.patch("http.client.HTTPConnection") as connection:
+            connection.return_value.getresponse.return_value.status = 200
+            with self.assertRaises(SystemExit) as exit_status:
                 exec(script, {})
-        with mock.patch("urllib.request.urlopen", side_effect=TimeoutError("stalled")):
+            self.assertEqual(exit_status.exception.code, 0)
+            connection.assert_called_once_with("127.0.0.1", 8081, timeout=3)
+            connection.return_value.request.assert_called_once_with("GET", "/")
+        for code in (503, 302):
+            with self.subTest(status=code), mock.patch("http.client.HTTPConnection") as connection:
+                connection.return_value.getresponse.return_value.status = code
+                with self.assertRaises(SystemExit) as exit_status:
+                    exec(script, {})
+                self.assertEqual(exit_status.exception.code, 1)
+        with mock.patch("http.client.HTTPConnection") as connection:
+            connection.return_value.request.side_effect = TimeoutError("stalled")
             with self.assertRaises(TimeoutError):
                 exec(script, {})
 
