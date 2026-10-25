@@ -71,10 +71,21 @@ class VoiceMetricTests(unittest.TestCase):
                 self.assertNotIn(b"synthetic-secret", req.data)
                 return Response(b"{}")
             raise AssertionError(req.full_url)
-        with mock.patch.object(METRIC, "urlopen", side_effect=open_request):
+        with mock.patch.object(METRIC, "_open", side_effect=open_request):
             METRIC.publish_sample("sample-project-123", {"timeSeries": []})
         self.assertEqual(len(calls), 2)
         self.assertTrue(all(c.full_url.startswith(("http://metadata.google.internal/computeMetadata/v1/", "https://monitoring.googleapis.com/v3/")) for c in calls))
+
+    def test_metadata_and_monitoring_requests_disable_proxy_and_redirects(self):
+        req = METRIC.Request("https://monitoring.googleapis.com/v3/projects/sample-project-123/timeSeries")
+        with mock.patch.object(METRIC, "build_opener") as factory:
+            METRIC._open(req, 3)
+        handlers = factory.call_args.args
+        self.assertTrue(any(isinstance(h, METRIC.ProxyHandler) and h.proxies == {} for h in handlers))
+        redirect = next(h for h in handlers if isinstance(h, METRIC._NoRedirect))
+        with self.assertRaises(ValueError):
+            redirect.redirect_request(None, req, 302, "", {}, "https://attacker.invalid",)
+        factory.return_value.open.assert_called_once_with(req, timeout=3)
 
     def test_invalid_identifiers_are_rejected_before_any_network_or_docker(self):
         for project, client, env, compose in [
