@@ -222,16 +222,18 @@ def run(*, compose: pathlib.Path, project: str, slug: str, environment: str,
         if remaining < MIN_REMAINING_SECONDS:
             raise WindowError("scheduled authorization deadline is too close or expired")
     deadline = time.monotonic() + remaining
-    with client_operation_lock.project_operation_lock(project):
+    with client_operation_lock.project_operation_lock(project) as assert_host_lock:
         lock_fd = _lock(output_parent, project)
         try:
             _stopped(project, deadline)
+            assert_host_lock()
             ensure_approved()
             snapshot_script = ROOT / "scripts" / "client-volume-snapshot.py"
             upload_script = ROOT / "scripts" / "client-backup-upload.py"
             _run([sys.executable, str(snapshot_script), "inventory", "--compose", str(compose),
                   "--project", project], _remaining(deadline))
             _stopped(project, deadline)
+            assert_host_lock()
             ensure_approved()
             run_id = f"{project}-{int(time.time())}-{secrets.token_hex(5)}"
             destination = output_parent / run_id
@@ -239,11 +241,13 @@ def run(*, compose: pathlib.Path, project: str, slug: str, environment: str,
                   "--project", project, "--output", str(destination), "--recipient", recipient,
                   "--image", image], _remaining(deadline))
             _stopped(project, deadline)
+            assert_host_lock()
             ensure_approved()
             _run([sys.executable, str(upload_script), "--compose", str(compose), "--project", project,
                   "--source", str(destination), "--gcp-project-id", gcp_project,
                   "--client-slug", slug, "--environment", environment], _remaining(deadline))
             _stopped(project, deadline)
+            assert_host_lock()
             ensure_approved()
             _remaining(deadline)
             return {"event": "backup.window.completed", "clientProject": project,
