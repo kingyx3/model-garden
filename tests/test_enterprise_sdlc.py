@@ -77,8 +77,17 @@ class EnterpriseSDLCTests(unittest.TestCase):
         worker = (ROOT / "platform" / "channels" / "livekit_receptionist.py").read_text(encoding="utf-8")
         self.assertIn("MODEL_GARDEN_MESSAGE_RETENTION_SECONDS", worker)
         self.assertIn("roomHash", worker)
-        self.assertIn("os.fchmod(descriptor, 0o600)", worker)
-        self.assertIn("fcntl.LOCK_EX", worker)
+        # The voice bridge delegates to the same hardened writer as transcripts.
+        # Keep checking the actual file/lock safeguards, not a stale implementation
+        # detail that requires the bridge to duplicate its own persistence logic.
+        writer = (ROOT / "platform" / "channels" / "call_transcript.py").read_text(encoding="utf-8")
+        self.assertIn("store_private_jsonl(MESSAGE_PATH, payload, retention_seconds=retention)", worker)
+        self.assertIn("return retention > 0", worker)
+        self.assertIn("os.fchmod(descriptor, 0o600)", writer)
+        self.assertIn("fcntl.LOCK_EX", writer)
+        self.assertIn("os.O_NOFOLLOW", writer)
+        self.assertIn("held_file.st_nlink != 1", writer)
+        self.assertIn("assert_pinned()  # never acknowledge success for a detached path", writer)
         self.assertNotIn('"room": job_ctx.room.name', worker)
         self.assertNotIn('"target": target', worker)
 
