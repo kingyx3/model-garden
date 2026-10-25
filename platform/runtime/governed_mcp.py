@@ -610,7 +610,7 @@ class GovernedToolRuntime:
             arguments,
             lambda exact: KNOWLEDGE.search_selected(
                 self.desired_state, exact["query"], source=exact.get("source"), limit=exact["limit"], access=access,
-                locale=exact.get("locale"),
+                locale=exact.get("locale"), require_integrity=True,
             ),
             provider="text-knowledge",
             tier=0,

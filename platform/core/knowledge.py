@@ -419,6 +419,7 @@ def search_selected(
     today: dt.date | None = None,
     access: str = "public",
     locale: str | None = None,
+    require_integrity: bool = False,
 ) -> dict[str, Any]:
     """`kb.search` over the Tier 0 sources compiled into this client's own desired state.
 
@@ -444,6 +445,29 @@ def search_selected(
         if record is None:
             reasons[name] = "source-content-missing"
             continue
+        # The governed runtime requires the compiler's content digest and
+        # section count on every read. A changed or incomplete desired-state
+        # payload must not be treated as owner-approved knowledge. The default
+        # remains compatible with metadata-only synthetic evaluation fixtures.
+        if require_integrity:
+            if not isinstance(record, Mapping):
+                reasons[name] = "source-content-integrity"
+                continue
+            text, filename = record.get("content"), record.get("source")
+            if not isinstance(text, str) or not isinstance(filename, str) or not filename.lower().endswith(SUFFIXES):
+                reasons[name] = "source-content-integrity"
+                continue
+            if not text.strip() or len(text.encode("utf-8")) > MAX_BYTES or record.get("sha256") != digest(text):
+                reasons[name] = "source-content-integrity"
+                continue
+            try:
+                section_count = len(parse_sections(text, markdown=filename.lower().endswith(".md")))
+            except KnowledgeError:
+                reasons[name] = "source-content-integrity"
+                continue
+            if type(record.get("sectionCount")) is not int or section_count < 1 or record["sectionCount"] != section_count:
+                reasons[name] = "source-content-integrity"
+                continue
         declared = selected[name]["spec"].get("locale")
         if locale and declared and declared.split("-")[0].lower() != locale.split("-")[0].lower():
             reasons[name] = "source-other-locale"
