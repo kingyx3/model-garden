@@ -162,6 +162,37 @@ class RequestIdTests(unittest.TestCase):
         self.assertNotIn("requestIds", result)
 
 
+    def test_same_exact_request_id_with_conflicting_actors_is_not_attributed(self):
+        record = call(START, START + 30)
+        tag = "call:" + record["callHash"]
+        legitimate = event(START + 5, "shared", correlation=tag)
+        other = event(START + 6, "shared", user="runtime:mailbox", correlation=tag)
+        other["timestamp"] = "invalid"  # conflicts must veto before timestamp filtering
+        (result,) = requests.attach_request_ids([record], [legitimate, other])
+        self.assertNotIn("requestIds", result)
+
+    def test_untagged_request_reused_by_another_actor_cannot_be_guessed(self):
+        record = call(START, START + 30)
+        events = [event(START + 5, "shared"), event(START + 6, "shared", user="pat@client.example")]
+        (result,) = requests.attach_request_ids([record], events)
+        self.assertNotIn("requestIds", result)
+
+    def test_exact_request_without_a_verified_actor_is_not_attributed(self):
+        record = call(START, START + 30)
+        tagged = event(START + 5, "missing-actor", correlation="call:" + record["callHash"])
+        tagged.pop("initiatingUser")
+        (result,) = requests.attach_request_ids([record], [tagged])
+        self.assertNotIn("requestIds", result)
+
+    def test_same_actor_duplicate_authorizations_still_deduplicate(self):
+        record = call(START, START + 30)
+        tag = "call:" + record["callHash"]
+        events = [event(START + 5, "same", user="verified:staff", correlation=tag),
+                  event(START + 6, "same", user="verified:staff", correlation=tag)]
+        (result,) = requests.attach_request_ids([record], events)
+        self.assertEqual((result["requestIds"], result["requestIdsSource"]), (["same"], "ledger-correlation"))
+
+
 class OverlayTests(unittest.TestCase):
     def test_the_worker_reads_the_voice_volume_read_only(self):
         overlay = voice.worker_overlay({"services": {"hermes": {}, "governed-worker": {}}})

@@ -3,8 +3,8 @@
 An authorization event explicitly tagged with ``governance.correlationId =
 call:<callHash>`` is preferred even when calls overlap or ledger delivery is
 delayed. A request id seen with conflicting tags, an untagged duplicate or
-malformed task/correlation context is ambiguous and omitted, even if the
-conflicting event has an invalid timestamp.
+malformed task/correlation context or conflicting acting identities are
+ambiguous and omitted, even if a conflicting event has an invalid timestamp.
 
 For older untagged runtime events, retain the labelled time-window heuristic
 only when the stored call windows do not overlap. Never infer attribution from
@@ -73,27 +73,32 @@ def attach_request_ids(
     """Attach exact call-correlated ids first; conservatively infer older untagged requests."""
     calls = [dict(record) for record in records]
     windows = [_window(call) for call in calls]
-    exact_by_call: dict[str, list[tuple[float, str]]] = {}
+    exact_by_call: dict[str, list[tuple[float, str, str]]] = {}
     untagged: list[tuple[float, str]] = []
     # Track every authorization for an ID, including malformed timestamps.
     # A reused ID with conflicting task/call tags must never be credited to
     # whichever call happened to be in progress.
-    request_states: dict[str, set[tuple[str, str]]] = {}
+    request_states: dict[str, set[tuple[str, str, str]]] = {}
     for event in events:
         request_id = event.get("requestId")
         if event.get("event") != "authorization" or not isinstance(request_id, str) or not request_id:
             continue
         correlation = _event_correlation(event)
-        state = ("untagged", "") if correlation is None else (
-            ("tag", correlation) if isinstance(correlation, str) else ("invalid", "")
+        actor = event.get("initiatingUser")
+        # A request ID is only unambiguous when every authorization agrees
+        # on BOTH its correlation and acting identity. An absent actor is not
+        # proof of a caller's governed action, even with an exact call tag.
+        valid_actor = isinstance(actor, str) and bool(actor) and actor == actor.strip()
+        state = ("invalid", "", "") if not valid_actor or correlation is False else (
+            ("untagged", "", actor) if correlation is None else ("tag", correlation, actor)
         )
         request_states.setdefault(request_id, set()).add(state)
         at = _seconds(event.get("timestamp"))
-        if at is None:
+        if at is None or not valid_actor:
             continue
         if isinstance(correlation, str) and _CALL_CORRELATION.fullmatch(correlation):
-            exact_by_call.setdefault(correlation, []).append((at, request_id))
-        elif correlation is None and event.get("initiatingUser") == identity:
+            exact_by_call.setdefault(correlation, []).append((at, request_id, actor))
+        elif correlation is None and actor == identity:
             untagged.append((at, request_id))
         # Malformed or unrelated correlation never falls back to time guessing.
 
@@ -107,8 +112,8 @@ def attach_request_ids(
         if isinstance(call_hash, str) and _CALL_HASH.fullmatch(call_hash):
             tag = "call:" + call_hash
             ids = list(dict.fromkeys(
-                request_id for _, request_id in exact_by_call.get(tag, ())
-                if request_states[request_id] == {("tag", tag)}
+                request_id for _, request_id, actor in exact_by_call.get(tag, ())
+                if request_states[request_id] == {("tag", tag, actor)}
             ))[:MAX_REQUEST_IDS]
             if ids:
                 call["requestIds"], call["requestIdsSource"] = ids, EXACT_SOURCE
@@ -123,7 +128,7 @@ def attach_request_ids(
             continue
         ids = list(dict.fromkeys(
             request_id for at, request_id in untagged
-            if low <= at <= high and request_states[request_id] == {("untagged", "")}
+            if low <= at <= high and request_states[request_id] == {("untagged", "", identity)}
         ))[:MAX_REQUEST_IDS]
         if ids:
             call["requestIds"], call["requestIdsSource"] = ids, SOURCE
