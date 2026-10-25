@@ -28,8 +28,11 @@ def iso(seconds: int) -> str:
     return dt.datetime.fromtimestamp(seconds, dt.timezone.utc).isoformat().replace("+00:00", "Z")
 
 
-def event(at: int, request_id: str, *, kind="authorization", user="runtime:hermes") -> dict:
-    return {"timestamp": iso(at), "event": kind, "requestId": request_id, "initiatingUser": user}
+def event(at: int, request_id: str, *, kind="authorization", user="runtime:hermes", correlation=None) -> dict:
+    row = {"timestamp": iso(at), "event": kind, "requestId": request_id, "initiatingUser": user}
+    if correlation is not None:
+        row["governance"] = {"correlationId": correlation}
+    return row
 
 
 def call(start: int, end: int, **extra) -> dict:
@@ -65,6 +68,59 @@ class RequestIdTests(unittest.TestCase):
         self.assertNotIn("requestIds", empty)
         (broken,) = requests.attach_request_ids([{"type": "CallTranscript", "callHash": "a"}], [event(START, "r1")])
         self.assertNotIn("requestIds", broken)
+
+
+    def test_explicit_call_correlation_attributes_overlapping_calls_without_time_guessing(self):
+        first = call(START, START + 60)
+        second = call(START + 30, START + 90)
+        first_tag, second_tag = "call:" + first["callHash"], "call:" + second["callHash"]
+        events = [
+            event(START + 40, "first", correlation=first_tag),
+            event(START + 41, "second", user="verified:staff", correlation=second_tag),
+            event(START + 42, "background"),
+        ]
+        records = requests.attach_request_ids([first, second], events)
+        self.assertEqual(records[0]["requestIds"], ["first"])
+        self.assertEqual(records[1]["requestIds"], ["second"])
+        self.assertEqual([record["requestIdsSource"] for record in records], ["ledger-correlation"] * 2)
+        self.assertNotIn("background", records[0]["requestIds"] + records[1]["requestIds"])
+
+    def test_exact_correlation_outside_call_window_is_accepted_but_other_trace_is_not_guessed(self):
+        record = call(START, START + 20)
+        tagged = event(START + 300, "late", correlation="call:" + record["callHash"])
+        unrelated = event(START + 5, "other-task", correlation="task:unrelated")
+        (result,) = requests.attach_request_ids([record], [tagged, unrelated])
+        self.assertEqual((result["requestIds"], result["requestIdsSource"]), (["late"], "ledger-correlation"))
+        (unrelated_only,) = requests.attach_request_ids([record], [unrelated])
+        self.assertNotIn("requestIds", unrelated_only)
+
+    def test_a_request_id_tagged_to_two_different_calls_is_ambiguous_and_not_attached(self):
+        first, second = call(START, START + 20), call(START + 60, START + 80)
+        events = [
+            event(START + 5, "reused", correlation="call:" + first["callHash"]),
+            event(START + 65, "reused", correlation="call:" + second["callHash"]),
+        ]
+        records = requests.attach_request_ids([first, second], events)
+        self.assertTrue(all("requestIds" not in record for record in records))
+
+    def test_invalid_correlations_and_naive_timestamps_cannot_create_attribution(self):
+        record = call(START, START + 20)
+        forged = event(START + 5, "forged", correlation="call:" + record["callHash"].upper())
+        malformed = event(START + 6, "malformed", correlation=123)
+        naive = event(START + 7, "naive")
+        naive["timestamp"] = "2026-01-01T00:00:00"
+        records = requests.attach_request_ids([record], [forged, malformed, naive])
+        self.assertNotIn("requestIds", records[0])
+
+    def test_explicit_attribution_preserves_existing_ids_and_deduplicates_authorizations(self):
+        record = call(START, START + 10)
+        tagged = event(START + 5, "a", correlation="call:" + record["callHash"])
+        (result,) = requests.attach_request_ids([record], [tagged, tagged, event(START + 6, "b", correlation=tagged["governance"]["correlationId"])])
+        self.assertEqual(result["requestIds"], ["a", "b"])
+        self.assertEqual(result["requestIdsSource"], "ledger-correlation")
+        (preserved,) = requests.attach_request_ids([dict(record, requestIds=["already"])], [tagged])
+        self.assertEqual(preserved["requestIds"], ["already"])
+        self.assertNotIn("requestIds", record)
 
 
 class OverlayTests(unittest.TestCase):
