@@ -1,6 +1,7 @@
 """Credential-free checks for verified data-subject access and correction requests over the Tier 0 stores (#241)."""
 from __future__ import annotations
 
+import hashlib
 import json
 import pathlib
 import subprocess
@@ -57,14 +58,37 @@ class ExportTests(Case):
         self.assertEqual((bundle["verifiedBy"], bundle["approvedBy"]), ("jordan@acme.example", "sam@acme.example"))
         self.assertEqual(oct(pathlib.Path(result["path"]).stat().st_mode & 0o777), "0o600")
 
+    def assert_no_subject_values_in_audit(self, details):
+        # Audit fields are an explicit allowlist: a new free-text field must
+        # fail this check, while opaque IDs/digests may contain phone-like hex.
+        self.assertEqual(set(details), {"requestId", "contact", "verifiedBy", "approvedBy", "method",
+                                        "interactions", "conversations", "digest", "expiresAt"})
+        self.assertRegex(details["requestId"], r"^sa-[0-9a-f]{12}$")
+        self.assertRegex(details["contact"], r"^c-[0-9a-f]{16}$")
+        self.assertRegex(details["digest"], r"^[0-9a-f]{16}$")
+        public = {key: value for key, value in details.items()
+                  if key not in ("requestId", "contact", "digest")}
+        for private in ("Alex", "6123", "acme-customer", "Priya", "priya"):
+            self.assertNotIn(private, json.dumps(public))
+
     def test_the_ledger_records_people_counts_and_a_digest_never_a_value(self):
         self.export()
         action, by, details = self.events[-1]
         self.assertEqual((action, by), ("subject-access.exported", "sam@acme.example"))
         self.assertEqual((details["interactions"], details["conversations"], details["verifiedBy"]), (1, 1, "jordan@acme.example"))
-        dump = json.dumps(self.events)
-        for private in ("Alex", "6123", "acme-customer", "Priya", "priya"):
-            self.assertNotIn(private, dump)
+        self.assert_no_subject_values_in_audit(details)
+        bundle = self.bundles / f"{details['requestId']}.json"
+        self.assertEqual(details["digest"], hashlib.sha256(bundle.read_bytes()).hexdigest()[:16])
+
+    def test_a_hash_collision_with_synthetic_phone_digits_is_not_a_false_privacy_failure(self):
+        self.export()
+        details = self.events[-1][2]
+        # Reproduce main CI's random 6123-in-digest failure deterministically.
+        self.assert_no_subject_values_in_audit({**details, "digest": "0000000000006123"})
+        for leak in ({"method": "6123"}, {"summary": THIRD_PARTY}, {"contact": "Alex Tan"}):
+            with self.subTest(leak=next(iter(leak))):
+                with self.assertRaises(AssertionError):
+                    self.assert_no_subject_values_in_audit({**details, **leak})
 
     def test_the_customer_is_found_by_one_exact_id_email_or_phone_and_nothing_else(self):
         for who in ({"email": "ALEX@acme-customer.example"}, {"phone": "65 6123 4567"}, {"contact_id": self.alex}):
@@ -126,8 +150,15 @@ class CorrectionTests(Case):
         with self.assertRaisesRegex(subject.SubjectAccessError, "already applied"):
             self.service.resolve_correction(first["requestId"], "declined", by="jordan@acme.example", now=NOW + 6)
         self.assertEqual(self.service.corrections(status="open"), [])
-        for private in ("6123", "Alex"):
-            self.assertNotIn(private, json.dumps(self.events))
+        for action, _, details in self.events:
+            self.assertIn(action, ("subject-access.correction-requested", "subject-access.correction-resolved"))
+            self.assertRegex(details["requestId"], r"^sa-[0-9a-f]{12}$")
+            self.assertRegex(details["contact"], r"^c-[0-9a-f]{16}$")
+            self.assertEqual(set(details), {"requestId", "contact", "field",
+                                            "verifiedBy" if action.endswith("requested") else "status"})
+            visible = {key: value for key, value in details.items() if key not in ("requestId", "contact")}
+            for private in ("6123", "Alex"):
+                self.assertNotIn(private, json.dumps(visible))
 
     def test_bad_requests_are_refused(self):
         for bad in ({"field": "ssn"}, {"approved_by": "jordan@acme.example"}):
