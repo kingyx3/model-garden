@@ -308,7 +308,14 @@ def knowledge_states(
                     or type(sections) is not int or sections < 1
                     or entry.get("sha256") != expected):
                 state = "invalid-content"
-        states.append({"name": name, "state": state})
+        # A member-only source can be usable for an internal Skill while
+        # providing no answerable content to a customer-facing Skill. Preserve
+        # the existing state shape unless public eligibility actually differs.
+        public_state = module.source_state(source.get("spec", {}), agent=agent, today=today, access="public")
+        record = {"name": name, "state": state}
+        if state == "usable" and public_state != state:
+            record["publicState"] = public_state
+        states.append(record)
     return states
 
 
@@ -341,6 +348,11 @@ def remediation_for(dependencies: list[Mapping[str, Any]], *, plain: bool = Fals
                 return (
                     "A knowledge source is classified restricted, which the built-in store does not serve: connect a knowledge "
                     "provider with document-level permissions, or lower the classification after review, then recompile"
+                )
+            if any(source.get("state") == "members-only" for source in dependency.get("content", {}).get("sources", [])):
+                return (
+                    "Approve customer-readable (public or internal) business knowledge for this public-facing "
+                    "Skill, then recompile; confidential knowledge may only answer verified team members"
                 )
             return (
                 "Approve business knowledge for this coworker: a source with status approved, a current "
@@ -415,8 +427,18 @@ def skill_readiness(
                 if facts is not None:
                     dependency.update(status="bound", provider=facts["provider"], tier=facts["tier"])
                     if knowledge is not None and family == "kb":
-                        usable = sum(1 for item in knowledge if item["state"] == "usable")
-                        dependency["content"] = {"usable": usable, "sources": [dict(item) for item in knowledge]}
+                        # A Skill declaring public knowledge access must have
+                        # content the runtime will actually serve to a public
+                        # caller, not just confidential member-only material.
+                        access = spec.get("knowledgeAccess", "member")
+                        sources = [
+                            {"name": item["name"], "state": (
+                                item.get("publicState", item["state"]) if access == "public" else item["state"]
+                            )}
+                            for item in knowledge
+                        ]
+                        usable = sum(1 for item in sources if item["state"] == "usable")
+                        dependency["content"] = {"usable": usable, "sources": sources}
                         if is_required and usable == 0:
                             dependency["status"] = "no-content"
                 elif is_required:
