@@ -8,6 +8,7 @@ import pathlib
 import shutil
 import tempfile
 import unittest
+from unittest import mock
 
 import yaml
 
@@ -59,6 +60,11 @@ class AutomaticUnboundHandoffTests(unittest.TestCase):
             names = {tool.name for tool in asyncio.run(server.list_tools())}
             self.assertIn("calendar_book", names)
             self.assertNotIn("calendar_availability", names)
+            self.assertIn("crm_create", names)  # Tier 0 remains native, never a human-only stub
+            # A second registration pass must not even attempt to replace an existing
+            # built-in or fallback Tool (the SDK otherwise logs a duplicate warning).
+            with mock.patch.object(server._tool_manager, "add_tool", side_effect=AssertionError("duplicate Tool")):
+                runtime_module._register_unbound_handoff_tools(server, runtime, set())
             asyncio.run(server.call_tool("calendar_book", {"arguments": ARGS}))
             pending = runtime_module.HANDOFF.pending(root / "handoffs")
             self.assertEqual(len(pending), 1)
