@@ -231,6 +231,17 @@ class GatewayDeliveryTests(G.GatewayCase):
         posted = next(event for event in self.ledger() if event.get("action") == "deliverable.posted")
         self.assertEqual(set(posted["details"]), {"channel", "location", "bytes", "sha256"})  # no name, no content
 
+    def test_gateway_delivery_respects_configured_client_retention(self):
+        self.gateway.environ["MODEL_GARDEN_ARTIFACT_RETENTION_DAYS"] = "7"
+        entry = self.gateway._artifacts().put(
+            name="Report.txt", content=b"synthetic", media_type="text/plain",
+            agent="coworker", requested_by="alice@acme.example",
+        )
+        self.assertEqual(entry["expiresAt"] - entry["createdAt"], 7 * 86400)
+        self.gateway.environ["MODEL_GARDEN_ARTIFACT_RETENTION_DAYS"] = "invalid"
+        with self.assertRaises(ValueError):
+            self.gateway._artifacts()
+
     def test_someone_elses_file_a_stranger_and_an_invented_id_attach_nothing(self):
         theirs = self.gateway._artifacts().put(name="Bobs.xlsx", content=b"bob", media_type="text/csv", agent="coworker", requested_by="bob@acme.example")
         self.say(f"Here: {self.location(theirs)} and tier0:acme/a-ffffffffffff and tier0:other-client/{self.entry['id']}")
