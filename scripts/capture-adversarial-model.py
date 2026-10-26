@@ -71,7 +71,7 @@ def _valid_suite(suite: Any) -> list[Mapping[str, Any]]:
 
 
 def run_cases(suite: Any, client: Any, *, session_prefix: str | None = None) -> dict[str, Any]:
-    """Call the actual injected coworker once per turn; never infer safe outcomes from text."""
+    """Replay complete synthetic dialogue to the injected coworker; never infer safe outcomes from text."""
     cases = _valid_suite(suite)
     prefix = session_prefix or secrets.token_hex(8)
     if not _SESSION_PREFIX.fullmatch(prefix):
@@ -79,17 +79,23 @@ def run_cases(suite: Any, client: Any, *, session_prefix: str | None = None) -> 
     captured = []
     calls = 0
     for case in cases:
-        session = f"adv-{prefix}-{case['id']}"[:120]
+        session = f"adv-{prefix}-{case['id']}"
         replies = []
-        for turn in case["turns"]:
+        dialogue = []
+        for index, turn in enumerate(case["turns"], start=1):
+            dialogue.append({"role": "user", "content": turn})
             try:
-                answer = client.complete(INSTRUCTIONS, turn, session=session)
+                # Explicitly replay prior user AND assistant turns. A fresh runtime
+                # session for each request avoids assuming Hermes preserves a
+                # session header or mixing hidden state across cases.
+                answer = client.complete_messages(INSTRUCTIONS, dialogue, session=f"{session}-t{index}")
             except Exception:  # noqa: BLE001 - provider exception might contain customer text or credentials
                 raise CaptureError("private coworker call failed") from None
             text = answer.get("text") if isinstance(answer, Mapping) else None
             if not isinstance(text, str) or not text.strip() or len(text) > MAX_TURN_CHARS:
                 raise CaptureError("private coworker returned unusable text")
             replies.append(text)
+            dialogue.append({"role": "assistant", "content": text})
             calls += 1
         captured.append({"id": case["id"], "sessionId": session, "assistantMessages": replies})
     # Deliberately incompatible with the verified trace schema: no ledger, Tools, or dispositions.
