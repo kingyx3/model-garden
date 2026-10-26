@@ -41,11 +41,11 @@ class VerifierTests(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         (pathlib.Path(self.tmp.name) / "state").mkdir(mode=0o700)
-        self.monitor = FakeMonitor(pathlib.Path(self.tmp.name), "acme-dev")
+        self.monitor = FakeMonitor(pathlib.Path(self.tmp.name), "acme-dev-mg")
         self.sent = []
         self.kwargs = dict(ledger=pathlib.Path(self.tmp.name) / "audit.jsonl",
             state_dir=pathlib.Path(self.tmp.name) / "state", bucket="locked-ledger-bucket",
-            prefix="acme/dev", client_project="acme-dev", confirm_client_project="acme-dev",
+            prefix="acme/dev", client_project="acme-dev-mg", confirm_client_project="acme-dev-mg",
             gcp_project="client-gcp-123", confirm_gcp_project="client-gcp-123",
             verifier_identity="auditor@client-gcp-123.iam.gserviceaccount.com",
             runtime_identity="runtime@client-gcp-123.iam.gserviceaccount.com",
