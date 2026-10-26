@@ -22,7 +22,7 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 LOG_NAME = "model-garden-ledger-verifier"
 TIMEOUT_SECONDS = 20
 PROJECT = re.compile(r"^[a-z][a-z0-9-]{2,62}$")
-IDENTITY = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._-]*@[a-zA-Z0-9][a-zA-Z0-9.-]*\\.iam\\.gserviceaccount\\.com$")
+IDENTITY = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._-]*@[a-zA-Z0-9][a-zA-Z0-9.-]*\.iam\.gserviceaccount\.com$")
 
 
 class VerifierError(ValueError):
