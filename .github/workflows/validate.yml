@@ -161,7 +161,9 @@ jobs:
           retention-days: 90
 
   hermes-compatibility:
-    runs-on: ubuntu-latest
+    # Hermes v0.21.2 requires Python <3.14; ubuntu-latest now supplies 3.14.
+    # Use the maintained Ubuntu 24.04 LTS runner with Python 3.12 for this pinned smoke test.
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
