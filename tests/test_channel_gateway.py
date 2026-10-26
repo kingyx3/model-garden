@@ -621,6 +621,40 @@ class InboxCommandTests(GatewayCase):
         events = [json.loads(line) for line in (self.data / "audit.jsonl").read_text().splitlines()]
         self.assertEqual([event["performedBy"] for event in events if event.get("action") == "channel.inbox-viewed"], ["alice@acme.example", "bob@acme.example"])
 
+    def test_signed_webchat_approver_can_decide_tier0_request_without_provider_buttons(self):
+        pending = self.data / "approvals" / "pending"
+        pending.mkdir(parents=True, exist_ok=True)
+        (pending / f"{APPROVE_REQUEST}.json").write_text(json.dumps({
+            "requestId": APPROVE_REQUEST, "tool": "crm.create", "requestedAt": NOW,
+            "arguments": {"private": "Do not send to a customer"},
+        }))
+        alice = self.sign_in()
+        bob = self.sign_in("bob@acme.example")
+
+        def send(session, words, number):
+            conversation = session["prefix"] + "-approval"
+            headers = {"Authorization": "Bearer " + session["session"]}
+            payload = json.dumps({"conversationId": conversation, "messageId": number,
+                                  "text": words, "sender": "alice@acme.example"}).encode()
+            self.assertEqual(self.gateway.handle("POST", "/channels/web/messages", headers, payload).status, 200)
+            events = json.loads(self.gateway.handle(
+                "GET", f"/channels/web/events?conversationId={conversation}&after=0", headers, b"").body)["events"]
+            return events[-1]["text"]
+
+        self.assertEqual(send(bob, f"approve {APPROVE_REQUEST}", "m1"),
+                         "Only a mapped approver can decide a request in a direct message.")
+        self.assertFalse((self.data / "approvals" / "decisions" / f"{APPROVE_REQUEST}.json").exists())
+        owner_inbox = send(alice, "inbox", "m2")
+        self.assertIn(f"approve {APPROVE_REQUEST}", owner_inbox)
+        self.assertNotIn("Do not send", owner_inbox)
+        self.assertIn("Recorded: approved by you", send(alice, f"approve {APPROVE_REQUEST}", "m3"))
+        decided = json.loads((self.data / "approvals" / "decisions" / f"{APPROVE_REQUEST}.json").read_text())
+        self.assertEqual((decided["approver"], decided["approved"]), ("alice@acme.example", True))
+        self.assertEqual(self.coworker.calls, [])
+        ledger = (self.data / "audit.jsonl").read_text()
+        self.assertNotIn("Do not send", ledger)
+        self.assertIn("approval.channel-decision", ledger)
+
     def test_the_built_in_web_chat_answers_inbox_for_the_signed_in_person(self):
         alice, _ = self.waiting()
         session = self.sign_in()
