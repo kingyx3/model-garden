@@ -325,9 +325,10 @@ post('/channels/web/messages',{conversationId:conv,messageId:'m'+Date.now()+Math
 var u=$('upload');if(u)u.onsubmit=function(e){e.preventDefault();var f=$('knowledge-file').files[0],n=$('upload-note');
 if(!f||f.size>65536){n.textContent='Choose a .txt or .md file no larger than 64 KiB.';return}
 var b=new Uint8Array(16);crypto.getRandomValues(b);var id=Array.from(b,function(x){return x.toString(16).padStart(2,'0')}).join('');
-f.text().then(function(content){return post('/channels/web/knowledge-uploads',{requestId:id,filename:f.name,content:content},true)})
+f.arrayBuffer().then(function(raw){var content=new TextDecoder('utf-8',{fatal:true}).decode(raw);
+return post('/channels/web/knowledge-uploads',{requestId:id,filename:f.name,content:content},true)})
 .then(function(r){return r.json().then(function(j){n.textContent=r.status===201?'Draft staged. '+j.next:(j.error||'Upload not accepted.')})})
-.catch(function(){n.textContent='Upload not accepted; ask an operator to check before retrying.'})};
+.catch(function(){n.textContent='Invalid UTF-8 or upload not accepted; ask an operator before retrying.'})};
 var m=/login=([^&]+)/.exec(location.hash);
 if(m){history.replaceState(null,'','/chat');post('/channels/web/session',{login:decodeURIComponent(m[1])}).then(function(r){return r.json()})
 .then(function(j){if(j.session){S.setItem('mg-session',j.session);S.setItem('mg-prefix',j.prefix);start(j.session,j.prefix)}else{$('note').textContent='That link is not valid or was already used.'}})}
