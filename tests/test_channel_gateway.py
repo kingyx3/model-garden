@@ -11,6 +11,7 @@ import tempfile
 import time
 import unittest
 import urllib.parse
+from unittest import mock
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 
@@ -192,6 +193,51 @@ class SlackTests(GatewayCase):
         self.assertEqual(self.posts()[-1]["text"], "Hello from the coworker")
         dropped = [json.loads(line) for line in (self.data / "audit.jsonl").read_text().splitlines() if "channel.event-dropped" in line]
         self.assertEqual([item["details"] for item in dropped], [{"channel": "slack", "reason": "outbox-full"}])
+
+    def test_paused_customer_message_creates_one_private_human_ticket_not_a_deferred_trigger(self):
+        store = gateway._module("pause").PauseStore(self.data)
+        store.pause("owner@acme.example", "incident", NOW)
+        private = "Sensitive customer request: 4111 1111 1111 1111"
+        body = slack_event(private, ts="1700000000.000931")
+        self.slack_post("/channels/slack/events", body)
+        self.slack_post("/channels/slack/events", body)  # signed redelivery is idempotent
+        self.assertEqual(self.coworker.calls, [])
+        self.assertFalse((self.data / "events" / "events.jsonl").exists(),
+                         "a message received during pause must not launch a deferred task on resume")
+        reply = self.posts()[-1]["text"]
+        self.assertIn("private", reply.lower())
+        self.assertIn("not been acted on", reply.lower())
+        self.assertNotIn("person has been told", reply.lower())
+        tickets = gateway._module("tickets").TicketStore(self.data / "tickets", tenant=self.gateway.tenant)
+        waiting = tickets.search(query="*", requested_by="owner@acme.example", principal_access="member")["tickets"]
+        self.assertEqual(len(waiting), 1)
+        self.assertEqual(waiting[0]["project"], "pause-hold")
+        self.assertEqual(tickets.created_since(NOW - 1), [],
+                         "safety intake must not fire a ticket.created automation after resume")
+        stored = json.dumps(tickets.get(waiting[0]["ticketId"]))
+        for secret in (private, "D0DIRECT01", "U0ALICE01", "1700000000.000931"):
+            self.assertNotIn(secret, stored)
+        self.slack_post("/channels/slack/events", slack_event("inbox", ts="1700000000.000932"))
+        self.assertIn("open ticket", self.posts()[-1]["text"])
+        actions = [json.loads(line)["action"] for line in (self.data / "audit.jsonl").read_text().splitlines()]
+        self.assertIn("channel.pause-hold-created", actions)
+        self.assertIn("channel.event-suppressed-paused", actions)
+        store.resume("owner@acme.example", NOW + 1)
+        self.slack_post("/channels/slack/events", slack_event("hello after resume", ts="1700000000.000933"))
+        self.assertEqual(len(self.coworker.calls), 1)
+        self.assertEqual(len(self.outbox_events()), 1)
+
+    def test_paused_intake_failure_never_claims_a_person_was_notified(self):
+        gateway._module("pause").PauseStore(self.data).pause("owner@acme.example", "incident", NOW)
+        with mock.patch.object(gateway._module("tickets").TicketStore, "create",
+                               side_effect=OSError("private disk path")):
+            self.slack_post("/channels/slack/events", slack_event("urgent help", ts="1700000000.000934"))
+        answer = self.posts()[-1]["text"].lower()
+        self.assertIn("could not be queued", answer)
+        self.assertIn("contact", answer)
+        self.assertNotIn("private disk path", answer)
+        self.assertEqual(self.coworker.calls, [])
+        self.assertEqual(self.outbox_events(), [])
 
     def gateway_outbox(self):
         return outbox_module.EventOutbox(self.data / "events")
