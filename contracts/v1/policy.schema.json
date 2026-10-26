@@ -4,54 +4,119 @@
   "title": "Model Garden Policy v1",
   "type": "object",
   "additionalProperties": false,
-  "required": ["apiVersion", "kind", "metadata", "spec"],
+  "required": [
+    "apiVersion",
+    "kind",
+    "metadata",
+    "spec"
+  ],
   "properties": {
-    "apiVersion": {"const": "modelgarden.ai/v1"},
-    "kind": {"const": "Policy"},
+    "apiVersion": {
+      "const": "modelgarden.ai/v1"
+    },
+    "kind": {
+      "const": "Policy"
+    },
     "metadata": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["name", "owner"],
+      "required": [
+        "name",
+        "owner"
+      ],
       "properties": {
-        "name": {"type": "string"},
-        "owner": {"type": "string"},
-        "description": {"type": "string"}
+        "name": {
+          "type": "string"
+        },
+        "owner": {
+          "type": "string"
+        },
+        "description": {
+          "type": "string"
+        }
       }
     },
     "spec": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["rules"],
+      "required": [
+        "rules"
+      ],
       "properties": {
         "rules": {
           "type": "array",
           "items": {
             "type": "object",
             "additionalProperties": false,
-            "required": ["id", "effect"],
+            "required": [
+              "id",
+              "effect"
+            ],
             "properties": {
-              "id": {"type": "string", "minLength": 1, "maxLength": 64},
-              "effect": {"enum": ["allow", "deny", "require-approval", "human-only"]},
-              "description": {"type": "string"},
-              "assignee": {"type": "string", "minLength": 1, "maxLength": 256, "description": "Required for human-only: the named person (or role mailbox) who performs the action."},
-              "deadlineHours": {"type": "integer", "minimum": 1, "maximum": 720, "description": "For human-only: hours the assignee has before the hand-off is reported as overdue (default 24)."},
+              "id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 64
+              },
+              "effect": {
+                "enum": [
+                  "allow",
+                  "deny",
+                  "require-approval",
+                  "human-only"
+                ]
+              },
+              "description": {
+                "type": "string"
+              },
+              "assignee": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 256,
+                "description": "Required for human-only: the named person (or role mailbox) who performs the action."
+              },
+              "deadlineHours": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 720,
+                "description": "For human-only: hours the assignee has before the hand-off is reported as overdue (default 24)."
+              },
               "actions": {
                 "type": "array",
-                "items": {"type": "string", "minLength": 1},
+                "items": {
+                  "type": "string",
+                  "minLength": 1
+                },
                 "description": "Tool names or glob patterns such as calendar.book, mail.send or crm.*. An allow rule must list its actions."
               },
               "dataClassifications": {
                 "type": "array",
-                "items": {"enum": ["public", "internal", "confidential", "restricted"]}
+                "items": {
+                  "enum": [
+                    "public",
+                    "internal",
+                    "confidential",
+                    "restricted"
+                  ]
+                }
               },
               "channels": {
                 "type": "array",
-                "items": {"type": "string", "minLength": 1, "maxLength": 256},
+                "items": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 256
+                },
                 "description": "Narrow the rule to these channels (for example voice, slack, email)."
               },
               "principals": {
                 "type": "array",
-                "items": {"enum": ["member", "public"]},
+                "items": {
+                  "enum": [
+                    "member",
+                    "public"
+                  ]
+                },
                 "uniqueItems": true,
                 "description": "Principal types the rule covers. Omitted: deny and require-approval cover everyone; allow covers members only. Naming public is the only way to let a public principal use a write Tool."
               },
@@ -70,21 +135,51 @@
                       "minItems": 1,
                       "maxItems": 32,
                       "uniqueItems": true,
-                      "items": {"type": ["string", "integer", "boolean"]}
+                      "items": {
+                        "type": [
+                          "string",
+                          "integer",
+                          "boolean"
+                        ]
+                      }
                     },
                     "description": "Each named Tool argument must be present and equal to one of the listed values (for example {\"category\": [\"faq\"]})."
                   },
-                  "maxPerDay": {"type": "integer", "minimum": 1, "maximum": 10000, "description": "The rule applies only while fewer than this many successful executions of the matched Tool by this Agent have been recorded today (UTC) in the local ledger, whoever asked."},
-                  "maxPerPrincipalPerDay": {"type": "integer", "minimum": 1, "maximum": 10000, "description": "The rule applies only while the requesting identity has fewer than this many successful executions of the matched Tool by this Agent today (UTC), so one person or public sender cannot use up the allowance for the others. A request with no attributed identity has no count, so the rule does not apply. Both daily limits must hold when both are set."}
+                  "maxPerDay": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 10000,
+                    "description": "The rule applies only while fewer than this many successful executions of the matched Tool by this Agent have been recorded today (UTC) in the local ledger, whoever asked."
+                  },
+                  "maxPerPrincipalPerDay": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 10000,
+                    "description": "The rule applies only while the requesting identity has fewer than this many successful executions of the matched Tool by this Agent today (UTC), so one person or public sender cannot use up the allowance for the others. A request with no attributed identity has no count, so the rule does not apply. Both daily limits must hold when both are set."
+                  }
                 }
               },
               "signoff": {
                 "type": "object",
                 "additionalProperties": false,
-                "required": ["owner", "ruleDigest"],
+                "required": [
+                  "owner",
+                  "ruleDigest"
+                ],
                 "properties": {
-                  "owner": {"type": "string", "minLength": 1},
-                  "ruleDigest": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+                  "owner": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "ruleDigest": {
+                    "type": "string",
+                    "pattern": "^[0-9a-f]{64}$"
+                  },
+                  "signature": {
+                    "type": "string",
+                    "pattern": "^[A-Za-z0-9+/]{86}==$",
+                    "description": "Optional base64-encoded 64-byte Ed25519 signature over the owner identity and rule digest. Required for approval-relaxing rules when governance.ownerKeys is configured; cryptographic verification occurs at compile/deploy time."
+                  }
                 },
                 "description": "Named client owner's sign-off for an allow rule that relaxes an approval requirement. ruleDigest binds the sign-off to the rule's exact content (every field except signoff), so any later edit blocks compilation until the owner re-signs."
               }
