@@ -9,7 +9,9 @@ import re
 import subprocess
 import sys
 import tempfile
+import threading
 import unittest
+from unittest import mock
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 
@@ -637,6 +639,54 @@ class CallFilingTests(Case):
     def interactions(self, runtime):
         with runtime._sidecar().crm_store()._locked() as state:
             return [dict(item) for item in state["interactions"].values()]
+
+    def test_emergency_pause_holds_transcript_filing_and_model_summary_until_resume(self):
+        coworker = FakeCoworker()
+        runtime = self.runtime([call_record()], coworker=coworker)
+        store = worker._module("pause").PauseStore(self.data)
+        store.pause(OWNER, "synthetic incident", T0)
+        self.assertEqual(runtime.run_calls(T0), {"skipped": "paused"})
+        self.assertEqual(coworker.calls, [], "paused worker must not summarize customer calls")
+        self.assertEqual(self.interactions(runtime), [], "paused worker must not file a transcript")
+        store.resume(OWNER, T0 + 1)
+        self.assertEqual(runtime.run_calls(T0 + 2)["filed"], 1)
+
+    def test_inflight_transcript_filing_cannot_race_a_confirmed_owner_pause(self):
+        runtime = self.runtime([call_record()])
+        store = worker._module("pause").PauseStore(self.data)
+        filing = worker._module("filing")
+        original = filing.read_call_transcripts
+        entered, release = threading.Event(), threading.Event()
+        reports, failures = [], []
+
+        def blocked_read(path):
+            entered.set()
+            if not release.wait(5):
+                raise TimeoutError("synthetic test filing was not released")
+            return original(path)
+
+        def run_filing():
+            try:
+                reports.append(runtime.run_calls(T0))
+            except BaseException as exc:
+                failures.append(type(exc).__name__)
+
+        thread = threading.Thread(target=run_filing, daemon=True)
+        with mock.patch.object(filing, "read_call_transcripts", side_effect=blocked_read):
+            thread.start()
+            try:
+                self.assertTrue(entered.wait(3), "filing must enter its guarded work")
+                with self.assertRaisesRegex(TimeoutError, "not acknowledged"):
+                    store.pause(OWNER, "synthetic incident", T0, lock_timeout_seconds=0.05)
+                self.assertFalse(store.is_paused(), "timeout is not a successful pause")
+            finally:
+                release.set()
+                thread.join(5)
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(failures, [])
+        self.assertEqual(reports[0]["filed"], 1)
+        store.pause(OWNER, "synthetic incident", T0 + 1, lock_timeout_seconds=1)
+        self.assertEqual(runtime.run_calls(T0 + 2), {"skipped": "paused"})
 
     def test_a_call_is_filed_unmatched_with_a_model_summary_once(self):
         coworker = FakeCoworker()
