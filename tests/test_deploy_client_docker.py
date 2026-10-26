@@ -167,11 +167,14 @@ class DeployClientDockerTests(unittest.TestCase):
                 "web": {"allowed_addresses": ["alice@acme.example"], "mail": {"from": "chat@acme.example", "host": "smtp.acme.example"}},
                 "mailbox": {"addresses": ["support@acme.example"]},
             }
-            worker = {"enabled": True, "coworker_api_key_ref": "secret://coworker-api/dev"}
+            worker = {"enabled": True, "coworker_api_key_ref": "secret://coworker-api/dev", "artifact_retention_days": 7}
             binding = self._binding(root, {"gateway": gateway, "worker": worker})
             metadata = deployer.render_bundle(profile, binding, root / "bundle", "acme-dev")
             compose = yaml.safe_load((root / "bundle" / "compose.yaml").read_text(encoding="utf-8"))
             self.assertTrue(metadata["channelGateway"])
+            self.assertEqual(compose["services"]["governed-tools"]["environment"]["MODEL_GARDEN_ARTIFACT_RETENTION_DAYS"], "7")
+            self.assertEqual(compose["services"]["channel-gateway"]["environment"]["MODEL_GARDEN_ARTIFACT_RETENTION_DAYS"], "7")
+            self.assertEqual(json.loads((root / "bundle" / "profile" / ".modelgarden" / "worker.json").read_text())["artifactRetentionDays"], 7)
             service = compose["services"]["channel-gateway"]
             self.assertEqual(service["ports"], ["127.0.0.1:8080:8080", "127.0.0.1:2525:2525"])
             self.assertIn("gateway.py", " ".join(service["entrypoint"]))

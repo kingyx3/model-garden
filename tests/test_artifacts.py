@@ -222,6 +222,24 @@ class StoreCase(unittest.TestCase):
             with self.subTest(days=days), self.assertRaises(Error):
                 self.store(retention_days=days)
 
+    def test_shorter_client_retention_revokes_old_files_and_purges_them(self):
+        # A reviewed policy change must affect files created under the old, longer policy.
+        long_policy = self.store(retention_days=365)
+        entry = self.put(long_policy, now=T0)
+        short_policy = self.store(retention_days=2)
+        with self.assertRaisesRegex(Error, "expired"):
+            short_policy.get(entry["id"], requested_by=ALICE, now=T0 + 3 * 86400)
+        self.assertEqual(short_policy.purge_expired(now=T0 + 3 * 86400), {"expired": 1})
+        self.assertFalse((self.root / "acme-prod" / entry["id"]).exists())
+        self.assertEqual(self.store("other-client").list(), [])
+
+    def test_retention_environment_rejects_invalid_policy_values(self):
+        for value in ("0", "3651", "7.0", "true", "-1", "999999"):
+            with self.subTest(value=value), self.assertRaises(Error):
+                artifacts.retention_from_environ({"MODEL_GARDEN_ARTIFACT_RETENTION_DAYS": value})
+        self.assertEqual(artifacts.retention_from_environ({}), 365)
+        self.assertEqual(artifacts.retention_from_environ({"MODEL_GARDEN_ARTIFACT_RETENTION_DAYS": "7"}), 7)
+
     def test_tenants_are_isolated(self):
         entry = self.put()
         other = self.store("globex-prod")

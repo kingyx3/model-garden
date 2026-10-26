@@ -176,6 +176,18 @@ class BindingTests(Case):
         self.assertEqual(len(self.store("acme").list()), 1)
         self.assertEqual(self.store("other").list(), [])
 
+    def test_client_retention_applies_to_governed_docs_and_files(self):
+        runtime = self.runtime()
+        runtime.environ["MODEL_GARDEN_ARTIFACT_RETENTION_DAYS"] = "7"
+        result = self.create(runtime)["result"]
+        (entry,) = self.store().list()
+        self.assertEqual(entry["expiresAt"] - entry["createdAt"], 7 * 86400)
+        self.assertEqual(runtime._tier0_files("docs", "built-in-artifacts")._store._retention_seconds, 7 * 86400)
+        self.assertEqual(result["documentId"], entry["location"])
+        runtime.environ["MODEL_GARDEN_ARTIFACT_RETENTION_DAYS"] = "invalid"
+        with self.assertRaises(runtime_module.ARTIFACTS.ArtifactError):
+            runtime._require_docs()
+
     def test_a_client_without_a_compiled_slug_is_refused(self):
         runtime = self.runtime(client="Not A Slug!")
         with self.assertRaisesRegex(PermissionError, "tenant-scoped"):

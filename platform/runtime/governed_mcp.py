@@ -668,7 +668,7 @@ class GovernedToolRuntime:
         if not isinstance(tenant, str) or not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,62}", tenant):
             raise PermissionError("documents need a compiled, tenant-scoped client slug")
         return ARTIFACTS.ArtifactStore(
-            self.artifact_root, tenant=tenant,
+            self.artifact_root, tenant=tenant, retention_days=ARTIFACTS.retention_from_environ(self.environ),
             audit=lambda action, by, details: GOVERN.record_operator_action(self.audit_path, action, by, details),
         )
 
@@ -713,7 +713,7 @@ class GovernedToolRuntime:
             raise PermissionError("files need a compiled, tenant-scoped client slug")
         module = FILES._artifacts()
         store = module.ArtifactStore(
-            self.artifact_root, tenant=tenant,
+            self.artifact_root, tenant=tenant, retention_days=module.retention_from_environ(self.environ),
             audit=lambda action, by, details: GOVERN.record_operator_action(self.audit_path, action, by, details),
         )
         agent = self.desired_state.get("agent", {}).get("metadata", {}).get("name")
