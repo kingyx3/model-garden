@@ -299,6 +299,49 @@ class WebChatTests(GatewayCase):
         self.assertEqual(self.gateway.handle("GET", "/channels/web/events?conversationId=someone-else&after=0", headers, b"").status, 403)
         self.assertEqual(self.gateway.handle("POST", "/channels/web/messages", {}, message).status, 401)
 
+    def test_zero_stack_inbox_handoff_can_be_acknowledged_and_closed_from_signed_webchat(self):
+        config = {**self.config, "people": {
+            "alice@acme.example": {"channel": "inbox", "identity": "alice@acme.example"},
+        }}
+        self.gateway = gateway.Gateway(
+            compiled(self.root), self.data, config, ENV, coworker=self.coworker, http=self.http,
+            mail_sender=lambda to, subject, body: self.mail.append((to, body)), clock=lambda: NOW,
+        )
+        request = {"requestId": "b" * 64, "tool": "calendar.book", "agent": "receptionist",
+                   "arguments": {"customer": "sensitive booking"}}
+        handoff.create(self.data / "handoffs", request, capability="calendar", reason="unbound",
+                       assignee="alice@acme.example", now=int(time.time()))
+        alice = self.sign_in()
+        bob = self.sign_in("bob@acme.example")
+
+        def send(session, text, message_id):
+            conversation = session["prefix"] + "-tier0"
+            headers = {"Authorization": "Bearer " + session["session"]}
+            payload = json.dumps({"conversationId": conversation, "messageId": message_id, "text": text,
+                                  "sender": "alice@acme.example"}).encode()
+            response = self.gateway.handle("POST", "/channels/web/messages", headers, payload)
+            self.assertEqual(response.status, 200)
+            events = json.loads(self.gateway.handle(
+                "GET", f"/channels/web/events?conversationId={conversation}&after=0", headers, b"",
+            ).body)["events"]
+            return events[-1]["text"]
+
+        self.assertIn("Hand-off for alice@acme.example", send(alice, "inbox", "a1"))
+        self.assertNotIn("sensitive booking", send(alice, "inbox", "a2"))
+        self.assertNotIn("Recorded", send(bob, "done " + "b" * 12, "b1"))
+        self.assertEqual(len(handoff.pending(self.data / "handoffs")), 1)
+        self.assertIn("still waiting", send(alice, "seen " + "b" * 12, "a3"))
+        self.assertEqual(handoff.pending(self.data / "handoffs")[0]["acknowledged"]["via"], "webchat")
+        self.assertIn("Recorded", send(alice, "done " + "b" * 12, "a4"))
+        self.assertEqual(handoff.pending(self.data / "handoffs"), [])
+        self.assertEqual(self.coworker.calls, [])
+        events = [json.loads(line) for line in (self.data / "audit.jsonl").read_text().splitlines()]
+        completed = [item for item in events if item["event"] == "handoff" and item["outcome"] == "done"]
+        self.assertEqual(len(completed), 1)
+        self.assertEqual(completed[0]["details"]["completedBy"], "alice@acme.example")
+        self.assertEqual(completed[0]["details"]["via"], "webchat")
+        self.assertEqual((completed[0]["ledger"]["tier"], completed[0]["ledger"]["provider"]), (4, "human"))
+
     def test_page_is_served_with_a_locked_down_csp(self):
         page = self.gateway.handle("GET", "/chat", {}, b"")
         self.assertEqual(page.status, 200)
