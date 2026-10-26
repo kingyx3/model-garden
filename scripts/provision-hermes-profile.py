@@ -11,8 +11,11 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import pathlib
 import re
+import stat
+import tempfile
 import sys
 from typing import Any
 
@@ -234,18 +237,62 @@ def _remove_empty_managed_skill_dirs(profile_dir: pathlib.Path) -> None:
         pass
 
 
+def _validate_profile_paths(profile_dir: pathlib.Path, files: dict[pathlib.Path, str]) -> None:
+    """Reject pre-existing filesystem aliases before touching any managed profile file.
+
+    The profile directory must be private to its runtime owner; this preflight is
+    not a substitute for filesystem ownership/isolation against concurrent writers.
+    """
+    if profile_dir.is_symlink():
+        raise ValueError("Hermes provisioning failed: profile root may not be a symlink")
+    if profile_dir.exists() and not profile_dir.is_dir():
+        raise ValueError("Hermes provisioning failed: profile root must be a directory")
+    for relative in files:
+        parent = profile_dir
+        for component in relative.parts[:-1]:
+            parent = parent / component
+            if parent.is_symlink():
+                raise ValueError(f"Hermes provisioning failed: profile directory may not be a symlink: {parent}")
+            if parent.exists() and not parent.is_dir():
+                raise ValueError(f"Hermes provisioning failed: profile parent must be a directory: {parent}")
+        destination = profile_dir / relative
+        if destination.is_symlink():
+            raise ValueError(f"Hermes provisioning failed: managed file may not be a symlink: {destination}")
+        if destination.exists():
+            if not destination.is_file():
+                raise ValueError(f"Hermes provisioning failed: managed target must be a file: {destination}")
+            if destination.stat().st_nlink != 1:
+                raise ValueError(f"Hermes provisioning failed: managed file may not be a hardlink: {destination}")
+
+
+def _write_private_file(destination: pathlib.Path, content: str) -> None:
+    """Publish complete profile files atomically; never open an existing target for writing."""
+    fd, temporary = tempfile.mkstemp(prefix=f".{destination.name}.", dir=destination.parent)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as output:
+            output.write(content)
+            output.flush()
+            os.fsync(output.fileno())
+        os.replace(temporary, destination)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
+
+
 def apply_profile(profile_dir: pathlib.Path, files: dict[pathlib.Path, str], dry_run: bool = False) -> list[pathlib.Path]:
+    _validate_profile_paths(profile_dir, files)
     stale = _stale_managed_skill_files(profile_dir, files)
     changed: list[pathlib.Path] = list(stale)
     for relative_path in sorted(files, key=lambda path: path.as_posix()):
         destination = profile_dir / relative_path
-        current = destination.read_text() if destination.is_file() else None
-        if current == files[relative_path]:
+        current = destination.read_text(encoding="utf-8") if destination.is_file() else None
+        private = destination.is_file() and stat.S_IMODE(destination.stat().st_mode) == 0o600
+        if current == files[relative_path] and private:
             continue
         changed.append(relative_path)
         if not dry_run:
-            destination.parent.mkdir(parents=True, exist_ok=True)
-            destination.write_text(files[relative_path])
+            destination.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+            _write_private_file(destination, files[relative_path])
     if not dry_run:
         for relative_path in stale:
             (profile_dir / relative_path).unlink()
