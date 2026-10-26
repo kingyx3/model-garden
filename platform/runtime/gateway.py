@@ -520,10 +520,19 @@ class Gateway:
         return tuple(attachments)
 
     def _chat_event(self, inbound: Any) -> None:
-        """Tell the worker that a conversational message arrived, by digest only, so a ``chat.message`` trigger can run (#99)."""
-        reference = hashlib.sha256(f"{inbound.channel}\0{inbound.conversation_id}\0{inbound.message_id}".encode("utf-8")).hexdigest()[:32]
-        if not _module("event_outbox").EventOutbox(self.data / "events").append("chat.message", reference, at=int(self.clock())):
-            self.audit("channel.event-dropped", IDENTITY, {"channel": inbound.channel, "reason": "outbox-full"})
+        """Emit an event only if the coworker is active at the shared pause fence.
+
+        A paused inbound message is held for a human by _respond instead. Do not
+        queue an automatic chat.message task that could run after a later resume.
+        """
+        store = _module("pause").PauseStore(self.data)
+        with store.effect_guard():
+            if store.is_paused():
+                self.audit("channel.event-suppressed-paused", IDENTITY, {"channel": inbound.channel})
+                return
+            reference = hashlib.sha256(f"{inbound.channel}\0{inbound.conversation_id}\0{inbound.message_id}".encode("utf-8")).hexdigest()[:32]
+            if not _module("event_outbox").EventOutbox(self.data / "events").append("chat.message", reference, at=int(self.clock())):
+                self.audit("channel.event-dropped", IDENTITY, {"channel": inbound.channel, "reason": "outbox-full"})
 
     def beat(self, now: int, failed: Iterable[str] = ()) -> dict[str, Any]:
         """Record that the gateway's own loop ran (and which periodic jobs failed), for ``--readiness`` and an external alert."""
@@ -637,8 +646,38 @@ class Gateway:
     def _respond(self, inbound: Any, principal: Any) -> str | None:
         pause = _module("pause")
         if pause.PauseStore(self.data).is_paused():
-            self.audit("channel.held-while-paused", IDENTITY, {"channel": inbound.channel})
-            return self.config.get("pausedMessage") or pause.HOLDING
+            # Safety intake is a local, bounded Tier 0 human ticket, NOT a
+            # coworker Tool execution, provider send or deferred model task.
+            # Keep message text, sender and channel identifiers out of the
+            # ticket and ledger. The channel's original message remains the
+            # source of truth for staff follow-up.
+            reference = hashlib.sha256(
+                f"{inbound.channel}\0{inbound.conversation_id}\0{inbound.message_id}".encode("utf-8")
+            ).hexdigest()
+            try:
+                ticket = _module("tickets").TicketStore(self.data / "tickets", tenant=self.tenant).create(
+                    project="pause-hold", title="Customer request received during emergency pause",
+                    description=f"Channel: {inbound.channel}; message digest: {reference}",
+                    requested_by="runtime:gateway", agent=self.config["agent"], now=int(self.clock()),
+                )
+            except (OSError, ValueError):
+                try:
+                    self.audit("channel.pause-hold-failed", IDENTITY, {"channel": inbound.channel, "reason": "local-intake-unavailable"})
+                except (OSError, ValueError):
+                    pass
+                return ("I am paused by my owner and cannot act on this. Your request could not be queued "
+                        "for staff. Please contact the business directly.")
+            try:
+                self.audit("channel.pause-hold-created", IDENTITY, {
+                    "channel": inbound.channel, "ticketId": ticket["ticketId"], "duplicate": ticket["duplicate"],
+                })
+            except (OSError, ValueError):
+                return ("I am paused by my owner and cannot act on this. A private staff ticket may have "
+                        "been recorded, but its audit receipt is unavailable. Please contact the business directly.")
+            return self.config.get("pausedMessage") or (
+                "I am paused by my owner and cannot act on this. Your request is in the private "
+                "staff ticket inbox for review; it has not been acted on."
+            )
         if self.coworker is None:
             return "The coworker is not connected yet. A person has been told."
         notes = []

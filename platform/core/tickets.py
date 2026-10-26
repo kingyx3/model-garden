@@ -222,7 +222,10 @@ class TicketStore:
         """
         with self._locked() as document:
             tickets = list(document["tickets"].values())
-        found = [{"ticketId": ticket["id"], "createdAt": ticket["createdAt"]} for ticket in tickets if ticket["createdAt"] >= since]
+        # A pause-hold is a safety receipt for human review, not a task for
+        # the coworker to run automatically after the owner resumes it.
+        found = [{"ticketId": ticket["id"], "createdAt": ticket["createdAt"]} for ticket in tickets
+                 if ticket["createdAt"] >= since and ticket["project"] != "pause-hold"]
         return sorted(found, key=lambda item: (item["createdAt"], item["ticketId"]))
 
     def open_items(self) -> list[dict[str, Any]]:
