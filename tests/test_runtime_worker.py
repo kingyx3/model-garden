@@ -901,6 +901,145 @@ if __name__ == "__main__":
     unittest.main()
 
 
+
+class WorkerPauseFenceTests(Case):
+    """A confirmed owner pause must wait for the whole worker effect, not only its governed Tool call (#232)."""
+
+    def assert_inflight_cannot_be_confirmed(self, runtime, action, entered, release):
+        results, failures = [], []
+
+        def invoke():
+            try:
+                results.append(action())
+            except BaseException as exc:
+                failures.append(type(exc).__name__)
+
+        thread = threading.Thread(target=invoke, daemon=True)
+        thread.start()
+        try:
+            self.assertTrue(entered.wait(3), "worker must enter the material operation")
+            with self.assertRaisesRegex(TimeoutError, "not acknowledged"):
+                worker._module("pause").PauseStore(self.data).pause(
+                    OWNER, "synthetic safety incident", T0, lock_timeout_seconds=0.05,
+                )
+            self.assertFalse(worker._module("pause").PauseStore(self.data).is_paused(),
+                             "a timeout must not claim a completed owner pause")
+        finally:
+            release.set()
+            thread.join(5)
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(failures, [])
+        self.assertEqual(len(results), 1)
+        return results[0]
+
+    def test_scheduled_model_run_is_inflight_until_coworker_finishes(self):
+        entered, release = threading.Event(), threading.Event()
+
+        class Blocking(FakeCoworker):
+            def complete(self, *args, **kwargs):
+                entered.set()
+                if not release.wait(5):
+                    raise TimeoutError("test scheduler was not released")
+                return super().complete(*args, **kwargs)
+
+        fake = Blocking()
+        runtime = self.make({"deployedBy": "deploy:alex", "owners": {OWNER: ["kb.search"]}},
+                            schedules=[SCHEDULE], coworker=fake)
+        runtime.apply_schedules(T0)
+        outcome = self.assert_inflight_cannot_be_confirmed(runtime, lambda: runtime.run_scheduler(T0 + 3700), entered, release)
+        self.assertEqual(outcome["runs"], 1)
+        store = worker._module("pause").PauseStore(self.data)
+        store.pause(OWNER, "synthetic safety incident", T0 + 1)
+        self.assertEqual(runtime.run_scheduler(T0 + 3800), {"skipped": "paused"})
+        self.assertEqual(len(fake.calls), 1)
+
+    def test_mail_classification_and_draft_cannot_race_a_confirmed_pause(self):
+        entered, release = threading.Event(), threading.Event()
+
+        class Blocking(FakeCoworker):
+            def classify(self, *args, **kwargs):
+                entered.set()
+                if not release.wait(5):
+                    raise TimeoutError("test mailbox was not released")
+                return super().classify(*args, **kwargs)
+
+        fake = Blocking()
+        runtime = self.make({"mailbox": {"addresses": [MAILBOX], "trustedAuthservId": MX, "owner": OWNER}},
+                            coworker=fake)
+        runtime._spool().ingest(raw(), now=T0 - 5)
+        outcome = self.assert_inflight_cannot_be_confirmed(runtime, lambda: runtime.run_mailbox(T0), entered, release)
+        self.assertEqual(outcome["done"], 1)
+        store = worker._module("pause").PauseStore(self.data)
+        store.pause(OWNER, "synthetic safety incident", T0 + 1)
+        runtime._spool().ingest(raw("<paused@customer.example>"), now=T0 + 2)
+        self.assertEqual(runtime.run_mailbox(T0 + 3), {"skipped": "paused"})
+        self.assertEqual(len([call for call in fake.calls if call[0] == "classify"]), 1)
+        store.resume(OWNER, T0 + 4)
+        self.assertEqual(runtime.run_mailbox(T0 + 5)["done"], 1)
+
+    def test_event_trigger_does_not_consume_events_or_run_across_pause(self):
+        entered, release = threading.Event(), threading.Event()
+
+        class Blocking(FakeCoworker):
+            def complete(self, *args, **kwargs):
+                entered.set()
+                if not release.wait(5):
+                    raise TimeoutError("test trigger was not released")
+                return super().complete(*args, **kwargs)
+
+        fake = Blocking()
+        runtime = self.make({"owners": {OWNER: ["kb.search"]}}, coworker=fake)
+        runtime._schedule_store().create_trigger(
+            owner=OWNER, agent="receptionist", goal="Review the event", event="chat.message",
+            budget={"steps": 3, "tokens": 5000}, required_capabilities=["kb.search"], now=T0,
+        )
+        outbox = outbox_module.EventOutbox(self.data / "events")
+        outbox.append("chat.message", "aa" * 16, at=T0)
+        outcome = self.assert_inflight_cannot_be_confirmed(runtime, lambda: runtime.run_events(T0), entered, release)
+        self.assertEqual(outcome["chat"], 1)
+        store = worker._module("pause").PauseStore(self.data)
+        store.pause(OWNER, "synthetic safety incident", T0 + 1)
+        outbox.append("chat.message", "bb" * 16, at=T0 + 2)
+        self.assertEqual(runtime.run_events(T0 + 3), {"skipped": "paused"})
+        self.assertEqual(len(fake.calls), 1)
+        store.resume(OWNER, T0 + 4)
+        self.assertEqual(runtime.run_events(T0 + 5)["chat"], 1)
+        self.assertEqual(len(fake.calls), 2)
+
+    def test_crm_retry_is_fenced_even_before_the_governed_tool(self):
+        entered, release = threading.Event(), threading.Event()
+        runtime = self.make(crm=True)
+        filing = worker._module("crm_filing")
+
+        def blocked_retry(*args, **kwargs):
+            entered.set()
+            if not release.wait(5):
+                raise TimeoutError("test CRM retry was not released")
+            return {"attempted": 0}
+
+        with mock.patch.object(filing, "retry_due", side_effect=blocked_retry):
+            outcome = self.assert_inflight_cannot_be_confirmed(runtime, lambda: runtime.run_crm_sync(T0), entered, release)
+        self.assertEqual(outcome["attempted"], 0)
+        store = worker._module("pause").PauseStore(self.data)
+        store.pause(OWNER, "synthetic safety incident", T0 + 1)
+        self.assertEqual(runtime.run_crm_sync(T0 + 2), {"skipped": "paused"})
+
+    def test_direct_event_firing_is_also_blocked_while_paused(self):
+        fake = FakeCoworker()
+        runtime = self.make({"owners": {OWNER: ["kb.search"]}}, coworker=fake)
+        runtime._schedule_store().create_trigger(
+            owner=OWNER, agent="receptionist", goal="Review the event", event="chat.message",
+            budget={"steps": 3, "tokens": 5000}, required_capabilities=["kb.search"], now=T0,
+        )
+        store = worker._module("pause").PauseStore(self.data)
+        store.pause(OWNER, "synthetic safety incident", T0)
+        self.assertEqual(runtime.fire_event("chat.message", "aa" * 16, T0 + 1), {"skipped": "paused"})
+        self.assertEqual(fake.calls, [])
+        store.resume(OWNER, T0 + 2)
+        self.assertEqual(runtime.fire_event("chat.message", "aa" * 16, T0 + 3)["runs"], 1)
+
+
+
 class ExportJobTests(Case):
     def test_the_export_job_copies_the_ledger_and_is_skipped_unless_configured(self):
         self.assertEqual(self.make().run_export(T0), {"skipped": "no-export-configured"})
