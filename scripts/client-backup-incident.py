@@ -72,7 +72,9 @@ def _state(path: pathlib.Path, binding: str) -> dict | None:
         raise IncidentError("unsafe incident state")
     if value is None:
         return None
-    if (set(value) != {"schemaVersion", "binding", "condition", "lastSlot"} or
+    if (not {"schemaVersion", "binding", "condition", "lastSlot"} <= set(value) or
+            set(value) - {"schemaVersion", "binding", "condition", "lastSlot"} -
+            {"pendingRecoverySlot"} or
             type(value["schemaVersion"]) is not int or value["schemaVersion"] != 1 or
             value["binding"] != binding or
             value["condition"] not in ("healthy", "unhealthy") or
@@ -81,6 +83,12 @@ def _state(path: pathlib.Path, binding: str) -> dict | None:
         raise IncidentError("invalid or cross-tenant incident state")
     try:
         dt.datetime.strptime(value["lastSlot"], "%Y%m%dT%H%M%SZ")
+        pending = value.get("pendingRecoverySlot")
+        if pending is not None:
+            if (value["condition"] != "healthy" or not isinstance(pending, str) or
+                    not STAMP.fullmatch(pending) or pending > value["lastSlot"]):
+                raise IncidentError("invalid pending recovery notification")
+            dt.datetime.strptime(pending, "%Y%m%dT%H%M%SZ")
     except ValueError as exc:
         raise IncidentError("invalid incident slot") from exc
     return value
@@ -163,15 +171,53 @@ def monitor(*, schedule: pathlib.Path, claims: pathlib.Path,
         event = ("backup.incident.opened" if condition == "unhealthy" and previous == "healthy"
                  else "backup.incident.recovered" if condition == "healthy" and
                       previous == "unhealthy" else "backup.incident.unchanged")
+        # Persist a recovery delivery outbox atomically with the incident
+        # transition. The Cloud Logging command may fail or the host may crash
+        # after this point; only an acknowledged write may clear the outbox.
+        pending = (latest if event == "backup.incident.recovered" else
+                   prior.get("pendingRecoverySlot") if prior is not None and
+                   condition == "healthy" else None)
         if prior is None or latest > prior["lastSlot"] or condition != previous:
-            _persist(path, {"schemaVersion": 1, "binding": binding,
-                            "condition": condition, "lastSlot": latest})
-        return {"event": event, "clientProject": project, "slotUTC": latest,
+            next_state = {"schemaVersion": 1, "binding": binding,
+                          "condition": condition, "lastSlot": latest}
+            if pending is not None:
+                next_state["pendingRecoverySlot"] = pending
+            _persist(path, next_state)
+        result = {"event": event, "clientProject": project, "slotUTC": latest,
                 "incidentActive": condition == "unhealthy",
                 "severity": "ERROR" if condition == "unhealthy" else "INFO",
                 "operatorAction": ("inspect-backup-claims-and-receipts" if
                                    condition == "unhealthy" else "verify-upload-and-restore"),
                 "recoveryProven": False, "notificationsDelivered": False}
+        if pending is not None:
+            result["pendingRecoverySlot"] = pending
+        return result
+    finally:
+        os.close(lock_fd)
+
+
+def ack_recovery(*, state_dir: pathlib.Path, project: str, slug: str,
+                 environment: str, gcp_project: str, recipient: str, slot: str) -> None:
+    """Acknowledge an accepted Cloud Logging recovery write, never its delivery.
+
+    A crash after cloud acceptance but before this fsynced update may replay
+    the same transition; provider-native notification rate limiting bounds it.
+    """
+    binding = _binding(project=project, slug=slug, environment=environment,
+                       gcp_project=gcp_project, recipient=recipient)
+    if not isinstance(slot, str) or not STAMP.fullmatch(slot):
+        raise IncidentError("invalid recovery acknowledgement")
+    SCHEDULE._private_owned(state_dir, directory=True)
+    lock_fd = _lock(state_dir, project)
+    try:
+        path = state_dir / f"{project}.incident.json"
+        state = _state(path, binding)
+        if (state is None or state["condition"] != "healthy" or
+                state.get("pendingRecoverySlot") != slot):
+            raise IncidentError("recovery acknowledgement is stale or unauthorized")
+        next_state = dict(state)
+        del next_state["pendingRecoverySlot"]
+        _persist(path, next_state)
     finally:
         os.close(lock_fd)
 
