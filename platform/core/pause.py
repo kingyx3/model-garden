@@ -18,6 +18,7 @@ from typing import Any, Iterator
 
 FILE = "pause.json"
 LOCK_FILE = ".pause.lock"
+MARKER = ".pause.initialized"  # Durable first-write witness; missing state after a write is unsafe.
 MAX_STATE_BYTES = 8192
 MAX_REASON = 300
 CONTROL = re.compile(r"[\x00-\x1f\x7f]+")
@@ -53,6 +54,16 @@ class PauseStore:
                 and (current.st_dev, current.st_ino) ==
                 (expected.st_dev, expected.st_ino))
 
+    def _marker_state(self) -> bool | None:
+        """True for a trusted first-write witness, False if absent, None if untrusted."""
+        try:
+            info = (self.root / MARKER).lstat()
+        except FileNotFoundError:
+            return False
+        except OSError:
+            return None
+        return True if _private_regular(info) else None
+
     def status(self) -> dict[str, Any]:
         """Read only a trusted, bounded state file; suspicious paths mean paused.
 
@@ -77,6 +88,9 @@ class PauseStore:
             pass  # no transaction has run yet
         except OSError:
             return _fail_closed()
+        marker_seen = self._marker_state()
+        if marker_seen is None:
+            return _fail_closed()
         try:
             path_info = self.path.lstat()
         except FileNotFoundError:
@@ -94,6 +108,11 @@ class PauseStore:
                 self.path.lstat()
             except FileNotFoundError:
                 if not self._same_root(root_info):
+                    return _fail_closed()
+                # An initialized volume with a missing pause.json is corruption,
+                # not a fresh deployment. Recheck the witness to catch a first
+                # write racing the missing-state lookup.
+                if marker_seen or self._marker_state() is not False:
                     return _fail_closed()
                 return {"paused": False}
             except OSError:
@@ -133,6 +152,8 @@ class PauseStore:
         # inspected and decoded. Never trust an unpaused result from a
         # detached governance volume.
         if not self._same_root(root_info):
+            return _fail_closed()
+        if self._marker_state() is not marker_seen:
             return _fail_closed()
         if not document["paused"]:
             return {"paused": False, "by": document.get("by"), "at": document.get("at")}
@@ -199,6 +220,23 @@ class PauseStore:
         """Atomically replace pause state in the locked directory, not a raced path."""
         if not self._same_root(root_info):
             raise OSError("pause governance directory changed before write")
+        # Commit a durable first-write witness *before* replacing the state.
+        # A crash after this point must fail closed if pause.json is missing.
+        # Legacy volumes without a witness remain readable until their first
+        # post-upgrade pause/resume; no automatic migration unpauses anything.
+        marker_fd = os.open(MARKER, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW | os.O_NONBLOCK,
+                            0o600, dir_fd=root_fd)
+        try:
+            marker_info = os.fstat(marker_fd)
+            current_marker = os.stat(MARKER, dir_fd=root_fd, follow_symlinks=False)
+            if (not _private_regular(marker_info) or not _private_regular(current_marker)
+                    or (marker_info.st_dev, marker_info.st_ino) !=
+                    (current_marker.st_dev, current_marker.st_ino)):
+                raise OSError("pause initialization marker is untrusted")
+            os.fsync(marker_fd)
+            os.fsync(root_fd)
+        finally:
+            os.close(marker_fd)
         temporary = ".pause-" + secrets.token_hex(16)
         flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW
         descriptor = os.open(temporary, flags, 0o600, dir_fd=root_fd)
