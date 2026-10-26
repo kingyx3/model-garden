@@ -29,6 +29,7 @@ class GovernedMcpRuntimeTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = pathlib.Path(tmp)
             desired = compiler.compile_workspace(ROOT / "examples/workspace", "receptionist")[0]
+            desired["source"]["client"] = "synthetic-client"
             desired["modelProfile"]["spec"]["routing"] = {"strategy": "ordered-fallback"}
             desired["modelProfile"]["spec"]["candidates"] = [
                 {"provider": "openai", "model": "primary"},
