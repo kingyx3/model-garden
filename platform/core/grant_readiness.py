@@ -149,13 +149,28 @@ def overlay(
 def overlay_from_root(manifest: Mapping[str, Any], root: pathlib.Path, *, now: int) -> dict[str, Any]:
     """Apply the overlay when a grant registry exists for the manifest's environment; otherwise return the manifest unchanged.
 
-    The registry is only read when its file exists, so this never creates files; one that exists but is unreadable or belongs
-    to another tenant is treated as holding no grants, so connected Skills block instead of falling back to a shared token.
+    The registry is read only when its data file exists; this never creates files. The grant registry's existing
+    private lock file witnesses initialization: if the data file disappears or is replaced with a non-file,
+    connected Skills block instead of reverting to legacy environment-level access. A truly uninitialized
+    legacy workspace (neither file present) is unchanged. A privileged actor removing both files is outside
+    this host-local witness's protection; actual provider authorization is still enforced separately.
     """
     tenant = tenant_of(manifest)
     registry_file = pathlib.Path(root) / f"{tenant}.grants.json" if tenant else None
-    if registry_file is None or not registry_file.is_file():
+    if registry_file is None:
         return copy.deepcopy(dict(manifest))
+    try:
+        if not registry_file.is_file():
+            # GrantRegistry creates this private lock file on first use. Once
+            # initialized, a deleted/replaced grant JSON must not make a
+            # connected Skill look like a legacy no-registry deployment.
+            witness = pathlib.Path(root) / f".{tenant}.grants.lock"
+            if (registry_file.exists() or registry_file.is_symlink()
+                    or witness.exists() or witness.is_symlink()):
+                return overlay(manifest, [], now=now, registry="unreadable")
+            return copy.deepcopy(dict(manifest))
+    except OSError:
+        return overlay(manifest, [], now=now, registry="unreadable")
     grants_module = _sibling("model_garden_grant_readiness_grants", "provider_grants.py")
     try:
         grants = grants_module.GrantRegistry(pathlib.Path(root), tenant=tenant).list(agent=manifest.get("agent"))
