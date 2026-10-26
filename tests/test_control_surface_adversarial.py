@@ -35,10 +35,14 @@ class HostileCommandTests(unittest.TestCase):
                 for start in (True, False):
                     with self.subTest(attack=attack["id"], user=user, conversation=conversation, paused=start):
                         store = pause.PauseStore(self.root)
-                        store.pause("alice@acme.example", "incident", NOW) if start else None
+                        # Exercise both states through authorized durable transitions.
+                        # Deleting pause.json is now corruption, not a valid reset.
+                        if start:
+                            store.pause("alice@acme.example", "incident", NOW)
+                        else:
+                            store.resume("alice@acme.example", NOW)
                         self.assertEqual(self.say(attack["input"], user=user, conversation=conversation), neutral)
                         self.assertEqual(store.is_paused(), start)
-                        (self.root / "pause.json").unlink(missing_ok=True)
 
     def test_a_multi_turn_claim_of_authority_does_not_carry_over_to_the_next_command(self):
         pause.PauseStore(self.root).pause("alice@acme.example", "incident", NOW)

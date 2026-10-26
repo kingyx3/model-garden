@@ -51,6 +51,69 @@ class StoreTests(unittest.TestCase):
         pause.PauseStore(self.root).resume("alice@acme.example", NOW + 5)
         self.assertFalse(pause.PauseStore(self.root).is_paused())
 
+    def test_deleting_written_pause_or_resume_state_never_looks_like_first_boot(self):
+        # A missing state is only valid before the first durable transition.
+        # Deleting an existing pause must not silently re-enable writes.
+        for transition in ("pause", "resume"):
+            with self.subTest(transition=transition), tempfile.TemporaryDirectory(dir=self.root) as tmp:
+                root = pathlib.Path(tmp)
+                store = pause.PauseStore(root)
+                self.assertFalse(store.is_paused())
+                if transition == "pause":
+                    store.pause("owner@client.example", "incident", NOW)
+                else:
+                    store.resume("owner@client.example", NOW)
+                self.assertTrue((root / ".pause.initialized").is_file())
+                (root / "pause.json").unlink()
+                state = pause.PauseStore(root).status()
+                self.assertTrue(state["paused"])
+                self.assertIsNone(state["by"])
+                with self.assertRaisesRegex(ValueError, "untrusted"):
+                    store.resume("owner@client.example", NOW + 1)
+
+    def test_untrusted_initialization_marker_fails_closed_even_with_valid_unpaused_state(self):
+        for tamper in ("symlink", "hardlink", "permissive", "directory"):
+            with self.subTest(tamper=tamper), tempfile.TemporaryDirectory(dir=self.root) as tmp:
+                root = pathlib.Path(tmp)
+                store = pause.PauseStore(root)
+                store.resume("owner@client.example", NOW)
+                marker = root / ".pause.initialized"
+                if tamper == "symlink":
+                    marker.rename(root / "outside")
+                    marker.symlink_to(root / "outside")
+                elif tamper == "hardlink":
+                    os.link(marker, root / "other")
+                elif tamper == "permissive":
+                    marker.chmod(0o644)
+                else:
+                    marker.unlink()
+                    marker.mkdir()
+                self.assertTrue(store.is_paused())
+                with self.assertRaises((ValueError, OSError)):
+                    store.resume("owner@client.example", NOW + 1)
+
+    def test_initialization_marker_appearing_during_first_boot_read_fails_closed(self):
+        with tempfile.TemporaryDirectory(dir=self.root) as tmp:
+            root = pathlib.Path(tmp)
+            store = pause.PauseStore(root)
+            marker = root / ".pause.initialized"
+            original_lstat = pathlib.Path.lstat
+            appeared = False
+
+            def race_on_state_lookup(path):
+                nonlocal appeared
+                if path == root / "pause.json" and not appeared:
+                    appeared = True
+                    marker.touch(mode=0o600)
+                    raise FileNotFoundError("state missing during initialization")
+                return original_lstat(path)
+
+            with mock.patch.object(pathlib.Path, "lstat", autospec=True,
+                                   side_effect=race_on_state_lookup):
+                result = store.status()
+            self.assertTrue(appeared)
+            self.assertTrue(result["paused"])
+
     def test_missing_governance_volume_fails_closed_and_admin_cannot_recreate_it(self):
         missing = self.root / "not-mounted"
         store = pause.PauseStore(missing)
