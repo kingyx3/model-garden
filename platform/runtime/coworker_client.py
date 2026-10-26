@@ -74,15 +74,44 @@ class CoworkerClient:
         self._transport = transport or _urllib_transport
 
     def complete(self, instructions: str, message: str, *, session: str | None = None) -> dict[str, Any]:
-        """One turn: ``{"text": str, "usage": {"tokens": int}}``."""
+        """One legacy single-user turn: ``{"text": str, "usage": {"tokens": int}}``."""
         if len(instructions) + len(message) > MAX_PROMPT_CHARS:
             raise CoworkerError("the request to the coworker is too long")
+        return self._send_messages(instructions, [{"role": "user", "content": message}], session=session)
+
+    def complete_messages(
+        self, instructions: str, dialogue: Sequence[Mapping[str, str]], *, session: str | None = None,
+    ) -> dict[str, Any]:
+        """Send explicit alternating user/assistant turns; do not trust server-side session persistence.
+
+        Used by private synthetic adversarial evaluation. The caller supplies the
+        previous assistant text rather than relying on a Hermes session header.
+        This does not authenticate the model, Tool receipts or live channel.
+        """
+        if not isinstance(instructions, str) or not isinstance(dialogue, (list, tuple)) or not 1 <= len(dialogue) <= 15:
+            raise CoworkerError("invalid explicit coworker dialogue")
+        total = len(instructions)
+        for index, item in enumerate(dialogue):
+            role = "user" if index % 2 == 0 else "assistant"
+            if not isinstance(item, Mapping) or set(item) != {"role", "content"} or item["role"] != role:
+                raise CoworkerError("invalid explicit coworker dialogue")
+            content = item["content"]
+            if not isinstance(content, str) or not content.strip() or len(content) > 4096:
+                raise CoworkerError("invalid explicit coworker dialogue")
+            total += len(content)
+        if len(dialogue) % 2 != 1 or total > MAX_PROMPT_CHARS:
+            raise CoworkerError("invalid or oversized explicit coworker dialogue")
+        return self._send_messages(instructions, dialogue, session=session)
+
+    def _send_messages(
+        self, instructions: str, dialogue: Sequence[Mapping[str, str]], *, session: str | None = None,
+    ) -> dict[str, Any]:
         headers = {"Authorization": f"Bearer {self._key}", "Content-Type": "application/json"}
         if session:
             headers["X-Hermes-Session-Id"] = re.sub(r"[^A-Za-z0-9:._-]", "-", session)[:120]
         body = json.dumps({
             "model": self._model,
-            "messages": [{"role": "system", "content": instructions}, {"role": "user", "content": message}],
+            "messages": [{"role": "system", "content": instructions}, *dialogue],
             "stream": False,
         }).encode("utf-8")
         try:
