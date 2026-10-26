@@ -75,6 +75,48 @@ class BackupCloudLogTests(unittest.TestCase):
         self.assertIn("--severity=INFO", run.call_args.args[0])
         self.assertFalse(result["recoveryProven"])
 
+    def test_pending_recovery_is_replayed_after_lost_cloud_write_then_acked(self):
+        report = self.report | {"event": "backup.incident.unchanged",
+                                "incidentActive": False,
+                                "slotUTC": "20261030T120000Z",
+                                "pendingRecoverySlot": "20261030T120000Z"}
+        with mock.patch.object(CLOUD.INCIDENT, "monitor", return_value=report), \
+             mock.patch.object(CLOUD.INCIDENT, "ack_recovery") as ack, \
+             mock.patch.object(CLOUD.subprocess, "run", return_value=subprocess.CompletedProcess([], 0)) as run:
+            result = CLOUD.emit(**self.kwargs)
+        self.assertEqual(result["health"], "HEALTHY")
+        self.assertEqual(json.loads(run.call_args.args[0][4])["incidentEvent"],
+                         "backup.incident.recovered")
+        ack.assert_called_once()
+        self.assertEqual(ack.call_args.kwargs["slot"], "20261030T120000Z")
+
+    def test_failed_recovery_cloud_write_never_acks_durable_pending_event(self):
+        report = self.report | {"event": "backup.incident.recovered",
+                                "incidentActive": False,
+                                "slotUTC": "20261030T120000Z",
+                                "pendingRecoverySlot": "20261030T120000Z"}
+        with mock.patch.object(CLOUD.INCIDENT, "monitor", return_value=report), \
+             mock.patch.object(CLOUD.INCIDENT, "ack_recovery") as ack, \
+             mock.patch.object(CLOUD.subprocess, "run", return_value=subprocess.CompletedProcess([], 1)):
+            with self.assertRaises(CLOUD.CloudLogError):
+                CLOUD.emit(**self.kwargs)
+        ack.assert_not_called()
+
+    def test_pending_recovery_cannot_be_forged_for_unhealthy_or_wrong_slot(self):
+        for changed in ({"incidentActive": True},
+                        {"pendingRecoverySlot": "20261130T120000Z"},
+                        {"pendingRecoverySlot": "../foreign"}):
+            report = self.report | {"event": "backup.incident.unchanged",
+                                    "incidentActive": False,
+                                    "slotUTC": "20261030T120000Z",
+                                    "pendingRecoverySlot": "20261030T120000Z"} | changed
+            with self.subTest(changed=changed), \
+                 mock.patch.object(CLOUD.INCIDENT, "monitor", return_value=report), \
+                 mock.patch.object(CLOUD.subprocess, "run") as run:
+                with self.assertRaises(CLOUD.CloudLogError):
+                    CLOUD.emit(**self.kwargs)
+                run.assert_not_called()
+
     def test_no_due_slot_is_unknown_not_healthy(self):
         report = {"event": "backup.incident.indeterminate", "clientProject": "acme-dev",
                   "incidentActive": False, "recoveryProven": False,
