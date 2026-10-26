@@ -897,8 +897,6 @@ class CoworkerClientTests(unittest.TestCase):
         self.assertIn("kb.search", self.requests[0][1]["messages"][0]["content"])
 
 
-if __name__ == "__main__":
-    unittest.main()
 
 
 
@@ -1160,3 +1158,7 @@ class UsageJobTests(Case):
         args = type("Args", (), {"config": None, "desired_state": compiled(self.root), "data_root": self.data})()
         built = worker.build(args, {"MODEL_GARDEN_USAGE_SOURCES": "conversations=/opt/hermes/conversations/state.db"})
         self.assertEqual(built.usage_sources, {"conversations": pathlib.Path("/opt/hermes/conversations/state.db")})
+
+
+if __name__ == "__main__":
+    unittest.main()
