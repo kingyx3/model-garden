@@ -45,8 +45,12 @@ def main(argv: list[str] | None = None, *, now: int | None = None) -> int:
     pausing = commands.add_parser("pause")
     pausing.add_argument("--by", required=True)
     pausing.add_argument("--reason", default="")
+    pausing.add_argument("--wait-seconds", type=float, default=PAUSE.DEFAULT_OWNER_LOCK_WAIT_SECONDS,
+                         help="maximum seconds to wait for admitted material effects (default: 5, max: 30)")
     resuming = commands.add_parser("resume")
     resuming.add_argument("--by", required=True)
+    resuming.add_argument("--wait-seconds", type=float, default=PAUSE.DEFAULT_OWNER_LOCK_WAIT_SECONDS,
+                          help="maximum seconds to wait for admitted material effects (default: 5, max: 30)")
     args = parser.parse_args(argv)
     store = PAUSE.PauseStore(args.root)
     moment = int(time.time()) if now is None else now
@@ -55,11 +59,22 @@ def main(argv: list[str] | None = None, *, now: int | None = None) -> int:
             print(json.dumps(store.status(), sort_keys=True))
             return 0
         if args.command == "pause":
-            state = store.pause(args.by, args.reason, moment)
+            state = store.pause(args.by, args.reason, moment, lock_timeout_seconds=args.wait_seconds)
             GOVERN.record_operator_action(args.audit_path, "coworker.pause", state["by"], {"reason": state.get("reason", ""), "via": "operator", "at": moment})
         else:
-            state = store.resume(args.by, moment)
+            state = store.resume(args.by, moment, lock_timeout_seconds=args.wait_seconds)
             GOVERN.record_operator_action(args.audit_path, "coworker.resume", state["by"], {"via": "operator", "at": moment})
+    except TimeoutError:
+        # A pending pause is NOT a pause. Record an explicit unconfirmed
+        # attempt without implying provider cancellation or a successful hold.
+        try:
+            GOVERN.record_operator_action(args.audit_path, f"coworker.{args.command}-unconfirmed",
+                                          args.by.strip(), {"via": "operator", "at": moment, "reason": "inflight-lock-timeout"})
+        except Exception:
+            print("error: pause/resume not confirmed; audit unavailable; isolate runtime if urgent", file=sys.stderr)
+            return 3
+        print("error: pause/resume not confirmed; in-flight work may continue. Check status, isolate runtime if urgent, then retry.", file=sys.stderr)
+        return 3
     except ValueError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
