@@ -8,9 +8,53 @@ A successful first upload returns HTTP 201 with an opaque `uploadId`, SHA-256, s
 
 **Separate owner approval and promotion are mandatory.** An authorized operator retrieves the private staged file, verifies the uploader and SHA-256 against the receipt, checks the business rules for prompt injection, correctness, classification, audience and retention, and asks the actual client owner to approve the exact source/version through the existing protected client-workspace change process. The operator can then use `scripts/import-knowledge.py` on a private copy with an approved name, Agent and classification. That command creates a **draft** KnowledgeSource; the owner must separately approve its private workspace diff and promote through reviewed DEV checks before `kb.search` can use it. The uploader's email or the `by` field is **not** owner signoff. No HTTP endpoint changes `spec.status` to approved.
 
-**Operational limits:** No automated expiry/deletion, legal retention enforcement, client-tenant deployment, live SMTP delivery, signed owner approval, push notice, or independently retained immutable export is proved here. Operators must apply the client's retention/deletion policy to pending uploads and their backups, reconcile audit receipts, and remove reviewed drafts safely. A full zero-stack acceptance still requires the inbound support address, artifact retention, delivered human notifications and a real client-evaluated deployment (#77). Never describe this credential-free test path as live client proof.
+**Operational limits:** Drafts have bounded expiry and an operator-only audited deletion command, but no automated scheduled cleanup, backup erasure, client-tenant deployment, live SMTP delivery, signed owner approval, push notice, or independently retained immutable export is proved here. Operators must run the retention reconciliation, review interrupted receipts and separately handle backups and imported workspace sources. A full zero-stack acceptance still requires the inbound support address, artifact retention, delivered human notifications and a real client-evaluated deployment (#77). Never describe this credential-free test path as live client proof.
 
 
 ## Artifact retention alignment (v0.8.157)
 
 The reviewed `EnvironmentBinding.spec.worker.artifact_retention_days` (1–3650) now propagates to the governed `docs.create`/`files.*` store and the channel gateway as well as the worker's expiry job. All three use the same tenant retention value; invalid values fail bundle validation. Reducing retention refuses reads of existing artifacts after the new shorter period and the next worker retention pass removes them; increasing retention never resurrects or extends an artifact's original expiry. The default remains 365 days when no policy is specified. This does not delete backup copies or the separately staged knowledge-upload drafts: those still require the client's own retention and erasure process.
+
+
+## Draft retention and operator reconciliation (v0.8.158)
+
+A signed upload now records `createdAt` and `expiresAt` using the same reviewed
+`worker.artifact_retention_days` (default 365, allowed 1–3650) passed to the
+gateway as `MODEL_GARDEN_ARTIFACT_RETENTION_DAYS`. Existing pre-v0.8.158 drafts
+without `expiresAt` use their original creation time and the current policy.
+Reducing retention takes effect on the next upload replay/reconciliation; increasing
+retention cannot extend a new draft's original `expiresAt`. Expired requests
+are refused, not silently recreated.
+
+On the authorized host, verify the exact tenant, approved retention period and
+current Action Ledger before running the dry-run. Example:
+
+```sh
+python3 scripts/reconcile-knowledge-uploads.py \
+  --data-root /opt/data/.modelgarden --tenant acme \
+  --actor operator:alice --retention-days 7
+```
+
+To apply the listed **expired** draft removals, repeat with
+`--apply --confirm-tenant acme --audit-path /opt/data/.modelgarden/audit.jsonl`.
+A separately approved individual erasure uses
+`--erase-id <full-upload-id> --reason owner-request` (or `reconciliation`
+for documented incident repair). The command requires existing host/operator
+access; the `--actor` string is an audit attribution, **not** an authentication
+mechanism or a substitute for client-owner approval. Do not expose this command
+or the mounted data volume through public web chat.
+
+The reconciler holds the same tenant-local lock as upload staging, verifies
+tenant, metadata, content digest and regular-file boundaries, refuses symlinks,
+and writes a redacted `knowledge.upload-delete-intent` receipt before deletion
+and `knowledge.upload-deleted` afterward. A private minimal tombstone prevents
+replay of an erased request ID. If the ledger is unavailable, deletion does not
+start; if deletion or final audit fails, inspect the tombstone, content and
+ledger before any manual repair. Never claim an interrupted deletion completed.
+A dry-run never deletes files or writes ledger events. `pending-audit` drafts
+require particular care: confirm whether the original staging receipt exists.
+
+**Not covered:** no scheduled worker purge, retention of backups, imported
+KnowledgeSources, external copies or immutable ledger export. The operator must
+coordinate their independent retention/erasure procedures. This is credential-free
+implementation evidence, not a live legal-erasure or client-acceptance drill.
