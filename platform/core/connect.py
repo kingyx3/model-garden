@@ -25,8 +25,10 @@ itself (the read-only test is injected) or edit a file; it is not wired to the i
 - **Changing a working connection is explicit and reversible.** ``merge_binding`` refuses, unless the caller says so, to widen the
   scopes of an existing binding, change its owner or switch its provider; ``describe_change`` shows exactly what a fragment would
   change. ``replace`` connects the new grant first (the test must pass), writes the binding through an injected callable, and
-  only then revokes the previous grant. If the write fails the new grant is revoked and the previous grant and binding are left
-  as they were, and both outcomes are ledgered (``connection.replaced`` / ``connection.rolled-back``).
+  only then revokes the previous grant. The injected binding writer must be atomic: exceptions or an explicit False mean no persisted change.
+  On write failure the new grant is revoked while the old one remains. If revocation also fails,
+  ``connection.rollback-failed`` records the outstanding grant and manual reconciliation is required;
+  never claim successful rollback. Neither path reveals provider exception text.
 
 Not done here: owner OAuth consent and token acquisition, storing the credential, a live test, and re-running Skill
 readiness after a change (the caller does that against the new binding).
@@ -279,8 +281,9 @@ def replace(
     """Move a coworker to a new grant without ever leaving it with none.
 
     Order: the test and the new grant (``apply``; a failure changes nothing), then ``write_binding(fragment)``, then revoking
-    the previous grant. If ``write_binding`` raises, the new grant is revoked and the previous grant stays in force; the
-    binding was never changed by this function and the failure is ledgered. Revoking the previous grant after a successful
+    the previous grant. The caller MUST provide an atomic writer: it either persists the binding and returns None/True,
+    or makes no change and raises/returns False. On a failed write, revoke the new grant; if revocation fails,
+    ledger the unresolved grant and require manual reconciliation. Revoking the previous grant after a successful
     write is retried by the caller if it fails: the binding already names the new grant's scopes, so the old one is only
     surplus access, and the result says so (``previousRevoked: False``).
     """
@@ -296,9 +299,20 @@ def replace(
     base = {"agent": proposal["agent"], "family": proposal["family"], "provider": proposal["provider"], "owner": proposal["owner"],
             "operator": proposal["operator"], "previousGrantId": previous_grant_id, "newGrantId": result["grant"]["id"]}
     try:
-        write_binding(result["binding"])
-    except Exception as exc:  # noqa: BLE001 - whatever stops the write, the previous working grant must stay in force
-        registry.revoke(result["grant"]["id"], by=proposal["operator"], now=now)
+        # The writer must be atomic: raising or returning False means it did not
+        # persist the binding. A None return is allowed for simple file writers.
+        receipt = write_binding(result["binding"])
+        if receipt is not None and receipt is not True:
+            raise OSError("binding writer did not confirm persistence")
+    except Exception as exc:  # noqa: BLE001 - do not retire the previous working grant on a failed write
+        try:
+            registry.revoke(result["grant"]["id"], by=proposal["operator"], now=now)
+        except Exception as revoke_exc:  # noqa: BLE001 - never report a successful rollback if cleanup failed
+            _record(audit, "connection.rollback-failed", proposal["operator"], {
+                **base, "reason": f"binding-write:{type(exc).__name__}",
+                "revokeError": type(revoke_exc).__name__, "newGrantRevoked": False,
+            })
+            raise ConnectError("binding update and new-grant revocation failed; manual reconciliation required before retry") from exc
         _record(audit, "connection.rolled-back", proposal["operator"], {**base, "reason": f"binding-write:{type(exc).__name__}"})
         raise ConnectError(f"the binding could not be written ({type(exc).__name__}); the new grant was revoked and the previous one is unchanged") from exc
     revoked = True

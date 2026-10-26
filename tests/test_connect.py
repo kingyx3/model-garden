@@ -319,6 +319,46 @@ class Case(unittest.TestCase):
         self.assertEqual(rolled[0][2]["reason"], "binding-write:OSError")
         self.assertFalse([event for event in self.events if event[0] == "connection.replaced"])
 
+    def test_binding_writer_false_does_not_revoke_the_working_grant(self):
+        old = self.apply(self.plan())["grant"]["id"]
+        with self.assertRaisesRegex(Error, "previous one is unchanged"):
+            self.replace(self.plan(), old, lambda _fragment: False)
+        active = [grant["id"] for grant in self.registry.list(agent="receptionist") if not grant.get("revokedAt")]
+        self.assertEqual(active, [old])
+        self.assertEqual([event[0] for event in self.events].count("connection.rolled-back"), 1)
+        self.assertFalse([event for event in self.events if event[0] == "connection.replaced"])
+
+    def test_binding_writer_unrecognized_receipt_is_not_proof_of_persistence(self):
+        old = self.apply(self.plan())["grant"]["id"]
+        with self.assertRaisesRegex(Error, "previous one is unchanged"):
+            self.replace(self.plan(), old, lambda _fragment: {"ok": False})
+        active = [grant["id"] for grant in self.registry.list(agent="receptionist") if not grant.get("revokedAt")]
+        self.assertEqual(active, [old])
+        self.assertFalse([event for event in self.events if event[0] == "connection.replaced"])
+
+    def test_rollback_revocation_failure_is_reported_and_never_claims_success(self):
+        old = self.apply(self.plan())["grant"]["id"]
+        real_revoke = self.registry.revoke
+
+        def refuse_new_grant(grant_id, **kwargs):
+            if grant_id != old:
+                raise PermissionError("secret://private/provider-rollback-error")
+            return real_revoke(grant_id, **kwargs)
+
+        self.registry.revoke = refuse_new_grant  # type: ignore[method-assign]
+        with self.assertRaisesRegex(Error, "manual reconciliation required") as raised:
+            self.replace(self.plan(), old, lambda _fragment: (_ for _ in ()).throw(OSError("disk full")))
+        self.assertNotIn("secret://", str(raised.exception))
+        active = [grant for grant in self.registry.list(agent="receptionist") if not grant.get("revokedAt")]
+        self.assertEqual(len(active), 2)  # no false claim of cleanup: the new grant remains active
+        self.assertIn(old, [grant["id"] for grant in active])
+        failures = [event for event in self.events if event[0] == "connection.rollback-failed"]
+        self.assertEqual(len(failures), 1)
+        self.assertEqual(failures[0][2]["reason"], "binding-write:OSError")
+        self.assertEqual(failures[0][2]["revokeError"], "PermissionError")
+        self.assertNotIn("secret://", json.dumps(self.events))
+        self.assertFalse([event for event in self.events if event[0] in ("connection.rolled-back", "connection.replaced")])
+
     def test_a_failed_test_changes_nothing_and_the_binding_is_never_written(self):
         old = self.apply(self.plan())["grant"]["id"]
         written = []
