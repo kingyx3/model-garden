@@ -45,7 +45,7 @@ class SignedKnowledgeUploadTests(G.GatewayCase):
         self.assertEqual(self.upload().status, 200)
         self.assertTrue(json.loads(self.upload().body)["alreadyStaged"])
         ledger = [json.loads(line) for line in (self.data / "audit.jsonl").read_text().splitlines()]
-        self.assertEqual(len([e for e in ledger if e["event"] == "knowledge.upload-staged"]), 1)
+        self.assertEqual(len([e for e in ledger if e["event"] == "operator-action" and e.get("action") == "knowledge.upload-staged"]), 1)
         self.assertNotIn("Open 9 to 5", (self.data / "audit.jsonl").read_text())
         self.assertNotIn("Call a human", (self.data / "audit.jsonl").read_text())
 
