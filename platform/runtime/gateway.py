@@ -542,9 +542,16 @@ class Gateway:
         store, now = pause.PauseStore(self.data), int(self.clock())
         try:
             if verb == "pause":
-                status = store.pause(admin, reason, now)
+                status = store.pause(admin, reason, now, lock_timeout_seconds=pause.DEFAULT_OWNER_LOCK_WAIT_SECONDS)
             else:
-                store.resume(admin, now)
+                store.resume(admin, now, lock_timeout_seconds=pause.DEFAULT_OWNER_LOCK_WAIT_SECONDS)
+        except TimeoutError:
+            # An already admitted governed write may still be running. Never
+            # tell the owner that an uncommitted pause/resume took effect.
+            self.audit(f"coworker.{verb}-unconfirmed", admin,
+                       {"via": "chat", "at": now, "reason": "inflight-lock-timeout"})
+            return (f"{verb.capitalize()} not confirmed: an in-flight action may still be running. "
+                    "Ask the operator to isolate the runtime if urgent; check status and retry.")
         except ValueError:
             # The metering worker owns its cap hold: an owner cannot disguise
             # the cap as a manual pause or temporarily resume it in chat.
