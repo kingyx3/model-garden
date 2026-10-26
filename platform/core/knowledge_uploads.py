@@ -13,6 +13,7 @@ import json
 import os
 import pathlib
 import re
+import secrets
 import stat
 import sys
 from collections.abc import Callable
@@ -151,7 +152,8 @@ def stage(
         # A crash before the ledger receipt must not leave an apparently
         # accepted draft. Pending-audit files fail closed on any retry.
         created: list[pathlib.Path] = []
-        publish_path = directory / f".u-{upload_id}.publish"
+        publish_path = directory / f".u-{upload_id}-{secrets.token_hex(8)}.publish"
+        published_temp = False
         try:
             _create(content_path, raw)
             created.append(content_path)
@@ -160,12 +162,12 @@ def stage(
             created.append(metadata_path)
             audit("knowledge.upload-staged", by, {"uploadId": upload_id, "sha256": digest,
                                                   "bytes": len(raw), "status": "draft"})
-            if _regular(publish_path):
-                raise UploadConflict("stale upload publication marker needs operator review")
             _create(publish_path, (json.dumps(metadata, sort_keys=True) + "\n").encode("utf-8"))
+            published_temp = True
             os.replace(publish_path, metadata_path)
         except Exception as exc:
-            publish_path.unlink(missing_ok=True)
+            if published_temp:
+                publish_path.unlink(missing_ok=True)
             for item in reversed(created):
                 item.unlink(missing_ok=True)
             raise UploadUnavailable("upload was not accepted; storage or audit unavailable") from exc
