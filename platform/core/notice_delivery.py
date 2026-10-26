@@ -94,10 +94,21 @@ class Directory:
 
         Used only for a message the channel adapter has already authenticated and that arrived in a direct (one-to-one)
         conversation. When the entry also records the person's own ``identity`` on that channel, ``sender_id`` must match it;
-        an address held by two people identifies nobody. ``inbox`` has no address, so it never identifies anyone.
+        an address held by two people identifies nobody. An explicitly identified ``inbox`` person may also reply
+        from signed web chat: the gateway validates the session and its conversation prefix before calling this method.
+        No other channel, unnamed inbox user or ambiguous identity can use that exception.
         """
         if not isinstance(channel, str) or not isinstance(address, str) or not address or channel == "inbox":
             return None
+        if channel == "webchat" and isinstance(sender_id, str) and sender_id:
+            identity_holders = [
+                person for person, entry in self._entries.items()
+                if entry[0] in ("inbox", "webchat") and self._identities.get(person) == sender_id
+            ]
+            if len(identity_holders) > 1:
+                return None  # even a signed session cannot choose between two configured people
+            if identity_holders and self._entries[identity_holders[0]][0] == "inbox":
+                return identity_holders[0]
         holders = [person for person, entry in self._entries.items() if entry == (channel, address)]
         if len(holders) != 1:
             return None

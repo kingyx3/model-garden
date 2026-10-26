@@ -101,6 +101,36 @@ class DirectoryIdentityTests(unittest.TestCase):
         self.assertIsNone(directory.identify("slack", "C-SHARED"))
         self.assertIsNone(directory.identify("inbox", ""))
 
+    def test_signed_webchat_can_identify_a_named_inbox_person_only_with_explicit_identity(self):
+        directory = delivery.Directory({
+            JORDAN: {"channel": "inbox", "identity": JORDAN},
+            PRIYA: {"channel": "inbox", "identity": PRIYA},
+        })
+        self.assertEqual(directory.lookup(JORDAN), ("inbox", ""))
+        self.assertEqual(directory.identify("webchat", "signed-session-conversation", JORDAN), JORDAN)
+        self.assertIsNone(directory.identify("webchat", "signed-session-conversation", OWNER))
+        self.assertIsNone(directory.identify("webchat", "signed-session-conversation"))
+        self.assertIsNone(directory.identify("webchat", "", JORDAN))
+        self.assertIsNone(directory.identify("slack", "signed-session-conversation", JORDAN))
+        self.assertIsNone(directory.identify("inbox", "signed-session-conversation", JORDAN))
+        self.assertIsNone(delivery.Directory({JORDAN: {"channel": "inbox"}}).identify(
+            "webchat", "signed-session-conversation", JORDAN,
+        ))
+
+    def test_duplicate_webchat_identity_is_ambiguous_and_never_grants_authority(self):
+        directory = delivery.Directory({
+            JORDAN: {"channel": "inbox", "identity": JORDAN},
+            PRIYA: {"channel": "inbox", "identity": JORDAN},
+        })
+        self.assertIsNone(directory.identify("webchat", "signed-session-conversation", JORDAN))
+
+    def test_webchat_and_inbox_identity_collision_also_fails_closed(self):
+        directory = delivery.Directory({
+            JORDAN: {"channel": "inbox", "identity": JORDAN},
+            PRIYA: {"channel": "webchat", "address": "other-session", "identity": JORDAN},
+        })
+        self.assertIsNone(directory.identify("webchat", "signed-session-conversation", JORDAN))
+
     def test_identity_must_not_be_a_credential(self):
         with self.assertRaises(delivery.DeliveryError):
             delivery.Directory({JORDAN: {"channel": "slack", "address": "D1", "identity": "xoxb-api_key-123"}})
