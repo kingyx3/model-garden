@@ -70,7 +70,7 @@ def _atomic_json(path: pathlib.Path, payload: dict[str, Any]) -> None:
         try:
             os.link(name, path)
         except FileExistsError:
-            raise ValueError("this exact-action request has already been decided") from None
+            raise ValueError("this exact-action request is already decided") from None
         directory_fd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
         try:
             os.fsync(directory_fd)
