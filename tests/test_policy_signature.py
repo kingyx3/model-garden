@@ -4,11 +4,13 @@ from __future__ import annotations
 import importlib.util
 import json
 import pathlib
+import shutil
 import subprocess
 import sys
 import tempfile
 import unittest
 
+import jsonschema
 import yaml
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -74,6 +76,54 @@ class SignatureTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 policy.owner_keys_from_binding({"kind": "EnvironmentBinding", "spec": {"governance": {"ownerKeys": bad}}})
 
+
+
+class PolicyContractSignatureTests(unittest.TestCase):
+    """The owner-signed rule must survive the actual v1 contract and compiler, not only the policy helper."""
+
+    def setUp(self):
+        self.key = policy.generate_owner_key()
+        self.signed = policy.sign_rule(RULE, OWNER, self.key["private"])
+        self.schema = json.loads((ROOT / "contracts/v1/policy.schema.json").read_text(encoding="utf-8"))
+
+    def test_owner_signed_rule_is_valid_v1_policy_and_compiles_with_trusted_key(self):
+        jsonschema.validate(doc(self.signed), self.schema)
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = pathlib.Path(tmp) / "workspace"
+            shutil.copytree(ROOT / "examples/workspace", workspace)
+            policy_path = workspace / "policies/default.yaml"
+            resource = yaml.safe_load(policy_path.read_text(encoding="utf-8"))
+            resource["spec"]["rules"].append(self.signed)
+            policy_path.write_text(yaml.safe_dump(resource), encoding="utf-8")
+            spec = importlib.util.spec_from_file_location("compiler_for_signed_policy_contract", ROOT / "scripts/compile-workspace.py")
+            compiler = importlib.util.module_from_spec(spec)
+            assert spec.loader is not None
+            spec.loader.exec_module(compiler)
+            binding = {
+                "environment": "dev",
+                "connectors": {
+                    "crm": {"provider": "built-in-crm", "tier": 0},
+                    "kb": {"provider": "text-knowledge", "tier": 0},
+                },
+                "governance": {"owners": [OWNER], "ownerKeys": {OWNER: self.key["public"]}},
+            }
+            compiled = compiler.compile_workspace(workspace, "receptionist", environment_binding=binding)
+            self.assertTrue(compiled)
+
+    def test_signature_shape_is_bounded_and_extra_signoff_fields_are_rejected(self):
+        jsonschema.validate(doc(self.signed), self.schema)
+        for bad in ("", "not-base64", "A" * 90, "A" * 86 + "=!"):
+            changed = {**self.signed, "signoff": {**self.signed["signoff"], "signature": bad}}
+            with self.subTest(signature=bad[:16]), self.assertRaises(jsonschema.ValidationError):
+                jsonschema.validate(doc(changed), self.schema)
+        extra = {**self.signed, "signoff": {**self.signed["signoff"], "private": "must-not-be-stored"}}
+        with self.assertRaises(jsonschema.ValidationError):
+            jsonschema.validate(doc(extra), self.schema)
+
+    def test_schema_shape_alone_never_authorizes_a_forged_signature(self):
+        forged = {**self.signed, "signoff": {**self.signed["signoff"], "signature": "A" * 86 + "=="}}
+        jsonschema.validate(doc(forged), self.schema)
+        self.assertTrue(policy.relaxation_errors([doc(forged)], TOOLS, [OWNER], {OWNER: self.key["public"]}))
 
 class CommandTests(unittest.TestCase):
     def test_keygen_then_sign_makes_a_rule_the_compiler_accepts(self):
