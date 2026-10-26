@@ -67,6 +67,47 @@ class StoreTests(unittest.TestCase):
         decision = approval_module.decide(self.store, OTHER, approved=True, approver="owner@x.example", now=now)
         self.assertEqual(decision["decidedAt"], now)
 
+    def test_a_recorded_decision_cannot_be_reversed_or_re_attributed(self):
+        write(self.store, "pending", REQUEST, {"requestedAt": T0})
+        first = approval_module.decide(self.store, REQUEST, approved=False, approver="owner@x.example", now=T0 + 10)
+        path = self.store / "decisions" / f"{REQUEST}.json"
+        original = path.read_bytes()
+        for approved, actor in ((True, "other@x.example"), (False, "owner@x.example")):
+            with self.assertRaisesRegex(ValueError, "already decided"):
+                approval_module.decide(self.store, REQUEST, approved=approved, approver=actor, now=T0 + 20)
+        self.assertEqual(path.read_bytes(), original)
+        self.assertEqual(json.loads(original), first)
+        self.assertEqual(os.stat(path).st_mode & 0o777, 0o600)
+
+    def test_simultaneous_opposite_decisions_have_exactly_one_winner(self):
+        from concurrent.futures import ThreadPoolExecutor
+
+        write(self.store, "pending", REQUEST, {"requestedAt": T0})
+        def attempt(approved):
+            try:
+                return approval_module.decide(self.store, REQUEST, approved=approved,
+                                              approver="owner@x.example", now=T0 + 10)
+            except ValueError as exc:
+                return str(exc)
+
+        with ThreadPoolExecutor(max_workers=12) as pool:
+            outcomes = list(pool.map(attempt, [True, False] * 6))
+        accepted = [result for result in outcomes if isinstance(result, dict)]
+        self.assertEqual(len(accepted), 1)
+        self.assertTrue(all("already decided" in result for result in outcomes if isinstance(result, str)))
+        self.assertEqual(json.loads((self.store / "decisions" / f"{REQUEST}.json").read_text()), accepted[0])
+
+    def test_existing_symlink_decision_is_never_followed_or_replaced(self):
+        write(self.store, "pending", REQUEST, {"requestedAt": T0})
+        outside = self.store / "outside.txt"
+        outside.write_text("do not change", encoding="utf-8")
+        decisions = self.store / "decisions"
+        decisions.mkdir()
+        (decisions / f"{REQUEST}.json").symlink_to(outside)
+        with self.assertRaisesRegex(ValueError, "already decided"):
+            approval_module.decide(self.store, REQUEST, approved=True, approver="owner@x.example", now=T0 + 10)
+        self.assertEqual(outside.read_text(), "do not change")
+
     def test_a_record_without_a_timestamp_is_aged_by_its_file_time(self):
         write(self.store, "pending", REQUEST, {}, mtime=T0)
         self.assertEqual(len(approval_module.pending(self.store, now=T0 + HOUR)), 1)
