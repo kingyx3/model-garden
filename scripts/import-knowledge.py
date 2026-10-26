@@ -65,10 +65,14 @@ def _agent_file(workspace: pathlib.Path, agent: str) -> tuple[pathlib.Path, dict
 
 def _write_new(path: pathlib.Path, content: bytes) -> None:
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600)
-    with os.fdopen(fd, "wb") as stream:
-        stream.write(content)
-        stream.flush()
-        os.fsync(stream.fileno())
+    try:
+        with os.fdopen(fd, "wb") as stream:
+            stream.write(content)
+            stream.flush()
+            os.fsync(stream.fileno())
+    except BaseException:
+        path.unlink(missing_ok=True)  # also clean up a partial write before caller tracks it
+        raise
 
 
 def import_knowledge(
@@ -154,7 +158,7 @@ def import_knowledge(
         spec = existing.get("spec", {})
         if not isinstance(spec, dict) or any(spec.get(key) != value for key, value in resource["spec"].items() if key != "status") or spec.get("status") not in ("draft", "approved"):
             raise ValueError("knowledge source already exists with different settings")
-        if content_path.read_bytes() != text.encode("utf-8"):
+        if content_path.stat().st_size > knowledge.MAX_BYTES or content_path.read_bytes() != text.encode("utf-8"):
             raise ValueError("knowledge source already exists with different content; use a separately reviewed version update")
         if name not in document["spec"].get("knowledge", []):
             raise ValueError("knowledge source already exists but Agent selection is missing; inspect it manually")
