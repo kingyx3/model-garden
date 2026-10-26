@@ -51,6 +51,7 @@ import argparse
 import contextlib
 import datetime as dt
 import fcntl
+import functools
 import hashlib
 import importlib.util
 import json
@@ -271,6 +272,26 @@ def inbox_sender(address: str, text: str) -> None:
     return None
 
 
+def _pause_fenced(job: Callable[..., dict[str, Any]]) -> Callable[..., dict[str, Any]]:
+    """Fence the *entire* worker-owned material job, including model calls and local writes.
+
+    Checking pause before a long-running operation is insufficient: an owner
+    could otherwise receive a confirmed pause while a scheduled run, mailbox
+    draft, event trigger or CRM retry was still executing. A shared lease
+    serializes those operations with the owner's exclusive transition; the
+    status is checked *inside* the lease. Nested event calls use shared leases.
+    This is a cooperative host-local fence, not remote provider cancellation.
+    """
+    @functools.wraps(job)
+    def guarded(self: Any, *args: Any, **kwargs: Any) -> dict[str, Any]:
+        with _module("pause").PauseStore(self.data).effect_guard():
+            if self._paused():
+                return {"skipped": "paused"}
+            return job(self, *args, **kwargs)
+
+    return guarded
+
+
 class Worker:
     def __init__(
         self,
@@ -382,6 +403,7 @@ class Worker:
     def _paused(self) -> bool:
         return _module("pause").PauseStore(self.data).is_paused()
 
+    @_pause_fenced
     def run_scheduler(self, now: int) -> dict[str, Any]:
         if self._paused():
             return {"skipped": "paused"}
@@ -392,6 +414,7 @@ class Worker:
         resumed = scheduler.resume_waiting(now=now)
         return {"runs": len(due["runs"]), "resumed": len(resumed["runs"])}
 
+    @_pause_fenced
     def fire_event(self, event: str, reference: str, now: int) -> dict[str, Any]:
         """Run the active triggers for one event the worker witnessed (``mail.received``, ``ticket.created``), once per event reference.
 
@@ -432,6 +455,7 @@ class Worker:
         temporary.write_text(json.dumps(state, sort_keys=True) + "\n", encoding="utf-8")
         os.replace(temporary, path)
 
+    @_pause_fenced
     def run_events(self, now: int) -> dict[str, Any]:
         """Fire ``chat.message`` for what the gateway reported and ``ticket.created`` for tickets nobody announced; once per event."""
         if self._paused():
@@ -787,6 +811,7 @@ class Worker:
     def _blocked_notified(self) -> pathlib.Path:
         return self.data / "crm-sync" / "blocked-notified.json"
 
+    @_pause_fenced
     def run_crm_sync(self, now: int) -> dict[str, Any]:
         if self._paused():
             return {"skipped": "paused"}  # filings stay queued; nothing is sent to the CRM while paused
@@ -889,6 +914,7 @@ class Worker:
         settings = self.config["mailbox"]
         return _module("spool").MailSpool(self.data / "mail", tenant=self.tenant, addresses=settings["addresses"], audit=self.audit)
 
+    @_pause_fenced
     def run_mailbox(self, now: int) -> dict[str, Any]:
         if self._paused():
             return {"skipped": "paused"}  # mail stays in the spool, unread by the coworker, until resume
