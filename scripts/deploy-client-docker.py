@@ -622,7 +622,7 @@ def _gateway_settings(binding: dict[str, Any]) -> tuple[dict[str, Any] | None, d
     web = gateway.get("web")
     if web is not None:
         mail = (web or {}).get("mail") or {}
-        config["web"] = {"allowedAddresses": web.get("allowed_addresses"), "mail": {"from": mail.get("from"), "host": mail.get("host"), **({"port": mail["port"]} if "port" in mail else {})}}
+        config["web"] = {"allowedAddresses": web.get("allowed_addresses"), "mail": {"from": mail.get("from"), "host": mail.get("host"), **({"port": mail["port"]} if "port" in mail else {})}, **({"knowledgeUploads": True} if web.get("knowledge_uploads") is True else {})}
         required = {"MODEL_GARDEN_WEBCHAT_KEY"}
     else:
         required = set()
