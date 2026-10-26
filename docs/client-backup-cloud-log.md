@@ -58,3 +58,18 @@ policy/channel separately; alerting is **not** enabled by this code.
 notification, enforceable cross-host deployment/restart freeze, age-key
 rotation governance, authorized timer activation, and a live cloud recovery
 drill with measured RPO/RTO. Keep issue #230 open.
+
+## Durable recovery-notice replay (v0.8.144)
+
+The incident monitor now fsyncs a private `pendingRecoverySlot` with each
+UNHEALTHY → HEALTHY transition. If the host crashes or `gcloud logging write`
+fails after the local state changed, later healthy polls **replay the pending
+recovery event**, not an ordinary healthy level, until a successful local
+Cloud Logging command is followed by a separate fsynced acknowledgement.
+A newer unhealthy observation cancels the stale pending recovery; an
+acknowledgement must match the exact tenant/key/slot and healthy state.
+A crash after cloud acceptance but before acknowledgement can duplicate the
+recovery log. The existing native alert policy rate limit bounds notifications;
+no exactly-once or confirmed notification delivery is claimed. Monitor the
+command's exit status and the authorized channel independently. A successful
+upload-health transition is **not** successful restoration or measured RPO/RTO.
