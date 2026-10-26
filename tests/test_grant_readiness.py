@@ -275,6 +275,10 @@ class Case(unittest.TestCase):
                         acting_identity="reception@svc.example", secret_ref="secret://reception/token", scopes=BOTH,
                         owner="owner@client.example", by="jordan@mg.example", now=NOW)
         self.assertTrue(skill(runtime.capabilities(), "book-appointment")["ready"])
+        registry.path.unlink()
+        # This is the actual sidecar capability path, not only the pure overlay.
+        # A deleted initialized grant store must never reactivate booking.
+        self.assertFalse(skill(runtime.capabilities(), "book-appointment")["ready"])
 
 
 if __name__ == "__main__":
