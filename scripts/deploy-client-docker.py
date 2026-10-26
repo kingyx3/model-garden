@@ -376,7 +376,10 @@ def _worker_settings(binding: dict[str, Any]) -> tuple[dict[str, Any] | None, st
     if worker.get("intervals"):
         config["intervals"] = worker["intervals"]
     if worker.get("artifact_retention_days") is not None:
-        config["artifactRetentionDays"] = worker["artifact_retention_days"]
+        days = worker["artifact_retention_days"]
+        if type(days) is not int or not 1 <= days <= 3650:
+            raise ValueError("Docker target failed: worker.artifact_retention_days must be 1 to 3650 days")
+        config["artifactRetentionDays"] = days
     cap = worker.get("monthly_spend_cap")
     if cap is not None:
         if not isinstance(cap, dict) or set(cap) - {"cap_cents", "warn_at_percent"}:
@@ -735,6 +738,7 @@ def _compose(
     *,
     read_audit: str | None = None,
     approval_ttl_hours: str | None = None,
+    artifact_retention_days: int | None = None,
     built_in_tools: bool = False,
     worker: bool = False,
     coworker_api: bool = False,
@@ -777,6 +781,7 @@ def _compose(
                 "MODEL_GARDEN_CAPABILITY_MANIFEST": f"/opt/profile-seed/{MANIFEST_PATH.as_posix()}",
                 **({"MODEL_GARDEN_READ_AUDIT": read_audit} if read_audit else {}),
                 **({"MODEL_GARDEN_APPROVAL_TTL_HOURS": approval_ttl_hours} if approval_ttl_hours else {}),
+                **({"MODEL_GARDEN_ARTIFACT_RETENTION_DAYS": str(artifact_retention_days)} if artifact_retention_days is not None else {}),
                 **({"MODEL_GARDEN_UPSTREAM_MCP": "enabled",
                     **{name: f"${{{name}:?{name} is required}}" for name in sorted(_upstream_env(upstream_refs))}}
                    if upstream_refs is not None else {}),
@@ -846,6 +851,7 @@ def _compose(
             "MODEL_GARDEN_DESIRED_STATE": "/opt/profile-seed/.modelgarden/desired-state.json",
             "MODEL_GARDEN_DATA_ROOT": "/opt/data/.modelgarden",
             "MODEL_GARDEN_GATEWAY_CONFIG": f"/opt/profile-seed/{GATEWAY_CONFIG_PATH.as_posix()}",
+            **({"MODEL_GARDEN_ARTIFACT_RETENTION_DAYS": str(artifact_retention_days)} if artifact_retention_days is not None else {}),
             "MODEL_GARDEN_CAPABILITY_MANIFEST": f"/opt/profile-seed/{MANIFEST_PATH.as_posix()}",
             **{name: f"${{{name}:?{name} is required}}" for name in sorted(secret_env)},
             **({"MODEL_GARDEN_SMTP_USER": deploy["smtp_user"]} if "smtp_user" in deploy else {}),
@@ -974,7 +980,9 @@ def render_bundle(
     (bundle_dir / "entrypoint.sh").write_text(_entrypoint(), encoding="utf-8")
     (bundle_dir / "Dockerfile").write_text(_dockerfile(lock), encoding="utf-8")
     (bundle_dir / "compose.yaml").write_text(
-        _compose(project_name, provider, lock, read_audit=read_audit, approval_ttl_hours=approval_ttl_hours, built_in_tools=built_in_tools,
+        _compose(project_name, provider, lock, read_audit=read_audit, approval_ttl_hours=approval_ttl_hours,
+                 artifact_retention_days=worker_config.get("artifactRetentionDays") if worker_config else None,
+                 built_in_tools=built_in_tools,
                  worker=worker_config is not None, coworker_api=coworker_key_ref is not None,
                  gateway=gateway if gateway[0] is not None else None, upstream_refs=upstream_refs,
                  vault_key=_vault_key_ref(binding) is not None),

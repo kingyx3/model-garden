@@ -30,7 +30,7 @@ import re
 import secrets
 import sys
 import importlib.util
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from typing import Any
 
 SCHEMA_VERSION = 1
@@ -61,6 +61,19 @@ Audit = Callable[[str, str, dict[str, Any]], Any]
 
 class ArtifactError(ValueError):
     """Raised for an invalid artifact or an operation outside the caller's rights; never carries content."""
+
+
+def retention_from_environ(environ: Mapping[str, str]) -> int:
+    """The reviewed client retention setting, shared by worker, gateway and governed sidecar."""
+    raw = environ.get("MODEL_GARDEN_ARTIFACT_RETENTION_DAYS")
+    if raw is None:
+        return DEFAULT_RETENTION_DAYS
+    if not isinstance(raw, str) or not re.fullmatch(r"[1-9][0-9]{0,3}", raw):
+        raise ArtifactError("MODEL_GARDEN_ARTIFACT_RETENTION_DAYS must be 1 to 3650")
+    days = int(raw)
+    if days > MAX_RETENTION_DAYS:
+        raise ArtifactError("MODEL_GARDEN_ARTIFACT_RETENTION_DAYS must be 1 to 3650")
+    return days
 
 
 def _principal(value: Any, label: str) -> str:
@@ -139,6 +152,11 @@ class ArtifactStore:
         return {"artifactId": entry["id"], "mediaType": entry["mediaType"], "bytes": entry["bytes"], "sha256": entry["sha256"],
                 "location": entry["location"], "agent": entry["agent"], "sources": list(entry["sources"])}
 
+    def _expires_at(self, entry: Mapping[str, Any]) -> int:
+        # A shorter reviewed policy also applies to files created before the change;
+        # a longer policy never extends their original expiry.
+        return min(entry["expiresAt"], entry["createdAt"] + self._retention_seconds)
+
     def _file(self, artifact_id: str) -> pathlib.Path:
         if not _ID.match(artifact_id):
             raise ArtifactError("artifact id must look like a-0123456789ab")
@@ -181,7 +199,8 @@ class ArtifactStore:
         with self._locked() as state:
             artifacts = state["artifacts"]
             existing = next((entry for entry in artifacts.values()
-                             if entry["sha256"] == digest and entry["requestedBy"] == who and entry["name"] == label), None)
+                             if entry["sha256"] == digest and entry["requestedBy"] == who and entry["name"] == label
+                             and self._expires_at(entry) > stamp), None)
             if existing is not None:
                 return {**existing, "duplicate": True}
             if len(artifacts) >= MAX_ARTIFACTS:
@@ -221,7 +240,7 @@ class ArtifactStore:
                 raise ArtifactError("no such artifact")
             if not admin and entry["requestedBy"] != who:
                 raise ArtifactError("only the person who asked for an artifact or an administrator may read it")
-            if entry["expiresAt"] <= stamp:
+            if self._expires_at(entry) <= stamp:
                 raise ArtifactError("this artifact has expired under the client's retention period")
             try:
                 data = path.read_bytes()
@@ -258,7 +277,7 @@ class ArtifactStore:
         """Delete every artifact past its retention period; each removal is recorded."""
         stamp = int(dt.datetime.now(dt.timezone.utc).timestamp()) if now is None else now
         with self._locked() as state:
-            expired = [self._remove(state, key) for key in [key for key, entry in state["artifacts"].items() if entry["expiresAt"] <= stamp]]
+            expired = [self._remove(state, key) for key in [key for key, entry in state["artifacts"].items() if self._expires_at(entry) <= stamp]]
         for entry in expired:
             self._record("artifact.expire", "runtime:retention", {"artifactId": entry["id"], "sha256": entry["sha256"], "expiresAt": entry["expiresAt"]})
         return {"expired": len(expired)}

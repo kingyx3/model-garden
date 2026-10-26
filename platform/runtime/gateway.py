@@ -483,7 +483,8 @@ class Gateway:
         return _module("schedules").ScheduleStore(self.data / "schedules", tenant=self.tenant, audit=self.audit)
 
     def _artifacts(self) -> Any:
-        return _module("artifacts").ArtifactStore(self.data / "artifacts", tenant=self.tenant, audit=self.audit)
+        return _module("artifacts").ArtifactStore(self.data / "artifacts", tenant=self.tenant, audit=self.audit,
+                                                  retention_days=_module("artifacts").retention_from_environ(self.environ))
 
     # -- deliverables ---------------------------------------------------------------------------------------
 

@@ -208,6 +208,9 @@ def load_config(document: Mapping[str, Any]) -> dict[str, Any]:
         _person(escalate_to, "escalateTo")
     people = document.get("people") or {}
     _module("delivery").Directory(people)  # validates: no credentials, one channel each
+    retention = document.get("artifactRetentionDays")
+    if retention is not None and (type(retention) is not int or not 1 <= retention <= 3650):
+        raise WorkerConfigError("artifactRetentionDays must be 1 to 3650 days")
     connectors = document.get("connectors") or {}
     if not isinstance(connectors, Mapping):
         raise WorkerConfigError("connectors must be the binding's connector map")
