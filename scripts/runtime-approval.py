@@ -10,11 +10,14 @@ being used (``sweep`` removes both).
 from __future__ import annotations
 
 import argparse
+import contextlib
+import fcntl
 import json
 import os
 import pathlib
 import re
 import sys
+import tempfile
 import time
 from collections.abc import Mapping
 from typing import Any
@@ -32,11 +35,49 @@ def _load(path: pathlib.Path) -> dict[str, Any]:
     return value
 
 
+@contextlib.contextmanager
+def decision_lock(store: pathlib.Path):
+    """Serialize decision publication and governed consumption across processes.
+
+    The runtime must clear the matching pending request *inside this lock*
+    when it claims a decision. Otherwise a second approver can race between
+    the rename into claimed/ and removal of pending/.
+    """
+    store.mkdir(parents=True, exist_ok=True, mode=0o700)
+    fd = os.open(store / ".decision.lock", os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
+
+
 def _atomic_json(path: pathlib.Path, payload: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_suffix(path.suffix + ".tmp")
-    temporary.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    temporary.replace(path)
+    """Publish a complete decision once, without replacing an earlier approver's choice.
+
+    The private temporary file is fsynced before a same-directory hard link
+    atomically claims the final name. A second writer (or existing symlink)
+    fails with EEXIST; no read-then-write race can reverse an approval.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    fd, name = tempfile.mkstemp(prefix=f".{path.stem}.", suffix=".tmp", dir=path.parent)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+            stream.write(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        try:
+            os.link(name, path)
+        except FileExistsError:
+            raise ValueError("this exact-action request is already decided") from None
+        directory_fd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+    finally:
+        pathlib.Path(name).unlink(missing_ok=True)
 
 
 def _validate_request_id(request_id: str) -> str:
@@ -82,6 +123,10 @@ def pending(store: pathlib.Path, *, now: float | None = None, ttl: int | None = 
         expired = is_expired(path, request, "requestedAt", now=now, ttl=limit)
         if expired and not include_expired:
             continue
+        # A recorded decision is no longer actionable in the human inbox.
+        # lexists also treats a dangling symlink/unsafe path as occupied.
+        if os.path.lexists(store / "decisions" / f"{request_id}.json"):
+            continue
         requests.append({**request, "expired": True} if expired else request)
     return requests
 
@@ -115,17 +160,18 @@ def decide(store: pathlib.Path, request_id: str, *, approved: bool, approver: st
     approver = approver.strip()
     if not approver:
         raise ValueError("approver must be non-empty")
-    pending_path = store / "pending" / f"{request_id}.json"
-    if not pending_path.is_file():
-        raise ValueError(f"no pending exact action exists for {request_id}")
-    request = _load(pending_path)
-    if request.get("requestId") != request_id:
-        raise ValueError("pending request id does not match filename")
-    if is_expired(pending_path, request, "requestedAt", now=now, ttl=ttl):
-        raise ValueError(f"the approval request {request_id[:12]} has expired; ask for it again")
-    decision = {"requestId": request_id, "approved": approved, "approver": approver, "decidedAt": int(time.time() if now is None else now)}
-    _atomic_json(store / "decisions" / f"{request_id}.json", decision)
-    return decision
+    with decision_lock(store):
+        pending_path = store / "pending" / f"{request_id}.json"
+        if not pending_path.is_file():
+            raise ValueError(f"no pending exact action exists for {request_id}")
+        request = _load(pending_path)
+        if request.get("requestId") != request_id:
+            raise ValueError("pending request id does not match filename")
+        if is_expired(pending_path, request, "requestedAt", now=now, ttl=ttl):
+            raise ValueError(f"the approval request {request_id[:12]} has expired; ask for it again")
+        decision = {"requestId": request_id, "approved": approved, "approver": approver, "decidedAt": int(time.time() if now is None else now)}
+        _atomic_json(store / "decisions" / f"{request_id}.json", decision)
+        return decision
 
 
 def main() -> int:

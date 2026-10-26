@@ -118,6 +118,19 @@ class InboxCommandTests(Case):
         rejected = json.loads((self.data / "approvals" / "decisions" / f"{other}.json").read_text())
         self.assertEqual((rejected["approved"], rejected["approver"]), (False, "alice@acme.example"))
 
+    def test_second_chat_decision_cannot_flip_or_replay_a_recorded_approval(self):
+        self.waiting()
+        request = request_id("approval")
+        self.assertIn("Recorded: rejected", self.say(f"reject {request}"))
+        path = self.data / "approvals" / "decisions" / f"{request}.json"
+        original = path.read_bytes()
+        for command in (f"approve {request}", f"reject {request}"):
+            self.assertEqual(self.say(command), "That request is not waiting for a decision. Nothing was changed.")
+            self.assertEqual(path.read_bytes(), original)
+        self.assertNotIn(f"approve {request}", self.say("inbox"))
+        self.assertEqual(len([event for event in self.events if event[0] == "channel.approval-decided"]), 1)
+        self.assertEqual(self.asked, [])
+
     def test_chat_decisions_deny_unmapped_member_and_group_without_disclosing_request(self):
         self.waiting()
         request = request_id("approval")

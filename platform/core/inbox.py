@@ -73,6 +73,9 @@ def _approvals(root: pathlib.Path, now: int) -> list[dict[str, Any]]:
         tool = request.get("tool")
         if approval is not None and approval.is_expired(path, request, "requestedAt", now=now, ttl=ttl):
             continue  # it can no longer be decided; the person who needs it done asks again
+        decision_path = pathlib.Path(root) / "decisions" / f"{request_id}.json"
+        if decision_path.exists() or decision_path.is_symlink():
+            continue  # first decision wins; do not offer an already-decided action again
         waiting = max(0, now - int(path.stat().st_mtime))
         items.append({
             "kind": "approval", "id": request_id, "tool": tool if isinstance(tool, str) else None,
