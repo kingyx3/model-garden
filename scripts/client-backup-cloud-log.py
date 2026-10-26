@@ -40,6 +40,14 @@ def _signal(report: dict, project: str) -> tuple[dict, str]:
         raise CloudLogError("invalid backup incident signal")
     event = report["event"]
     slot = report.get("slotUTC")
+    pending = report.get("pendingRecoverySlot")
+    if pending is not None:
+        if (event not in ("backup.incident.recovered", "backup.incident.unchanged") or
+                report["incidentActive"] or not isinstance(pending, str) or
+                not INCIDENT.STAMP.fullmatch(pending) or
+                not isinstance(slot, str) or not INCIDENT.STAMP.fullmatch(slot) or
+                pending > slot):
+            raise CloudLogError("invalid pending recovery notification")
     if event == "backup.incident.indeterminate":
         if slot is not None:
             raise CloudLogError("indeterminate event must not assert a slot")
@@ -56,6 +64,11 @@ def _signal(report: dict, project: str) -> tuple[dict, str]:
                "notificationsDelivered": False}
     if slot is not None:
         payload["slotUTC"] = slot
+    if pending is not None:
+        # Replay a persisted recovery transition after a failed gcloud write,
+        # including when the incident monitor now reports "unchanged".
+        payload["incidentEvent"] = "backup.incident.recovered"
+        payload["slotUTC"] = pending
     return payload, severity
 
 
@@ -86,6 +99,13 @@ def emit(*, schedule: pathlib.Path, claims: pathlib.Path, state_dir: pathlib.Pat
         raise CloudLogError("bounded Cloud Logging invocation failed") from exc
     if completed.returncode != 0:
         raise CloudLogError("Cloud Logging rejected level signal")
+    pending = report.get("pendingRecoverySlot")
+    if pending is not None:
+        # At-least-once, not exactly-once: a crash between cloud acceptance
+        # and this private fsynced acknowledgement replays on the next poll.
+        INCIDENT.ack_recovery(state_dir=state_dir, project=project, slug=slug,
+                              environment=environment, gcp_project=gcp_project,
+                              recipient=recipient, slot=pending)
     return {"event": "backup.cloud-log.accepted", "clientProject": project,
             "health": payload["health"], "cloudLogCommandSucceeded": True,
             "notificationsDelivered": False, "recoveryProven": False}
