@@ -14,8 +14,8 @@ variable "ledger_verifier_alert_enabled" {
 
 resource "google_logging_metric" "ledger_verifier_unhealthy" {
   count  = var.ledger_verifier_alert_enabled ? 1 : 0
-  name   = "\${local.name}-ledger-verifier-unhealthy"
-  filter = "logName=\"projects/\${var.project_id}/logs/model-garden-ledger-verifier\" AND jsonPayload.component=\"ledger-independent-verifier\" AND jsonPayload.clientProject=\"\${local.name}\" AND jsonPayload.health=\"UNHEALTHY\""
+  name   = "${local.name}-ledger-verifier-unhealthy"
+  filter = "logName=\"projects/${var.project_id}/logs/model-garden-ledger-verifier\" AND jsonPayload.component=\"ledger-independent-verifier\" AND jsonPayload.clientProject=\"${local.name}\" AND jsonPayload.health=\"UNHEALTHY\""
   metric_descriptor {
     metric_kind = "DELTA"
     value_type  = "INT64"
@@ -24,8 +24,8 @@ resource "google_logging_metric" "ledger_verifier_unhealthy" {
 
 resource "google_logging_metric" "ledger_verifier_heartbeat" {
   count  = var.ledger_verifier_alert_enabled ? 1 : 0
-  name   = "\${local.name}-ledger-verifier-heartbeat"
-  filter = "logName=\"projects/\${var.project_id}/logs/model-garden-ledger-verifier\" AND jsonPayload.component=\"ledger-independent-verifier\" AND jsonPayload.clientProject=\"\${local.name}\""
+  name   = "${local.name}-ledger-verifier-heartbeat"
+  filter = "logName=\"projects/${var.project_id}/logs/model-garden-ledger-verifier\" AND jsonPayload.component=\"ledger-independent-verifier\" AND jsonPayload.clientProject=\"${local.name}\""
   metric_descriptor {
     metric_kind = "DELTA"
     value_type  = "INT64"
@@ -34,7 +34,7 @@ resource "google_logging_metric" "ledger_verifier_heartbeat" {
 
 resource "google_monitoring_alert_policy" "ledger_verifier" {
   count                 = var.ledger_verifier_alert_enabled ? 1 : 0
-  display_name          = "\${local.name}-ledger-independent-verifier-degraded"
+  display_name          = "${local.name}-ledger-independent-verifier-degraded"
   combiner              = "OR"
   severity              = "ERROR"
   notification_channels = var.gateway_uptime_notification_channels
@@ -47,7 +47,7 @@ resource "google_monitoring_alert_policy" "ledger_verifier" {
   conditions {
     display_name = "Independent ledger verifier reported failure"
     condition_threshold {
-      filter          = "metric.type=\"logging.googleapis.com/user/\${google_logging_metric.ledger_verifier_unhealthy[0].name}\" AND resource.type=\"global\""
+      filter          = "metric.type=\"logging.googleapis.com/user/${google_logging_metric.ledger_verifier_unhealthy[0].name}\" AND resource.type=\"global\""
       comparison      = "COMPARISON_GT"
       threshold_value = 0
       duration        = "0s"
@@ -61,7 +61,7 @@ resource "google_monitoring_alert_policy" "ledger_verifier" {
   conditions {
     display_name = "Independent ledger verifier heartbeat missing"
     condition_absent {
-      filter   = "metric.type=\"logging.googleapis.com/user/\${google_logging_metric.ledger_verifier_heartbeat[0].name}\" AND resource.type=\"global\""
+      filter   = "metric.type=\"logging.googleapis.com/user/${google_logging_metric.ledger_verifier_heartbeat[0].name}\" AND resource.type=\"global\""
       duration = "900s"
       aggregations {
         alignment_period   = "60s"
@@ -72,7 +72,7 @@ resource "google_monitoring_alert_policy" "ledger_verifier" {
 
   documentation {
     mime_type = "text/markdown"
-    content   = "Independent ledger verifier for \${var.client_slug}/\${var.environment} failed or stopped publishing. Check the separately authorized verifier timer, read-only identity, immutable export and complete chain. Cloud Logging acceptance is not alert delivery, a client-approved retention lock or independent restore proof. Do not treat an auto-closed incident as verified recovery."
+    content   = "Independent ledger verifier for ${var.client_slug}/${var.environment} failed or stopped publishing. Check the separately authorized verifier timer, read-only identity, immutable export and complete chain. Cloud Logging acceptance is not alert delivery, a client-approved retention lock or independent restore proof. Do not treat an auto-closed incident as verified recovery."
   }
 
   alert_strategy {
