@@ -77,7 +77,6 @@ class SignatureTests(unittest.TestCase):
                 policy.owner_keys_from_binding({"kind": "EnvironmentBinding", "spec": {"governance": {"ownerKeys": bad}}})
 
 
-
 class PolicyContractSignatureTests(unittest.TestCase):
     """The owner-signed rule must survive the actual v1 contract and compiler, not only the policy helper."""
 
@@ -108,7 +107,10 @@ class PolicyContractSignatureTests(unittest.TestCase):
                 "governance": {"owners": [OWNER], "ownerKeys": {OWNER: self.key["public"]}},
             }
             compiled = compiler.compile_workspace(workspace, "receptionist", environment_binding=binding)
-            self.assertTrue(compiled)
+            self.assertTrue(any(
+                rule.get("id") == "auto-book" and rule.get("signoff", {}).get("signature") == self.signed["signoff"]["signature"]
+                for resource in compiled[0]["policies"] for rule in resource["spec"]["rules"]
+            ))
 
     def test_signature_shape_is_bounded_and_extra_signoff_fields_are_rejected(self):
         jsonschema.validate(doc(self.signed), self.schema)
