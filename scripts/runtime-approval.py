@@ -10,6 +10,8 @@ being used (``sweep`` removes both).
 from __future__ import annotations
 
 import argparse
+import contextlib
+import fcntl
 import json
 import os
 import pathlib
@@ -31,6 +33,24 @@ def _load(path: pathlib.Path) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise ValueError(f"{path}: expected JSON object")
     return value
+
+
+@contextlib.contextmanager
+def decision_lock(store: pathlib.Path):
+    """Serialize decision publication and governed consumption across processes.
+
+    The runtime must clear the matching pending request *inside this lock*
+    when it claims a decision. Otherwise a second approver can race between
+    the rename into claimed/ and removal of pending/.
+    """
+    store.mkdir(parents=True, exist_ok=True, mode=0o700)
+    fd = os.open(store / ".decision.lock", os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
 
 
 def _atomic_json(path: pathlib.Path, payload: dict[str, Any]) -> None:
@@ -140,17 +160,18 @@ def decide(store: pathlib.Path, request_id: str, *, approved: bool, approver: st
     approver = approver.strip()
     if not approver:
         raise ValueError("approver must be non-empty")
-    pending_path = store / "pending" / f"{request_id}.json"
-    if not pending_path.is_file():
-        raise ValueError(f"no pending exact action exists for {request_id}")
-    request = _load(pending_path)
-    if request.get("requestId") != request_id:
-        raise ValueError("pending request id does not match filename")
-    if is_expired(pending_path, request, "requestedAt", now=now, ttl=ttl):
-        raise ValueError(f"the approval request {request_id[:12]} has expired; ask for it again")
-    decision = {"requestId": request_id, "approved": approved, "approver": approver, "decidedAt": int(time.time() if now is None else now)}
-    _atomic_json(store / "decisions" / f"{request_id}.json", decision)
-    return decision
+    with decision_lock(store):
+        pending_path = store / "pending" / f"{request_id}.json"
+        if not pending_path.is_file():
+            raise ValueError(f"no pending exact action exists for {request_id}")
+        request = _load(pending_path)
+        if request.get("requestId") != request_id:
+            raise ValueError("pending request id does not match filename")
+        if is_expired(pending_path, request, "requestedAt", now=now, ttl=ttl):
+            raise ValueError(f"the approval request {request_id[:12]} has expired; ask for it again")
+        decision = {"requestId": request_id, "approved": approved, "approver": approver, "decidedAt": int(time.time() if now is None else now)}
+        _atomic_json(store / "decisions" / f"{request_id}.json", decision)
+        return decision
 
 
 def main() -> int:
