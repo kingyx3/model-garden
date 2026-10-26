@@ -72,6 +72,7 @@ RUNTIME_SOURCE_PATHS = (
     pathlib.Path("platform/core/handoff.py"),
     pathlib.Path("platform/core/handoff_reply.py"),
     pathlib.Path("platform/core/knowledge.py"),
+    pathlib.Path("platform/core/knowledge_uploads.py"),
     pathlib.Path("platform/core/contacts.py"),
     pathlib.Path("platform/core/inbox.py"),
     pathlib.Path("platform/core/memory.py"),
@@ -621,8 +622,10 @@ def _gateway_settings(binding: dict[str, Any]) -> tuple[dict[str, Any] | None, d
         config["assign"] = gateway["assign"]  # {"permissions": {person: [Tool names]}}; the gateway validates the shape
     web = gateway.get("web")
     if web is not None:
+        if web.get("knowledge_uploads") not in (None, True, False):
+            raise ValueError("Docker target failed: gateway.web.knowledge_uploads must be true or false")
         mail = (web or {}).get("mail") or {}
-        config["web"] = {"allowedAddresses": web.get("allowed_addresses"), "mail": {"from": mail.get("from"), "host": mail.get("host"), **({"port": mail["port"]} if "port" in mail else {})}}
+        config["web"] = {"allowedAddresses": web.get("allowed_addresses"), "mail": {"from": mail.get("from"), "host": mail.get("host"), **({"port": mail["port"]} if "port" in mail else {})}, **({"knowledgeUploads": True} if web.get("knowledge_uploads") is True else {})}
         required = {"MODEL_GARDEN_WEBCHAT_KEY"}
     else:
         required = set()

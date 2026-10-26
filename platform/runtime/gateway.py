@@ -95,7 +95,7 @@ def _module(key: str):
         "handoff_reply": "platform/core/handoff_reply.py", "schedules": "platform/core/schedules.py",
         "artifacts": "platform/core/artifacts.py", "coworker": "platform/runtime/coworker_client.py",
         "enrollment": "platform/core/secret_enrollment.py", "vault": "platform/core/sealed_vault.py",
-        "receipts": "platform/channels/receipts.py", "pause": "platform/core/pause.py", "tickets": "platform/core/tickets.py", "heartbeat": "platform/core/heartbeat.py", "team_runtime": "platform/runtime/team_runtime.py", "inbox": "platform/core/inbox.py", "event_outbox": "platform/core/event_outbox.py", "oauth": "platform/core/oauth_consent.py", "readiness": "platform/core/grant_readiness.py", "studio": "platform/runtime/studio.py",
+        "receipts": "platform/channels/receipts.py", "pause": "platform/core/pause.py", "tickets": "platform/core/tickets.py", "heartbeat": "platform/core/heartbeat.py", "team_runtime": "platform/runtime/team_runtime.py", "inbox": "platform/core/inbox.py", "event_outbox": "platform/core/event_outbox.py", "oauth": "platform/core/oauth_consent.py", "readiness": "platform/core/grant_readiness.py", "studio": "platform/runtime/studio.py", "uploads": "platform/core/knowledge_uploads.py",
     }
     # Shared names, so an error class raised in one module is the class another module catches.
     shared = {"text": "model_garden_text_channel", "schedules": "model_garden_schedule_commands_store"}
@@ -150,6 +150,8 @@ def load_config(document: Mapping[str, Any]) -> dict[str, Any]:
         raise GatewayConfigError("approvals.receipts must be true or false")
     if "web" in sections:
         web = sections["web"]
+        if web.get("knowledgeUploads") not in (None, True, False):
+            raise GatewayConfigError("web.knowledgeUploads must be true or false")
         if not origin:
             raise GatewayConfigError("web chat needs publicOrigin to build sign-in links")
         if not isinstance(web.get("mail"), Mapping) or not {"from", "host"} <= set(web["mail"]):
@@ -199,7 +201,8 @@ CHAT_HTML = """<!doctype html>
 <form id="login"><input id="address" type="email" autocomplete="email" required><button>Send link</button></form>
 <p id="note" role="status"></p></section>
 <section id="chat" hidden><div id="log" aria-live="polite"></div>
-<form id="send"><input id="text" autocomplete="off" required><button>Send</button></form></section>
+<form id="send"><input id="text" autocomplete="off" required><button>Send</button></form>
+<!--KNOWLEDGE_UPLOAD--></section>
 </main><script src="/chat/app.js"></script></body></html>
 """
 
@@ -319,6 +322,13 @@ $('login').onsubmit=function(e){e.preventDefault();post('/channels/web/login',{a
 $('note').textContent='If that address is allowed, a sign-in link is on its way.'})};
 $('send').onsubmit=function(e){e.preventDefault();var t=$('text').value;$('text').value='';line('me',t);
 post('/channels/web/messages',{conversationId:conv,messageId:'m'+Date.now()+Math.random().toString(36).slice(2,6),text:t},true)};
+var u=$('upload');if(u)u.onsubmit=function(e){e.preventDefault();var f=$('knowledge-file').files[0],n=$('upload-note');
+if(!f||f.size>65536){n.textContent='Choose a .txt or .md file no larger than 64 KiB.';return}
+var b=new Uint8Array(16);crypto.getRandomValues(b);var id=Array.from(b,function(x){return x.toString(16).padStart(2,'0')}).join('');
+f.arrayBuffer().then(function(raw){var content=new TextDecoder('utf-8',{fatal:true}).decode(raw);
+return post('/channels/web/knowledge-uploads',{requestId:id,filename:f.name,content:content},true)})
+.then(function(r){return r.json().then(function(j){n.textContent=r.status===201?'Draft staged. '+j.next:(j.error||'Upload not accepted.')})})
+.catch(function(){n.textContent='Invalid UTF-8 or upload not accepted; ask an operator before retrying.'})};
 var m=/login=([^&]+)/.exec(location.hash);
 if(m){history.replaceState(null,'','/chat');post('/channels/web/session',{login:decodeURIComponent(m[1])}).then(function(r){return r.json()})
 .then(function(j){if(j.session){S.setItem('mg-session',j.session);S.setItem('mg-prefix',j.prefix);start(j.session,j.prefix)}else{$('note').textContent='That link is not valid or was already used.'}})}
@@ -777,7 +787,11 @@ class Gateway:
             return Response(200 if ready else 503, b"ok" if ready else b"unavailable",
                             "text/plain", {"Cache-Control": "no-store"})
         if route == "/chat" and method == "GET" and self.auth is not None:
-            return Response(200, CHAT_HTML.encode("utf-8"), "text/html; charset=utf-8", _PAGE_HEADERS)
+            upload_form = ('<form id="upload"><label for="knowledge-file">Business rules (.txt or .md; draft only)</label>'
+                           '<input id="knowledge-file" type="file" accept=".txt,.md" required><button>Stage draft</button></form>'
+                           '<p id="upload-note" role="status"></p>') if self.config["web"].get("knowledgeUploads") is True else ""
+            return Response(200, CHAT_HTML.replace("<!--KNOWLEDGE_UPLOAD-->", upload_form).encode("utf-8"),
+                            "text/html; charset=utf-8", _PAGE_HEADERS)
         if route == "/chat/app.js" and method == "GET" and self.auth is not None:
             return Response(200, CHAT_JS.encode("utf-8"), "text/javascript; charset=utf-8", _PAGE_HEADERS)
         if route == "/chat/app.css" and method == "GET" and self.auth is not None:
@@ -900,6 +914,36 @@ class Gateway:
             return json_response(200, {"session": session, "prefix": self._prefix(identity)})
         identity = self._web_identity(headers)
         prefix = self._prefix(identity) + "-"
+        if route == "/channels/web/knowledge-uploads" and method == "POST":
+            if self.config["web"].get("knowledgeUploads") is not True:
+                return json_response(404, {"error": "not found"})
+            normalized = {k.lower(): v for k, v in headers.items()}
+            if normalized.get("origin") != self.config["publicOrigin"]:
+                return json_response(403, {"error": "origin not allowed"})
+            if normalized.get("content-type", "").split(";", 1)[0].strip().lower() != "application/json":
+                return json_response(415, {"error": "application/json required"})
+            principal = self.directory.resolve(identity)
+            if not principal.mapped or principal.access != "member":
+                return json_response(403, {"error": "mapped client member required"})
+            uploads = _module("uploads")
+            try:
+                document = json.loads(body)
+                if not isinstance(document, dict) or set(document) != {"requestId", "filename", "content"}:
+                    raise ValueError("invalid upload fields")
+                result = uploads.stage(
+                    self.data / "knowledge-uploads", tenant=self.tenant, by=principal.identity,
+                    filename=document["filename"], content=document["content"],
+                    request_id=document["requestId"], now=int(self.clock()), audit=self.audit,
+                )
+            except uploads.UploadConflict:
+                return json_response(409, {"error": "draft upload conflicts with existing state or quota"})
+            except uploads.UploadUnavailable:
+                return json_response(503, {"error": "draft upload was not accepted"})
+            except (ValueError, TypeError, UnicodeError):
+                return json_response(400, {"error": "invalid draft upload"})
+            except OSError:
+                return json_response(503, {"error": "draft upload storage unavailable"})
+            return json_response(200 if result["alreadyStaged"] else 201, result)
         if route == "/channels/web/events" and method == "GET":
             conversation = (query.get("conversationId") or [""])[0]
             after = (query.get("after") or ["0"])[0]
