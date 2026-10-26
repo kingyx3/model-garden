@@ -148,15 +148,24 @@ def stage(
         metadata = {"uploadId": upload_id, "tenant": tenant, "by": by, "filename": filename,
                     "status": "draft", "sha256": digest, "bytes": len(raw),
                     "sectionCount": report["sectionCount"], "createdAt": int(now)}
+        # A crash before the ledger receipt must not leave an apparently
+        # accepted draft. Pending-audit files fail closed on any retry.
         created: list[pathlib.Path] = []
+        publish_path = directory / f".u-{upload_id}.publish"
         try:
             _create(content_path, raw)
             created.append(content_path)
-            _create(metadata_path, (json.dumps(metadata, sort_keys=True) + "\n").encode("utf-8"))
+            pending = {**metadata, "status": "pending-audit"}
+            _create(metadata_path, (json.dumps(pending, sort_keys=True) + "\n").encode("utf-8"))
             created.append(metadata_path)
             audit("knowledge.upload-staged", by, {"uploadId": upload_id, "sha256": digest,
                                                   "bytes": len(raw), "status": "draft"})
+            if _regular(publish_path):
+                raise UploadConflict("stale upload publication marker needs operator review")
+            _create(publish_path, (json.dumps(metadata, sort_keys=True) + "\n").encode("utf-8"))
+            os.replace(publish_path, metadata_path)
         except Exception as exc:
+            publish_path.unlink(missing_ok=True)
             for item in reversed(created):
                 item.unlink(missing_ok=True)
             raise UploadUnavailable("upload was not accepted; storage or audit unavailable") from exc
