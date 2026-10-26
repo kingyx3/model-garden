@@ -24,6 +24,7 @@ ingress = _load("ingress_for_inbox_command", "platform/channels/ingress.py")
 inbox = _load("inbox_for_inbox_command", "platform/core/inbox.py")
 handoff = _load("handoff_for_inbox_command", "platform/core/handoff.py")
 tickets = _load("tickets_for_inbox_command", "platform/core/tickets.py")
+approval = _load("approval_for_inbox_command", "scripts/runtime-approval.py")
 text = ingress.TEXT
 NOW = 1_800_000_000
 SECRET = "Hargreaves boiler 12 Acacia Road"
@@ -60,9 +61,12 @@ class Case(unittest.TestCase):
         self.events: list = []
         self.counter = 0
         self.ingress = ingress.ChannelIngress(
-            {"slack": self.adapter}, text.PrincipalDirectory(DIRECTORY), respond=self.respond, decide=lambda *a, **k: {},
+            {"slack": self.adapter}, text.PrincipalDirectory(DIRECTORY), respond=self.respond, decide=self.decide,
             audit=lambda action, who, details: self.events.append((action, who, details)), inbox=self.inbox_text,
         )
+
+    def decide(self, request_id, *, approved, approver):
+        return approval.decide(self.data / "approvals", request_id, approved=approved, approver=approver)
 
     def respond(self, inbound, principal):
         self.asked.append(inbound.text)
@@ -92,6 +96,67 @@ class Case(unittest.TestCase):
 
 
 class InboxCommandTests(Case):
+    def test_verified_direct_approver_can_decide_exact_pending_action_in_chat(self):
+        self.waiting()
+        request = request_id("approval")
+        reply = self.say(f"approve {request}")
+        self.assertIn("Recorded: approved by you", reply)
+        decision = json.loads((self.data / "approvals" / "decisions" / f"{request}.json").read_text())
+        self.assertEqual((decision["requestId"], decision["approved"], decision["approver"]),
+                         (request, True, "alice@acme.example"))
+        self.assertNotIn(SECRET, reply)
+        self.assertEqual(self.asked, [])
+        self.assertIn(("channel.approval-decided", "alice@acme.example",
+                       {"channel": "slack", "request": request[:16], "approved": True}), self.events)
+
+        other = request_id("reject")
+        (self.data / "approvals" / "pending" / f"{other}.json").write_text(json.dumps({
+            "requestId": other, "tool": "mail.send", "requestedAt": NOW,
+            "arguments": {"message": SECRET},
+        }))
+        self.assertIn("Recorded: rejected by you", self.say(f"reject {other}"))
+        rejected = json.loads((self.data / "approvals" / "decisions" / f"{other}.json").read_text())
+        self.assertEqual((rejected["approved"], rejected["approver"]), (False, "alice@acme.example"))
+
+    def test_chat_decisions_deny_unmapped_member_and_group_without_disclosing_request(self):
+        self.waiting()
+        request = request_id("approval")
+        for user, conversation in (("UMEMBER", "D0DIRECT01"), ("USTRANGER", "D0DIRECT01"),
+                                   ("UAPPROVER", "C0TEAM001")):
+            reply = self.say(f"approve {request}", user=user, conversation=conversation)
+            self.assertEqual(reply, "Only a mapped approver can decide a request in a direct message.")
+            self.assertNotIn(request, reply)
+        self.assertFalse((self.data / "approvals" / "decisions" / f"{request}.json").exists())
+        self.assertEqual(self.asked, [])
+
+    def test_chat_decisions_require_complete_id_and_existing_unexpired_request(self):
+        self.waiting()
+        request = request_id("approval")
+        for invalid in (request[:12], "not-a-request", request.upper()):
+            self.assertIn("full 64-character", self.say(f"approve {invalid}"))
+        self.assertFalse((self.data / "approvals" / "decisions" / f"{request}.json").exists())
+        self.assertEqual(self.say(f"approve {request_id('missing')}"),
+                         "That request is not waiting for a decision. Nothing was changed.")
+        expired = request_id("expired")
+        (self.data / "approvals" / "pending" / f"{expired}.json").write_text(json.dumps({
+            "requestId": expired, "tool": "crm.create", "requestedAt": 1,
+        }))
+        self.assertEqual(self.say(f"reject {expired}"),
+                         "That request is not waiting for a decision. Nothing was changed.")
+        self.assertFalse((self.data / "approvals" / "decisions" / f"{expired}.json").exists())
+        self.assertEqual(self.asked, [])
+
+    def test_inbox_exposes_full_decision_reference_only_to_authorized_approver(self):
+        self.waiting()
+        request = request_id("approval")
+        owner = self.say("inbox")
+        self.assertIn(f"approve {request}", owner)
+        self.assertIn(f"reject {request}", owner)
+        self.assertNotIn(SECRET, owner)
+        member = self.say("inbox", user="UMEMBER")
+        self.assertNotIn(request, member)
+        self.assertNotIn("approve ", member)
+
     def test_an_approver_sees_everything_with_the_reply_that_closes_each_hand_off(self):
         alice, bob = self.waiting()
         reply = self.say("inbox")
