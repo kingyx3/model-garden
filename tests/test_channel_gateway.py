@@ -670,6 +670,13 @@ class InboxCommandTests(GatewayCase):
 class TicketChatTests(GatewayCase):
     """A verified human can triage Tier 0 tickets without provider credentials or Tool impersonation."""
 
+    config = {
+        **GatewayCase.config,
+        "directory": {**GatewayCase.config["directory"],
+                      "slack": {**GatewayCase.config["directory"]["slack"],
+                                "T01/U0BOB00001": {"identity": "bob@acme.example"}}},
+    }
+
     def ticket(self, *, title="Private boiler quote", description="Customer address 12 Acacia Road", tenant=None):
         module = _load("gateway_ticket_chat_store", "platform/core/tickets.py")
         store = module.TicketStore(self.data / "tickets", tenant=tenant or self.gateway.tenant)
@@ -752,9 +759,10 @@ class TicketChatTests(GatewayCase):
         self.slack_post("/channels/slack/events", slack_event(f"ticket {ticket_id} waiting", user="U0STRANGER", ts="1700000000.001001"))
         self.assertIn("mapped team member", self.posts()[-1]["text"])
         self.assertEqual(store.get(ticket_id)["status"], "open")
-        self.slack_post("/channels/slack/events", slack_event(f"ticket {ticket_id} waiting", ts="1700000000.001002"))
+        self.slack_post("/channels/slack/events", slack_event(f"ticket {ticket_id} waiting", user="U0BOB00001", ts="1700000000.001002"))
         self.assertIn("waiting", self.posts()[-1]["text"])
         self.assertEqual(store.get(ticket_id)["status"], "waiting")
+        self.assertEqual(store.get(ticket_id)["comments"][-1]["by"], "bob@acme.example")
         self.assertEqual(self.coworker.calls, [])
 
 
