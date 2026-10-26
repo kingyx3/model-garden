@@ -15,6 +15,7 @@ import os
 import pathlib
 import re
 import sys
+import tempfile
 import time
 from collections.abc import Mapping
 from typing import Any
@@ -33,10 +34,30 @@ def _load(path: pathlib.Path) -> dict[str, Any]:
 
 
 def _atomic_json(path: pathlib.Path, payload: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_suffix(path.suffix + ".tmp")
-    temporary.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    temporary.replace(path)
+    """Publish a complete decision once, without replacing an earlier approver's choice.
+
+    The private temporary file is fsynced before a same-directory hard link
+    atomically claims the final name. A second writer (or existing symlink)
+    fails with EEXIST; no read-then-write race can reverse an approval.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    fd, name = tempfile.mkstemp(prefix=f".{path.stem}.", suffix=".tmp", dir=path.parent)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+            stream.write(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        try:
+            os.link(name, path)
+        except FileExistsError:
+            raise ValueError("this exact-action request has already been decided") from None
+        directory_fd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+    finally:
+        pathlib.Path(name).unlink(missing_ok=True)
 
 
 def _validate_request_id(request_id: str) -> str:
@@ -81,6 +102,10 @@ def pending(store: pathlib.Path, *, now: float | None = None, ttl: int | None = 
             raise ValueError(f"unsafe pending approval record: {path}")
         expired = is_expired(path, request, "requestedAt", now=now, ttl=limit)
         if expired and not include_expired:
+            continue
+        # A recorded decision is no longer actionable in the human inbox.
+        # lexists also treats a dangling symlink/unsafe path as occupied.
+        if os.path.lexists(store / "decisions" / f"{request_id}.json"):
             continue
         requests.append({**request, "expired": True} if expired else request)
     return requests
