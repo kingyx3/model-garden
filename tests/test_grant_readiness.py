@@ -205,6 +205,32 @@ class Case(unittest.TestCase):
         self.registry.path.write_text(json.dumps(other_tenant), encoding="utf-8")
         self.assertEqual(self.applied()["grantRegistry"], "unreadable")
 
+    def test_deleted_initialized_grant_registry_never_restores_legacy_access(self):
+        # An existing grant registry leaves a durable lock-file witness. Losing
+        # the data file must not silently reactivate an environment-level token.
+        self.grant()
+        self.assertTrue(skill(self.applied(), "book-appointment")["ready"])
+        self.registry.path.unlink()
+        self.assertTrue((self.root / f".{TENANT}.grants.lock").is_file())
+        result = self.applied()
+        self.assertEqual(result["grantRegistry"], "unreadable")
+        self.assertFalse(skill(result, "book-appointment")["ready"])
+        self.assertEqual(skill(result, "book-appointment")["dependencies"][0]["status"], "no-grant")
+        self.assertTrue(skill(result, "answer-faq")["ready"])
+
+    def test_nonregular_grant_registry_with_witness_blocks_connected_skill(self):
+        self.grant()
+        self.registry.path.unlink()
+        self.registry.path.mkdir()
+        result = self.applied()
+        self.assertEqual(result["grantRegistry"], "unreadable")
+        self.assertFalse(skill(result, "book-appointment")["ready"])
+        self.registry.path.rmdir()
+        self.registry.path.symlink_to(self.root / "nonexistent-grants.json")
+        result = self.applied()
+        self.assertEqual(result["grantRegistry"], "unreadable")
+        self.assertFalse(skill(result, "book-appointment")["ready"])
+
     def test_a_manifest_that_does_not_name_its_environment_is_left_alone(self):
         self.grant()
         bare = {key: value for key, value in self.manifest.items() if key != "client"}
