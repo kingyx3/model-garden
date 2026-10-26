@@ -83,11 +83,30 @@ def _create(path: pathlib.Path, data: bytes) -> None:
         raise
 
 
+def _retention(days: int) -> int:
+    if type(days) is not int or not 1 <= days <= 3650:
+        raise UploadError("retention_days must be 1 to 3650")
+    return days
+
+
+def _expires(metadata: dict[str, Any], days: int) -> int:
+    created = metadata.get("createdAt")
+    stored = metadata.get("expiresAt")
+    if type(created) is not int or created < 0:
+        raise UploadConflict("upload creation time is invalid")
+    if stored is not None and (type(stored) is not int or stored < created):
+        raise UploadConflict("upload expiry is invalid")
+    limit = created + _retention(days) * 86400
+    return min(limit, stored) if stored is not None else limit
+
+
 def stage(
     root: pathlib.Path, *, tenant: str, by: str, filename: str, content: str,
     request_id: str, now: int, audit: Callable[[str, str, dict[str, Any]], None],
+    retention_days: int = 365,
 ) -> dict[str, Any]:
     """Persist one verified person's file, idempotently; require a ledger receipt."""
+    retention_days = _retention(retention_days)
     if not isinstance(tenant, str) or not _TENANT.fullmatch(tenant):
         raise UploadError("invalid tenant")
     if not isinstance(by, str) or not 1 <= len(by) <= 256 or any(c in by for c in "\r\n\x00"):
@@ -127,6 +146,8 @@ def stage(
         if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
             raise UploadConflict("upload lock must be a regular file")
         fcntl.flock(fd, fcntl.LOCK_EX)
+        if _regular(directory / f".deleted-{upload_id}.json"):
+            raise UploadConflict("deleted requestId cannot be reused")
         metadata_path = directory / f"u-{upload_id}.json"
         content_path = directory / f"u-{upload_id}{extension}"
         if _regular(metadata_path):
@@ -140,6 +161,8 @@ def stage(
                     existing.get("filename") != filename or existing.get("sha256") != digest or
                     existing.get("status") != "draft" or content_path.read_bytes() != raw):
                 raise UploadConflict("requestId was already used for different content")
+            if int(now) >= _expires(existing, retention_days):
+                raise UploadConflict("draft expired; operator reconciliation required")
             output["alreadyStaged"] = True
             return output
         if _regular(content_path):
@@ -148,7 +171,8 @@ def stage(
             raise UploadConflict("pending upload quota reached; review existing drafts")
         metadata = {"uploadId": upload_id, "tenant": tenant, "by": by, "filename": filename,
                     "status": "draft", "sha256": digest, "bytes": len(raw),
-                    "sectionCount": report["sectionCount"], "createdAt": int(now)}
+                    "sectionCount": report["sectionCount"], "createdAt": int(now),
+                    "expiresAt": int(now) + retention_days * 86400}
         # A crash before the ledger receipt must not leave an apparently
         # accepted draft. Pending-audit files fail closed on any retry.
         created: list[pathlib.Path] = []
@@ -172,5 +196,114 @@ def stage(
                 item.unlink(missing_ok=True)
             raise UploadUnavailable("upload was not accepted; storage or audit unavailable") from exc
         return output
+    finally:
+        os.close(fd)
+
+
+def purge_expired(
+    root: pathlib.Path, *, tenant: str, now: int, retention_days: int,
+    audit: Callable[[str, str, dict[str, Any]], None], actor: str,
+    dry_run: bool = True, erase_id: str | None = None, reason: str | None = None,
+) -> list[str]:
+    """Operator-only reconciliation; dry-run by default, never follow foreign paths.
+
+    The caller must already hold host/operator authorization. A deletion-intent
+    ledger receipt precedes file removal; a minimal tombstone prevents replay.
+    If a later unlink or completion receipt fails, fail closed for operator repair.
+    Backups and imported KnowledgeSources are deliberately outside this scope.
+    """
+    days = _retention(retention_days)
+    if not isinstance(tenant, str) or not _TENANT.fullmatch(tenant):
+        raise UploadError("invalid tenant")
+    if not isinstance(actor, str) or not re.fullmatch(r"operator:[A-Za-z0-9._@-]{1,100}", actor):
+        raise UploadError("a named operator identity is required")
+    if erase_id is not None:
+        if not isinstance(erase_id, str) or not re.fullmatch(r"[0-9a-f]{32}", erase_id):
+            raise UploadError("erase_id must be a full opaque upload identifier")
+        if reason not in ("owner-request", "reconciliation"):
+            raise UploadError("explicit erasure requires owner-request or reconciliation reason")
+    elif reason is not None:
+        raise UploadError("reason is only accepted with erase_id")
+    root = pathlib.Path(root)
+    directory = root / tenant
+    if not root.exists() and not root.is_symlink():
+        if erase_id:
+            raise UploadError("tenant upload store does not exist")
+        return []
+    _private_dir(root)
+    if not directory.exists() and not directory.is_symlink():
+        if erase_id:
+            raise UploadError("tenant upload store does not exist")
+        return []
+    _private_dir(directory)
+    lock = directory / ".upload.lock"
+    if lock.is_symlink():
+        raise UploadConflict("upload lock must not be a symlink")
+    fd = os.open(lock, os.O_CREAT | os.O_RDWR | getattr(os, "O_NOFOLLOW", 0), 0o600)
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+            raise UploadConflict("upload lock must be a regular file")
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        selected: list[tuple[str, pathlib.Path, pathlib.Path, dict[str, Any], str]] = []
+        for metadata_path in sorted(directory.glob("u-*.json")):
+            if not _regular(metadata_path) or metadata_path.stat().st_size > 4096:
+                raise UploadConflict("upload receipt is not a bounded regular file")
+            upload_id = metadata_path.stem[2:]
+            if not re.fullmatch(r"[0-9a-f]{32}", upload_id):
+                raise UploadConflict("unexpected upload receipt name")
+            try:
+                metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+            except (OSError, ValueError) as exc:
+                raise UploadConflict("upload receipt is invalid") from exc
+            if not isinstance(metadata, dict) or metadata.get("tenant") != tenant or metadata.get("uploadId") != upload_id:
+                raise UploadConflict("upload receipt tenant or identifier mismatch")
+            filename = metadata.get("filename")
+            if not isinstance(filename, str) or not _NAME.fullmatch(filename) or ".." in filename:
+                raise UploadConflict("upload filename is invalid")
+            if metadata.get("status") not in ("draft", "pending-audit"):
+                raise UploadConflict("upload state needs operator review")
+            suffix = pathlib.Path(filename).suffix.lower()
+            content_path = directory / f"u-{upload_id}{suffix}"
+            if not _regular(content_path) or content_path.stat().st_size > MAX_BYTES:
+                raise UploadConflict("upload content missing or invalid")
+            for other in (".txt", ".md"):
+                if other != suffix and _regular(directory / f"u-{upload_id}{other}"):
+                    raise UploadConflict("upload has conflicting content files")
+            if (hashlib.sha256(content_path.read_bytes()).hexdigest() != metadata.get("sha256") or
+                    content_path.stat().st_size != metadata.get("bytes")):
+                raise UploadConflict("upload content digest or size mismatch")
+            expired = int(now) >= _expires(metadata, days)
+            if not expired and upload_id != erase_id:
+                continue
+            tombstone = directory / f".deleted-{upload_id}.json"
+            if _regular(tombstone):
+                raise UploadConflict("upload deletion needs operator reconciliation")
+            selected.append((upload_id, metadata_path, content_path, metadata,
+                             reason if upload_id == erase_id else "retention"))
+        if erase_id and not any(item[0] == erase_id for item in selected):
+            raise UploadError("requested upload not found in this tenant")
+        if dry_run:
+            return [item[0] for item in selected]
+        deleted: list[str] = []
+        for upload_id, metadata_path, content_path, metadata, why in selected:
+            details = {"uploadId": upload_id, "sha256": metadata["sha256"],
+                       "reason": why, "status": metadata["status"]}
+            tombstone = directory / f".deleted-{upload_id}.json"
+            try:
+                audit("knowledge.upload-delete-intent", actor, details)
+            except Exception as exc:
+                raise UploadUnavailable("audit unavailable; no upload was deleted") from exc
+            try:
+                _create(tombstone, (json.dumps({"uploadId": upload_id, "sha256": metadata["sha256"],
+                                               "deletedAt": int(now), "reason": why},
+                                              sort_keys=True) + "\n").encode("utf-8"))
+                content_path.unlink()
+                metadata_path.unlink()
+                audit("knowledge.upload-deleted", actor, details)
+            except Exception as exc:
+                raise UploadUnavailable("upload deletion incomplete; inspect tombstone and ledger") from exc
+            deleted.append(upload_id)
+        return deleted
     finally:
         os.close(fd)

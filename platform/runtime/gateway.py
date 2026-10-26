@@ -935,6 +935,7 @@ class Gateway:
                     self.data / "knowledge-uploads", tenant=self.tenant, by=principal.identity,
                     filename=document["filename"], content=document["content"],
                     request_id=document["requestId"], now=int(self.clock()), audit=self.audit,
+                    retention_days=_module("artifacts").retention_from_environ(self.environ),
                 )
             except uploads.UploadConflict:
                 return json_response(409, {"error": "draft upload conflicts with existing state or quota"})

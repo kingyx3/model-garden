@@ -132,6 +132,92 @@ class SignedKnowledgeUploadTests(G.GatewayCase):
         self.assertIn('status: draft', (workspace / "knowledge" / "reviewed-rules.yaml").read_text())
         self.assertNotIn(b"reviewed-rules", self.gateway.desired_state_path.read_bytes())
 
+
+    def test_retention_expiry_denies_replay_even_after_policy_extension(self):
+        self.gateway.environ = {**self.gateway.environ, "MODEL_GARDEN_ARTIFACT_RETENTION_DAYS": "1"}
+        report = json.loads(self.upload().body)
+        receipt = self.data / "knowledge-uploads" / self.gateway.tenant / ("u-" + report["uploadId"] + ".json")
+        metadata = json.loads(receipt.read_text())
+        self.assertEqual(metadata["expiresAt"], G.NOW + 86400)
+        self.gateway.clock = lambda: G.NOW + 86400
+        self.gateway.environ["MODEL_GARDEN_ARTIFACT_RETENTION_DAYS"] = "30"
+        self.assertEqual(self.upload().status, 409)
+        self.assertEqual(json.loads(receipt.read_text())["status"], "draft")
+
+    def test_expired_drafts_require_explicit_operator_purge_with_audit_and_tombstone(self):
+        uploads = G.gateway._module("uploads")
+        self.gateway.environ = {**self.gateway.environ, "MODEL_GARDEN_ARTIFACT_RETENTION_DAYS": "1"}
+        report = json.loads(self.upload().body)
+        directory = self.data / "knowledge-uploads" / self.gateway.tenant
+        before = (self.data / "audit.jsonl").read_text()
+        options = dict(tenant=self.gateway.tenant, now=G.NOW + 86400,
+                       retention_days=1, audit=self.gateway.audit, actor="operator:alice")
+        self.assertEqual(uploads.purge_expired(self.data / "knowledge-uploads", **options), [report["uploadId"]])
+        self.assertEqual((self.data / "audit.jsonl").read_text(), before)
+        self.assertTrue((directory / ("u-" + report["uploadId"] + ".md")).exists())
+        self.assertEqual(uploads.purge_expired(self.data / "knowledge-uploads", dry_run=False, **options), [report["uploadId"]])
+        self.assertFalse((directory / ("u-" + report["uploadId"] + ".md")).exists())
+        self.assertFalse((directory / ("u-" + report["uploadId"] + ".json")).exists())
+        self.assertTrue((directory / (".deleted-" + report["uploadId"] + ".json")).exists())
+        self.assertEqual(self.upload().status, 409)
+        ledger = (self.data / "audit.jsonl").read_text()
+        self.assertIn("knowledge.upload-delete-intent", ledger)
+        self.assertIn("knowledge.upload-deleted", ledger)
+        self.assertNotIn("Open 9 to 5", ledger)
+
+    def test_operator_explicit_erasure_is_tenant_scoped_and_requires_reason(self):
+        uploads = G.gateway._module("uploads")
+        report = json.loads(self.upload().body)
+        args = dict(tenant=self.gateway.tenant, now=G.NOW, retention_days=365,
+                    audit=self.gateway.audit, actor="operator:alice", erase_id=report["uploadId"])
+        with self.assertRaises(uploads.UploadError):
+            uploads.purge_expired(self.data / "knowledge-uploads", dry_run=False, **args)
+        with self.assertRaises(uploads.UploadError):
+            uploads.purge_expired(self.data / "knowledge-uploads", dry_run=False,
+                                  **{**args, "tenant": "other-client", "reason": "owner-request"})
+        self.assertEqual(uploads.purge_expired(self.data / "knowledge-uploads", dry_run=False,
+                                                **{**args, "reason": "owner-request"}), [report["uploadId"]])
+
+    def test_expiry_reconciliation_refuses_symlink_or_tampered_draft(self):
+        uploads = G.gateway._module("uploads")
+        report = json.loads(self.upload().body)
+        directory = self.data / "knowledge-uploads" / self.gateway.tenant
+        content = directory / ("u-" + report["uploadId"] + ".md")
+        content.unlink()
+        outside = self.root / "outside-knowledge.txt"
+        outside.write_text("do not touch")
+        content.symlink_to(outside)
+        with self.assertRaises(uploads.UploadConflict):
+            uploads.purge_expired(self.data / "knowledge-uploads", tenant=self.gateway.tenant,
+                                  now=G.NOW + 400 * 86400, retention_days=1,
+                                  audit=self.gateway.audit, actor="operator:alice", dry_run=False)
+        self.assertEqual(outside.read_text(), "do not touch")
+        self.assertTrue(content.is_symlink())
+
+    def test_audit_outage_cannot_silently_delete_staged_draft(self):
+        uploads = G.gateway._module("uploads")
+        report = json.loads(self.upload().body)
+        directory = self.data / "knowledge-uploads" / self.gateway.tenant
+        def unavailable(*args):
+            raise OSError("ledger unavailable")
+        with self.assertRaises(uploads.UploadUnavailable):
+            uploads.purge_expired(self.data / "knowledge-uploads", tenant=self.gateway.tenant,
+                                  now=G.NOW + 400 * 86400, retention_days=1,
+                                  audit=unavailable, actor="operator:alice", dry_run=False)
+        self.assertTrue((directory / ("u-" + report["uploadId"] + ".md")).exists())
+        self.assertFalse((directory / (".deleted-" + report["uploadId"] + ".json")).exists())
+
+    def test_legacy_draft_without_expiry_obeys_current_shorter_retention(self):
+        uploads = G.gateway._module("uploads")
+        report = json.loads(self.upload().body)
+        receipt = self.data / "knowledge-uploads" / self.gateway.tenant / ("u-" + report["uploadId"] + ".json")
+        metadata = json.loads(receipt.read_text())
+        metadata.pop("expiresAt", None)
+        receipt.write_text(json.dumps(metadata))
+        self.assertEqual(uploads.purge_expired(self.data / "knowledge-uploads", tenant=self.gateway.tenant,
+                                                now=G.NOW + 2 * 86400, retention_days=1,
+                                                audit=self.gateway.audit, actor="operator:alice"), [report["uploadId"]])
+
     def test_invalid_opt_in_value_is_rejected(self):
         with self.assertRaises(G.gateway.GatewayConfigError):
             G.gateway.load_config({**self.config, "web": {**self.config["web"], "knowledgeUploads": "yes"}})
