@@ -27,7 +27,7 @@ MAX_REASON = 300
 MAX_OWNER_LOCK_WAIT_SECONDS = 30.0
 DEFAULT_OWNER_LOCK_WAIT_SECONDS = 5.0
 CONTROL = re.compile(r"[\x00-\x1f\x7f]+")
-HOLDING = "I am paused by my owner for now, so I cannot act on this. A person has been told and will pick it up."
+HOLDING = "I am paused by my owner for now, so I cannot act on this. Please contact a person if this is urgent."
 
 
 def clean(reason: Any) -> str:
