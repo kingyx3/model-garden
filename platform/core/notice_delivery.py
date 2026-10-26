@@ -101,12 +101,14 @@ class Directory:
         if not isinstance(channel, str) or not isinstance(address, str) or not address or channel == "inbox":
             return None
         if channel == "webchat" and isinstance(sender_id, str) and sender_id:
-            inbox_holders = [
+            identity_holders = [
                 person for person, entry in self._entries.items()
-                if entry[0] == "inbox" and self._identities.get(person) == sender_id
+                if entry[0] in ("inbox", "webchat") and self._identities.get(person) == sender_id
             ]
-            if inbox_holders:
-                return inbox_holders[0] if len(inbox_holders) == 1 else None
+            if len(identity_holders) > 1:
+                return None  # even a signed session cannot choose between two configured people
+            if identity_holders and self._entries[identity_holders[0]][0] == "inbox":
+                return identity_holders[0]
         holders = [person for person, entry in self._entries.items() if entry == (channel, address)]
         if len(holders) != 1:
             return None
