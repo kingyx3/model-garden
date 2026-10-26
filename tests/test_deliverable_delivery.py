@@ -232,6 +232,8 @@ class GatewayDeliveryTests(G.GatewayCase):
         self.assertEqual(set(posted["details"]), {"channel", "location", "bytes", "sha256"})  # no name, no content
 
     def test_gateway_delivery_respects_configured_client_retention(self):
+        # Gateway fixtures share a module-level ENV dict; keep this test's hostile override local.
+        self.gateway.environ = dict(self.gateway.environ)
         self.gateway.environ["MODEL_GARDEN_ARTIFACT_RETENTION_DAYS"] = "7"
         entry = self.gateway._artifacts().put(
             name="Report.txt", content=b"synthetic", media_type="text/plain",
