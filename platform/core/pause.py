@@ -6,13 +6,16 @@ but cannot be read counts as paused: the control fails safe, never open.
 """
 from __future__ import annotations
 
+import errno
 import fcntl
 import json
+import math
 import os
 import pathlib
 import re
 import secrets
 import stat
+import time
 from contextlib import contextmanager
 from typing import Any, Iterator
 
@@ -21,6 +24,8 @@ LOCK_FILE = ".pause.lock"
 MARKER = ".pause.initialized"  # Durable first-write witness; missing state after a write is unsafe.
 MAX_STATE_BYTES = 8192
 MAX_REASON = 300
+MAX_OWNER_LOCK_WAIT_SECONDS = 30.0
+DEFAULT_OWNER_LOCK_WAIT_SECONDS = 5.0
 CONTROL = re.compile(r"[\x00-\x1f\x7f]+")
 HOLDING = "I am paused by my owner for now, so I cannot act on this. A person has been told and will pick it up."
 
@@ -179,12 +184,18 @@ class PauseStore:
             yield
 
     @contextmanager
-    def _transaction(self, *, shared: bool = False) -> Iterator[tuple[int, os.stat_result]]:
+    def _transaction(self, *, shared: bool = False, lock_timeout_seconds: float | None = None) -> Iterator[tuple[int, os.stat_result]]:
         """Hold the trusted mount and lock inode for a complete state transition.
 
         A replaced mount must never let a lock from the old volume authorize
         a write into a newly attached volume. All writes use the pinned dirfd.
         """
+        if lock_timeout_seconds is not None and (
+                isinstance(lock_timeout_seconds, bool) or
+                not isinstance(lock_timeout_seconds, (int, float)) or
+                not math.isfinite(lock_timeout_seconds) or
+                not 0 < lock_timeout_seconds <= MAX_OWNER_LOCK_WAIT_SECONDS):
+            raise ValueError("pause lock wait must be finite and between 0 and 30 seconds")
         root_info = self.root.lstat()
         if not stat.S_ISDIR(root_info.st_mode) or root_info.st_mode & 0o022:
             raise OSError("pause governance directory is untrusted")
@@ -199,7 +210,26 @@ class PauseStore:
             try:
                 if not _private_regular(os.fstat(descriptor)):
                     raise OSError("pause transaction lock is untrusted")
-                fcntl.flock(descriptor, fcntl.LOCK_SH if shared else fcntl.LOCK_EX)
+                mode = fcntl.LOCK_SH if shared else fcntl.LOCK_EX
+                if lock_timeout_seconds is None:
+                    fcntl.flock(descriptor, mode)
+                else:
+                    # Never acknowledge an owner command while an admitted
+                    # material effect still holds the shared lease. The timeout
+                    # reports an *unconfirmed* transition; it does not cancel
+                    # the provider action or silently claim a pause.
+                    deadline = time.monotonic() + lock_timeout_seconds
+                    while True:
+                        try:
+                            fcntl.flock(descriptor, mode | fcntl.LOCK_NB)
+                            break
+                        except OSError as exc:
+                            if exc.errno not in (errno.EAGAIN, errno.EACCES):
+                                raise
+                            remaining = deadline - time.monotonic()
+                            if remaining <= 0:
+                                raise TimeoutError("pause transition not acknowledged: in-flight governed effect or state transition still holds the lock") from None
+                            time.sleep(min(0.05, remaining))
                 locked = os.fstat(descriptor)
                 current_lock = os.stat(LOCK_FILE, dir_fd=root_fd, follow_symlinks=False)
                 if (not _private_regular(locked) or not _private_regular(current_lock)
@@ -260,11 +290,12 @@ class PauseStore:
                 pass
             raise
 
-    def pause(self, by: str, reason: str, now: int, *, cause: str | None = None, window: str | None = None) -> dict[str, Any]:
+    def pause(self, by: str, reason: str, now: int, *, cause: str | None = None, window: str | None = None,
+              lock_timeout_seconds: float | None = None) -> dict[str, Any]:
         by = clean(by)
         if not by:
             raise ValueError("who is pausing is required")
-        with self._transaction() as transaction:
+        with self._transaction(lock_timeout_seconds=lock_timeout_seconds) as transaction:
             # Re-check while holding the lock: a worker may have imposed a cap
             # between the caller's last read and this transition.
             state = self.status()
@@ -276,11 +307,11 @@ class PauseStore:
             self._write({"paused": True, "by": by, "at": int(now), "reason": clean(reason), **extra}, *transaction)
             return self.status()
 
-    def resume(self, by: str, now: int) -> dict[str, Any]:
+    def resume(self, by: str, now: int, *, lock_timeout_seconds: float | None = None) -> dict[str, Any]:
         by = clean(by)
         if not by:
             raise ValueError("who is resuming is required")
-        with self._transaction() as transaction:
+        with self._transaction(lock_timeout_seconds=lock_timeout_seconds) as transaction:
             state = self.status()
             if state["paused"] and state.get("by") is None:
                 raise ValueError("untrusted pause state; operator must repair it before controls resume")

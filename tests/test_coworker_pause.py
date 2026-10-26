@@ -539,6 +539,31 @@ class StoreTests(unittest.TestCase):
                 store.resume("owner@client.example", NOW + 1)
         self.assertTrue(store.is_paused())
 
+    def test_bounded_owner_pause_and_resume_never_acknowledge_an_inflight_effect(self):
+        store = pause.PauseStore(self.root)
+        # An admitted governed write can hold the shared lease indefinitely.
+        # Neither owner command may claim success while that lease is held.
+        with store.effect_guard():
+            with self.assertRaisesRegex(TimeoutError, "not acknowledged"):
+                store.pause("owner@client.example", "emergency", NOW, lock_timeout_seconds=0.05)
+            self.assertFalse(store.is_paused())
+        self.assertTrue(store.pause("owner@client.example", "emergency", NOW,
+                                    lock_timeout_seconds=0.1)["paused"])
+        with store.effect_guard():
+            with self.assertRaisesRegex(TimeoutError, "not acknowledged"):
+                store.resume("owner@client.example", NOW + 1, lock_timeout_seconds=0.05)
+            self.assertTrue(store.is_paused())
+        self.assertFalse(store.resume("owner@client.example", NOW + 2,
+                                      lock_timeout_seconds=0.1)["paused"])
+
+    def test_owner_lock_wait_must_be_finite_and_bounded(self):
+        store = pause.PauseStore(self.root)
+        for bad in (0, -1, float("nan"), float("inf"), 31, True, "5"):
+            with self.subTest(wait=repr(bad)), self.assertRaises(ValueError):
+                store.pause("owner@client.example", "emergency", NOW,
+                            lock_timeout_seconds=bad)
+        self.assertFalse(store.is_paused())
+
     def test_who_is_required_and_the_reason_is_bounded(self):
         with self.assertRaises(ValueError):
             pause.PauseStore(self.root).pause(" ", "x", NOW)
@@ -907,6 +932,38 @@ class OperatorScriptTests(unittest.TestCase):
             self.assertTrue(store.status()["paused"])
             self.assertEqual(store.status()["cause"], "spend-cap")
             self.assertFalse((root / "audit.jsonl").exists())  # neither action was recorded as successful
+
+    def test_operator_timeout_never_claims_pause_and_records_unconfirmed_attempt(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            store = pause.PauseStore(root)
+            with store.effect_guard():
+                result = self.run_script(root, "pause", "--by", "owner@client.example",
+                                         "--wait-seconds", "0.1", "--reason", "incident")
+                self.assertEqual(result.returncode, 3, result.stderr)
+                self.assertIn("not confirmed", result.stderr)
+                self.assertEqual(result.stdout, "")
+                self.assertFalse(store.is_paused())
+            actions = [json.loads(line)["action"] for line in (root / "audit.jsonl").read_text().splitlines()]
+            self.assertIn("coworker.pause-unconfirmed", actions)
+            self.assertNotIn("coworker.pause", actions)
+            self.assertEqual(self.run_script(root, "pause", "--by", "owner@client.example",
+                                             "--wait-seconds", "0.1").returncode, 0)
+
+    def test_admin_chat_timeout_does_not_claim_success_or_emit_success_audit(self):
+        gateway = _load("gateway_pause_timeout_test", "platform/runtime/gateway.py")
+        service = mock.Mock()
+        service.data = pathlib.Path("/unused")
+        service.clock.return_value = NOW
+        fake_store = mock.Mock()
+        fake_store.pause.side_effect = TimeoutError("pause not acknowledged")
+        fake_store.resume.side_effect = TimeoutError("resume not acknowledged")
+        with mock.patch.object(gateway, "_module", return_value=mock.Mock(PauseStore=lambda root: fake_store)):
+            for verb in ("pause", "resume"):
+                answer = gateway.Gateway._pause_command(service, "owner@client.example", verb, "incident")
+                self.assertIn("not confirmed", answer)
+        actions = [call.args[0] for call in service.audit.call_args_list]
+        self.assertEqual(actions, ["coworker.pause-unconfirmed", "coworker.resume-unconfirmed"])
 
     def test_pause_status_and_resume_are_ledgered_under_the_named_person(self):
         with tempfile.TemporaryDirectory() as tmp:
