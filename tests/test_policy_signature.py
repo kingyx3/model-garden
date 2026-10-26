@@ -104,7 +104,7 @@ class PolicyContractSignatureTests(unittest.TestCase):
                     "crm": {"provider": "built-in-crm", "tier": 0},
                     "kb": {"provider": "text-knowledge", "tier": 0},
                 },
-                "governance": {"owners": [OWNER], "ownerKeys": {OWNER: self.key["public"]}},
+                "governance": {"owners": [OWNER, "business-owner"], "ownerKeys": {OWNER: self.key["public"]}},
             }
             compiled = compiler.compile_workspace(workspace, "receptionist", environment_binding=binding)
             self.assertTrue(any(
