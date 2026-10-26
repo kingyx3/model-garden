@@ -84,7 +84,8 @@
                 "required": ["owner", "ruleDigest"],
                 "properties": {
                   "owner": {"type": "string", "minLength": 1},
-                  "ruleDigest": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+                  "ruleDigest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+                  "signature": {"type": "string", "pattern": "^[A-Za-z0-9+/]{86}==$", "description": "Base64 Ed25519 signature over the owner and rule digest. Required for relaxing rules when governance.ownerKeys is configured; verified at compile/deploy time."}
                 },
                 "description": "Named client owner's sign-off for an allow rule that relaxes an approval requirement. ruleDigest binds the sign-off to the rule's exact content (every field except signoff), so any later edit blocks compilation until the owner re-signs."
               }
