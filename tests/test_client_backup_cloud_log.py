@@ -104,7 +104,7 @@ class BackupCloudLogTests(unittest.TestCase):
 
     def test_pending_recovery_cannot_be_forged_for_unhealthy_or_wrong_slot(self):
         for changed in ({"incidentActive": True},
-                        {"pendingRecoverySlot": "20261022T120000Z"},
+                        {"pendingRecoverySlot": "20261130T120000Z"},
                         {"pendingRecoverySlot": "../foreign"}):
             report = self.report | {"event": "backup.incident.unchanged",
                                     "incidentActive": False,
