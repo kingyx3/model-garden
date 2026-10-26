@@ -35,7 +35,8 @@ class GovernedMcpRuntimeTests(unittest.TestCase):
             names = {tool.name for tool in asyncio.run(runtime_module.build_server(runtime).list_tools())}
             self.assertTrue({"kb_search", "crm_create", "crm_read", "crm_log_interaction",
                              "platform_capabilities", "handoff_request", "handoff_status"}.issubset(names))
-            self.assertFalse({"calendar_availability", "calendar_book"} & names)
+            self.assertIn("calendar_book", names)  # selected write: normal Tool prepares Tier 4 handoff
+            self.assertNotIn("calendar_availability", names)  # unbound reads cannot be handed off
             self.assertFalse(hasattr(runtime, "calendar_book"))
             self.assertFalse(hasattr(runtime, "calendar_availability"))
             self.assertFalse((root / "audit.jsonl").exists())  # discovery never authorizes or contacts a provider
