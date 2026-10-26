@@ -44,6 +44,8 @@ MAX_SEEN = 5000
 MAX_REPLY_CHARS = 3500
 MAX_ATTACHMENTS = 3
 INBOX_COMMAND = re.compile(r"^/?inbox$", re.IGNORECASE)
+APPROVAL_TEXT_COMMAND = re.compile(r"^/?(approve|reject)\s+(\S+)\s*$", re.IGNORECASE)
+EXACT_APPROVAL_ID = re.compile(r"^[0-9a-f]{64}$")
 PAUSE_COMMAND = re.compile(r"^/?(pause|resume)\s+(?:the\s+)?coworker\b[\s:.-]*(.*)$", re.IGNORECASE | re.DOTALL)
 ASSIGN_COMMAND = re.compile(r"^/?(?:assign|delegate)\s+(?:to\s+)?([a-z0-9][a-z0-9-]{0,62})\s*(?::|\s-\s)\s*(.+)$", re.IGNORECASE | re.DOTALL)
 Audit = Callable[[str, str, dict[str, Any]], Any]
@@ -223,6 +225,26 @@ class ChannelIngress:
                     reply = "I can show what is waiting only to a team member in a direct message."
                 self._send(adapter, inbound, reply)
                 return "inbox-command"
+            # No external approval-button provider is needed for the Tier 0 inbox.
+            # Resolve authority only from the verified direct-channel principal.
+            approval_text = APPROVAL_TEXT_COMMAND.match(text.strip()) if self._inbox is not None else None
+            if approval_text is not None:
+                verb, request_id = approval_text.group(1).lower(), approval_text.group(2)
+                if not principal.can_approve or not self._is_direct(inbound):
+                    reply = "Only a mapped approver can decide a request in a direct message."
+                elif EXACT_APPROVAL_ID.fullmatch(request_id) is None:
+                    reply = "Use the full 64-character lowercase request ID from your private inbox."
+                else:
+                    try:
+                        self._decide(request_id, approved=verb == "approve", approver=principal.identity)
+                    except (OSError, ValueError):
+                        reply = "That request is not waiting for a decision. Nothing was changed."
+                    else:
+                        self._note("channel.approval-decided", principal.identity,
+                                   {"channel": inbound.channel, "request": request_id[:16], "approved": verb == "approve"})
+                        reply = "Recorded: " + ("approved" if verb == "approve" else "rejected") + " by you. The action is not yet executed."
+                self._send(adapter, inbound, reply)
+                return "approval-text-command"
             parsed = parse_assign(text) if self._assign is not None else None
             if parsed is not None:
                 agent, goal = parsed
