@@ -124,6 +124,13 @@ class DirectoryIdentityTests(unittest.TestCase):
         })
         self.assertIsNone(directory.identify("webchat", "signed-session-conversation", JORDAN))
 
+    def test_webchat_and_inbox_identity_collision_also_fails_closed(self):
+        directory = delivery.Directory({
+            JORDAN: {"channel": "inbox", "identity": JORDAN},
+            PRIYA: {"channel": "webchat", "address": "other-session", "identity": JORDAN},
+        })
+        self.assertIsNone(directory.identify("webchat", "signed-session-conversation", JORDAN))
+
     def test_identity_must_not_be_a_credential(self):
         with self.assertRaises(delivery.DeliveryError):
             delivery.Directory({JORDAN: {"channel": "slack", "address": "D1", "identity": "xoxb-api_key-123"}})
