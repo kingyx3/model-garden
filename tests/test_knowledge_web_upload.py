@@ -111,6 +111,27 @@ class SignedKnowledgeUploadTests(G.GatewayCase):
         self.assertNotEqual(first["uploadId"], second["uploadId"])
         self.assertNotEqual(self.gateway.tenant, "default")
 
+    def test_interrupted_audit_publication_is_never_accepted_on_retry(self):
+        report = json.loads(self.upload().body)
+        receipt = self.data / "knowledge-uploads" / self.gateway.tenant / ("u-" + report["uploadId"] + ".json")
+        metadata = json.loads(receipt.read_text())
+        metadata["status"] = "pending-audit"
+        receipt.write_text(json.dumps(metadata))
+        self.assertEqual(self.upload().status, 409)
+
+    def test_staged_content_needs_separate_workspace_import_and_owner_approval(self):
+        from test_knowledge_import import IMPORT
+        report = json.loads(self.upload().body)
+        staged = self.data / "knowledge-uploads" / self.gateway.tenant / ("u-" + report["uploadId"] + ".md")
+        workspace = self.root / "reviewed-workspace"
+        shutil.copytree(G.ROOT / "examples" / "workspace", workspace)
+        imported = IMPORT.import_knowledge(workspace, staged, name="reviewed-rules",
+                                           owner="alice@acme.example", agent="receptionist",
+                                           classification="internal")
+        self.assertEqual(imported["status"], "draft")
+        self.assertIn('status: draft', (workspace / "knowledge" / "reviewed-rules.yaml").read_text())
+        self.assertNotIn(b"reviewed-rules", self.gateway.desired_state_path.read_bytes())
+
     def test_opt_in_disabled_and_page_does_not_offer_upload(self):
         disabled = {**self.config, "web": {k: v for k, v in self.config["web"].items() if k != "knowledgeUploads"}}
         self.gateway = G.gateway.Gateway(
