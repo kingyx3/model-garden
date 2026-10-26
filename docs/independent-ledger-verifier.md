@@ -10,10 +10,10 @@
 
 ```bash
 python3 scripts/ledger-verifier-health.py \
-  --ledger /srv/verifier/acme-dev/audit.jsonl \
-  --state-dir /var/lib/model-garden-verifier/acme-dev \
-  --gcs-bucket CLIENT_RETENTION_LOCKED_BUCKET --gcs-prefix acme-dev \
-  --client-project acme-dev --confirm-client-project acme-dev \
+  --ledger /srv/verifier/acme-dev-mg/audit.jsonl \
+  --state-dir /var/lib/model-garden-verifier/acme-dev-mg \
+  --gcs-bucket CLIENT_RETENTION_LOCKED_BUCKET --gcs-prefix acme-dev-mg \
+  --client-project acme-dev-mg --confirm-client-project acme-dev-mg \
   --gcp-project client-project-123 --confirm-gcp-project client-project-123 \
   --verifier-identity auditor@client-project-123.iam.gserviceaccount.com \
   --runtime-identity runtime@client-project-123.iam.gserviceaccount.com
