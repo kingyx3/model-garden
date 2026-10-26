@@ -69,3 +69,14 @@ actual provider-native delivery with retry and recovery verification,
 cross-host deployment/restart freeze, approved timer activation, age-key
 governance, and an authorized live cloud restore drill with measured RPO/RTO.
 Issue #230 remains open. This implementation makes no production change.
+
+## Cloud notification outbox (v0.8.144)
+
+A healthy transition retains a private `pendingRecoverySlot` in the durable
+incident state until `client-backup-cloud-log.py` successfully submits its
+redacted Cloud Logging event and acknowledges that exact slot under the
+per-client incident lock. Plain incident audits do not acknowledge delivery.
+An unhealthy re-open invalidates a pending recovery. Missing/unsafe state or
+cross-client acknowledgement fails closed. This is an at-least-once cloud-log
+submission prerequisite; actual Cloud Monitoring incident/channel delivery
+and a real restore drill remain external acceptance gates.
