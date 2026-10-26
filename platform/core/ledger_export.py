@@ -170,8 +170,26 @@ class DirectorySink:
 Transport = Callable[[urllib.request.Request], Any]
 
 
+class _RejectRedirects(urllib.request.HTTPRedirectHandler):
+    """Do not forward audit payloads, bearer tokens or metadata headers to a redirect target."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+def _private_urlopen(request: urllib.request.Request, *, timeout: int) -> Any:
+    """Use verified TLS directly: no environment proxies or automatic redirects.
+
+    The default urllib opener inherits HTTP(S)_PROXY and follows 30x responses.
+    Both are inappropriate for an audit export containing sensitive chain records
+    and scoped credentials. Callers handle redirect HTTPError as a failed delivery.
+    """
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), _RejectRedirects())
+    return opener.open(request, timeout=timeout)
+
+
 def _urlopen(request: urllib.request.Request) -> Any:
-    with urllib.request.urlopen(request, timeout=15) as response:  # noqa: S310 - https endpoint chosen by the operator
+    with _private_urlopen(request, timeout=15) as response:
         return response.status
 
 
@@ -222,7 +240,7 @@ def _http(method: str, url: str, headers: Mapping[str, str], body: bytes | None)
         raise LedgerExportError("the GCS sink only talks to Google Cloud endpoints")
     request = urllib.request.Request(url, data=body, headers=dict(headers), method=method)
     try:
-        with urllib.request.urlopen(request, timeout=20) as response:  # noqa: S310 - host checked above
+        with _private_urlopen(request, timeout=20) as response:
             return response.status, response.read(16 * 1024 * 1024)
     except urllib.error.HTTPError as exc:
         return exc.code, b""

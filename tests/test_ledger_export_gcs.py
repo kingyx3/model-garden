@@ -7,6 +7,8 @@ import sys
 import tempfile
 import unittest
 import urllib.parse
+import urllib.request
+from unittest import mock
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 from test_ledger_export import cli, export, write_ledger  # noqa: E402 - shared fixtures
@@ -139,6 +141,78 @@ class GcsSinkTests(unittest.TestCase):
     def test_the_http_helper_only_talks_to_google_endpoints(self):
         with self.assertRaises(export.LedgerExportError):
             export._http("GET", "https://evil.example/x", {}, None)
+
+    def test_gcs_http_disables_proxies_and_redirects_for_bearer_and_metadata_requests(self):
+        """No environment proxy or HTTP redirect may receive an export or metadata credential."""
+        class Response:
+            status = 200
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_):
+                return False
+
+            def read(self, limit):
+                return b"{}"
+
+        seen = []
+
+        class Opener:
+            def open(self, request, timeout):
+                seen.append((request.full_url, timeout))
+                return Response()
+
+        def checked_opener(*handlers):
+            proxies = [h for h in handlers if isinstance(h, urllib.request.ProxyHandler)]
+            self.assertEqual(len(proxies), 1)
+            self.assertEqual(proxies[0].proxies, {})
+            redirects = [h for h in handlers if isinstance(h, urllib.request.HTTPRedirectHandler)]
+            self.assertEqual(len(redirects), 1)
+            request = urllib.request.Request("https://storage.googleapis.com/storage/v1/b/test/o",
+                                             headers={"Authorization": "Bearer private"})
+            self.assertIsNone(redirects[0].redirect_request(
+                request, None, 302, "Found", {},
+                "https://attacker.example/collect"))
+            return Opener()
+
+        with mock.patch.object(export.urllib.request, "build_opener", side_effect=checked_opener), \
+             mock.patch.object(export.urllib.request, "urlopen", side_effect=AssertionError("unsafe default opener")):
+            for url in ("https://storage.googleapis.com/storage/v1/b/test/o",
+                        "https://iamcredentials.googleapis.com/v1/projects/-/serviceAccounts/test:generateAccessToken",
+                        "http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token"):
+                self.assertEqual(export._http("GET", url, {"Authorization": "Bearer private"}, None), (200, b"{}"))
+        self.assertEqual(len(seen), 3)
+
+    def test_webhook_http_disables_proxies_and_redirects_for_authorization(self):
+        """The default SIEM delivery transport must not forward bearer tokens through redirects."""
+        class Response:
+            status = 204
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_):
+                return False
+
+        class Opener:
+            def open(self, request, timeout):
+                self_url = request.full_url
+                assert self_url == "https://siem.example/ingest"
+                return Response()
+
+        def checked_opener(*handlers):
+            self.assertEqual([h.proxies for h in handlers if isinstance(h, urllib.request.ProxyHandler)], [{}])
+            redirects = [h for h in handlers if isinstance(h, urllib.request.HTTPRedirectHandler)]
+            self.assertEqual(len(redirects), 1)
+            request = urllib.request.Request("https://siem.example/ingest", headers={"Authorization": "Bearer private"})
+            self.assertIsNone(redirects[0].redirect_request(
+                request, None, 307, "Temporary Redirect", {}, "https://attacker.example/collect"))
+            return Opener()
+
+        with mock.patch.object(export.urllib.request, "build_opener", side_effect=checked_opener), \
+             mock.patch.object(export.urllib.request, "urlopen", side_effect=AssertionError("unsafe default opener")):
+            self.assertEqual(export._urlopen(urllib.request.Request("https://siem.example/ingest", method="POST")), 204)
 
     def test_the_command_builds_a_bucket_sink(self):
         parser_args = cli.argparse.Namespace(gcs_bucket="acme-ledger-export", gcs_impersonate=SA, gcs_prefix="p")
