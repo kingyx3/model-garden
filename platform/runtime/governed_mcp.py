@@ -216,7 +216,13 @@ class GovernedToolRuntime:
         if isinstance(profile, dict):
             spec = profile.get("spec")
             candidates = spec.get("candidates") if isinstance(spec, dict) else None
-            if isinstance(candidates, list) and candidates and isinstance(candidates[0], dict):
+            # This sidecar does not observe Hermes' selected provider on a turn.
+            # For an ordered fallback chain, recording candidates[0] as the
+            # *actual* model would falsely attribute secondary-provider usage,
+            # costs and governed actions to the primary. Omit both fields until
+            # independently authenticated per-request provider receipts exist.
+            # A single-candidate profile retains its declared model context.
+            if isinstance(candidates, list) and len(candidates) == 1 and isinstance(candidates[0], dict):
                 provider = candidates[0].get("provider")
                 model = candidates[0].get("model")
                 if isinstance(provider, str) and provider:

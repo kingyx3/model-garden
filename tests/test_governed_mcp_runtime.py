@@ -24,6 +24,45 @@ runtime_module = load("governed_mcp_runtime", "platform/runtime/governed_mcp.py"
 
 
 class GovernedMcpRuntimeTests(unittest.TestCase):
+    def test_fallback_chain_never_claims_the_primary_model_as_actual(self):
+        """The governed sidecar cannot observe which Hermes fallback answered."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            desired = compiler.compile_workspace(ROOT / "examples/workspace", "receptionist")[0]
+            desired["source"]["client"] = "synthetic-client"
+            desired["modelProfile"]["spec"]["routing"] = {"strategy": "ordered-fallback"}
+            desired["modelProfile"]["spec"]["candidates"] = [
+                {"provider": "openai", "model": "primary"},
+                {"provider": "anthropic", "model": "secondary"},
+            ]
+            (root / "desired.json").write_text(json.dumps(desired), encoding="utf-8")
+            runtime = runtime_module.GovernedToolRuntime(
+                root / "desired.json", root / "audit.jsonl", root / "approvals", environ={},
+            )
+            context = runtime._governance_context()
+            self.assertEqual(context["runtime"], "hermes")
+            self.assertEqual(context["tenantId"], desired["source"]["client"])
+            self.assertNotIn("modelProvider", context)
+            self.assertNotIn("model", context)
+            _, caller_context, _ = runtime._caller()
+            self.assertNotIn("modelProvider", caller_context)
+            self.assertNotIn("model", caller_context)
+
+    def test_single_model_keeps_declared_model_context(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            desired = compiler.compile_workspace(ROOT / "examples/workspace", "receptionist")[0]
+            desired["modelProfile"]["spec"]["candidates"] = [
+                {"provider": "openai", "model": "only-candidate"},
+            ]
+            (root / "desired.json").write_text(json.dumps(desired), encoding="utf-8")
+            runtime = runtime_module.GovernedToolRuntime(
+                root / "desired.json", root / "audit.jsonl", root / "approvals", environ={},
+            )
+            context = runtime._governance_context()
+            self.assertEqual(context["modelProvider"], "openai")
+            self.assertEqual(context["model"], "only-candidate")
+
     def test_retired_vendor_tools_are_not_exposed_and_tier_zero_survives(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = pathlib.Path(tmp)
