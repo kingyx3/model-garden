@@ -97,6 +97,13 @@ class StoreTests(unittest.TestCase):
         self.assertTrue(all("already decided" in result for result in outcomes if isinstance(result, str)))
         self.assertEqual(json.loads((self.store / "decisions" / f"{REQUEST}.json").read_text()), accepted[0])
 
+    def test_decided_requests_disappear_from_pending_inbox_without_expiring(self):
+        write(self.store, "pending", REQUEST, {"requestedAt": T0, "tool": "crm.update"})
+        write(self.store, "pending", OTHER, {"requestedAt": T0, "tool": "mail.send"})
+        approval_module.decide(self.store, REQUEST, approved=True, approver="owner@x.example", now=T0 + 10)
+        self.assertEqual([item["requestId"] for item in approval_module.pending(self.store, now=T0 + 20)], [OTHER])
+        self.assertEqual([item["requestId"] for item in approval_module.pending(self.store, now=T0 + 20, include_expired=True)], [OTHER])
+
     def test_existing_symlink_decision_is_never_followed_or_replaced(self):
         write(self.store, "pending", REQUEST, {"requestedAt": T0})
         outside = self.store / "outside.txt"
