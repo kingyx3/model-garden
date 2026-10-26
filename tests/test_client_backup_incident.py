@@ -89,6 +89,44 @@ class BackupIncidentTests(unittest.TestCase):
                                                         tzinfo=UTC))["event"],
                          "backup.incident.unchanged")
 
+    def test_recovery_notification_is_durable_until_explicit_ack(self):
+        self.run_monitor()
+        later = "20261030T120000Z"
+        self.receipt(later)
+        at_later = dt.datetime(2026, 10, 30, 12, 6, tzinfo=UTC)
+        first = self.run_monitor(now=at_later)
+        self.assertEqual(first["event"], "backup.incident.recovered")
+        self.assertEqual(first["pendingRecoverySlot"], later)
+        # A monitor or gcloud crash after persisting recovery must not lose it.
+        second = self.run_monitor(now=at_later)
+        self.assertEqual(second["event"], "backup.incident.unchanged")
+        self.assertEqual(second["pendingRecoverySlot"], later)
+        INCIDENT.ack_recovery(state_dir=self.root / "state", project=self.project,
+                              slug="acme", environment="dev",
+                              gcp_project="sample-project-123", recipient=self.recipient,
+                              slot=later)
+        self.assertNotIn("pendingRecoverySlot", self.run_monitor(now=at_later))
+
+    def test_recovery_ack_rejects_cross_tenant_and_stale_or_reopened_state(self):
+        self.run_monitor()
+        later = "20261030T120000Z"
+        self.receipt(later)
+        at_later = dt.datetime(2026, 10, 30, 12, 6, tzinfo=UTC)
+        self.run_monitor(now=at_later)
+        ack = dict(state_dir=self.root / "state", project=self.project,
+                   slug="acme", environment="dev", gcp_project="sample-project-123",
+                   recipient=self.recipient, slot=later)
+        with self.assertRaises(INCIDENT.IncidentError):
+            INCIDENT.ack_recovery(**(ack | {"recipient": "age1" + "p" * 55}))
+        with self.assertRaises(INCIDENT.IncidentError):
+            INCIDENT.ack_recovery(**(ack | {"slot": self.stamp}))
+        self.assertEqual(self.run_monitor(now=at_later)["pendingRecoverySlot"], later)
+        receipt = self.root / "claims" / f"{self.project}-{later}.result.json"
+        receipt.chmod(0o644)
+        self.assertEqual(self.run_monitor(now=at_later)["event"], "backup.incident.opened")
+        with self.assertRaises(INCIDENT.IncidentError):
+            INCIDENT.ack_recovery(**ack)
+
     def test_latest_success_deterioration_reopens_but_old_miss_does_not(self):
         self.run_monitor()  # Earlier due slot is missed.
         later = "20261030T120000Z"
