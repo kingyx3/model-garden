@@ -540,26 +540,33 @@ class Worker:
         return contact_for
 
     def run_calls(self, now: int) -> dict[str, Any]:
-        """File finished phone calls from the voice container's transcript volume (mounted read-only); see the module docstring."""
+        """File completed voice calls only while the shared emergency-pause boundary admits work."""
         path = self.voice_transcripts
         if path is None or not path.is_file():
             return {"skipped": "no-voice-transcripts"}
-        sidecar = self._sidecar(CALL_FILING_IDENTITY)
-        try:
-            store = sidecar.crm_store()
-        except PermissionError:
-            return {"skipped": "no-crm-bound"}
-        filing = _module("filing")
-        records = filing.read_call_transcripts(path)
-        try:
-            records = _module("call_requests").attach_request_ids(records, _module("audit_query").read_ledger(self.audit_path))
-        except ValueError:  # an unreadable ledger only means the calls are filed without request ids
-            pass
-        summarizer = _module("call_summary").CallSummarizer(self.coworker, cache_path=self.data / "call-summaries.json")
-        totals = filing.file_call_transcripts(sidecar, store, records, recorder=self._conversation_recorder(), summarizer=summarizer)
-        ledgered = filing.ledger_transcript_failures(_module("govern"), self.audit_path, filing.read_transcript_failures(path), performed_by=CALL_FILING_IDENTITY)
-        totals["notFiled"] = totals.pop("failed")  # a "failed" key would read as the job itself failing
-        return {"records": len(records), **totals, "writeFailures": ledgered, "summaries": summarizer.counts}
+        # Transcript filing includes model summarization, local timeline writes and
+        # failure receipts, not just the sidecar's governed CRM Tool. The worker
+        # must claim the same cooperative host-local lease as material Tools so
+        # an acknowledged owner pause cannot race these unguarded operations.
+        with _module("pause").PauseStore(self.data).effect_guard():
+            if self._paused():
+                return {"skipped": "paused"}  # leave transcripts untouched for resume
+            sidecar = self._sidecar(CALL_FILING_IDENTITY)
+            try:
+                store = sidecar.crm_store()
+            except PermissionError:
+                return {"skipped": "no-crm-bound"}
+            filing = _module("filing")
+            records = filing.read_call_transcripts(path)
+            try:
+                records = _module("call_requests").attach_request_ids(records, _module("audit_query").read_ledger(self.audit_path))
+            except ValueError:  # an unreadable ledger only means the calls are filed without request ids
+                pass
+            summarizer = _module("call_summary").CallSummarizer(self.coworker, cache_path=self.data / "call-summaries.json")
+            totals = filing.file_call_transcripts(sidecar, store, records, recorder=self._conversation_recorder(), summarizer=summarizer)
+            ledgered = filing.ledger_transcript_failures(_module("govern"), self.audit_path, filing.read_transcript_failures(path), performed_by=CALL_FILING_IDENTITY)
+            totals["notFiled"] = totals.pop("failed")  # a "failed" key would read as the job itself failing
+            return {"records": len(records), **totals, "writeFailures": ledgered, "summaries": summarizer.counts}
 
     def _told_once(self, kind: str, reference: str) -> bool:
         """True the first time this ``kind`` and ``reference`` is seen and remembers it, so a condition that lasts is announced once."""
