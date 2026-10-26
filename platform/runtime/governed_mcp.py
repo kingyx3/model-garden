@@ -274,32 +274,36 @@ class GovernedToolRuntime:
         return CAPABILITIES.caller_view(self.capabilities(), member=self._caller()[2] == "member")
 
     def _take_approval(self, request_id: str) -> tuple[dict[str, Any] | None, pathlib.Path | None]:
-        """Atomically claim one decision without letting a crashed claim block fresh approval."""
-        path = _request_path(self.approval_root, "decisions", request_id)
-        if not path.is_file():
-            return None, None
-        claimed_dir = self.approval_root / "claimed"
-        claimed_dir.mkdir(parents=True, exist_ok=True)
-        claimed = claimed_dir / f"{request_id}.{uuid.uuid4().hex}.json"
-        try:
-            path.replace(claimed)
-        except FileNotFoundError:
-            return None, None
-        try:
-            decision = _load_json_object(claimed, "approval decision")
-            if decision.get("requestId") != request_id:
-                raise ValueError("approval decision requestId does not match its filename")
-            age = APPROVAL.age_seconds(claimed, decision, "decidedAt", now=self.clock())
-            if age >= self.approval_ttl:
-                # A decision given long ago must not authorise an identical request made now: drop it and ask again.
-                claimed.unlink(missing_ok=True)
-                GOVERN.record_operator_action(self.audit_path, "approval.expired", "runtime:governed-tools",
-                                              {"requestId": request_id, "kind": "decision", "ageSeconds": age})
+        """Claim one decision and clear pending under the same lock used by approvers."""
+        with APPROVAL.decision_lock(self.approval_root):
+            path = _request_path(self.approval_root, "decisions", request_id)
+            if not path.is_file():
                 return None, None
-            return decision, claimed
-        except Exception:
-            claimed.unlink(missing_ok=True)
-            raise
+            claimed_dir = self.approval_root / "claimed"
+            claimed_dir.mkdir(parents=True, exist_ok=True)
+            claimed = claimed_dir / f"{request_id}.{uuid.uuid4().hex}.json"
+            try:
+                path.replace(claimed)
+            except FileNotFoundError:
+                return None, None
+            try:
+                decision = _load_json_object(claimed, "approval decision")
+                if decision.get("requestId") != request_id:
+                    raise ValueError("approval decision requestId does not match its filename")
+                age = APPROVAL.age_seconds(claimed, decision, "decidedAt", now=self.clock())
+                if age >= self.approval_ttl:
+                    # A stale decision must never authorise a later identical request.
+                    claimed.unlink(missing_ok=True)
+                    GOVERN.record_operator_action(self.audit_path, "approval.expired", "runtime:governed-tools",
+                                                  {"requestId": request_id, "kind": "decision", "ageSeconds": age})
+                    return None, None
+                # Remove the request before another approver can publish a
+                # second decision; both operations share decision_lock().
+                self._clear_pending(request_id)
+                return decision, claimed
+            except Exception:
+                claimed.unlink(missing_ok=True)
+                raise
 
     @staticmethod
     def _discard_claim(path: pathlib.Path | None) -> None:
@@ -421,8 +425,6 @@ class GovernedToolRuntime:
                 GOVERN.append_audit_event(self.audit_path, event)
                 raise PermissionError(f"Tool {tool_name!r} unavailable: {family} connection {state}")
         approval, claim = self._take_approval(request["requestId"])
-        if approval is not None:
-            self._clear_pending(request["requestId"])
         try:
             result = GOVERN.execute_action(
                 self.desired_state,
