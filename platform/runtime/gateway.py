@@ -596,7 +596,7 @@ class Gateway:
                     "tenant": self.tenant, "ticketId": ticket_id, "status": result["status"],
                     "via": "chat", "commented": bool(note),
                 })
-            except OSError:
+            except (OSError, ValueError, UnicodeError):
                 # The store already committed: never falsely say no action occurred.
                 return "Ticket status changed but its audit receipt failed. Contact the operator before retrying."
         return f"Ticket {ticket_id} recorded as {result['status']} by you."
