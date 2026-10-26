@@ -1052,31 +1052,44 @@ class GovernedToolRuntime:
         missing = [name for name in (contract or {}).get("arguments", {}).get("required", []) if name not in arguments]
         if missing:
             raise ValueError(f"hand-off for {tool} is missing required argument(s): {', '.join(missing)}")
-        identity, governance_context, principal_access = self._caller()
-        decision = GOVERN.authorize_action(
-            self.desired_state, tool, arguments,
-            initiating_user=identity, governance_context=governance_context, principal_access=principal_access,
-            audit_path=self.audit_path,
-        )
-        family = CAPABILITIES.family_of(tool)
-        entry = next((item for item in self.capabilities().get("capabilities", []) if item.get("family") == family), None)
-        status = entry.get("status") if isinstance(entry, dict) else None
-        no_provider = status in ("unbound", "unavailable") and entry.get("fallback") == "human-handoff"
-        if decision["decision"] != "hand-off" and not no_provider:
-            raise ValueError(f"{tool} is available here; call the Tool directly instead of asking a person")
-        return GOVERN.create_handoff(
-            self.desired_state,
-            tool,
-            arguments,
-            self.handoff_root,
-            reason="unavailable" if status == "unavailable" else "unbound",
-            assignee=self.handoff_assignee,
-            initiating_user=identity,
-            governance_context=governance_context,
-            audit_path=self.audit_path,
-            ledger=self._ledger(provider=None, justification=justification),
-            principal_access=principal_access,
-        )
+        # Preparing a named-person action is itself material work. Share the owner-pause
+        # effect lease with ordinary Tools so a confirmed pause cannot race a new handoff.
+        with PAUSE.PauseStore(self.governance_root).effect_guard():
+            if self._paused_for(tool):
+                raise PermissionError(f"Tool {tool!r} is not allowed: this coworker is paused by its owner")
+            identity, governance_context, principal_access = self._caller()
+            task = self.task_resolver() if self.task_resolver is not None else None
+            if task is not None:
+                governance_context.update(task["governance"])
+                reason = task.get("halt") or (None if tool in task["authority"] else "outside-delegated-authority")
+                if reason is not None:
+                    raise PermissionError(f"Tool {tool!r} is not allowed for this delegated task ({reason})")
+            decision = GOVERN.authorize_action(
+                self.desired_state, tool, arguments,
+                initiating_user=identity, governance_context=governance_context, principal_access=principal_access,
+                audit_path=self.audit_path,
+            )
+            family = CAPABILITIES.family_of(tool)
+            entry = next((item for item in self.capabilities().get("capabilities", []) if item.get("family") == family), None)
+            status = entry.get("status") if isinstance(entry, dict) else None
+            no_provider = status in ("unbound", "unavailable") and entry.get("fallback") == "human-handoff"
+            if decision["decision"] != "hand-off" and not no_provider:
+                raise ValueError(f"{tool} is available here; call the Tool directly instead of asking a person")
+            if task is not None and task.get("charge") is not None:
+                task["charge"]()
+            return GOVERN.create_handoff(
+                self.desired_state,
+                tool,
+                arguments,
+                self.handoff_root,
+                reason="unavailable" if status == "unavailable" else "unbound",
+                assignee=self.handoff_assignee,
+                initiating_user=identity,
+                governance_context=governance_context,
+                audit_path=self.audit_path,
+                ledger=self._ledger(provider=None, justification=justification),
+                principal_access=principal_access,
+            )
 
     def handoff_status(self, handoff_id: str) -> dict[str, Any]:
         """The recorded state of one hand-off: the only basis for telling a caller what a person did."""
@@ -1345,9 +1358,45 @@ def build_server(runtime: GovernedToolRuntime) -> MCPServer:
         """Check whether a person has done or declined a hand-off; report only what this returns."""
         return runtime.handoff_status(handoff_id)
 
-    for offered in runtime.upstream_tools():
+    upstream = runtime.upstream_tools()
+    _register_unbound_handoff_tools(mcp, runtime, {item["tool"] for item in upstream})
+    for offered in upstream:
         _register_upstream_tool(mcp, runtime, offered)
     return mcp
+
+
+def _register_unbound_handoff_tools(mcp: MCPServer, runtime: GovernedToolRuntime, upstream: set[str]) -> None:
+    """Expose selected, unbound human-fallback writes as ordinary portable Tools.
+
+    A caller need not invent a separate handoff_request call. The wrapper *only*
+    prepares a named-person action through the same governed handoff path; it
+    cannot execute the missing provider. Every invocation rechecks current
+    readiness, policy, principal, task authority and owner pause.
+    """
+    entries = {entry.get("family"): entry for entry in runtime.capabilities().get("capabilities", [])}
+    for selected in runtime.desired_state.get("tools", []):
+        tool = selected.get("metadata", {}).get("name")
+        if not isinstance(tool, str) or tool in upstream:
+            continue
+        contract = CAPABILITIES.catalog_tool(tool)
+        if not contract or selected.get("spec", {}).get("risk") != "write" or contract.get("risk") != "write":
+            continue
+        entry = entries.get(CAPABILITIES.family_of(tool))
+        if not isinstance(entry, dict) or entry.get("status") not in ("unbound", "unavailable") or entry.get("fallback") != "human-handoff":
+            continue
+
+        def make_fallback(portable_tool: str):
+            def fallback(arguments: dict[str, Any], justification: str | None = None) -> dict[str, Any]:
+                return runtime.request_handoff(tool=portable_tool, arguments=arguments, justification=justification)
+
+            fallback.__doc__ = (
+                f"Prepare `{portable_tool}` for the named human because its provider is unavailable. "
+                "Nothing is executed or booked; report that it is NOT done until handoff_status confirms "
+                "the human outcome. Supply the exact portable Tool arguments, not a free-text instruction."
+            )
+            return fallback
+
+        mcp.tool(name=tool.replace(".", "_").replace("-", "_"))(make_fallback(tool))
 
 
 def _register_upstream_tool(mcp: MCPServer, runtime: GovernedToolRuntime, offered: Mapping[str, Any]) -> None:
