@@ -3,6 +3,8 @@ from __future__ import annotations
 import copy
 import importlib.util
 import json
+import os
+import stat
 import pathlib
 import shutil
 import tempfile
@@ -126,6 +128,56 @@ class ProvisionHermesProfileTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(ValueError, "no governed runtime implementation.*crm.write"):
             adapter.build_profile_files(desired_state)
+
+    def test_refuses_symlinked_profile_targets_without_touching_other_coworkers(self) -> None:
+        files = adapter.build_profile_files(self.receptionist_desired_state())
+        for relative in ("SOUL.md", "config.yaml", ".modelgarden/desired-state.json",
+                         "skills/model-garden/take-message/SKILL.md"):
+            with self.subTest(relative=relative), tempfile.TemporaryDirectory() as tmp:
+                profile = pathlib.Path(tmp) / "coworker-a"
+                victim = pathlib.Path(tmp) / "coworker-b-private"
+                victim.write_text("keep other coworker intact", encoding="utf-8")
+                target = profile / relative
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.symlink_to(victim)
+                with self.assertRaisesRegex(ValueError, "symlink"):
+                    adapter.apply_profile(profile, files)
+                self.assertEqual(victim.read_text(), "keep other coworker intact")
+
+    def test_refuses_symlinked_profile_directories_and_root(self) -> None:
+        files = adapter.build_profile_files(self.receptionist_desired_state())
+        for relative in (".", ".modelgarden", "skills/model-garden/take-message"):
+            with self.subTest(relative=relative), tempfile.TemporaryDirectory() as tmp:
+                outside = pathlib.Path(tmp) / "outside"
+                outside.mkdir()
+                profile = pathlib.Path(tmp) / "coworker-a"
+                target = profile if relative == "." else profile / relative
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.symlink_to(outside, target_is_directory=True)
+                with self.assertRaisesRegex(ValueError, "symlink"):
+                    adapter.apply_profile(profile, files)
+                self.assertEqual(list(outside.iterdir()), [])
+
+    def test_refuses_hardlinked_profile_targets(self) -> None:
+        files = adapter.build_profile_files(self.receptionist_desired_state())
+        with tempfile.TemporaryDirectory() as tmp:
+            profile = pathlib.Path(tmp) / "coworker-a"
+            profile.mkdir()
+            victim = pathlib.Path(tmp) / "coworker-b-private"
+            victim.write_text("keep other coworker intact", encoding="utf-8")
+            os.link(victim, profile / "SOUL.md")
+            with self.assertRaisesRegex(ValueError, "hardlink"):
+                adapter.apply_profile(profile, files)
+            self.assertEqual(victim.read_text(), "keep other coworker intact")
+
+    def test_materialized_profile_files_are_private(self) -> None:
+        files = adapter.build_profile_files(self.receptionist_desired_state())
+        with tempfile.TemporaryDirectory() as tmp:
+            profile = pathlib.Path(tmp) / "coworker-a"
+            adapter.apply_profile(profile, files)
+            for relative in files:
+                with self.subTest(relative=relative):
+                    self.assertEqual(stat.S_IMODE((profile / relative).stat().st_mode), 0o600)
 
     def test_apply_is_idempotent(self) -> None:
         files = adapter.build_profile_files(self.receptionist_desired_state())
