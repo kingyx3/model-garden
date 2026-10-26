@@ -48,7 +48,7 @@ run "approved_private_verifier_alert" {
     error_message = "Missing verifier heartbeat must be detected."
   }
   assert {
-    condition     = strcontains(google_logging_metric.ledger_verifier_unhealthy[0].filter, "jsonPayload.clientProject=\"acme-dev\"")
+    condition     = strcontains(google_logging_metric.ledger_verifier_unhealthy[0].filter, "jsonPayload.clientProject=\"acme-dev-mg\"")
     error_message = "Unhealthy signals must be scoped to the exact client environment."
   }
 }
