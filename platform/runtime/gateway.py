@@ -924,22 +924,22 @@ class Gateway:
             principal = self.directory.resolve(identity)
             if not principal.mapped or principal.access != "member":
                 return json_response(403, {"error": "mapped client member required"})
+            uploads = _module("uploads")
             try:
                 document = json.loads(body)
                 if not isinstance(document, dict) or set(document) != {"requestId", "filename", "content"}:
                     raise ValueError("invalid upload fields")
-                uploads = _module("uploads")
                 result = uploads.stage(
                     self.data / "knowledge-uploads", tenant=self.tenant, by=principal.identity,
                     filename=document["filename"], content=document["content"],
                     request_id=document["requestId"], now=int(self.clock()), audit=self.audit,
                 )
-            except (ValueError, TypeError, UnicodeError):
-                return json_response(400, {"error": "invalid draft upload"})
             except uploads.UploadConflict:
                 return json_response(409, {"error": "draft upload conflicts with existing state or quota"})
             except uploads.UploadUnavailable:
                 return json_response(503, {"error": "draft upload was not accepted"})
+            except (ValueError, TypeError, UnicodeError):
+                return json_response(400, {"error": "invalid draft upload"})
             except OSError:
                 return json_response(503, {"error": "draft upload storage unavailable"})
             return json_response(200 if result["alreadyStaged"] else 201, result)
