@@ -69,8 +69,14 @@ approved refusal/hand-off evidence. Keep #235 open until then.
 
 `scripts/capture-adversarial-model.py` sends the suite's synthetic hostile turns
 through the **existing private, authenticated Hermes OpenAI-compatible API**
-(`CoworkerClient`), preserving a separate session ID per case. It does not
-call a model provider directly or store model credentials. Use only an
+(`CoworkerClient`). For each turn, it explicitly includes all prior user
+**and assistant** messages in the OpenAI-compatible `messages` array and
+uses a distinct runtime session ID for that HTTP call. The captured
+`sessionId` groups one test case, **not** a claim that Hermes persisted
+conversation history. This prevents false multi-turn coverage when the pinned
+server ignores the optional session header, without silently mixing hidden
+server-side state between cases. It does not call a model provider directly or
+store model credentials. Use only an
 **approved non-production runtime with synthetic data**, a deployed Hermes
 profile and an independently monitored governed ledger. This capture supplies
 extra evaluation system instructions, so it is **not** proof of the unchanged
@@ -104,3 +110,20 @@ retained, independently reviewed `recorded-model-run` trace under the
 capture contract above. Real LiveKit/SIP, mailbox and retrieved-source
 injection runs remain distinct evidence gates; a synthetic Hermes API call
 cannot satisfy them.
+
+## Explicit multi-turn coverage boundary (v0.8.143)
+
+The credential-free regression suite now asserts that a second hostile turn
+actually carries the first user turn **and** the model's previous reply as
+distinct roles. The private client rejects injected system roles, invalid
+alternation, excessive turns and oversized histories before sending a request.
+A failed request has no safety verdict; a case never inherits another case's
+dialogue. Existing one-turn scheduler/mail/voice callers retain their API.
+
+This makes a future approved model run a meaningful explicit-dialogue
+adversarial exercise, but does **not** prove that Hermes supports persistent
+session memory, that the configured production Agent uses identical system
+instructions, that a retrieved snippet arrived through a real knowledge Tool,
+or that any live SIP/mail/Tool/ledger behavior occurred. Verify those separately
+with authorized model execution, authenticated complete receipts and channel
+evidence before checking #235 acceptance or claiming safety.
