@@ -5,8 +5,11 @@ import asyncio
 import importlib.util
 import json
 import pathlib
+import shutil
 import tempfile
 import unittest
+
+import yaml
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 
@@ -26,7 +29,13 @@ ARGS = {"start": "2026-10-27T10:00:00+08:00", "end": "2026-10-27T10:30:00+08:00"
 
 class AutomaticUnboundHandoffTests(unittest.TestCase):
     def runtime(self, root, *, available=False, task_resolver=None):
-        desired = compiler.compile_workspace(ROOT / "examples/workspace", "receptionist")[0]
+        workspace = root / "workspace"
+        shutil.copytree(ROOT / "examples/workspace", workspace)
+        agent_file = workspace / "agents/front-office/receptionist/agent.yaml"
+        agent = yaml.safe_load(agent_file.read_text(encoding="utf-8"))
+        agent["spec"]["disabledSkills"] = []  # explicitly selected, not a disabled Skill's dormant Tool
+        agent_file.write_text(yaml.safe_dump(agent), encoding="utf-8")
+        desired = compiler.compile_workspace(workspace, "receptionist")[0]
         desired["source"]["client"] = "fixture-tenant"
         (root / "desired.json").write_text(json.dumps(desired), encoding="utf-8")
         manifest = runtime_module.CAPABILITIES.build_manifest(desired, {"connectors": {}})
