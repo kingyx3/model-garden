@@ -738,6 +738,15 @@ class TicketChatTests(GatewayCase):
         if events_path.exists():
             self.assertFalse(any(json.loads(line)["action"] == "ticket.update" for line in events_path.read_text().splitlines()))
 
+    def test_corrupt_ledger_never_claims_a_committed_ticket_was_unchanged(self):
+        store, ticket_id = self.ticket()
+        (self.data / "audit.jsonl").write_text("invalid jsonl\\n")
+        session = self.sign_in()
+        reply = self.web_say(session, f"ticket {ticket_id} done", "e1")
+        self.assertIn("status changed but its audit receipt failed", reply)
+        self.assertEqual(store.get(ticket_id)["status"], "done")
+        self.assertNotIn("Nothing was changed", reply)
+
     def test_slack_signed_dm_member_can_triage_but_unmapped_cannot(self):
         store, ticket_id = self.ticket()
         self.slack_post("/channels/slack/events", slack_event(f"ticket {ticket_id} waiting", user="U0STRANGER", ts="1700000000.001001"))
