@@ -83,11 +83,30 @@ def _create(path: pathlib.Path, data: bytes) -> None:
         raise
 
 
+def _retention(days: int) -> int:
+    if type(days) is not int or not 1 <= days <= 3650:
+        raise UploadError("retention_days must be 1 to 3650")
+    return days
+
+
+def _expires(metadata: dict[str, Any], days: int) -> int:
+    created = metadata.get("createdAt")
+    stored = metadata.get("expiresAt")
+    if type(created) is not int or created < 0:
+        raise UploadConflict("upload creation time is invalid")
+    if stored is not None and (type(stored) is not int or stored < created):
+        raise UploadConflict("upload expiry is invalid")
+    limit = created + _retention(days) * 86400
+    return min(limit, stored) if stored is not None else limit
+
+
 def stage(
     root: pathlib.Path, *, tenant: str, by: str, filename: str, content: str,
     request_id: str, now: int, audit: Callable[[str, str, dict[str, Any]], None],
+    retention_days: int = 365,
 ) -> dict[str, Any]:
     """Persist one verified person's file, idempotently; require a ledger receipt."""
+    retention_days = _retention(retention_days)
     if not isinstance(tenant, str) or not _TENANT.fullmatch(tenant):
         raise UploadError("invalid tenant")
     if not isinstance(by, str) or not 1 <= len(by) <= 256 or any(c in by for c in "\r\n\x00"):
@@ -127,6 +146,8 @@ def stage(
         if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
             raise UploadConflict("upload lock must be a regular file")
         fcntl.flock(fd, fcntl.LOCK_EX)
+        if _regular(directory / f".deleted-{upload_id}.json"):
+            raise UploadConflict("deleted requestId cannot be reused")
         metadata_path = directory / f"u-{upload_id}.json"
         content_path = directory / f"u-{upload_id}{extension}"
         if _regular(metadata_path):
@@ -140,6 +161,8 @@ def stage(
                     existing.get("filename") != filename or existing.get("sha256") != digest or
                     existing.get("status") != "draft" or content_path.read_bytes() != raw):
                 raise UploadConflict("requestId was already used for different content")
+            if int(now) >= _expires(existing, retention_days):
+                raise UploadConflict("draft expired; operator reconciliation required")
             output["alreadyStaged"] = True
             return output
         if _regular(content_path):
@@ -148,7 +171,8 @@ def stage(
             raise UploadConflict("pending upload quota reached; review existing drafts")
         metadata = {"uploadId": upload_id, "tenant": tenant, "by": by, "filename": filename,
                     "status": "draft", "sha256": digest, "bytes": len(raw),
-                    "sectionCount": report["sectionCount"], "createdAt": int(now)}
+                    "sectionCount": report["sectionCount"], "createdAt": int(now),
+                    "expiresAt": int(now) + retention_days * 86400}
         # A crash before the ledger receipt must not leave an apparently
         # accepted draft. Pending-audit files fail closed on any retry.
         created: list[pathlib.Path] = []
