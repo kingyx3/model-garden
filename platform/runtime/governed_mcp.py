@@ -1384,6 +1384,11 @@ def _register_unbound_handoff_tools(mcp: MCPServer, runtime: GovernedToolRuntime
         entry = entries.get(CAPABILITIES.family_of(tool))
         if not isinstance(entry, dict) or entry.get("status") not in ("unbound", "unavailable") or entry.get("fallback") != "human-handoff":
             continue
+        name = tool.replace(".", "_").replace("-", "_")
+        # Tier 0 Tools are already real, governed local implementations even
+        # when no external provider is bound. Never shadow or duplicate them.
+        if mcp._tool_manager.get_tool(name) is not None:
+            continue
 
         def make_fallback(portable_tool: str):
             def fallback(arguments: dict[str, Any], justification: str | None = None) -> dict[str, Any]:
@@ -1396,7 +1401,7 @@ def _register_unbound_handoff_tools(mcp: MCPServer, runtime: GovernedToolRuntime
             )
             return fallback
 
-        mcp.tool(name=tool.replace(".", "_").replace("-", "_"))(make_fallback(tool))
+        mcp.tool(name=name)(make_fallback(tool))
 
 
 def _register_upstream_tool(mcp: MCPServer, runtime: GovernedToolRuntime, offered: Mapping[str, Any]) -> None:
