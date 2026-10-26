@@ -132,6 +132,10 @@ class SignedKnowledgeUploadTests(G.GatewayCase):
         self.assertIn('status: draft', (workspace / "knowledge" / "reviewed-rules.yaml").read_text())
         self.assertNotIn(b"reviewed-rules", self.gateway.desired_state_path.read_bytes())
 
+    def test_invalid_opt_in_value_is_rejected(self):
+        with self.assertRaises(G.gateway.GatewayConfigError):
+            G.gateway.load_config({**self.config, "web": {**self.config["web"], "knowledgeUploads": "yes"}})
+
     def test_opt_in_disabled_and_page_does_not_offer_upload(self):
         disabled = {**self.config, "web": {k: v for k, v in self.config["web"].items() if k != "knowledgeUploads"}}
         self.gateway = G.gateway.Gateway(
