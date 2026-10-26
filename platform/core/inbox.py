@@ -340,7 +340,8 @@ def format_chat(inbox: dict[str, Any]) -> str:
                          + ". Reply `resume coworker` to restart me.")
         elif item["kind"] == "approval":
             lines.append(f"- Approval: {item['tool'] or 'an action'}, waiting {_age(item['waitingSeconds'])} (ref {item['id'][:12]}). "
-                         "Use the Approve or Reject buttons on its approval message.")
+                         "Use the Approve or Reject buttons on its approval message, or review the exact action in the private operator view "
+                         f"then reply `approve {item['id']}` or `reject {item['id']}`. A decision is not execution.")
         elif item["kind"] == "handoff":
             ref = item["id"][:12]
             state = "OVERDUE" if item["overdue"] else "open"
