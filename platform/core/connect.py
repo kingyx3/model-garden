@@ -301,7 +301,8 @@ def replace(
     try:
         # The writer must be atomic: raising or returning False means it did not
         # persist the binding. A None return is allowed for simple file writers.
-        if write_binding(result["binding"]) is False:
+        receipt = write_binding(result["binding"])
+        if receipt is not None and receipt is not True:
             raise OSError("binding writer did not confirm persistence")
     except Exception as exc:  # noqa: BLE001 - do not retire the previous working grant on a failed write
         try:
