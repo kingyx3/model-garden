@@ -196,6 +196,18 @@ class RuntimeTests(RuntimeCase):
     def events(self, action):
         return [event for event in self.audit() if event.get("action") == action]
 
+    def test_claiming_a_decision_clears_pending_before_any_second_approver_can_act(self):
+        runtime = self.clocked()
+        request_id = self.ask(runtime)
+        first = self.decide(request_id, approved=False)
+        claimed, receipt = runtime._take_approval(request_id)
+        self.assertEqual(claimed, first)
+        self.assertIsNotNone(receipt)
+        self.assertFalse((self.root / "approvals" / "pending" / f"{request_id}.json").exists())
+        with self.assertRaisesRegex(ValueError, "no pending"):
+            self.decide(request_id, approved=True)
+        runtime._discard_claim(receipt)
+
     def test_a_pending_request_records_when_it_was_asked(self):
         runtime = self.clocked()
         request_id = self.ask(runtime)
