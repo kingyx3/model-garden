@@ -46,6 +46,10 @@ MAX_ATTACHMENTS = 3
 INBOX_COMMAND = re.compile(r"^/?inbox$", re.IGNORECASE)
 APPROVAL_TEXT_COMMAND = re.compile(r"^/?(approve|reject)\s+(\S+)\s*$", re.IGNORECASE)
 EXACT_APPROVAL_ID = re.compile(r"^[0-9a-f]{64}$")
+TICKETS_COMMAND = re.compile(r"^/?tickets$", re.IGNORECASE)
+TICKET_UPDATE_COMMAND = re.compile(r"^/?ticket\s+(\S+)\s+(\S+)(?:\s+(.+))?\s*$", re.IGNORECASE | re.DOTALL)
+EXACT_TICKET_ID = re.compile(r"^t-[0-9a-f]{12}$")
+TICKET_STATUSES = frozenset(("open", "in-progress", "waiting", "done", "cancelled"))
 PAUSE_COMMAND = re.compile(r"^/?(pause|resume)\s+(?:the\s+)?coworker\b[\s:.-]*(.*)$", re.IGNORECASE | re.DOTALL)
 ASSIGN_COMMAND = re.compile(r"^/?(?:assign|delegate)\s+(?:to\s+)?([a-z0-9][a-z0-9-]{0,62})\s*(?::|\s-\s)\s*(.+)$", re.IGNORECASE | re.DOTALL)
 Audit = Callable[[str, str, dict[str, Any]], Any]
@@ -102,12 +106,14 @@ class ChannelIngress:
         audit: Audit | None = None,
         deliverables: Callable[[Any, Any, str], Any] | None = None,
         inbox: Callable[[Any, Any], str] | None = None,
+        tickets: Callable[[str, str, str | None, str | None], str] | None = None,
         assign: Callable[[str, str, str], str] | None = None,
         observed: Callable[[Any], None] | None = None,
         pause: Callable[[str, str, str], str] | None = None,
     ) -> None:
         self._adapters = dict(adapters)
         self._inbox = inbox
+        self._tickets = tickets  # signed, direct staff-only Tier 0 list and status transition; gateway enforces pause and ledgers
         self._pause = pause  # (admin, "pause" | "resume", reason) -> reply; only a mapped admin in a direct conversation reaches it
         self._assign = assign  # (person, agent, goal) -> reply; raises ValueError with a safe message when refused
         self._observed = observed  # told once about each fresh conversational message (not a command or a redelivery), e.g. to raise an event
@@ -245,6 +251,32 @@ class ChannelIngress:
                         reply = "Recorded: " + ("approved" if verb == "approve" else "rejected") + " by you. The action is not yet executed."
                 self._send(adapter, inbound, reply)
                 return "approval-text-command"
+            # Human ticket triage is a distinct, authenticated Tier 0 operation, not an
+            # instruction to the model or an ungoverned Tool invocation.
+            list_tickets = TICKETS_COMMAND.fullmatch(text.strip()) if self._tickets is not None else None
+            ticket_update = TICKET_UPDATE_COMMAND.fullmatch(text.strip()) if self._tickets is not None else None
+            if list_tickets is not None or ticket_update is not None:
+                if not principal.mapped or principal.access != "member" or not self._is_direct(inbound):
+                    reply = "Only a mapped team member can manage tickets in a direct message."
+                elif ticket_update is None:
+                    try:
+                        reply = self._tickets(principal.identity, "list", None, None)
+                        self._note("channel.tickets-viewed", principal.identity, {"channel": inbound.channel})
+                    except (OSError, ValueError):
+                        reply = "Tickets are unavailable. Nothing was changed."
+                else:
+                    ticket_id, status, note = ticket_update.groups()
+                    if EXACT_TICKET_ID.fullmatch(ticket_id) is None:
+                        reply = "Use the full ticket reference: t- followed by 12 lowercase hex characters. Nothing was changed."
+                    elif status not in TICKET_STATUSES:
+                        reply = "Use one of: open, in-progress, waiting, done, cancelled. Nothing was changed."
+                    else:
+                        try:
+                            reply = self._tickets(principal.identity, status, ticket_id, note)
+                        except (OSError, ValueError):
+                            reply = "That ticket is not available for this action. Nothing was changed."
+                self._send(adapter, inbound, reply)
+                return "ticket-command"
             parsed = parse_assign(text) if self._assign is not None else None
             if parsed is not None:
                 agent, goal = parsed

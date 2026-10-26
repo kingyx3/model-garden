@@ -667,5 +667,104 @@ class InboxCommandTests(GatewayCase):
         self.assertEqual(self.coworker.calls, [])
 
 
+class TicketChatTests(GatewayCase):
+    """A verified human can triage Tier 0 tickets without provider credentials or Tool impersonation."""
+
+    config = {
+        **GatewayCase.config,
+        "directory": {**GatewayCase.config["directory"],
+                      "slack": {**GatewayCase.config["directory"]["slack"],
+                                "T01/U0BOB00001": {"identity": "bob@acme.example"}}},
+    }
+
+    def ticket(self, *, title="Private boiler quote", description="Customer address 12 Acacia Road", tenant=None):
+        module = _load("gateway_ticket_chat_store", "platform/core/tickets.py")
+        store = module.TicketStore(self.data / "tickets", tenant=tenant or self.gateway.tenant)
+        created = store.create(project="support", title=title, description=description,
+                               requested_by="unmapped:webchat:customer", now=NOW - 100)
+        return store, created["ticketId"]
+
+    def web_say(self, session, words, number):
+        headers = {"Authorization": "Bearer " + session["session"]}
+        conversation = session["prefix"] + "-ticket"
+        payload = json.dumps({"conversationId": conversation, "messageId": number,
+                              "text": words, "sender": "someone-else@acme.example"}).encode()
+        response = self.gateway.handle("POST", "/channels/web/messages", headers, payload)
+        self.assertEqual(response.status, 200)
+        events = json.loads(self.gateway.handle(
+            "GET", f"/channels/web/events?conversationId={conversation}&after=0", headers, b"").body)["events"]
+        return events[-1]["text"]
+
+    def test_signed_staff_can_list_triage_and_finish_a_ticket_with_redacted_ledger(self):
+        store, ticket_id = self.ticket()
+        session = self.sign_in()
+        listing = self.web_say(session, "tickets", "t1")
+        self.assertIn(ticket_id, listing)
+        self.assertIn("support", listing)
+        self.assertNotIn("Private boiler", listing)
+        self.assertNotIn("Acacia", listing)
+        self.assertEqual(self.coworker.calls, [])
+        self.assertIn("in-progress", self.web_say(session, f"ticket {ticket_id} in-progress Calling customer at 3", "t2"))
+        self.assertEqual(store.get(ticket_id)["comments"][0]["by"], "alice@acme.example")
+        self.assertEqual(store.get(ticket_id)["comments"][0]["text"], "Calling customer at 3")
+        self.assertIn("done", self.web_say(session, f"ticket {ticket_id} done", "t3"))
+        self.assertEqual(store.get(ticket_id)["status"], "done")
+        self.assertNotIn(ticket_id, self.web_say(session, "tickets", "t4"))
+        self.assertIn("Nothing was changed", self.web_say(session, f"ticket {ticket_id} waiting", "t5"))
+        events = [json.loads(line) for line in (self.data / "audit.jsonl").read_text().splitlines()]
+        updates = [item for item in events if item["action"] == "ticket.update"]
+        self.assertEqual([(item["performedBy"], item["details"]["status"]) for item in updates],
+                         [("alice@acme.example", "in-progress"), ("alice@acme.example", "done")])
+        self.assertTrue(all(item["details"]["tenant"] == self.gateway.tenant for item in updates))
+        raw = json.dumps(events)
+        self.assertNotIn("Acacia", raw)
+        self.assertNotIn("Calling customer", raw)
+
+    def test_unmapped_and_cross_tenant_requests_fail_without_disclosure(self):
+        store, ticket_id = self.ticket()
+        _, other_id = self.ticket(title="Other tenant secret", tenant="another-client")
+        bob = self.sign_in("bob@acme.example")  # signed web user, but not mapped in the staff directory
+        for command in ("tickets", f"ticket {ticket_id} done"):
+            self.assertIn("mapped team member", self.web_say(bob, command, "b" + str(len(command))))
+        alice = self.sign_in()
+        self.assertIn("Nothing was changed", self.web_say(alice, f"ticket {other_id} done", "a1"))
+        self.assertIn("full ticket reference", self.web_say(alice, "ticket t-123 done", "a2"))
+        self.assertIn("Nothing was changed", self.web_say(alice, f"ticket {ticket_id} reopened", "a3"))
+        self.assertEqual(store.get(ticket_id)["status"], "open")
+        self.assertNotIn("Other tenant secret", self.web_say(alice, "tickets", "a4"))
+        self.assertEqual(self.coworker.calls, [])
+
+    def test_pause_blocks_new_ticket_effects_but_allows_read_only_inbox(self):
+        store, ticket_id = self.ticket()
+        gateway._module("pause").PauseStore(self.data).pause("owner@acme.example", "incident", NOW)
+        session = self.sign_in()
+        self.assertIn(ticket_id, self.web_say(session, "tickets", "p1"))
+        self.assertIn("paused", self.web_say(session, f"ticket {ticket_id} done", "p2").lower())
+        self.assertEqual(store.get(ticket_id)["status"], "open")
+        events_path = self.data / "audit.jsonl"
+        if events_path.exists():
+            self.assertFalse(any(json.loads(line)["action"] == "ticket.update" for line in events_path.read_text().splitlines()))
+
+    def test_corrupt_ledger_never_claims_a_committed_ticket_was_unchanged(self):
+        store, ticket_id = self.ticket()
+        (self.data / "audit.jsonl").write_text("invalid jsonl\\n")
+        session = self.sign_in()
+        reply = self.web_say(session, f"ticket {ticket_id} done", "e1")
+        self.assertIn("status changed but its audit receipt failed", reply)
+        self.assertEqual(store.get(ticket_id)["status"], "done")
+        self.assertNotIn("Nothing was changed", reply)
+
+    def test_slack_signed_dm_member_can_triage_but_unmapped_cannot(self):
+        store, ticket_id = self.ticket()
+        self.slack_post("/channels/slack/events", slack_event(f"ticket {ticket_id} waiting", user="U0STRANGER", ts="1700000000.001001"))
+        self.assertIn("mapped team member", self.posts()[-1]["text"])
+        self.assertEqual(store.get(ticket_id)["status"], "open")
+        self.slack_post("/channels/slack/events", slack_event(f"ticket {ticket_id} waiting", user="U0BOB00001", ts="1700000000.001002"))
+        self.assertIn("waiting", self.posts()[-1]["text"])
+        self.assertEqual(store.get(ticket_id)["status"], "waiting")
+        self.assertEqual(store.get(ticket_id)["comments"][-1]["by"], "bob@acme.example")
+        self.assertEqual(self.coworker.calls, [])
+
+
 if __name__ == "__main__":
     unittest.main()

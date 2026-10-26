@@ -95,7 +95,7 @@ def _module(key: str):
         "handoff_reply": "platform/core/handoff_reply.py", "schedules": "platform/core/schedules.py",
         "artifacts": "platform/core/artifacts.py", "coworker": "platform/runtime/coworker_client.py",
         "enrollment": "platform/core/secret_enrollment.py", "vault": "platform/core/sealed_vault.py",
-        "receipts": "platform/channels/receipts.py", "pause": "platform/core/pause.py", "heartbeat": "platform/core/heartbeat.py", "team_runtime": "platform/runtime/team_runtime.py", "inbox": "platform/core/inbox.py", "event_outbox": "platform/core/event_outbox.py", "oauth": "platform/core/oauth_consent.py", "readiness": "platform/core/grant_readiness.py", "studio": "platform/runtime/studio.py",
+        "receipts": "platform/channels/receipts.py", "pause": "platform/core/pause.py", "tickets": "platform/core/tickets.py", "heartbeat": "platform/core/heartbeat.py", "team_runtime": "platform/runtime/team_runtime.py", "inbox": "platform/core/inbox.py", "event_outbox": "platform/core/event_outbox.py", "oauth": "platform/core/oauth_consent.py", "readiness": "platform/core/grant_readiness.py", "studio": "platform/runtime/studio.py",
     }
     # Shared names, so an error class raised in one module is the class another module catches.
     shared = {"text": "model_garden_text_channel", "schedules": "model_garden_schedule_commands_store"}
@@ -427,7 +427,7 @@ class Gateway:
         self.ingress = _module("ingress").ChannelIngress(
             self.adapters, self.directory, respond=self._respond, decide=self._decide, handoff_replies=self._handoff_replies(),
             schedules=self._schedule_store(), agent=self.config["agent"], executor=executor, audit=self.audit,
-            deliverables=self._deliverables, inbox=self._inbox_text, observed=self._chat_event, pause=self._pause_command,
+            deliverables=self._deliverables, inbox=self._inbox_text, tickets=self._ticket_command, observed=self._chat_event, pause=self._pause_command,
             assign=self._assign_task if self.config["assign"] else None,
         )
 
@@ -562,6 +562,44 @@ class Gateway:
             return "Paused. I will not act on anything that changes something until an administrator says `resume coworker`."
         self.audit("coworker.resume", admin, {"via": "chat", "at": now})
         return "Resumed. I am working normally again."
+
+    def _ticket_command(self, person: str, action: str, ticket_id: str | None, note: str | None) -> str:
+        """A mapped staff member's signed direct-chat Tier 0 ticket action.
+
+        Unlike a coworker Tool call this is the human's own recorded work.
+        The ingress validates channel identity, DM, full reference and status;
+        the store enforces the tenant, lifecycle and private history. A pause
+        serializes against the owner lock before admitting any new effect.
+        """
+        store = _module("tickets").TicketStore(self.data / "tickets", tenant=self.tenant)
+        if action == "list":
+            items = store.open_items()
+            if not items:
+                return "No open tickets."
+            lines = [f"{len(items)} open ticket(s). References and status only; details stay on the private client host."]
+            for item in items[:20]:
+                lines.append(f"- {item['ticketId']}  {item['project']}  {item['status']}")
+            if len(items) > 20:
+                lines.append(f"{len(items) - 20} more; use the private operator ticket list.")
+            lines.append("Reply `ticket <full-id> <in-progress|waiting|done|cancelled> [note]` to update one.")
+            return "\n".join(lines)
+        if ticket_id is None:
+            raise ValueError("a full ticket reference is required")
+        pause = _module("pause").PauseStore(self.data)
+        with pause.effect_guard():
+            if pause.is_paused():
+                return "Ticket update refused while the coworker is paused. Nothing was changed."
+            result = store.update(ticket_id=ticket_id, status=action, comment=note, requested_by=person,
+                                  principal_access="member", now=int(self.clock()))
+            try:
+                self.audit("ticket.update", person, {
+                    "tenant": self.tenant, "ticketId": ticket_id, "status": result["status"],
+                    "via": "chat", "commented": bool(note),
+                })
+            except (OSError, ValueError, UnicodeError):
+                # The store already committed: never falsely say no action occurred.
+                return "Ticket status changed but its audit receipt failed. Contact the operator before retrying."
+        return f"Ticket {ticket_id} recorded as {result['status']} by you."
 
     def _inbox_text(self, inbound: Any, principal: Any) -> str:
         """What is waiting, for the mapped person asking: everything for an approver or admin, otherwise their own hand-offs."""
