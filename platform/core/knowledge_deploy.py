@@ -34,7 +34,7 @@ from typing import Any
 APPLIED_FILE = "knowledge-applied.json"
 SCHEMA_VERSION = 1
 ACTION = "knowledge.change"
-FIELDS = ("type", "classification", "owner", "status", "version", "effectiveDate", "reviewBy", "audiences", "sha256")
+FIELDS = ("type", "classification", "owner", "status", "version", "effectiveDate", "reviewBy", "audiences", "skillAudiences", "sha256")
 Record = Callable[[dict[str, Any] | None, dict[str, Any], str], Mapping[str, Any] | None]
 
 
@@ -56,6 +56,7 @@ def fingerprint(desired_state: Mapping[str, Any]) -> dict[str, dict[str, Any]]:
                 status=spec.get("status", "draft"), version=spec.get("version"), effectiveDate=spec.get("effectiveDate"),
                 reviewBy=spec.get("reviewBy"),
                 audiences=sorted(spec["audiences"]) if isinstance(spec.get("audiences"), list) else None,
+                skillAudiences=sorted(spec["skillAudiences"]) if isinstance(spec.get("skillAudiences"), list) else None,
             )
             digest = (content.get(name) or {}).get("sha256") if isinstance(content.get(name), Mapping) else None
             if isinstance(digest, str):
@@ -65,11 +66,20 @@ def fingerprint(desired_state: Mapping[str, Any]) -> dict[str, dict[str, Any]]:
 
 
 def _widened(before: Mapping[str, Any] | None, after: Mapping[str, Any]) -> bool:
-    """Whether more coworkers may answer from the source than before (no audience list means every selecting coworker)."""
-    old, new = (before or {}).get("audiences"), after.get("audiences")
-    if new is None:
-        return old is not None or before is None
-    return old is not None and bool(set(new) - set(old))
+    """Whether the Agent or Skill audience expands (absent means unrestricted)."""
+    for key in ("audiences", "skillAudiences"):
+        old, new = (before or {}).get(key), after.get(key)
+        if new is None:
+            if old is not None or before is None:
+                return True
+        elif old is not None and set(new) - set(old):
+            return True
+    return False
+
+
+def _access_level(entry: Mapping[str, Any]) -> int:
+    """Tier 0 visibility: restricted is unavailable, confidential is team-only, internal/public may answer customers."""
+    return {"restricted": 0, "confidential": 1, "internal": 2, "public": 2}.get(entry.get("classification", "internal"), 0)
 
 
 def diff(before: Mapping[str, Mapping[str, Any]] | None, after: Mapping[str, Mapping[str, Any]]) -> dict[str, Any]:
@@ -93,6 +103,11 @@ def diff(before: Mapping[str, Mapping[str, Any]] | None, after: Mapping[str, Map
         if after[name].get("status") == "approved" and _widened(old.get(name), after[name])
         and name not in newly_approved
     )
+    access_widened = sorted(
+        name for name in changed
+        if after[name].get("status") == "approved" and old[name].get("status") == "approved"
+        and _access_level(after[name]) > _access_level(old[name])
+    )
     retired = sorted(name for name in changed if after[name].get("status") == "retired" and old[name].get("status") != "retired")
     revisions = {
         name: {"from": {k: old[name].get(k) for k in ("version", "sha256") if old[name].get(k)},
@@ -105,7 +120,7 @@ def diff(before: Mapping[str, Mapping[str, Any]] | None, after: Mapping[str, Map
                 side["sha256"] = side["sha256"][:16]
     return {
         "added": added, "removed": removed, "changed": changed, "newlyApproved": newly_approved,
-        "approvedContentChanged": content_changed, "audienceWidened": widened, "retired": retired,
+        "approvedContentChanged": content_changed, "audienceWidened": widened, "accessWidened": access_widened, "retired": retired,
         "revisions": revisions, "sources": len(after),
     }
 
@@ -158,7 +173,7 @@ def record_deployment(sources: Mapping[str, Any], root: pathlib.Path, *, changed
     details = (event or {}).get("details") or {}
     return {
         "changed": event is not None, "baseline": baseline, "changedBy": changed_by,
-        "critical": sorted({*details.get("newlyApproved", []), *details.get("approvedContentChanged", []), *details.get("audienceWidened", [])}),
+        "critical": sorted({*details.get("newlyApproved", []), *details.get("approvedContentChanged", []), *details.get("audienceWidened", []), *details.get("accessWidened", [])}),
     }
 
 
