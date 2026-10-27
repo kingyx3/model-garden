@@ -260,12 +260,14 @@ class NoticeQueue:
                 state["pending"][key] = {"key": key, "kind": kind, "to": to, "text": text[:600], "reference": reference[:40]}
         return key
 
-    def source(self):
+    def source(self, *, kind_filter: Callable[[str], bool] | None = None):
         with self._locked() as state:
             # A local inbox is not an external send. Keep posted notices until
             # an explicit host-operator acknowledgement; do not post them again
             # on every clock tick or silently remove them on a no-op sender.
-            notices = [dict(notice) for notice in state["pending"].values() if not notice.get("inboxPosted")]
+            notices = [dict(notice) for notice in state["pending"].values()
+                       if not notice.get("inboxPosted") and
+                       (kind_filter is None or kind_filter(str(notice.get("kind"))))]
 
         def mark(item: Mapping[str, Any], via: str) -> None:
             with self._locked() as state:
@@ -1000,7 +1002,10 @@ class Worker:
         delivery, capabilities = _module("delivery"), _module("capabilities")
         directory = delivery.Directory(self.config["people"])
         escalate_to = self.config["escalateTo"]
-        sources = [delivery.handoff_source(self.data / "handoffs", escalate_to=escalate_to, now=now), self.queue.source()]
+        # Safety/owner action notices must continue during pause; the optional
+        # weekly digest is not a safety alert and must be separately fenced.
+        sources = [delivery.handoff_source(self.data / "handoffs", escalate_to=escalate_to, now=now),
+                   self.queue.source(kind_filter=lambda kind: kind != "digest")]
         grants: list[dict[str, Any]] = []
         grant_root = self.data / "provider-grants"
         if (grant_root / f"{self.tenant}.grants.json").is_file():
@@ -1011,7 +1016,18 @@ class Worker:
         ))
         if self.config["export"] is not None:
             sources.append(self._export_alert_source(now))
-        results = delivery.deliver(sources, directory, {"inbox": inbox_sender, **self.senders}, audit=self.audit)
+        senders = {"inbox": inbox_sender, **self.senders}
+        results = delivery.deliver(sources, directory, senders, audit=self.audit)
+        # An already queued digest must not escape the pause via the normal
+        # safety-notice drain. Hold the lease through the actual send/mark so
+        # owner pause cannot be acknowledged while a digest is in flight.
+        if not self._paused():
+            with _module("pause").PauseStore(self.data).effect_guard():
+                if not self._paused():
+                    results.extend(delivery.deliver(
+                        [self.queue.source(kind_filter=lambda kind: kind == "digest")],
+                        directory, senders, audit=self.audit,
+                    ))
         counts: dict[str, int] = {}
         for result in results:
             counts[result["status"]] = counts.get(result["status"], 0) + 1
