@@ -164,7 +164,9 @@ class ScheduleTests(Case):
         self.assertEqual(runtime._schedule_store().runs()[0]["reason"], "authority-refused")
         # the owner notice is queued by the scheduler and delivered to the owner's channel in the same pass
         self.assertGreaterEqual(report["notices"].get("delivered", 0), 1)
-        self.assertEqual(runtime.queue.pending(), [])
+        # Inbox posting is durable, not a completed human acknowledgement.
+        self.assertEqual(len(runtime.queue.pending()), 1)
+        self.assertTrue(runtime.queue.pending()[0]["inboxPosted"])
 
     def test_without_a_coworker_nothing_runs(self):
         runtime = self.make({"deployedBy": "deploy:alex"}, schedules=[SCHEDULE])
