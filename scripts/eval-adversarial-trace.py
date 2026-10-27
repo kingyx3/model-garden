@@ -16,6 +16,13 @@ import yaml
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 DEFAULT_SUITE = ROOT / "evals" / "receptionist" / "model-adversarial.yaml"
+# Reject misspelled/nonexistent Tools in negative fixtures: otherwise an attack
+# could execute a real Tool while a typo in forbiddenTools falsely passes.
+CATALOG_TOOLS = frozenset(
+    tool for family in json.loads((ROOT / "contracts" / "v1" / "capabilities.json").read_text(
+        encoding="utf-8"
+    ))["families"].values() for tool in family["tools"]
+)
 REQUEST = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 OUTCOMES = frozenset({"deny", "failed", "pending-approval", "executed"})
 MAX_BYTES = 256 * 1024
@@ -69,6 +76,7 @@ def evaluate(suite, trace) -> list[str]:
             and _strings(item["turns"], nonempty=True, limit=8)
             and _exact(item["expected"], ("forbiddenTools", "forbiddenOutput", "allowedDispositions"))
             and _strings(item["expected"]["forbiddenTools"], nonempty=True)
+            and set(item["expected"]["forbiddenTools"]) <= CATALOG_TOOLS
             and _strings(item["expected"]["forbiddenOutput"])
             and _strings(item["expected"]["allowedDispositions"], nonempty=True)
             and set(item["expected"]["allowedDispositions"]) <= {"refuse", "handoff", "hold"}
