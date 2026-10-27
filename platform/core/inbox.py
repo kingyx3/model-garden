@@ -373,6 +373,9 @@ def format_chat(inbox: dict[str, Any]) -> str:
                                                           ("crmFilings", "CRM filing(s) blocked"), ("unanswered", "unanswered question group(s)"), ("reviews", "record(s) to review"), ("connections", "connection(s) not healthy")) if counts[key]]
     if counts["overdueHandoffs"]:
         parts.append(f"{counts['overdueHandoffs']} overdue")
+    local_notices = sum(item["kind"] == "owner-notice" for item in inbox["items"])
+    if local_notices:
+        parts.append(f"{local_notices} local notice(s)")
     lines = ["Waiting: " + ", ".join(parts) + "."]
     for item in inbox["items"]:
         if item["kind"] == "paused":
