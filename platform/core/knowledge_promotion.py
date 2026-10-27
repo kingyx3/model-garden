@@ -7,7 +7,7 @@ and JSON records, writes nothing itself and holds no secret. The promotion recor
 repository, where it is reviewed like any other change; ``scripts/knowledge-promotion.py`` is the command a CI job or an operator runs.
 
 - **What is critical.** The same changes ``knowledge_deploy.diff`` names: a source becoming approved, an approved source whose text or
-  version changed, and an approved source whose audience widened. A draft being edited, a retirement and the removal of a source make
+  version changed, and an approved source whose audience or customer visibility widened. A draft being edited, a retirement and the removal of a source make
   a coworker say *less*, so they pass without evals.
 - **Evidence is bound to the content, not to a name.** An eval run records, for each source it ran against, the version and the SHA-256
   of the text. A critical source is covered only when the evidence holds the same digest and version as the content being promoted, so
@@ -38,7 +38,7 @@ from typing import Any
 SCHEMA_VERSION = 1
 DEFAULT_SUITE = "receptionist"
 DEFAULT_MAX_AGE_SECONDS = 7 * 86400
-CRITICAL_KEYS = ("newlyApproved", "approvedContentChanged", "audienceWidened")
+CRITICAL_KEYS = ("newlyApproved", "approvedContentChanged", "audienceWidened", "accessWidened")
 MAX_NAME = 128
 
 
@@ -93,7 +93,11 @@ def _epoch(value: Any) -> int | None:
 def build_evidence(desired_state: Mapping[str, Any], *, suite: str, passed: bool, failures: int, now: int) -> dict[str, Any]:
     """The evidence an eval run leaves: the suite, the result and the version and digest of every knowledge source it ran against."""
     sources = {
-        name: {key: entry[key] for key in ("version", "sha256", "status") if key in entry}
+        name: {
+            **{key: entry.get(key) for key in ("version", "sha256", "status", "classification")},
+            "audiences": entry.get("audiences"),
+            "skillAudiences": entry.get("skillAudiences"),
+        }
         for name, entry in _deploy().fingerprint(desired_state).items() if entry.get("type") == "text-file"
     }
     return {"schemaVersion": SCHEMA_VERSION, "suite": suite, "passed": bool(passed), "failures": int(failures),
@@ -138,9 +142,12 @@ def check(
         if not isinstance(evidence, Mapping):
             reasons.append("no-evidence")
         else:
+            if evidence.get("schemaVersion") != SCHEMA_VERSION:
+                reasons.append("evidence-wrong-schema")
             if evidence.get("suite") != suite:
                 reasons.append("evidence-wrong-suite")
-            if evidence.get("passed") is not True:
+            if (evidence.get("passed") is not True or type(evidence.get("failures")) is not int
+                    or evidence["failures"] != 0):
                 reasons.append("evidence-not-passing")
             ran = _epoch(evidence.get("ranAt"))
             if ran is None:
@@ -152,7 +159,8 @@ def check(
             covered = evidence.get("knowledge") if isinstance(evidence.get("knowledge"), Mapping) else {}
             for name in critical:
                 seen = covered.get(name) if isinstance(covered.get(name), Mapping) else {}
-                if not seen or seen.get("sha256") != current[name].get("sha256") or seen.get("version") != current[name].get("version"):
+                required = ("sha256", "version", "status", "classification", "audiences", "skillAudiences")
+                if any(key not in seen or seen[key] != current[name].get(key) for key in required):
                     reasons.append(f"evidence-not-for-this-content:{name[:MAX_NAME]}")
     return {"allowed": not reasons, "critical": critical, "reasons": reasons, "summary": summary}
 
@@ -197,7 +205,7 @@ def verify(desired_state: Mapping[str, Any], record: Mapping[str, Any] | None) -
     if promoted is None:
         return {"matches": not current, "unpromoted": sorted(current), "drifted": [], "missing": []}
     drifted = sorted(name for name in set(promoted) & set(current)
-                     if any(promoted[name].get(key) != current[name].get(key) for key in ("status", "version", "sha256", "audiences")))
+                     if any(promoted[name].get(key) != current[name].get(key) for key in ("status", "version", "sha256", "audiences", "skillAudiences", "classification")))
     return {"matches": not (set(current) - set(promoted)) and not (set(promoted) - set(current)) and not drifted,
             "unpromoted": sorted(set(current) - set(promoted)), "drifted": drifted, "missing": sorted(set(promoted) - set(current))}
 
