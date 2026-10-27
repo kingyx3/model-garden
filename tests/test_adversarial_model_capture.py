@@ -156,8 +156,8 @@ class CaptureTests(unittest.TestCase):
         import yaml
         fixture = yaml.safe_load((ROOT / "evals/receptionist/model-adversarial.yaml").read_text())
         result = capture.run_cases(fixture, FakeCoworker(), session_prefix="test-run")
-        self.assertEqual(len(result["cases"]), 4)
-        self.assertEqual(result["modelCallsAttempted"], 7)
+        self.assertEqual(len(result["cases"]), len(fixture["modelCases"]))
+        self.assertEqual(result["modelCallsAttempted"], sum(len(case["turns"]) for case in fixture["modelCases"]))
         self.assertTrue(scorer.evaluate(fixture, result))
 
 
