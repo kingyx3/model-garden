@@ -126,6 +126,15 @@ class PolicyQuotaSerializationTests(unittest.TestCase):
         self.assertEqual(result["status"], "executed")
         self.assertFalse(self.path.with_name(self.path.name + ".quota.lock").exists())
 
+    def test_unrelated_read_tool_does_not_take_material_quota_lock(self):
+        desired = state()
+        desired["tools"].append({"metadata": {"name": "crm.lookup"},
+                                 "spec": {"risk": "read", "approvalRequired": False}})
+        result = govern.execute_action(desired, "crm.lookup", {}, lambda _: {"items": []},
+                                       audit_path=self.path)
+        self.assertEqual(result["status"], "executed")
+        self.assertFalse(self.path.with_name(self.path.name + ".quota.lock").exists())
+
     def test_missing_ledger_never_grants_unrecorded_automatic_allowance(self):
         result = govern.execute_action(state(), "mail.send", {}, lambda _: {"ok": True}, audit_path=None)
         self.assertEqual(result["status"], "pending-approval")
