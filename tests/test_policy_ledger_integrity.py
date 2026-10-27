@@ -80,5 +80,20 @@ class PolicyLedgerIntegrityTests(unittest.TestCase):
             self.state(), "mail.send", {}, audit_path=self.path)["decision"], "require-approval")
 
 
+    def test_dangling_ledger_symlink_is_not_mistaken_for_first_boot(self):
+        self.path.symlink_to(self.path.with_name("missing-ledger.jsonl"))
+        self.assertIsNone(govern.count_executions_today(self.path, "mail.send"))
+        self.assertEqual(govern.authorize_action(
+            self.state(), "mail.send", {}, audit_path=self.path)["decision"], "require-approval")
+
+    def test_hardlinked_ledger_is_not_a_trusted_quota_source(self):
+        self.record()
+        import os
+        os.link(self.path, self.path.with_name("second-link.jsonl"))
+        self.assertIsNone(govern.count_executions_today(self.path, "mail.send"))
+        self.assertEqual(govern.authorize_action(
+            self.state(), "mail.send", {}, audit_path=self.path)["decision"], "require-approval")
+
+
 if __name__ == "__main__":
     unittest.main()
