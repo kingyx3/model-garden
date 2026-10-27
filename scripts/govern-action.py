@@ -289,8 +289,10 @@ def count_executions_today(
             try:
                 opened = os.fstat(handle.fileno())
                 current = audit_path.lstat()
-                if (opened.st_dev, opened.st_ino) != (current.st_dev, current.st_ino):
-                    return None  # swapped path or symlink
+                if (opened.st_dev, opened.st_ino) != (path_info.st_dev, path_info.st_ino) or (
+                        opened.st_dev, opened.st_ino) != (current.st_dev, current.st_ino) or (
+                        opened.st_nlink != 1 or current.st_nlink != 1):
+                    return None  # swapped path or linked inode
                 _verify_audit_chain_handle(handle)
                 handle.seek(0)
                 for raw in handle:
