@@ -45,6 +45,34 @@ class DigestCase(base.Case):
 class DigestTests(DigestCase):
     MONDAY = at(2026, 10, 19)  # a Monday, 00:00 UTC
 
+    def test_emergency_pause_defers_nonessential_weekly_digest_until_resume(self):
+        runtime = self.make(self.CONFIG)
+        store = base.worker._module("pause").PauseStore(self.data)
+        store.pause(OWNER, "incident", self.MONDAY)
+        self.assertEqual(runtime.run_digest(self.MONDAY + 10), {"skipped": "paused"})
+        self.assertEqual(self.notices("digest"), [])
+        self.assertFalse((self.data / "worker" / "digest-sent.json").exists())
+        store.resume(OWNER, self.MONDAY + 11)
+        self.assertEqual(runtime.run_digest(self.MONDAY + 20),
+                         {"windowEnd": self.MONDAY, "sent": True})
+        self.assertEqual(len(self.notices("digest")), 1)
+        self.assertEqual(runtime.run_digest(self.MONDAY + 30), {"skipped": "already-sent"})
+
+    def test_prequeued_digest_waits_for_resume_but_safety_alerts_still_deliver(self):
+        sent = []
+        runtime = self.make(self.CONFIG, senders={"slack": lambda address, text: sent.append((address, text))})
+        runtime.queue.add("digest", OWNER, "Nonessential weekly summary", reference="digest:week")
+        runtime.queue.add("worker-failing", OWNER, "Urgent worker alert", reference="alert:worker")
+        store = base.worker._module("pause").PauseStore(self.data)
+        store.pause(OWNER, "incident", self.MONDAY)
+        runtime.deliver_notices(self.MONDAY + 10)
+        self.assertEqual([text for _, text in sent], ["Urgent worker alert"])
+        self.assertEqual([notice["kind"] for notice in runtime.queue.pending()], ["digest"])
+        store.resume(OWNER, self.MONDAY + 11)
+        runtime.deliver_notices(self.MONDAY + 20)
+        self.assertEqual([text for _, text in sent], ["Urgent worker alert", "Nonessential weekly summary"])
+        self.assertEqual(runtime.queue.pending(), [])
+
     def test_config_is_validated_and_off_by_default(self):
         self.assertEqual(self.make({}).run_digest(self.MONDAY), {"skipped": "no-digest-configured"})
         for bad in ({"to": OWNER, "weekday": 7}, {"to": OWNER, "hour": 24}, {"to": OWNER, "utcOffsetMinutes": 900}, {"to": OWNER, "weekday": True},

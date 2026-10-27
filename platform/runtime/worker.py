@@ -260,12 +260,14 @@ class NoticeQueue:
                 state["pending"][key] = {"key": key, "kind": kind, "to": to, "text": text[:600], "reference": reference[:40]}
         return key
 
-    def source(self):
+    def source(self, *, kind_filter: Callable[[str], bool] | None = None):
         with self._locked() as state:
             # A local inbox is not an external send. Keep posted notices until
             # an explicit host-operator acknowledgement; do not post them again
             # on every clock tick or silently remove them on a no-op sender.
-            notices = [dict(notice) for notice in state["pending"].values() if not notice.get("inboxPosted")]
+            notices = [dict(notice) for notice in state["pending"].values()
+                       if not notice.get("inboxPosted") and
+                       (kind_filter is None or kind_filter(str(notice.get("kind"))))]
 
         def mark(item: Mapping[str, Any], via: str) -> None:
             with self._locked() as state:
@@ -382,6 +384,7 @@ class Worker:
 
     # -- jobs ----------------------------------------------------------------------------------------
 
+    @_pause_fenced
     def apply_schedules(self, now: int) -> dict[str, Any]:
         definitions = self.desired_state.get("schedules") or []
         if not definitions:
@@ -411,6 +414,7 @@ class Worker:
             merged.append(definition)
         return merged
 
+    @_pause_fenced
     def run_changes(self, now: int) -> dict[str, Any]:
         """Apply the schedule edits the owner approved in the Studio to the live schedules (``studio_overlay.py`` for what applies live)."""
         edits = self._studio_schedule_edits()
@@ -743,6 +747,7 @@ class Worker:
 
     DIGEST_GRACE = 2 * 86_400  # a digest later than this after its time is skipped rather than back-filled
 
+    @_pause_fenced
     def run_digest(self, now: int) -> dict[str, Any]:
         """Send the owner one short weekly summary of counts from the ledger and the inbox (#236); once per window, counts only.
 
@@ -997,7 +1002,10 @@ class Worker:
         delivery, capabilities = _module("delivery"), _module("capabilities")
         directory = delivery.Directory(self.config["people"])
         escalate_to = self.config["escalateTo"]
-        sources = [delivery.handoff_source(self.data / "handoffs", escalate_to=escalate_to, now=now), self.queue.source()]
+        # Safety/owner action notices must continue during pause; the optional
+        # weekly digest is not a safety alert and must be separately fenced.
+        sources = [delivery.handoff_source(self.data / "handoffs", escalate_to=escalate_to, now=now),
+                   self.queue.source(kind_filter=lambda kind: kind != "digest")]
         grants: list[dict[str, Any]] = []
         grant_root = self.data / "provider-grants"
         if (grant_root / f"{self.tenant}.grants.json").is_file():
@@ -1008,7 +1016,18 @@ class Worker:
         ))
         if self.config["export"] is not None:
             sources.append(self._export_alert_source(now))
-        results = delivery.deliver(sources, directory, {"inbox": inbox_sender, **self.senders}, audit=self.audit)
+        senders = {"inbox": inbox_sender, **self.senders}
+        results = delivery.deliver(sources, directory, senders, audit=self.audit)
+        # An already queued digest must not escape the pause via the normal
+        # safety-notice drain. Hold the lease through the actual send/mark so
+        # owner pause cannot be acknowledged while a digest is in flight.
+        if not self._paused():
+            with _module("pause").PauseStore(self.data).effect_guard():
+                if not self._paused():
+                    results.extend(delivery.deliver(
+                        [self.queue.source(kind_filter=lambda kind: kind == "digest")],
+                        directory, senders, audit=self.audit,
+                    ))
         counts: dict[str, int] = {}
         for result in results:
             counts[result["status"]] = counts.get(result["status"], 0) + 1
@@ -1172,7 +1191,12 @@ class Worker:
         report: dict[str, Any] = {}
         if not self._schedules_applied:
             report["schedules"] = self._guard("schedules", self.apply_schedules, now)
-            self._schedules_applied = True
+            # A paused or failed startup must be retried after resume/recovery;
+            # otherwise the one-shot flag silently drops the workspace schedules.
+            self._schedules_applied = (
+                report["schedules"].get("skipped") != "paused"
+                and "failed" not in report["schedules"]
+            )
         for name, job in self.jobs():
             if now - self.last_run.get(name, float("-inf")) < self.config["intervals"][name]:
                 continue

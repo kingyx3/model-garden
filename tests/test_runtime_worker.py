@@ -137,6 +137,28 @@ class ScheduleTests(Case):
         self.assertTrue(applied)
         self.assertNotIn("Summarise open enquiries", (self.data / "audit.jsonl").read_text())
 
+    def test_paused_startup_retries_schedule_reconciliation_after_resume(self):
+        runtime = self.make({"deployedBy": "deploy:alex@acme.example"}, schedules=[SCHEDULE])
+        store = worker._module("pause").PauseStore(self.data)
+        store.pause(OWNER, "incident", T0)
+        self.assertEqual(runtime.tick()["schedules"], {"skipped": "paused"})
+        self.assertFalse(runtime._schedules_applied)
+        self.assertEqual(runtime._schedule_store().list(), [])
+        store.resume(OWNER, T0 + 1)
+        self.clock[0] = T0 + 60
+        self.assertTrue(runtime.tick()["schedules"]["applied"])
+        self.assertTrue(runtime._schedules_applied)
+        self.assertEqual([entry["managedBy"] for entry in runtime._schedule_store().list()], ["monday-summary"])
+
+    def test_paused_worker_does_not_apply_owner_schedule_edits(self):
+        runtime = self.make({"deployedBy": "deploy:alex@acme.example"}, schedules=[SCHEDULE])
+        store = worker._module("pause").PauseStore(self.data)
+        store.pause(OWNER, "incident", T0)
+        with mock.patch.object(runtime, "_studio_schedule_edits", side_effect=AssertionError("schedule edits must wait")):
+            self.assertEqual(runtime.run_changes(T0), {"skipped": "paused"})
+        store.resume(OWNER, T0 + 1)
+        self.assertEqual(runtime.run_changes(T0 + 1), {"edits": 0})
+
     def test_no_deployer_means_nothing_is_applied(self):
         runtime = self.make({}, schedules=[SCHEDULE])
         self.assertEqual(runtime.tick()["schedules"], {"applied": False, "reason": "no-deployer-named"})
