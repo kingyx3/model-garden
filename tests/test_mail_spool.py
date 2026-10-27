@@ -193,6 +193,19 @@ class SpoolTrustBoundaryTests(Case):
         self.assertEqual(outside.read_text(), "keep this exact content")
         self.assertEqual(spool.stats()["total"], 1)
 
+    def test_duplicate_mail_never_acknowledges_a_missing_or_modified_spooled_payload(self):
+        spool = self.spool()
+        message_id = spool.ingest(raw(), now=T0)["id"]
+        path = spool.messages / f"{message_id}.eml"
+        path.unlink()
+        with self.assertRaises(spool_module.SpoolError):
+            spool.ingest(raw(), now=T0 + 1)
+        path.write_bytes(b"tampered")
+        import os
+        os.chmod(path, 0o600)
+        with self.assertRaises(spool_module.SpoolError):
+            spool.ingest(raw(), now=T0 + 2)
+
     def test_linked_or_exposed_message_file_cannot_be_claimed(self):
         import os
         spool = self.spool()
