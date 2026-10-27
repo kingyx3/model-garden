@@ -206,7 +206,7 @@ class MailSpool:
             before = json.dumps(state, sort_keys=True)
             yield state
             if json.dumps(state, sort_keys=True) != before:
-                serialized = (json.dumps(state, sort_keys=True) + "\\n").encode("utf-8")
+                serialized = (json.dumps(state, sort_keys=True) + "\n").encode("utf-8")
                 if len(serialized) > self.MAX_INDEX_BYTES:
                     raise SpoolError("spool index exceeds its limit")
                 # The old fixed index.tmp was attacker-precreatable. mkstemp is
