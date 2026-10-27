@@ -28,6 +28,7 @@ import os
 import pathlib
 import re
 import secrets
+import stat
 import sys
 import importlib.util
 from collections.abc import Callable, Iterator, Mapping, Sequence
@@ -38,6 +39,7 @@ PROVIDER_ID = "built-in-artifacts"
 MAX_DOCUMENT_CHARS = 200_000
 MAX_BYTES = 10 * 1024 * 1024
 MAX_ARTIFACTS = 2000
+MAX_INDEX_BYTES = 8 * 1024 * 1024
 MAX_SOURCES = 20
 DEFAULT_RETENTION_DAYS = 365
 MAX_RETENTION_DAYS = 3650
@@ -112,33 +114,86 @@ class ArtifactStore:
         self._retention_seconds = retention_days * 86400
         self._allow_restricted = bool(allow_restricted)
 
+    @staticmethod
+    def _private_path(path: pathlib.Path, *, directory: bool = False, missing: bool = False) -> os.stat_result | None:
+        """Refuse linked, foreign-owned or exposed state before opening any tenant data."""
+        try:
+            info = path.lstat()
+        except FileNotFoundError:
+            if missing:
+                return None
+            raise ArtifactError("the artifact's file is missing") from None
+        expected = stat.S_ISDIR if directory else stat.S_ISREG
+        if (not expected(info.st_mode) or info.st_uid != os.geteuid() or info.st_mode & 0o077
+                or (not directory and info.st_nlink != 1)):
+            raise ArtifactError("unsafe artifact storage path (type, owner, permissions or links)")
+        return info
+
+    @staticmethod
+    def _checked_fd(descriptor: int, expected: os.stat_result) -> None:
+        opened = os.fstat(descriptor)
+        if (not stat.S_ISREG(opened.st_mode) or opened.st_uid != os.geteuid()
+                or opened.st_mode & 0o077 or opened.st_nlink != 1
+                or (opened.st_dev, opened.st_ino) != (expected.st_dev, expected.st_ino)):
+            raise ArtifactError("unsafe artifact storage path changed during open")
+
+    def _read_payload(self, path: pathlib.Path, *, limit: int = MAX_BYTES) -> bytes:
+        observed = self._private_path(path)
+        assert observed is not None
+        try:
+            descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        except OSError as exc:
+            raise ArtifactError("unsafe artifact storage path could not be opened") from exc
+        with os.fdopen(descriptor, "rb") as stream:
+            self._checked_fd(stream.fileno(), observed)
+            if observed.st_size > limit:
+                raise ArtifactError("unsafe artifact storage file exceeds its size limit")
+            data = stream.read(limit + 1)
+            if len(data) > limit:
+                raise ArtifactError("unsafe artifact storage file exceeds its size limit")
+            return data
+
     @contextlib.contextmanager
     def _locked(self) -> Iterator[dict[str, Any]]:
-        self.directory.mkdir(parents=True, exist_ok=True, mode=0o700)
-        for path in (self.directory.parent, self.directory):
-            try:
-                os.chmod(path, 0o700)
-            except OSError:
-                pass
-        descriptor = os.open(self.directory / ".lock", os.O_RDWR | os.O_CREAT, 0o600)
+        self.directory.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        self._private_path(self.directory.parent, directory=True)
+        self.directory.mkdir(exist_ok=True, mode=0o700)
+        self._private_path(self.directory, directory=True)
+        lock_path = self.directory / ".lock"
         try:
+            descriptor = os.open(lock_path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600)
+        except OSError as exc:
+            raise ArtifactError("unsafe artifact storage lock could not be opened") from exc
+        try:
+            self._checked_fd(descriptor, self._private_path(lock_path))
             fcntl.flock(descriptor, fcntl.LOCK_EX)
             state: dict[str, Any] = {"schemaVersion": SCHEMA_VERSION, "tenant": self.tenant, "artifacts": {}}
-            if self.index.is_file():
-                loaded = json.loads(self.index.read_text(encoding="utf-8"))
+            original = self._private_path(self.index, missing=True)
+            if original is not None:
+                loaded = json.loads(self._read_payload(self.index, limit=MAX_INDEX_BYTES).decode("utf-8"))
                 if not isinstance(loaded, dict) or loaded.get("schemaVersion") != SCHEMA_VERSION or loaded.get("tenant") != self.tenant:
                     raise ArtifactError("artifact index has an unsupported format or belongs to another tenant")
+                if not isinstance(loaded.get("artifacts"), dict):
+                    raise ArtifactError("artifact index has invalid entries")
                 state = loaded
             before = json.dumps(state, sort_keys=True)
             yield state
             if json.dumps(state, sort_keys=True) != before:
-                temporary = self.index.with_suffix(".tmp")
-                handle = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-                with os.fdopen(handle, "w", encoding="utf-8") as stream:
-                    stream.write(json.dumps(state, sort_keys=True) + "\n")
-                    stream.flush()
-                    os.fsync(stream.fileno())
-                os.replace(temporary, self.index)
+                current = self._private_path(self.index, missing=True)
+                if (current is None) != (original is None) or (current is not None and original is not None
+                        and (current.st_dev, current.st_ino) != (original.st_dev, original.st_ino)):
+                    raise ArtifactError("unsafe artifact index changed during update")
+                temporary = self.directory / (".index-" + secrets.token_hex(12) + ".tmp")
+                handle = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+                try:
+                    with os.fdopen(handle, "w", encoding="utf-8") as stream:
+                        stream.write(json.dumps(state, sort_keys=True) + "\n")
+                        stream.flush()
+                        os.fsync(stream.fileno())
+                    os.replace(temporary, self.index)
+                finally:
+                    with contextlib.suppress(FileNotFoundError):
+                        temporary.unlink()
         finally:
             fcntl.flock(descriptor, fcntl.LOCK_UN)
             os.close(descriptor)
@@ -202,6 +257,10 @@ class ArtifactStore:
                              if entry["sha256"] == digest and entry["requestedBy"] == who and entry["name"] == label
                              and self._expires_at(entry) > stamp), None)
             if existing is not None:
+                # Idempotent success must not bless an unsafe or altered payload.
+                existing_data = self._read_payload(self._file(existing["id"]))
+                if hashlib.sha256(existing_data).hexdigest() != existing["sha256"]:
+                    raise ArtifactError("the artifact's file no longer matches its recorded digest")
                 return {**existing, "duplicate": True}
             if len(artifacts) >= MAX_ARTIFACTS:
                 raise ArtifactError("the artifact store is full; expired or unneeded artifacts must be deleted")
@@ -242,10 +301,7 @@ class ArtifactStore:
                 raise ArtifactError("only the person who asked for an artifact or an administrator may read it")
             if self._expires_at(entry) <= stamp:
                 raise ArtifactError("this artifact has expired under the client's retention period")
-            try:
-                data = path.read_bytes()
-            except OSError as exc:
-                raise ArtifactError("the artifact's file is missing") from exc
+            data = self._read_payload(path)
             snapshot = dict(entry)
         if hashlib.sha256(data).hexdigest() != snapshot["sha256"]:
             raise ArtifactError("the artifact's file no longer matches its recorded digest")
@@ -255,10 +311,10 @@ class ArtifactStore:
     # -- deletion and retention ---------------------------------------------------------
 
     def _remove(self, state: dict[str, Any], artifact_id: str) -> dict[str, Any]:
-        entry = state["artifacts"].pop(artifact_id)
-        with contextlib.suppress(FileNotFoundError):
-            self._file(artifact_id).unlink()
-        return entry
+        path = self._file(artifact_id)
+        if self._private_path(path, missing=True) is not None:
+            path.unlink()
+        return state["artifacts"].pop(artifact_id)
 
     def delete(self, artifact_id: str, *, requested_by: str, admin: bool = False) -> dict[str, Any]:
         who = _principal(requested_by, "requested_by")
