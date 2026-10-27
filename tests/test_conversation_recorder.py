@@ -223,7 +223,7 @@ class MailboxWiringTests(Case):
 
         return support.SupportMailbox(adapter, email_channel.TEXT.PrincipalDirectory(), {"mail.draft": draft}, classify=lambda message: label,
                                       answer=lambda message, category: {"text": "We are open 9 to 6.", "sources": ["kb:hours"]}, handled=support.MessageLog(self.root / "handled"),
-                                      conversations=recorder)
+                                      conversations=recorder, ticket=lambda _item: {"ticketId": "t-fixture"})
 
     def test_a_handled_enquiry_from_a_verified_sender_is_recorded_and_linked(self):
         result = self.mailbox(self.recorder()).handle(raw(), now=T0)
