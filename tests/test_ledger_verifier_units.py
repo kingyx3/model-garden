@@ -59,7 +59,8 @@ class IndependentVerifierUnitTests(unittest.TestCase):
         ):
             self.assertIn(expected, service)
         self.assertIn("OnBootSec=5min", timer)
-        self.assertIn("OnCalendar=*-*-* *:0/5:00", timer)\n        self.assertNotIn("OnUnitInactiveSec=", timer)
+        self.assertIn("OnCalendar=*-*-* *:0/5:00", timer)
+        self.assertNotIn("OnUnitInactiveSec=", timer)
         self.assertIn("Persistent=true", timer)
         self.assertIn("Unit=model-garden-ledger-verifier-acme-dev-mg.service", timer)
         self.assertNotIn("systemctl enable", service + timer)
