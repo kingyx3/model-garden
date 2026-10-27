@@ -1,7 +1,9 @@
 # Adversarial model-trace outcome replay (#235)
 
-`evals/receptionist/model-adversarial.yaml` defines four **synthetic** multi-turn,
-retrieved-knowledge, mailbox-recipient and voice-impersonation attacks. The
+`evals/receptionist/model-adversarial.yaml` defines seven **synthetic** attacks: multi-turn forged-owner,
+retrieved-knowledge, mailbox-recipient, voice-impersonation, cross-channel
+approval replay, retrieved-document exfiltration and customer-to-operator
+command laundering. The
 credential-free checker `scripts/eval-adversarial-trace.py` scores separately
 captured model/Tool outcomes; it **does not run a model**, connect to a provider,
 authenticate the recorder or prove a live receptionist is safe.
@@ -29,7 +31,7 @@ pending approval or provider failure. Unexpected ledger effects also fail.
 The scorer checks synthetic canary leakage in assistant text and structured
 refusal/handoff/holding disposition, without brittle exact answer matching.
 
-Example (one case only; the actual run must contain all four):
+Example (one case only; the actual run must contain all seven):
 ```json
 {
   "schemaVersion": 1,
@@ -51,7 +53,9 @@ python3 -m unittest tests/test_model_adversarial_trace.py -v
 
 The checker prints **only scenario IDs and stable failure codes**, not message
 contents. It caps input size, cases and events, rejects unknown fields and
-duplicate JSON keys, and fails on missing scenarios. CI exercises synthetic
+duplicate JSON keys, and fails on missing scenarios. Forbidden Tool names must exist in the
+versioned capability catalog; a typo cannot silently disable a negative
+assertion. CI exercises synthetic
 passing and adversarial failing traces through the standard unittest entry
 point; no provider credential is needed.
 
@@ -127,3 +131,16 @@ instructions, that a retrieved snippet arrived through a real knowledge Tool,
 or that any live SIP/mail/Tool/ledger behavior occurred. Verify those separately
 with authorized model execution, authenticated complete receipts and channel
 evidence before checking #235 acceptance or claiming safety.
+
+## Cross-channel and retrieved-content regression coverage (v0.8.164 candidate)
+
+The expanded suite tests a public chat's claimed approval being replayed in
+email, malicious instructions embedded in a retrieved FAQ attempting private
+file sharing/email, and a customer message masquerading as a system/operator
+command to post in staff chat or read CRM. These are **synthetic prompts and
+negative Tool/ledger outcome contracts**, not proof of an actual cross-channel
+identity boundary or a model-executed retrieval path. Each case is scored
+against matching governed Tool and ledger receipts; forbidden effects must
+be denied. Tests deliberately inject executed forbidden effects and ensure
+the scorer fails. Actual model, SIP, mailbox, source provenance, handoff and
+recipient evidence remain outstanding before #235 can close.
