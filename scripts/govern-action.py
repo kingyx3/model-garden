@@ -31,6 +31,7 @@ import importlib.util
 import json
 import os
 import pathlib
+import stat
 import sys
 from collections.abc import Callable
 from typing import Any
@@ -271,8 +272,16 @@ def count_executions_today(
     if audit_path is None:
         return None
     today = (now or dt.datetime.now(dt.timezone.utc)).strftime("%Y-%m-%d")
-    if not audit_path.exists():
+    try:
+        path_info = audit_path.lstat()
+    except FileNotFoundError:
         return 0  # legacy first-run ledger; no independent initialization witness
+    except OSError:
+        return None
+    # Symlinks (including dangling ones) and hardlinks can bypass the locked
+    # ledger path and are not trustworthy quota sources.
+    if not stat.S_ISREG(path_info.st_mode) or path_info.st_nlink != 1:
+        return None
     count = 0
     try:
         with audit_path.open("r", encoding="utf-8") as handle:
