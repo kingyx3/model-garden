@@ -258,8 +258,9 @@ class Case(unittest.TestCase):
             raise RuntimeError("chat down")
 
         self.label = "complaint"
-        result = self.build(escalate=broken).handle(raw(), now=T0)
-        self.assertEqual((result["status"], result["escalation"], result["crm"]["state"]), ("needs-person", "failed", "synced"))
+        result = self.build(escalate=broken, ticket=lambda _item: {"ticketId": "t-fallback"}).handle(raw(), now=T0)
+        self.assertEqual((result["status"], result["escalation"], result["ticket"], result["crm"]["state"]),
+                         ("needs-person", "failed", "t-fallback", "synced"))
 
     # -- a thread for a person is a ticket too --------------------------------------------------------------
 
