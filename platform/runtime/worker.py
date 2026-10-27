@@ -61,6 +61,7 @@ import pathlib
 import re
 import signal
 import sys
+import tempfile
 import threading
 import time
 from collections.abc import Callable, Mapping
@@ -599,21 +600,44 @@ class Worker:
             totals["notFiled"] = totals.pop("failed")  # a "failed" key would read as the job itself failing
             return {"records": len(records), **totals, "writeFailures": ledgered, "summaries": summarizer.counts}
 
-    def _told_once(self, kind: str, reference: str) -> bool:
-        """True the first time this ``kind`` and ``reference`` is seen and remembers it, so a condition that lasts is announced once."""
+    def _queue_once(self, kind: str, reference: str, to: str, text: str, *, notice_reference: str | None = None) -> bool:
+        """Persist a once-only owner notice *before* remembering that it was queued.
+
+        The marker and the notice use separate files: an interrupted marker
+        write can cause an at-least-once duplicate, but a full queue, failed
+        write or crash must never permanently suppress an undelivered alert.
+        A host-local lock serializes competing worker instances.
+        """
         path = self.data / "worker" / "told.json"
-        digest = hashlib.sha256(f"{kind}|{reference}".encode("utf-8")).hexdigest()[:24]
-        try:
-            known = [item for item in json.loads(path.read_text(encoding="utf-8")) if isinstance(item, str)]
-        except (OSError, ValueError, TypeError):
-            known = []
-        if digest in known:
-            return False
         path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-        temporary = path.with_suffix(".tmp")
-        temporary.write_text(json.dumps([*known, digest][-MAX_QUEUE:]) + "\n", encoding="utf-8")
-        os.replace(temporary, path)
-        return True
+        descriptor = os.open(path.parent / ".told.lock", os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX)
+            digest = hashlib.sha256(f"{kind}|{reference}".encode("utf-8")).hexdigest()[:24]
+            try:
+                known = [item for item in json.loads(path.read_text(encoding="utf-8")) if isinstance(item, str)]
+            except FileNotFoundError:
+                known = []
+            if digest in known:
+                return False
+            # This can raise (queue full or unavailable). In that case the
+            # marker is untouched, and the next worker pass can try again.
+            self.queue.add(kind, to, text, reference=(notice_reference or reference)[:40])
+            temporary = None
+            try:
+                fd, temporary = tempfile.mkstemp(prefix=".told-", dir=path.parent)
+                with os.fdopen(fd, "w", encoding="utf-8") as stream:
+                    stream.write(json.dumps([*known, digest][-MAX_QUEUE:]) + "\n")
+                    stream.flush()
+                    os.fsync(stream.fileno())
+                os.replace(temporary, path)
+            finally:
+                if temporary is not None:
+                    pathlib.Path(temporary).unlink(missing_ok=True)
+            return True
+        finally:
+            fcntl.flock(descriptor, fcntl.LOCK_UN)
+            os.close(descriptor)
 
     def month_to_date_micros(self, window: str) -> int:
         """Model cost metered into the ledger so far in the UTC calendar month ``window`` (``YYYY-MM``), in micro-dollars (an estimate)."""
@@ -664,21 +688,30 @@ class Worker:
                 state = {"paused": False}
         told = 0
         for threshold in settings["warnAtPercent"]:
-            if percent >= threshold and spent < cap_micros and self._told_once("spend-warn", f"{window}|{threshold}|{settings['capCents']}"):
-                told += 1
-                self.audit("spend.warning", IDENTITY, {"window": window, "threshold": threshold, "percent": int(percent)})
-                if to:
-                    self.queue.add("spend-warning", to, f"Model spend this month is about {int(percent)}% of the {settings['capCents'] / 100:.2f} USD cap "
-                                   f"(an estimate). At the cap the coworker stops new actions.", reference=f"{window}:{threshold}")
+            if percent >= threshold and spent < cap_micros and to:
+                if self._queue_once(
+                    "spend-warning", f"{window}|{threshold}|{settings['capCents']}", to,
+                    f"Model spend this month is about {int(percent)}% of the {settings['capCents'] / 100:.2f} USD cap "
+                    "(an estimate). At the cap the coworker stops new actions.",
+                    notice_reference=f"{window}:{threshold}",
+                ):
+                    told += 1
+                    self.audit("spend.warning", IDENTITY, {"window": window, "threshold": threshold, "percent": int(percent)})
         paused_now = False
         if spent >= cap_micros:
             if not state["paused"]:
                 store.pause(IDENTITY, f"monthly spend cap reached ({settings['capCents'] / 100:.2f} USD)", now, cause="spend-cap", window=window)
                 paused_now = True
                 self.audit("spend.cap-reached", IDENTITY, {"window": window, "capCents": settings["capCents"], "spentMicrosUsd": spent})
-                if to and self._told_once("spend-cap", f"{window}|{settings['capCents']}"):
-                    self.queue.add("spend-cap", to, f"The monthly model-spend cap of {settings['capCents'] / 100:.2f} USD (an estimate) was reached, so the coworker "
-                                   "has stopped new actions. Raise the cap or wait for next month; then it resumes.", reference=f"{window}:cap")
+            # The cap hold persists after this pass. A queue outage during the
+            # transition must not make the notification impossible to retry.
+            if to:
+                self._queue_once(
+                    "spend-cap", f"{window}|{settings['capCents']}", to,
+                    f"The monthly model-spend cap of {settings['capCents'] / 100:.2f} USD (an estimate) was reached, so the coworker "
+                    "has stopped new actions. Raise the cap or wait for next month; then it resumes.",
+                    notice_reference=f"{window}:cap",
+                )
         return {"window": window, "spentMicrosUsd": spent, "percent": int(percent), "warned": told, "paused": paused_now}
 
     DIGEST_GRACE = 2 * 86_400  # a digest later than this after its time is skipped rather than back-filled
@@ -771,12 +804,12 @@ class Worker:
             return {"told": 0}
         told = 0
         for entry in _module("task_inbox").TaskInbox(path).reported():
-            if not self._told_once("task-report", f"{entry['taskId']}|{entry['state']}"):
-                continue
-            self.queue.add("task-report", entry["person"],
-                           f"Your task {entry['taskId']} for {entry['agent']} is {entry['state']}. Ask for the result in a direct chat or from the operator.",
-                           reference=entry["taskId"][:40])
-            told += 1
+            if self._queue_once(
+                "task-report", f"{entry['taskId']}|{entry['state']}", entry["person"],
+                f"Your task {entry['taskId']} for {entry['agent']} is {entry['state']}. Ask for the result in a direct chat or from the operator.",
+                notice_reference=entry["taskId"],
+            ):
+                told += 1
         return {"told": told}
 
     def run_knowledge(self, now: int) -> dict[str, Any]:
@@ -803,16 +836,17 @@ class Worker:
                 phase = "due-soon"
             else:
                 continue
-            if not self._told_once("knowledge-review", f"{name}|{spec['reviewBy']}|{phase}"):
-                continue
             if phase == "stale":
-                stale += 1
                 text = (f"The business-rules source {name} passed its review date ({spec['reviewBy']}), so the coworker has stopped answering from it. "
                         "Confirm the content is still right, set a later reviewBy and redeploy.")
             else:
-                due += 1
                 text = f"The business-rules source {name} is due for review on {spec['reviewBy']} ({days} day(s) left). After that the coworker stops answering from it."
-            self.queue.add("knowledge-review", to, text, reference=f"{name}:{phase}"[:40])
+            if self._queue_once("knowledge-review", f"{name}|{spec['reviewBy']}|{phase}", to, text,
+                                notice_reference=f"{name}:{phase}"):
+                if phase == "stale":
+                    stale += 1
+                else:
+                    due += 1
         return {"dueSoon": due, "stale": stale}
 
     def _blocked_notified(self) -> pathlib.Path:
