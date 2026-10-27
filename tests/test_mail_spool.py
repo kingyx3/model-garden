@@ -145,6 +145,89 @@ class IntakeTests(Case):
             b.stats()
 
 
+
+class SpoolTrustBoundaryTests(Case):
+    """The receiving mail process must not follow local links or overwrite another tenant's files."""
+
+    def test_symlinked_tenant_directory_is_refused_without_chmod_of_target(self):
+        import os
+        outside = self.root / "outside"
+        outside.mkdir(mode=0o755)
+        mail_root = self.root / "mail"
+        mail_root.mkdir(mode=0o700)
+        (mail_root / "acme-prod").symlink_to(outside, target_is_directory=True)
+        before = stat.S_IMODE(outside.stat().st_mode)
+        with self.assertRaises(spool_module.SpoolError):
+            self.spool().stats()
+        self.assertEqual(stat.S_IMODE(outside.stat().st_mode), before)
+
+    def test_lock_and_index_links_are_refused_without_reading_or_writing_target(self):
+        import os
+        spool = self.spool()
+        spool.ingest(raw(), now=T0)
+        lock = spool.directory / ".lock"
+        outside = self.root / "outside"
+        outside.write_text("unchanged")
+        lock.unlink()
+        lock.symlink_to(outside)
+        with self.assertRaises(spool_module.SpoolError):
+            spool.stats()
+        self.assertEqual(outside.read_text(), "unchanged")
+        lock.unlink()
+        lock.write_text("")
+        os.chmod(lock, 0o600)
+        spool.index.unlink()
+        os.link(outside, spool.index)
+        with self.assertRaises(spool_module.SpoolError):
+            spool.stats()
+        self.assertEqual(outside.read_text(), "unchanged")
+
+    def test_predictable_index_temp_hardlink_never_truncates_other_file(self):
+        import os
+        spool = self.spool()
+        outside = self.root / "outside"
+        outside.write_text("keep this exact content")
+        spool.stats()
+        os.link(outside, spool.index.with_suffix(".tmp"))
+        self.assertEqual(spool.ingest(raw(), now=T0)["status"], "accepted")
+        self.assertEqual(outside.read_text(), "keep this exact content")
+        self.assertEqual(spool.stats()["total"], 1)
+
+    def test_duplicate_mail_never_acknowledges_a_missing_or_modified_spooled_payload(self):
+        spool = self.spool()
+        message_id = spool.ingest(raw(), now=T0)["id"]
+        path = spool.messages / f"{message_id}.eml"
+        path.unlink()
+        with self.assertRaises(spool_module.SpoolError):
+            spool.ingest(raw(), now=T0 + 1)
+        path.write_bytes(b"tampered")
+        import os
+        os.chmod(path, 0o600)
+        with self.assertRaises(spool_module.SpoolError):
+            spool.ingest(raw(), now=T0 + 2)
+
+    def test_linked_or_exposed_message_file_cannot_be_claimed(self):
+        import os
+        spool = self.spool()
+        message_id = spool.ingest(raw(), now=T0)["id"]
+        path = spool.messages / f"{message_id}.eml"
+        outside = self.root / "outside.eml"
+        outside.write_bytes(path.read_bytes())
+        path.unlink()
+        path.symlink_to(outside)
+        with self.assertRaises(spool_module.SpoolError):
+            spool.claim(now=T0)
+        path.unlink()
+        os.link(outside, path)
+        with self.assertRaises(spool_module.SpoolError):
+            spool.claim(now=T0)
+        path.unlink()
+        path.write_bytes(outside.read_bytes())
+        os.chmod(path, 0o644)
+        with self.assertRaises(spool_module.SpoolError):
+            spool.claim(now=T0)
+
+
 class ProcessingTests(Case):
     def test_claim_leases_oldest_first_and_never_hands_out_a_leased_message_twice(self):
         spool = self.spool()
