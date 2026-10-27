@@ -34,7 +34,7 @@ class ClientVolumeRestoreTests(unittest.TestCase):
             "volumes": {"hermes-data": {}},
         }), encoding="utf-8")
         self.archive = self.root / "backup"
-        self.archive.mkdir()
+        self.archive.mkdir(mode=0o700)
         self.identity = self.root / "age-key"
         self.identity.write_text("AGE-SECRET-KEY-FAKE-FOR-TESTS\n")
         self.identity.chmod(0o600)
@@ -115,6 +115,49 @@ class ClientVolumeRestoreTests(unittest.TestCase):
         (self.archive / "hermes-data.tar.age").symlink_to(self.root / "real")
         with self.assertRaisesRegex(RESTORE.RestoreError, "symlink"):
             RESTORE.verify(self.compose, "acme-dev", self.archive, self.identity)
+
+    def test_refuses_public_or_unowned_backup_source_before_decryption(self):
+        self.archive.chmod(0o755)
+        with mock.patch.object(RESTORE, "_validate_plaintext_tar", side_effect=AssertionError("must not decrypt")):
+            with self.assertRaisesRegex(RESTORE.RestoreError, "private"):
+                RESTORE.verify(self.compose, "acme-dev", self.archive, self.identity)
+        self.archive.chmod(0o700)
+        foreign_uid = os.geteuid() + 1
+        with mock.patch.object(RESTORE.os, "geteuid", return_value=foreign_uid), \
+             mock.patch.object(RESTORE, "_validate_plaintext_tar", side_effect=AssertionError("must not decrypt")):
+            with self.assertRaisesRegex(RESTORE.RestoreError, "private"):
+                RESTORE.verify(self.compose, "acme-dev", self.archive, self.identity)
+
+    def test_refuses_hardlinked_or_public_manifest_and_ciphertext(self):
+        for name in ("manifest.json", "hermes-data.tar.age"):
+            with self.subTest(name=name):
+                path = self.archive / name
+                alias = self.root / ("linked-" + name)
+                os.link(path, alias)
+                try:
+                    with self.assertRaisesRegex(RESTORE.RestoreError, "private"):
+                        RESTORE.verify(self.compose, "acme-dev", self.archive, self.identity)
+                finally:
+                    alias.unlink()
+                path.chmod(0o644)
+                try:
+                    with self.assertRaisesRegex(RESTORE.RestoreError, "private"):
+                        RESTORE.verify(self.compose, "acme-dev", self.archive, self.identity)
+                finally:
+                    path.chmod(0o600)
+
+    def test_refuses_hardlinked_or_foreign_owned_age_identity(self):
+        alias = self.root / "linked-identity"
+        os.link(self.identity, alias)
+        try:
+            with self.assertRaisesRegex(RESTORE.RestoreError, "identity"):
+                RESTORE.verify(self.compose, "acme-dev", self.archive, self.identity)
+        finally:
+            alias.unlink()
+        foreign_uid = os.geteuid() + 1
+        with mock.patch.object(RESTORE.os, "geteuid", return_value=foreign_uid):
+            with self.assertRaisesRegex(RESTORE.RestoreError, "identity"):
+                RESTORE.verify(self.compose, "acme-dev", self.archive, self.identity)
 
     def test_target_requires_empty_owned_volume_and_stopped_project(self):
         with mock.patch.object(RESTORE.SNAPSHOT, "assert_quiescent", side_effect=RESTORE.SNAPSHOT.SnapshotError("running")):
