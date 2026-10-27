@@ -10,6 +10,12 @@ The default holding response says the request is in the private staff ticket inb
 
 Mapped approvers/admins can inspect counts with `inbox` in a direct chat; staff can inspect `tickets` and review the original conversation in its source channel. The local ticket is a review pointer, **not** proof a human received a notification or completed the request. Staff should triage and record completion after authorized resume. No model execution, external message, provider action or approval is performed by the intake path. Ordinary coworker Tool writes remain paused.
 
+## Nonessential scheduled work while paused
+
+The worker holds workspace schedule reconciliation, approved Studio schedule edits and the non-urgent weekly owner digest behind the same host-local pause lease as task execution. A startup tick observed during a pause **does not** consume the one-time schedule reconciliation: it retries on the next tick after authorized resume. The weekly digest neither queues a notice nor advances its sent marker while paused; it may run after resume if still inside its configured grace window. Operator safety alerts, task-completion notices, monitoring, retention and audit export continue while paused; they are not customer-facing autonomous actions.
+
+These are local cooperative fences, not proof of cloud-wide pause or cancellation of an in-flight external provider request. The regression tests cover paused startup, deferred digest and schedule edits, but an authorized tenant-live drill is still required for issue #232.
+
 ## Operational limits
 
 The built-in ticket store is private and bounded (5,000 total tickets), and its current retention/cleanup remains an operator responsibility under the client's data policy. A full or unreadable store fails visibly rather than silently claiming handoff. The local audit receipt is not an independently immutable export. A live acceptance drill must still prove channel authentication, receipt, staff response, restart, in-flight provider behavior, cross-tenant/coworker isolation and authorized owner signoff before #232 can close.
