@@ -73,3 +73,35 @@ recovery log. The existing native alert policy rate limit bounds notifications;
 no exactly-once or confirmed notification delivery is claimed. Monitor the
 command's exit status and the authorized channel independently. A successful
 upload-health transition is **not** successful restoration or measured RPO/RTO.
+
+## Contiguous automatic lookback for an approved host timer (v0.8.176)
+
+An authorized operator-managed timer may replace the manual
+`--since-utc 2026-10-23T00:00:00Z` argument with `--auto-since` (exactly
+one of these two arguments is required). This does **not** install a timer,
+enable a Cloud Monitoring alert, or approve any backup or cloud action.
+
+Automatic mode validates the private recurrence policy, owner-private incident
+state, exact client/environment/GCP/age-key binding, and the monitoring
+interval **before** invoking the incident monitor or Cloud Logging. On first
+use, inspection starts at the recurrence's approved `validFrom`, so missed
+earlier slots cannot be hidden by starting from "now." On subsequent polls,
+inspection starts at the **last durable observed UTC slot**, overlapping the
+previous result across timer restarts and detecting new missed slots. A missing
+state is a first-use baseline only; a corrupt/foreign state fails closed.
+If a first-use policy is older than 31 days, or a persisted last slot is over
+31 days old, the command refuses rather than silently skipping an unobserved
+interval. An operator must investigate and preserve evidence before any
+authorized monitoring reset. Do **not** delete incident state to manufacture
+a healthy level.
+
+Example: use the command above with `--auto-since` in place of `--since-utc`
+for an explicitly approved, periodically invoked host service. Use the same
+dedicated UID that owns the 0700 schedule/incident directories and 0600
+files. Watch nonzero exit statuses independently: exit 2 can mean an unsafe
+or unbridgeable monitoring gap, and **no Cloud Logging sample was accepted**.
+A working timer, successful local log command or healthy upload level is
+neither a delivered alert nor successful restore proof. Continue to require
+authorized GCP notification-channel configuration, operator acknowledgement,
+cross-host deployment freeze and a measured live recovery drill.
+
