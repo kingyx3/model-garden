@@ -359,7 +359,7 @@ def for_person(inbox: dict[str, Any], identity: str, *, everything: bool) -> dic
             (item["kind"] == "owner-notice" and item.get("to") == identity)]
     return {
         "generatedAt": inbox["generatedAt"], "items": mine,
-        "counts": {"approvals": 0, "handoffs": len(mine), "overdueHandoffs": sum(1 for item in mine if item["overdue"]), "reviews": 0, "paused": 0, "unanswered": 0,
+        "counts": {"approvals": 0, "handoffs": sum(item["kind"] == "handoff" for item in mine), "overdueHandoffs": sum(1 for item in mine if item["kind"] == "handoff" and item["overdue"]), "reviews": 0, "paused": 0, "unanswered": 0,
                    "tickets": 0, "crmFilings": 0, "connections": 0},
     }
 
