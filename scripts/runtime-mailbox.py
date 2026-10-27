@@ -75,7 +75,7 @@ def main(argv: list[str] | None = None, stdin=None) -> int:
             try:
                 raw = (stdin or sys.stdin.buffer).read(SPOOL.MAX_MESSAGE_BYTES + 1)
                 print(json.dumps(spool.ingest(raw), sort_keys=True))
-            except (SPOOL.SpoolFull, OSError) as exc:
+            except Exception as exc:  # noqa: BLE001 - ledger or storage failures must tell the MTA to retry
                 print(f"Runtime mailbox deferred: {type(exc).__name__}", file=sys.stderr)
                 return TEMPFAIL
             return 0
