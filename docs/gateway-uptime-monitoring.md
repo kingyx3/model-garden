@@ -77,7 +77,14 @@ environment labels. It uses the VM metadata identity and the already scoped
 `roles/monitoring.metricWriter` service account; it does not expose a VM
 port, reuse a public gateway readiness endpoint, create credentials or
 transmit transcripts. A stopped, missing, duplicated, unhealthchecked or
-unhealthy voice container publishes 0. Docker/metadata/Monitoring failures
+unhealthy voice container publishes 0. A cached Docker `healthy` status
+is **not** sufficient: the last completed native healthcheck must have a
+timezone-aware end timestamp within 120 seconds of the host clock. Missing,
+future, malformed or older probe history also publishes 0, detecting a stalled
+Docker healthcheck loop even when its last status remained green. An idle but
+connected LiveKit worker remains healthy. Keep host clock synchronization and
+the 60-second sampling timer operational; a broken clock may fail closed.
+Docker/metadata/Monitoring failures
 never publish a false healthy sample; missing data is an alert condition
 **after the time series has been initialized**.
 
