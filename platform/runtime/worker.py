@@ -382,6 +382,7 @@ class Worker:
 
     # -- jobs ----------------------------------------------------------------------------------------
 
+    @_pause_fenced
     def apply_schedules(self, now: int) -> dict[str, Any]:
         definitions = self.desired_state.get("schedules") or []
         if not definitions:
@@ -411,6 +412,7 @@ class Worker:
             merged.append(definition)
         return merged
 
+    @_pause_fenced
     def run_changes(self, now: int) -> dict[str, Any]:
         """Apply the schedule edits the owner approved in the Studio to the live schedules (``studio_overlay.py`` for what applies live)."""
         edits = self._studio_schedule_edits()
@@ -743,6 +745,7 @@ class Worker:
 
     DIGEST_GRACE = 2 * 86_400  # a digest later than this after its time is skipped rather than back-filled
 
+    @_pause_fenced
     def run_digest(self, now: int) -> dict[str, Any]:
         """Send the owner one short weekly summary of counts from the ledger and the inbox (#236); once per window, counts only.
 
@@ -1172,7 +1175,12 @@ class Worker:
         report: dict[str, Any] = {}
         if not self._schedules_applied:
             report["schedules"] = self._guard("schedules", self.apply_schedules, now)
-            self._schedules_applied = True
+            # A paused or failed startup must be retried after resume/recovery;
+            # otherwise the one-shot flag silently drops the workspace schedules.
+            self._schedules_applied = (
+                report["schedules"].get("skipped") != "paused"
+                and "failed" not in report["schedules"]
+            )
         for name, job in self.jobs():
             if now - self.last_run.get(name, float("-inf")) < self.config["intervals"][name]:
                 continue
