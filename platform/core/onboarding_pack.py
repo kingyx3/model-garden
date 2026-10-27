@@ -80,14 +80,46 @@ def build(
     options: Options | None = None,
 ) -> list[dict[str, Any]]:
     """One pack per Agent from the readiness and approvals reports (as produced by ``compile-workspace.py``)."""
-    approvals_by_agent = {entry["agent"]: entry for entry in approvals}
+    # A missing or duplicated policy preview must not turn into "No actions are selected yet".
+    # The owner must see the approval decisions for exactly the Agents whose readiness
+    # was evaluated, not a partial or stale report from a different selection.
+    readiness_reports = list(readiness)
+    approval_reports = list(approvals)
+    readiness_by_agent: dict[str, Mapping[str, Any]] = {}
+    approvals_by_agent: dict[str, Mapping[str, Any]] = {}
+    for entry in readiness_reports:
+        name = entry["agent"]
+        if name in readiness_by_agent:
+            raise PackError(f"duplicate readiness Agent {name!r}")
+        readiness_by_agent[name] = entry
+    for entry in approval_reports:
+        name = entry["agent"]
+        if name in approvals_by_agent:
+            raise PackError(f"duplicate approval Agent {name!r}")
+        if not isinstance(entry.get("policyVersion"), str) or not entry["policyVersion"]:
+            raise PackError(f"missing policyVersion for Agent {name!r}")
+        approvals_by_agent[name] = entry
+    if set(readiness_by_agent) != set(approvals_by_agent):
+        raise PackError("approval report must cover exactly the readiness Agents")
+
     packs: list[dict[str, Any]] = []
-    for agent in readiness:
+    for agent in readiness_reports:
         name = agent["agent"]
+        seen_skills: set[tuple[str, str]] = set()
         working: list[dict[str, Any]] = []
         needs: list[dict[str, Any]] = []
         off: list[str] = []
         for entry in agent["skills"]:
+            key = (entry.get("kind", "Skill"), entry["name"])
+            if key in seen_skills:
+                raise PackError(f"duplicate Skill {key!r} for Agent {name!r}")
+            seen_skills.add(key)
+            if entry.get("enabled", True) and entry["ready"] and any(
+                dependency.get("required", True) and dependency["status"] in
+                {"missing", "no-content", "unavailable", "no-grant", "grant-unavailable", "grant-scope"}
+                for dependency in entry["dependencies"]
+            ):
+                raise PackError(f"Skill {entry['name']!r} claims ready with a required unavailable dependency")
             label = {"name": entry["name"], "kind": entry.get("kind", "Skill")}
             if not entry.get("enabled", True):
                 off.append(entry["name"])
@@ -106,16 +138,16 @@ def build(
                         for family in families
                     ],
                 })
-        policy = approvals_by_agent.get(name)
+        policy = approvals_by_agent[name]
         actions = [
             {"skill": group["skill"], "tool": action["tool"], "risk": action["risk"], "team": action["member"], "public": action["public"]}
-            for group in (policy["skills"] if policy else [])
+            for group in policy["skills"]
             for action in group["actions"]
         ]
         packs.append({
             "agent": name,
             "environment": agent.get("environment"),
-            "policyVersion": policy.get("policyVersion") if policy else None,
+            "policyVersion": policy["policyVersion"],
             "working": working,
             "needsAction": needs,
             "switchedOff": sorted(off),
