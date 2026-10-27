@@ -262,13 +262,40 @@ class NoticeQueue:
 
     def source(self):
         with self._locked() as state:
-            notices = list(state["pending"].values())
+            # A local inbox is not an external send. Keep posted notices until
+            # an explicit host-operator acknowledgement; do not post them again
+            # on every clock tick or silently remove them on a no-op sender.
+            notices = [dict(notice) for notice in state["pending"].values() if not notice.get("inboxPosted")]
 
         def mark(item: Mapping[str, Any], via: str) -> None:
             with self._locked() as state:
-                state["pending"].pop(item["notice"]["key"], None)
+                key = item["notice"]["key"]
+                if key in state["pending"]:
+                    if via == "inbox":
+                        state["pending"][key]["inboxPosted"] = True
+                    else:
+                        state["pending"].pop(key)
 
         return _module("delivery").source("worker", notices, mark, reference=lambda notice: f"{notice['reference']}:{notice['kind']}")
+
+    def ack_inbox(self, key: str, *, actor: str, audit: Callable[[str, str, dict[str, Any]], Any]) -> None:
+        """Acknowledge a posted local notice from a host operator, never as client-owner consent.
+
+        Ledger first, then remove: a failed ledger leaves the notice visible.
+        A crash after the receipt can repeat an acknowledgement, not lose it.
+        """
+        if not isinstance(key, str) or re.fullmatch(r"[0-9a-f]{24}", key) is None:
+            raise ValueError("no such inbox notice")
+        if not isinstance(actor, str) or re.fullmatch(r"[A-Za-z0-9._-]{1,64}", actor) is None:
+            raise ValueError("host operator identity is invalid")
+        with self._locked() as state:
+            notice = state["pending"].get(key)
+            if not isinstance(notice, dict) or notice.get("inboxPosted") is not True:
+                raise ValueError("no such inbox notice")
+            audit("notice.operator-ack", f"host-operator:{actor}", {
+                "noticeKey": key, "kind": notice["kind"], "reference": notice["reference"],
+            })
+            del state["pending"][key]
 
     def pending(self) -> list[dict[str, Any]]:
         with self._locked() as state:
