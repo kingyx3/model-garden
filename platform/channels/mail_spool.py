@@ -304,6 +304,14 @@ class MailSpool:
             if message_id in messages:
                 duplicate = True
                 existing = messages[message_id]
+                # A retry must not receive SMTP 250 for an index entry whose
+                # underlying message was removed, linked or changed on disk.
+                try:
+                    persisted = self._read_private(self._file(message_id), "message", MAX_MESSAGE_BYTES)
+                except FileNotFoundError as exc:
+                    raise SpoolError("stored duplicate mail is missing") from exc
+                if hashlib.sha256(persisted).hexdigest() != existing.get("sha256"):
+                    raise SpoolError("stored duplicate mail has changed")
                 pending = existing.get("auditPending", False)
                 # A different payload with the same Message-ID must never
                 # acknowledge an earlier, unaudited intake.
