@@ -5,6 +5,7 @@ import importlib.util
 import json
 import os
 import pathlib
+import re
 import stat
 import sys
 import tempfile
@@ -44,9 +45,9 @@ class PrivateCacheTests(unittest.TestCase):
         self.root = pathlib.Path(tmp.name)
         self.cache = self.root / "private" / "call-summaries.json"
 
-    def run_summary(self, answer="Fresh answer.", record=None):
+    def run_summary(self, answer="Fresh answer.", record=None, patterns=()):
         client = FakeClient(answer)
-        result = summary.CallSummarizer(client, cache_path=self.cache)(record or call())
+        result = summary.CallSummarizer(client, cache_path=self.cache, patterns=patterns)(record or call())
         return result, client
 
     def test_private_regular_cache_is_reused_without_another_model_call(self):
@@ -101,6 +102,23 @@ class PrivateCacheTests(unittest.TestCase):
         self.assertEqual((result["summary"], client.calls), ("Different request.", 1))
         again, cached_client = self.run_summary("Should not be called.", call("I need to cancel the visit."))
         self.assertEqual((again["summary"], cached_client.calls), ("Different request.", 0))
+
+    def test_new_redaction_policy_invalidates_a_previous_unredacted_summary(self):
+        original, _ = self.run_summary("Reference number 123.")
+        self.assertIn("123", original["summary"])
+        updated, client = self.run_summary("Reference number 123.", patterns=(re.compile("123"),))
+        self.assertEqual(client.calls, 1)
+        self.assertIn("[REDACTED:pattern]", updated["summary"])
+        self.assertNotIn("123", updated["summary"])
+
+    def test_nested_symlink_parent_is_not_trusted(self):
+        target = self.root / "other"
+        (target / "private").mkdir(parents=True, mode=0o700)
+        redirected = self.root / "redirected"
+        redirected.symlink_to(target, target_is_directory=True)
+        self.cache = redirected / "private" / "call-summaries.json"
+        self.run_summary()
+        self.assertFalse((target / "private" / "call-summaries.json").exists())
 
     def test_failed_atomic_replace_preserves_previous_cache_and_leaves_no_temp_file(self):
         self.run_summary("Original answer.")
