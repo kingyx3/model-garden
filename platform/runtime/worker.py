@@ -1210,14 +1210,21 @@ class Worker:
                 # Pre-upgrade installations have a heartbeat but no durable streak history.
                 # Carry forward any already-persistent failure; partial streaks cannot be recovered.
                 try:
+                    self.heartbeat.lstat()
+                except FileNotFoundError:
+                    return {}  # genuinely fresh volume
+                except OSError:
+                    raise WorkerConfigError("previous worker heartbeat is untrusted") from None
+                try:
                     previous = heartbeat._read_pinned(self.heartbeat)
-                except (OSError, ValueError, UnicodeError):
-                    previous = None
-                persistent = previous.get("persistentFailures", []) if isinstance(previous, dict) else []
-                allowed = set(DEFAULT_INTERVALS) | {"schedules", "alerts"}
-                if isinstance(persistent, list) and all(isinstance(name, str) and name in allowed for name in persistent):
-                    return {name: 3 for name in persistent}
-                return {}
+                    allowed = set(DEFAULT_INTERVALS) | {"schedules", "alerts"}
+                    if (not isinstance(previous, dict) or not isinstance(previous.get("persistentFailures"), list) or
+                            any(not isinstance(name, str) or name not in allowed
+                                for name in previous["persistentFailures"])):
+                        raise ValueError("invalid previous heartbeat")
+                except (OSError, ValueError, TypeError, UnicodeError):
+                    raise WorkerConfigError("previous worker heartbeat is untrusted") from None
+                return {name: 3 for name in previous["persistentFailures"]}
             raise WorkerConfigError("worker failure history is missing after initialization") from None
         try:
             document = heartbeat._read_pinned(history)
