@@ -356,7 +356,7 @@ class Worker:
         self.queue = NoticeQueue(self.data / "worker")
         self.last_run: dict[str, float] = {}
         self.heartbeat = self.data / "worker" / "heartbeat.json"
-        self._failure_streaks: dict[str, int] = {}  # per-job attempts, not every loop tick
+        self._failure_streaks: dict[str, int] = self._load_failure_streaks()  # persisted across worker restarts
         self._schedules_applied = False
 
     # -- shared ------------------------------------------------------------------------------------
@@ -1191,26 +1191,89 @@ class Worker:
                 pass
             return {"failed": type(exc).__name__}
 
+    def _failure_state_path(self) -> pathlib.Path:
+        return self.heartbeat.with_name("failure-streaks.json")
+
+    def _failure_marker_path(self) -> pathlib.Path:
+        return self.heartbeat.with_name("failure-streaks.initialized")
+
+    def _load_failure_streaks(self) -> dict[str, int]:
+        """Preserve consecutive job failures across process restarts; corrupt history is not a clean bill of health."""
+        heartbeat = _module("heartbeat")
+        history, marker = self._failure_state_path(), self._failure_marker_path()
+        try:
+            history.lstat()  # unlike exists(), detect dangling symlinks
+        except FileNotFoundError:
+            try:
+                marker.lstat()
+            except FileNotFoundError:
+                # Pre-upgrade installations have a heartbeat but no durable streak history.
+                # Carry forward any already-persistent failure; partial streaks cannot be recovered.
+                try:
+                    previous = heartbeat._read_pinned(self.heartbeat)
+                except (OSError, ValueError, UnicodeError):
+                    previous = None
+                persistent = previous.get("persistentFailures", []) if isinstance(previous, dict) else []
+                allowed = set(DEFAULT_INTERVALS) | {"schedules", "alerts"}
+                if isinstance(persistent, list) and all(isinstance(name, str) and name in allowed for name in persistent):
+                    return {name: 3 for name in persistent}
+                return {}
+            raise WorkerConfigError("worker failure history is missing after initialization") from None
+        try:
+            document = heartbeat._read_pinned(history)
+            if not isinstance(document, dict) or set(document) != {"schemaVersion", "streaks"} or document["schemaVersion"] != 1:
+                raise ValueError("invalid failure history")
+            streaks = document["streaks"]
+            allowed = set(DEFAULT_INTERVALS) | {"schedules", "alerts"}
+            if (not isinstance(streaks, dict) or len(streaks) > len(allowed) or
+                    any(name not in allowed or isinstance(count, bool) or not isinstance(count, int) or not 0 <= count <= 3
+                        for name, count in streaks.items())):
+                raise ValueError("invalid failure history")
+            return dict(streaks)
+        except (OSError, ValueError, TypeError, UnicodeError):
+            raise WorkerConfigError("worker failure history is unreadable or untrusted") from None
+
+    def _save_failure_streaks(self, streaks: Mapping[str, int]) -> None:
+        heartbeat = _module("heartbeat")
+        marker = self._failure_marker_path()
+        try:
+            marker.lstat()
+        except FileNotFoundError:
+            # A durable first-write witness makes subsequent history deletion fail closed.
+            heartbeat._write_pinned(marker, {"schemaVersion": 1})
+        else:
+            try:
+                if heartbeat._read_pinned(marker) != {"schemaVersion": 1}:
+                    raise ValueError("untrusted witness")
+            except (OSError, ValueError, UnicodeError):
+                raise WorkerConfigError("worker failure history witness is untrusted") from None
+        heartbeat._write_pinned(self._failure_state_path(), {"schemaVersion": 1, "streaks": dict(sorted(streaks.items()))})
+
     def _beat(self, now: int, report: Mapping[str, Any]) -> None:
-        self.heartbeat.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-        failed = sorted(name for name, value in report.items() if isinstance(value, Mapping) and "failed" in value)
-        for name in report:  # do not reset a long-interval job on ticks when it did not run
-            self._failure_streaks[name] = self._failure_streaks.get(name, 0) + 1 if name in failed else 0
-        persistent = sorted(name for name, count in self._failure_streaks.items() if count >= 3)
+        """Durable, payload-free health and alert-delivery failure tracking.
+
+        An unavailable alert queue cannot silently turn a persistent worker
+        incident into a healthy heartbeat. Persist streaks before publishing
+        a new health claim; a crash may overcount, never erase a failure.
+        """
+        failed = {name for name, value in report.items() if isinstance(value, Mapping) and "failed" in value}
+        streaks = dict(self._failure_streaks)
+        for name in report:
+            streaks[name] = min(3, streaks.get(name, 0) + 1) if name in failed else 0
+        persistent = sorted(name for name, count in streaks.items() if count >= 3 and name != "alerts")
         try:
             self._failure_alerts(now, persistent, ran={name for name in report if name not in failed})
-        except Exception:  # noqa: BLE001 - an alert that cannot be queued must never stop the heartbeat
-            pass
-        # Heartbeat carries ONLY fixed job names and counts, never provider errors or user data.
-        document = {"at": now, "failed": failed, "persistentFailures": persistent}
-        temporary = self.heartbeat.with_suffix(".tmp")
-        descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
-        os.fchmod(descriptor, 0o600)  # a leftover .tmp file must not retain permissive permissions
-        with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
-            stream.write(json.dumps(document, sort_keys=True) + "\n")
-            stream.flush()
-            os.fsync(stream.fileno())
-        os.replace(temporary, self.heartbeat)
+        except Exception:  # noqa: BLE001 - record the alert-path failure, never the sensitive exception
+            failed.add("alerts")
+            streaks["alerts"] = min(3, streaks.get("alerts", 0) + 1)
+        else:
+            if "alerts" in streaks:
+                streaks["alerts"] = 0
+        self._save_failure_streaks(streaks)
+        document = {"at": now, "failed": sorted(failed),
+                    "persistentFailures": sorted(name for name, count in streaks.items() if count >= 3)}
+        _module("heartbeat")._write_pinned(self.heartbeat, document)
+        self._failure_streaks = streaks
 
     def _failure_alerts(self, now: int, persistent: list[str], *, ran: set[str]) -> None:
         """One notice when a job starts failing three passes in a row and one when it recovers; state, not time, deduplicates flapping.
