@@ -262,41 +262,48 @@ def count_executions_today(
     agent: str | None = None,
     initiating_user: str | None = None,
 ) -> int | None:
-    """Successful executions of a Tool so far today (UTC) in the local ledger.
+    """Count successful executions in a *verified*, stable ledger snapshot.
 
-    With ``agent`` only that Agent's executions count (an event that names no Agent is counted, which can only make a limit
-    stricter), so one Agent's use never rations another's. With ``initiating_user`` only that requester's executions count.
-
-    ``None`` means the count is unavailable (no ledger, or it cannot be read), which a
-    usage-limited allow rule treats as "limit not proven" and therefore does not apply.
+    A valid-looking JSON edit must not reset a signed policy's daily allowance.
+    This is a host-local tamper-evidence check, not an independent truncation
+    anchor or a cross-process atomic reservation of an execution slot.
     """
     if audit_path is None:
         return None
     today = (now or dt.datetime.now(dt.timezone.utc)).strftime("%Y-%m-%d")
     if not audit_path.exists():
-        return 0
+        return 0  # legacy first-run ledger; no independent initialization witness
     count = 0
     try:
         with audit_path.open("r", encoding="utf-8") as handle:
-            for raw in handle:
-                try:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_SH)
+            try:
+                opened = os.fstat(handle.fileno())
+                current = audit_path.lstat()
+                if (opened.st_dev, opened.st_ino) != (current.st_dev, current.st_ino):
+                    return None  # swapped path or symlink
+                _verify_audit_chain_handle(handle)
+                handle.seek(0)
+                for raw in handle:
                     event = json.loads(raw)
-                except json.JSONDecodeError:
+                    if (
+                        isinstance(event, dict)
+                        and event.get("event") == "execution"
+                        and event.get("outcome") == "succeeded"
+                        and event.get("tool") == tool_name
+                        and str(event.get("timestamp", "")).startswith(today)
+                        and (agent is None or event.get("agent") in (None, agent))
+                        and (initiating_user is None or event.get("initiatingUser") == initiating_user)
+                    ):
+                        count += 1
+                current = audit_path.lstat()
+                if (opened.st_dev, opened.st_ino) != (current.st_dev, current.st_ino):
                     return None
-                if (
-                    isinstance(event, dict)
-                    and event.get("event") == "execution"
-                    and event.get("outcome") == "succeeded"
-                    and event.get("tool") == tool_name
-                    and str(event.get("timestamp", "")).startswith(today)
-                    and (agent is None or event.get("agent") in (None, agent))
-                    and (initiating_user is None or event.get("initiatingUser") == initiating_user)
-                ):
-                    count += 1
-    except OSError:
+            finally:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+    except (OSError, ValueError, TypeError, UnicodeError):
         return None
     return count
-
 
 def authorize_action(
     desired_state: dict[str, Any],
@@ -548,6 +555,45 @@ def append_audit_event(path: pathlib.Path | None, event: dict[str, Any]) -> None
         os.close(descriptor)
 
 
+def _verify_audit_chain_handle(handle: Any) -> dict[str, Any]:
+    """Validate one already-opened, caller-locked ledger descriptor."""
+    handle.seek(0)
+    previous_hash: str | None = None
+    expected_sequence = 1
+    events = 0
+    last_version = 1
+    for line_number, raw in enumerate(handle, start=1):
+        if not raw.strip():
+            continue
+        try:
+            event = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"Audit chain invalid at line {line_number}: invalid JSON") from exc
+        if not isinstance(event, dict):
+            raise ValueError(f"Audit chain invalid at line {line_number}: record is not an object")
+        events += 1
+        schema_version = event.get("schemaVersion", 1)
+        if type(schema_version) is not int or schema_version not in (1, *CHAINED_SCHEMA_VERSIONS):
+            raise ValueError(f"Audit chain invalid at line {line_number}: unsupported schemaVersion {schema_version!r}")
+        if schema_version < last_version:
+            raise ValueError(f"Audit chain invalid at line {line_number}: schemaVersion moved backwards")
+        last_version = schema_version
+        if schema_version == 1:
+            previous_hash = _sha256_json(event)
+            expected_sequence = events + 1
+            continue
+        if event.get("sequence") != expected_sequence:
+            raise ValueError(f"Audit chain invalid at line {line_number}: sequence mismatch")
+        if event.get("previousEventHash") != previous_hash:
+            raise ValueError(f"Audit chain invalid at line {line_number}: previous hash mismatch")
+        stored_hash = event.get("eventHash")
+        if not isinstance(stored_hash, str) or stored_hash != _event_chain_hash(event):
+            raise ValueError(f"Audit chain invalid at line {line_number}: event hash mismatch")
+        previous_hash = stored_hash
+        expected_sequence += 1
+    return {"valid": True, "events": events, "headHash": previous_hash}
+
+
 def verify_audit_chain(path: pathlib.Path) -> dict[str, Any]:
     """Verify ordering and SHA-256 chaining for chained (schema-v2 and v3) audit events.
 
@@ -557,46 +603,12 @@ def verify_audit_chain(path: pathlib.Path) -> dict[str, Any]:
     """
     if not path.exists():
         return {"valid": True, "events": 0, "headHash": None}
-    previous_hash: str | None = None
-    expected_sequence = 1
-    events = 0
-    last_version = 1
     with path.open("r", encoding="utf-8") as handle:
         fcntl.flock(handle.fileno(), fcntl.LOCK_SH)
         try:
-            for line_number, raw in enumerate(handle, start=1):
-                if not raw.strip():
-                    continue
-                try:
-                    event = json.loads(raw)
-                except json.JSONDecodeError as exc:
-                    raise ValueError(f"Audit chain invalid at line {line_number}: invalid JSON") from exc
-                if not isinstance(event, dict):
-                    raise ValueError(f"Audit chain invalid at line {line_number}: record is not an object")
-                events += 1
-                schema_version = event.get("schemaVersion", 1)
-                if type(schema_version) is not int or schema_version not in (1, *CHAINED_SCHEMA_VERSIONS):
-                    raise ValueError(f"Audit chain invalid at line {line_number}: unsupported schemaVersion {schema_version!r}")
-                if schema_version < last_version:
-                    raise ValueError(f"Audit chain invalid at line {line_number}: schemaVersion moved backwards")
-                last_version = schema_version
-                if schema_version == 1:
-                    previous_hash = _sha256_json(event)
-                    expected_sequence = events + 1
-                    continue
-                if event.get("sequence") != expected_sequence:
-                    raise ValueError(f"Audit chain invalid at line {line_number}: sequence mismatch")
-                if event.get("previousEventHash") != previous_hash:
-                    raise ValueError(f"Audit chain invalid at line {line_number}: previous hash mismatch")
-                stored_hash = event.get("eventHash")
-                if not isinstance(stored_hash, str) or stored_hash != _event_chain_hash(event):
-                    raise ValueError(f"Audit chain invalid at line {line_number}: event hash mismatch")
-                previous_hash = stored_hash
-                expected_sequence += 1
+            return _verify_audit_chain_handle(handle)
         finally:
             fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
-    return {"valid": True, "events": events, "headHash": previous_hash}
-
 
 def _result_receipt(result: Any) -> dict[str, Any]:
     encoded = _canonical_json(result)
