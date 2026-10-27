@@ -52,7 +52,7 @@ class VoiceMetricTests(unittest.TestCase):
             if include_log:
                 health["Log"] = [{"End": end}]
             with mock.patch.object(METRIC.subprocess, "run", side_effect=[
-                result("a1\\n"), result(json.dumps({"Running": True, "Health": health}))
+                result("a1\n"), result(json.dumps({"Running": True, "Health": health}))
             ]):
                 return METRIC.docker_voice_ready("client-dev", now=fixed)
 
