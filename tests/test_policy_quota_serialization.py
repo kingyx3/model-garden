@@ -28,12 +28,14 @@ def state(*, per_principal=False, limited=True):
     }
 
 
-def competing_worker(audit_path, first, entered, release, output, per_principal=False):
+def competing_worker(audit_path, first, entered, release, second_executed, output, per_principal=False):
     def execute(_arguments):
         if first:
             entered.set()
             if not release.wait(10):
                 raise RuntimeError("test worker timed out")
+        else:
+            second_executed.set()
         return {"ok": True}
     try:
         result = govern.execute_action(
@@ -59,16 +61,17 @@ class PolicyQuotaSerializationTests(unittest.TestCase):
 
     def assert_one_slot_serialized(self, *, per_principal):
         context = multiprocessing.get_context("fork")
-        entered, release = context.Event(), context.Event()
+        entered, release, second_executed = context.Event(), context.Event(), context.Event()
         output = context.Queue()
         first = context.Process(target=competing_worker,
-                                args=(str(self.path), True, entered, release, output, per_principal))
+                                args=(str(self.path), True, entered, release, second_executed, output, per_principal))
         second = context.Process(target=competing_worker,
-                                 args=(str(self.path), False, entered, release, output, per_principal))
+                                 args=(str(self.path), False, entered, release, second_executed, output, per_principal))
         try:
             first.start()
             self.assertTrue(entered.wait(8), "first worker did not reach the executor")
             second.start()
+            self.assertFalse(second_executed.wait(0.7), "second provider call raced the first")
             release.set()
             first.join(12)
             second.join(12)
