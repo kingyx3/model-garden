@@ -58,6 +58,8 @@ class WorkerOperationalReadinessTests(unittest.TestCase):
     def test_persistent_job_failure_is_visible_but_does_not_kill_liveness(self) -> None:
         runtime = worker.Worker.__new__(worker.Worker)
         runtime.heartbeat = self.path
+        runtime.data = self.path.parent.parent
+        runtime.config = {"escalateTo": None, "mailbox": None}
         runtime._failure_streaks = {}
         for attempt in (1, 2, 3):
             runtime._beat(T0 + attempt, {"scheduler": {"failed": "RuntimeError"}, "notices": {"sent": 1}})
@@ -80,6 +82,8 @@ class WorkerOperationalReadinessTests(unittest.TestCase):
     def test_no_payload_leaks_to_health_output_and_readiness_exits_failure(self) -> None:
         runtime = worker.Worker.__new__(worker.Worker)
         runtime.heartbeat = self.path
+        runtime.data = self.path.parent.parent
+        runtime.config = {"escalateTo": None, "mailbox": None}
         runtime._failure_streaks = {}
         for index in range(3):
             runtime._beat(T0 + index, {"mailbox": {"failed": "customer secret payload"}})
@@ -132,8 +136,7 @@ class WorkerOperationalReadinessTests(unittest.TestCase):
                     history.chmod(0o666)
                 with self.assertRaises(worker.WorkerConfigError):
                     self.restarted()
-                self.assertEqual(worker.operational_health(self.path, now=T0 + 1)["status"], "healthy")
-                # The old heartbeat remains observable, but cannot be renewed by a restarted worker.
+                # No restarted worker can renew the old heartbeat; a hardlink also invalidates its trust check.
         history.unlink()
         history.write_bytes(good)
         history.chmod(0o600)
