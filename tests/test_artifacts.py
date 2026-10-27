@@ -5,6 +5,7 @@ import contextlib
 import importlib.util
 import io
 import json
+import os
 import pathlib
 import sys
 import tempfile
@@ -208,6 +209,67 @@ class StoreCase(unittest.TestCase):
         with self.assertRaisesRegex(Error, "missing"):
             self.store().get(entry["id"], requested_by=ALICE, now=T0)
 
+    def test_linked_artifact_payload_is_never_read_or_deleted(self):
+        entry = self.put()
+        store = self.store()
+        path = self.root / "acme-prod" / entry["id"]
+        outside = pathlib.Path(self._tmp.name) / "unrelated-secret"
+        outside.write_bytes(b"not-an-artifact")
+        path.unlink()
+        path.symlink_to(outside)
+        with self.assertRaisesRegex(Error, "unsafe"):
+            store.get(entry["id"], requested_by=ALICE, now=T0)
+        with self.assertRaisesRegex(Error, "unsafe"):
+            store.delete(entry["id"], requested_by=ALICE)
+        self.assertEqual(outside.read_bytes(), b"not-an-artifact")
+        path.unlink()
+        os.link(outside, path)
+        with self.assertRaisesRegex(Error, "unsafe"):
+            store.get(entry["id"], requested_by=ALICE, now=T0)
+        with self.assertRaisesRegex(Error, "unsafe"):
+            store.purge_expired(now=T0 + 366 * 86400)
+        self.assertTrue(outside.exists())
+
+    def test_artifact_bytes_must_remain_private_even_with_valid_digest(self):
+        entry = self.put()
+        path = self.root / "acme-prod" / entry["id"]
+        path.chmod(0o644)
+        with self.assertRaisesRegex(Error, "unsafe"):
+            self.store().get(entry["id"], requested_by=ALICE, now=T0)
+
+    def test_index_and_lock_refuse_symlink_and_hardlink_replacement(self):
+        self.put()
+        store = self.store()
+        index = self.root / "acme-prod" / "index.json"
+        lock = self.root / "acme-prod" / ".lock"
+        outside = pathlib.Path(self._tmp.name) / "outside-index"
+        outside.write_bytes(index.read_bytes())
+        index.unlink()
+        index.symlink_to(outside)
+        with self.assertRaisesRegex(Error, "unsafe"):
+            store.list()
+        index.unlink()
+        os.link(outside, index)
+        with self.assertRaisesRegex(Error, "unsafe"):
+            store.list()
+        index.unlink()
+        index.write_bytes(outside.read_bytes())
+        index.chmod(0o600)
+        lock.unlink()
+        lock.symlink_to(outside)
+        with self.assertRaisesRegex(Error, "unsafe"):
+            store.list()
+        self.assertEqual(outside.read_bytes(), index.read_bytes())
+
+    def test_tenant_directory_symlink_is_refused_before_writing(self):
+        outside = pathlib.Path(self._tmp.name) / "other"
+        outside.mkdir(mode=0o700)
+        self.root.mkdir(mode=0o700)
+        (self.root / "acme-prod").symlink_to(outside, target_is_directory=True)
+        with self.assertRaisesRegex(Error, "unsafe"):
+            self.put()
+        self.assertEqual(list(outside.iterdir()), [])
+
     def test_retention_expires_and_purges_files(self):
         short = self.store(retention_days=1)
         keep = self.put(short, content=b"keep", name="keep.txt", now=T0 + 86400)
@@ -246,7 +308,9 @@ class StoreCase(unittest.TestCase):
         self.assertEqual(other.list(), [])
         with self.assertRaises(Error):
             other.get(entry["id"], requested_by=ALICE, now=T0)
-        (self.root / "globex-prod" / "index.json").write_text((self.root / "acme-prod" / "index.json").read_text())
+        foreign_index = self.root / "globex-prod" / "index.json"
+        foreign_index.write_text((self.root / "acme-prod" / "index.json").read_text())
+        foreign_index.chmod(0o600)  # valid private file, but tenant identifier must still be rejected
         with self.assertRaisesRegex(Error, "another tenant"):
             other.list()
         with self.assertRaises(Error):
