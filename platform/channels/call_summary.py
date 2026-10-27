@@ -16,17 +16,21 @@ Pure Python, no credentials: the client is injected (tests use a fake transport)
 """
 from __future__ import annotations
 
+import hashlib
 import importlib.util
 import json
 import os
 import pathlib
+import stat
 import sys
+import tempfile
 import time
 from collections.abc import Callable, Iterable, Mapping
 from typing import Any
 
 CACHE_SECONDS = 30 * 24 * 60 * 60
 MAX_CACHE_ENTRIES = 5000
+MAX_CACHE_BYTES = 2_000_000
 MAX_SUMMARY_CHARS = 1200
 MAX_PROMPT_TRANSCRIPT_CHARS = 16_000
 EXTRACT_CHARS = 160
@@ -119,7 +123,7 @@ def summarize(record: Mapping[str, Any], client: Any | None = None, *, patterns:
 class CallSummarizer:
     """``record -> record`` with the summary attached; counts what it produced so a command can report it.
 
-    With a ``cache_path`` the summary chosen for a call is kept (mode 0600, thirty days) and reused. A model's wording differs from run
+    With a ``cache_path`` the summary chosen for an unchanged call is kept (mode 0600, thirty days) and reused. A model's wording differs from run
     to run, so without this an approval waiting on a filing would go stale (a new text is a new exact action) every time the step ran.
     """
 
@@ -129,11 +133,34 @@ class CallSummarizer:
         self.counts = {"model": 0, "fallback": 0, "cached": 0}
         self.tokens = 0
 
-    def _load_cache(self) -> dict[str, Any]:
+    def _safe_parent(self) -> bool:
+        """Never follow a redirected or other-user-writable cache directory."""
         if self._cache_path is None:
+            return False
+        try:
+            info = self._cache_path.parent.lstat()
+        except OSError:
+            return False
+        return (stat.S_ISDIR(info.st_mode) and info.st_uid == os.getuid()
+                and not (stat.S_IMODE(info.st_mode) & 0o022))
+
+    @staticmethod
+    def _safe_file(info: os.stat_result) -> bool:
+        return (stat.S_ISREG(info.st_mode) and info.st_uid == os.getuid() and info.st_nlink == 1
+                and not (stat.S_IMODE(info.st_mode) & 0o077) and info.st_size <= MAX_CACHE_BYTES)
+
+    def _load_cache(self) -> dict[str, Any]:
+        if self._cache_path is None or not self._safe_parent():
             return {}
         try:
-            value = json.loads(self._cache_path.read_text(encoding="utf-8"))
+            descriptor = os.open(self._cache_path, os.O_RDONLY | os.O_NOFOLLOW)
+            with os.fdopen(descriptor, "rb") as handle:
+                if not self._safe_file(os.fstat(handle.fileno())):
+                    return {}
+                data = handle.read(MAX_CACHE_BYTES + 1)
+            if len(data) > MAX_CACHE_BYTES:
+                return {}
+            value = json.loads(data)
         except (OSError, ValueError):
             return {}
         cutoff = self._clock() - CACHE_SECONDS
@@ -142,20 +169,52 @@ class CallSummarizer:
     def _save_cache(self, cache: dict[str, Any]) -> None:
         if self._cache_path is None:
             return
+        temporary: str | None = None
         try:
-            self._cache_path.parent.mkdir(parents=True, exist_ok=True)
+            self._cache_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+            if not self._safe_parent():
+                return
+            try:
+                existing = self._cache_path.lstat()
+            except FileNotFoundError:
+                existing = None
+            if existing is not None and not self._safe_file(existing):
+                return  # never repair an unsafe path by following it or truncating its target
             items = sorted(cache.items(), key=lambda kv: kv[1]["at"])[-MAX_CACHE_ENTRIES:]
-            descriptor = os.open(self._cache_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-            with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
-                json.dump(dict(items), handle, sort_keys=True)
-        except OSError:
-            pass  # an unwritable cache only means the next run may word the summary differently
+            data = json.dumps(dict(items), sort_keys=True).encode("utf-8")
+            if len(data) > MAX_CACHE_BYTES:
+                return
+            descriptor, temporary = tempfile.mkstemp(prefix=".call-summaries-", dir=self._cache_path.parent)
+            with os.fdopen(descriptor, "wb") as handle:
+                handle.write(data)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary, self._cache_path)  # atomic; cannot truncate a symlink/hardlink target
+            temporary = None
+        except (OSError, ValueError, TypeError):
+            pass  # cache failure must not prevent the governed CRM filing
+        finally:
+            if temporary is not None:
+                try:
+                    os.unlink(temporary)
+                except OSError:
+                    pass
+
+    @staticmethod
+    def _fingerprint(record: Mapping[str, Any]) -> str:
+        """An unchanged call id alone is not proof that its transcript/outcome is unchanged."""
+        fields = ("callHash", "agent", "tenant", "environment", "timestamp", "endedAt",
+                  "turns", "outcome", "transfer", "requestIds", "redactions")
+        payload = {key: record.get(key) for key in fields}
+        return hashlib.sha256(json.dumps(payload, sort_keys=True, default=str).encode("utf-8")).hexdigest()
 
     def __call__(self, record: Mapping[str, Any]) -> dict[str, Any]:
         call_hash = record.get("callHash") if isinstance(record.get("callHash"), str) else ""
+        fingerprint = self._fingerprint(record)
         cache = self._load_cache() if call_hash else {}
         hit = cache.get(call_hash)
-        if hit and isinstance(hit.get("text"), str) and hit.get("source") in (SOURCE_MODEL, SOURCE_FALLBACK):
+        if (hit and hit.get("fingerprint") == fingerprint and isinstance(hit.get("text"), str)
+                and hit.get("source") in (SOURCE_MODEL, SOURCE_FALLBACK)):
             self.counts["cached"] += 1
             return {**record, "summary": hit["text"], "summarySource": hit["source"]}
         result = summarize(record, self._client, patterns=self._patterns)
@@ -163,6 +222,7 @@ class CallSummarizer:
         tokens = result["usage"].get("tokens")
         self.tokens += tokens if isinstance(tokens, int) else 0
         if call_hash:
-            cache[call_hash] = {"text": result["text"], "source": result["source"], "at": int(self._clock())}
+            cache[call_hash] = {"text": result["text"], "source": result["source"],
+                                "fingerprint": fingerprint, "at": int(self._clock())}
             self._save_cache(cache)
         return {**record, "summary": result["text"], "summarySource": result["source"]}
