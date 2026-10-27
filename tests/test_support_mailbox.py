@@ -301,6 +301,44 @@ class Case(unittest.TestCase):
         self.assertEqual((result["status"], result["ticket"], result["crm"]["state"]), ("needs-person", "failed:RuntimeError", "synced"))
         self.assertNotIn("ticket", self.build().handle(raw(message_id="<c10@customer.example>"), now=T0))  # no opener: nothing changes
 
+    def test_both_human_handoff_routes_failing_keeps_mail_retryable(self):
+        self.label = "complaint"
+
+        def unavailable(_item):
+            raise OSError("private details must never enter a retry error")
+
+        mailbox = self.build(escalate=unavailable, ticket=unavailable)
+        with self.assertRaisesRegex(RuntimeError, "human handoff unavailable"):
+            mailbox.handle(raw(), now=T0)
+        self.assertFalse(mailbox._handled.seen("<c1@customer.example>"))
+        self.assertFalse(any(event[0] == "support-mailbox.handled" for event in self.events))
+        recovered = self.build(escalate=unavailable, ticket=lambda _item: {"ticketId": "t-1"})
+        result = recovered.handle(raw(), now=T0 + 60)
+        self.assertEqual((result["status"], result["ticket"]), ("needs-person", "t-1"))
+        self.assertTrue(recovered._handled.seen("<c1@customer.example>"))
+        self.assertNotIn("private details", json.dumps(self.events))
+
+    def test_human_handoff_without_any_route_is_not_acknowledged(self):
+        self.label = "complaint"
+        mailbox = self.build(escalate=None, ticket=None)
+        with self.assertRaisesRegex(RuntimeError, "human handoff unavailable"):
+            mailbox.handle(raw(), now=T0)
+        self.assertFalse(mailbox._handled.seen("<c1@customer.example>"))
+
+    def test_audit_failure_does_not_mark_mail_handled_before_retry(self):
+        self.label = "spam"
+
+        def broken_audit(*_event):
+            raise OSError("audit unavailable")
+
+        mailbox = self.build(audit=broken_audit)
+        with self.assertRaisesRegex(OSError, "audit unavailable"):
+            mailbox.handle(raw(), now=T0)
+        self.assertFalse(mailbox._handled.seen("<c1@customer.example>"))
+        recovered = self.build().handle(raw(), now=T0 + 60)
+        self.assertEqual((recovered["status"], recovered["reason"]), ("ignored", "spam"))
+        self.assertTrue(mailbox._handled.seen("<c1@customer.example>"))
+
     # -- filing ------------------------------------------------------------------------------------------
 
     def test_each_thread_is_filed_once_through_the_sync_ledger_with_no_message_text(self):
