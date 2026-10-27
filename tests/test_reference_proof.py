@@ -29,7 +29,8 @@ def evidence(voice_rows=(), audit_rows=()):
         "services": {"hermes": {"running": True}, "governed-tools": {"running": True},
                      "voice": {"running": True}},
         "voice": proof._voice_summary(list(voice_rows)),
-        "governance": proof._audit_summary(list(audit_rows)),
+        "governance": {**proof._audit_summary(list(audit_rows)),
+                       "completedCallActions": proof._completed_call_actions(list(voice_rows), list(audit_rows))},
     }
 
 
@@ -90,7 +91,61 @@ class ReferenceProofTests(unittest.TestCase):
         data = evidence([voice("CallStarted"), voice("CallEnded", timestamp=110)],
                         rows + [{"event": "execution", "outcome": "succeeded", "tool": "calendar.book"}])
         self.assertEqual(data["governance"]["successfulActions"], 1)
+        self.assertFalse(check(data, action=True)["passed"])  # unrelated execution cannot prove a voice action
+        self.assertTrue(check(data, call=False, action=True)["passed"])  # standalone action mode is unchanged
+
+
+    def test_a_completed_call_needs_a_matching_authorization_and_execution(self):
+        call_rows = [voice("CallStarted"), voice("CallEnded", timestamp=110)]
+        request_id = "c" * 64
+        def row(kind, outcome, *, agent="receptionist", actor="runtime:hermes", tag="call:" + ROOM):
+            return {"event": kind, "outcome": outcome, "requestId": request_id, "agent": agent,
+                    "initiatingUser": actor, "governance": {"correlationId": tag}, "tool": "calendar.book"}
+        authorized = row("authorization", "allow")
+        succeeded = row("execution", "succeeded")
+        data = evidence(call_rows, [authorized, succeeded])
+        self.assertEqual(data["governance"]["completedCallActions"], 1)
         self.assertTrue(check(data, action=True)["passed"])
+        self.assertEqual(evidence(call_rows, [succeeded])["governance"]["completedCallActions"], 0)
+        self.assertEqual(evidence(call_rows, [authorized])["governance"]["completedCallActions"], 0)
+        self.assertEqual(evidence(call_rows, [authorized, succeeded, succeeded])["governance"]["completedCallActions"], 1)
+
+    def test_unrelated_agent_actor_or_conflicting_request_cannot_launder_call_proof(self):
+        call_rows = [voice("CallStarted"), voice("CallEnded", timestamp=110)]
+        rid = "d" * 64
+        good = {"event": "authorization", "outcome": "allow", "requestId": rid, "agent": "receptionist",
+                "initiatingUser": "runtime:hermes", "governance": {"correlationId": "call:" + ROOM}}
+        executed = {**good, "event": "execution", "outcome": "succeeded"}
+        for altered in (
+            {"agent": "different-agent"},
+            {"initiatingUser": "runtime:mailbox"},
+            {"governance": {"correlationId": "call:" + OTHER}},
+            {"governance": {"correlationId": "task:unrelated"}},
+            {"governance": {"correlationId": None}},
+        ):
+            with self.subTest(altered=altered):
+                data = evidence(call_rows, [good, {**executed, **altered}])
+                self.assertEqual(data["governance"]["completedCallActions"], 0)
+                self.assertFalse(check(data, action=True)["passed"])
+        # A conflicting duplicate must veto even when another authorization/execution pair is valid.
+        conflict = {**good, "governance": {"correlationId": "task:unrelated"}}
+        self.assertEqual(evidence(call_rows, [good, executed, conflict])["governance"]["completedCallActions"], 0)
+
+    def test_missing_call_or_request_provenance_cannot_satisfy_action_gate(self):
+        call_rows = [voice("CallStarted"), voice("CallEnded", timestamp=110)]
+        base = {"requestId": "e" * 64, "agent": "receptionist", "initiatingUser": "runtime:hermes",
+                "governance": {"correlationId": "call:" + ROOM}}
+        for bad in ({"requestId": None}, {"requestId": "invalid"}, {"agent": None},
+                    {"initiatingUser": None}, {"governance": {}}, {"governance": {"correlationId": 123}}):
+            with self.subTest(bad=bad):
+                authorization = {**base, **bad, "event": "authorization", "outcome": "allow"}
+                execution = {**base, **bad, "event": "execution", "outcome": "succeeded"}
+                self.assertEqual(evidence(call_rows, [authorization, execution])["governance"]["completedCallActions"], 0)
+        # A valid action in a call that never ended is not a completed-call action.
+        valid = [{**base, "event": "authorization", "outcome": "allow"},
+                 {**base, "event": "execution", "outcome": "succeeded"}]
+        self.assertEqual(evidence([voice("CallStarted")], valid)["governance"]["completedCallActions"], 0)
+
 
 
 if __name__ == "__main__":

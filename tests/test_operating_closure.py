@@ -139,7 +139,7 @@ class OperatingClosureTests(unittest.TestCase):
                 "governed-tools": {"running": True},
                 "voice": {"running": True},
             },
-            "governance": {"records": 2, "successfulActions": 1},
+            "governance": {"records": 2, "successfulActions": 1, "completedCallActions": 1},
             "voice": {"distinctCalls": 1, "completedCalls": 1,
                       "completedCallFallbackEvidence": 1, "transcriptWriteFailures": 0},
         }
@@ -151,6 +151,11 @@ class OperatingClosureTests(unittest.TestCase):
         )
         self.assertTrue(result["passed"])
 
+        evidence["governance"]["completedCallActions"] = 0
+        self.assertFalse(reference_proof.evaluate(
+            evidence, require_voice_call=True, require_fallback=True, require_governed_action=True,
+        )["passed"])
+        evidence["governance"]["completedCallActions"] = 1
         evidence["voice"]["completedCalls"] = 0
         result = reference_proof.evaluate(
             evidence,

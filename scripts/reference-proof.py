@@ -132,6 +132,69 @@ def _voice_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "messageFallbackEvidence": types.get("FallbackMessage", 0),
     }
 
+
+def _completed_call_actions(voice_rows: list[dict[str, Any]], audit_rows: list[dict[str, Any]]) -> int:
+    """Count uniquely authorized successful Tool requests explicitly tied to completed calls.
+
+    Structural correlation only, NOT trusted SIP/identity/provider attestation.
+    Untagged time-window guesses, unrelated agents and conflicting reused request IDs
+    cannot turn a background Tool execution into reference-call acceptance.
+    Only aggregate counts leave the collector; call/request/actor IDs stay private.
+    """
+    started: dict[tuple[str, str], int] = {}
+    for row in voice_rows:
+        room, agent, at = row.get("roomHash"), row.get("agent"), row.get("timestamp")
+        if (row.get("type") == "CallStarted" and isinstance(room, str)
+                and re.fullmatch(r"[0-9a-f]{64}", room) and isinstance(agent, str) and agent
+                and type(at) is int):
+            key = (room, agent)
+            started[key] = min(at, started.get(key, at))
+    completed: set[tuple[str, str]] = set()
+    for row in voice_rows:
+        room, agent, at = row.get("roomHash"), row.get("agent"), row.get("timestamp")
+        if (row.get("type") == "CallEnded" and type(at) is int
+                and isinstance(room, str) and isinstance(agent, str)
+                and (room, agent) in started and at >= started[(room, agent)]):
+            completed.add((room, agent))
+
+    requests: dict[str, dict[str, Any]] = {}
+    for row in audit_rows:
+        request_id = row.get("requestId")
+        if not isinstance(request_id, str) or not re.fullmatch(r"[0-9a-f]{64}", request_id):
+            continue
+        context = row.get("governance")
+        tag = context.get("correlationId") if isinstance(context, dict) else None
+        # Include malformed or missing fields as conflicting signatures. Never
+        # silently ignore a second record with the same request ID.
+        signature = tuple(
+            value if isinstance(value, str) and value else None
+            for value in (row.get("agent"), row.get("initiatingUser"), tag, row.get("tool"))
+        )
+        request = requests.setdefault(request_id, {
+            "signatures": set(), "authorizations": set(), "approvals": set(), "executed": False,
+        })
+        request["signatures"].add(signature)
+        if row.get("event") == "authorization":
+            request["authorizations"].add(row.get("outcome") if isinstance(row.get("outcome"), str) else None)
+        elif row.get("event") == "approval":
+            request["approvals"].add(row.get("outcome") if isinstance(row.get("outcome"), str) else None)
+        elif row.get("event") == "execution" and row.get("outcome") == "succeeded":
+            request["executed"] = True
+
+    count = 0
+    for request in requests.values():
+        if len(request["signatures"]) != 1 or not request["executed"]:
+            continue
+        agent, actor, tag, tool = next(iter(request["signatures"]))
+        if not (agent and actor and tool and isinstance(tag, str) and
+                re.fullmatch(r"call:[0-9a-f]{64}", tag) and (tag[5:], agent) in completed):
+            continue
+        auth = request["authorizations"]
+        if auth == {"allow"} or (auth == {"require-approval"} and "approved" in request["approvals"]):
+            count += 1
+    return count
+
+
 def collect(project: str) -> dict[str, Any]:
     if not PROJECT.fullmatch(project):
         raise ValueError("project name must use lowercase letters, numbers, and internal hyphens")
@@ -151,7 +214,7 @@ def collect(project: str) -> dict[str, Any]:
         "generatedAt": dt.datetime.now(dt.timezone.utc).isoformat(),
         "project": project,
         "services": service_summary,
-        "governance": _audit_summary(audit_rows),
+        "governance": {**_audit_summary(audit_rows), "completedCallActions": _completed_call_actions(voice_rows, audit_rows)},
         "voice": _voice_summary(voice_rows),
         "redaction": "No credentials, prompts, Tool arguments, caller identifiers, transfer targets, room identifiers, or message bodies are included.",
     }
@@ -174,6 +237,8 @@ def evaluate(evidence: dict[str, Any], *, require_voice_call: bool, require_fall
         failures.append("no human-transfer or message fallback correlated to a completed call")
     if require_governed_action and evidence["governance"].get("successfulActions", 0) < 1:
         failures.append("no successful governed business-action execution receipt exists")
+    if require_governed_action and require_voice_call and evidence["governance"].get("completedCallActions", 0) < 1:
+        failures.append("no authorized successful Tool request is explicitly correlated to a completed call")
     return {"passed": not failures, "failures": failures}
 
 
@@ -196,6 +261,7 @@ def _markdown(evidence: dict[str, Any], result: dict[str, Any]) -> str:
         "",
         f"- Governed action records: {evidence['governance']['records']}",
         f"- Successful governed executions: {evidence['governance']['successfulActions']}",
+        f"- Authorized executions correlated to completed calls: {evidence['governance'].get('completedCallActions', 0)}",
         f"- Approval evidence records: {evidence['governance']['approvalEvidenceRecords']}",
         f"- Audit head hash present: {'yes' if evidence['governance'].get('auditHeadHash') else 'no'}",
         f"- Call starts observed: {evidence['voice']['distinctCalls']}",
