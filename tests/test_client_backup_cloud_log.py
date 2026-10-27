@@ -2,10 +2,12 @@
 from __future__ import annotations
 
 import datetime as dt
+import hashlib
 import importlib.util
 import json
 import pathlib
 import subprocess
+import tempfile
 import unittest
 from unittest import mock
 
@@ -239,6 +241,48 @@ class BackupCloudLogTests(unittest.TestCase):
              mock.patch.object(CLOUD.INCIDENT, "_state", side_effect=CLOUD.INCIDENT.IncidentError("unsafe state")):
             with self.assertRaises(CLOUD.INCIDENT.IncidentError):
                 CLOUD._automatic_since(now=now, **params)
+
+    def test_auto_since_reads_real_private_incident_state_and_rejects_foreign_binding(self):
+        """Integration: use the actual policy, inode checks and incident-state parser."""
+        with tempfile.TemporaryDirectory() as temp:
+            root = pathlib.Path(temp)
+            (root / "policy").mkdir(mode=0o700)
+            (root / "state").mkdir(mode=0o700)
+            schedule = root / "policy" / "schedule.json"
+            recipient = self.kwargs["recipient"]
+            policy = {
+                "schemaVersion": 1, "clientProject": "acme-dev",
+                "clientSlug": "acme", "environment": "dev",
+                "gcpProjectId": "sample-project-123",
+                "ageRecipientSha256": hashlib.sha256(recipient.encode()).hexdigest(),
+                "approvedBy": "operator-1", "changeRef": "CHG-123",
+                "validFrom": "2026-10-20T00:00:00Z",
+                "expiresAt": "2026-11-15T00:00:00Z",
+                "weekdaysUTC": [4], "hourUTC": 12, "minuteUTC": 0,
+            }
+            schedule.write_text(json.dumps(policy))
+            schedule.chmod(0o600)
+            params = dict(schedule=schedule, state_dir=root / "state",
+                          project="acme-dev", slug="acme", environment="dev",
+                          gcp_project="sample-project-123", recipient=recipient,
+                          now=dt.datetime(2026, 10, 27, 23, tzinfo=dt.timezone.utc))
+            self.assertEqual(CLOUD._automatic_since(**params),
+                             dt.datetime(2026, 10, 20, tzinfo=dt.timezone.utc))
+            state = root / "state" / "acme-dev.incident.json"
+            record = {
+                "schemaVersion": 1,
+                "binding": CLOUD.INCIDENT._binding(project="acme-dev", slug="acme",
+                    environment="dev", gcp_project="sample-project-123", recipient=recipient),
+                "condition": "unhealthy", "lastSlot": "20261023T120000Z",
+            }
+            state.write_text(json.dumps(record))
+            state.chmod(0o600)
+            self.assertEqual(CLOUD._automatic_since(**params),
+                             dt.datetime(2026, 10, 23, 12, tzinfo=dt.timezone.utc))
+            record["binding"] = "0" * 64
+            state.write_text(json.dumps(record))
+            with self.assertRaises(CLOUD.INCIDENT.IncidentError):
+                CLOUD._automatic_since(**params)
 
     def test_emit_automatic_since_is_derived_before_any_cloud_write(self):
         chosen = dt.datetime(2026, 10, 23, tzinfo=dt.timezone.utc)
