@@ -30,7 +30,7 @@ from typing import Any
 
 CACHE_SECONDS = 30 * 24 * 60 * 60
 MAX_CACHE_ENTRIES = 5000
-MAX_CACHE_BYTES = 2_000_000
+MAX_CACHE_BYTES = 8_000_000
 MAX_SUMMARY_CHARS = 1200
 MAX_PROMPT_TRANSCRIPT_CHARS = 16_000
 EXTRACT_CHARS = 160
@@ -142,7 +142,8 @@ class CallSummarizer:
         except OSError:
             return False
         return (stat.S_ISDIR(info.st_mode) and info.st_uid == os.getuid()
-                and not (stat.S_IMODE(info.st_mode) & 0o022))
+                and not (stat.S_IMODE(info.st_mode) & 0o022)
+                and self._cache_path.parent.resolve() == self._cache_path.parent.absolute())
 
     @staticmethod
     def _safe_file(info: os.stat_result) -> bool:
@@ -200,12 +201,13 @@ class CallSummarizer:
                 except OSError:
                     pass
 
-    @staticmethod
-    def _fingerprint(record: Mapping[str, Any]) -> str:
+    def _fingerprint(self, record: Mapping[str, Any]) -> str:
         """An unchanged call id alone is not proof that its transcript/outcome is unchanged."""
         fields = ("callHash", "agent", "tenant", "environment", "timestamp", "endedAt",
                   "turns", "outcome", "transfer", "requestIds", "redactions")
         payload = {key: record.get(key) for key in fields}
+        # A stricter client redaction policy must never reuse wording cached under an older policy.
+        payload["redactionPatterns"] = [(pattern.pattern, pattern.flags) for pattern in self._patterns]
         return hashlib.sha256(json.dumps(payload, sort_keys=True, default=str).encode("utf-8")).hexdigest()
 
     def __call__(self, record: Mapping[str, Any]) -> dict[str, Any]:
