@@ -251,7 +251,11 @@ class NoticeQueue:
     def add(self, kind: str, to: str | None, text: str, *, reference: str) -> str:
         key = hashlib.sha256(f"{kind}|{to}|{reference}".encode()).hexdigest()[:24]
         with self._locked() as state:
-            if key not in state["pending"] and len(state["pending"]) < MAX_QUEUE:
+            if key not in state["pending"]:
+                if len(state["pending"]) >= MAX_QUEUE:
+                    # Never report a successful human handoff when the durable
+                    # queue silently discarded the notice.
+                    raise RuntimeError("worker notice queue full; retry the human handoff")
                 state["pending"][key] = {"key": key, "kind": kind, "to": to, "text": text[:600], "reference": reference[:40]}
         return key
 
