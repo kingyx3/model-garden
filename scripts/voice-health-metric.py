@@ -32,11 +32,12 @@ def validate_inputs(project_id: str, client: str, environment: str, compose_proj
         raise ValueError("invalid Docker Compose project")
 
 
-def docker_voice_ready(compose_project: str) -> bool:
-    """Require exactly one running, natively healthy voice container for this project.
+def docker_voice_ready(compose_project: str, *, now: datetime | None = None) -> bool:
+    """Require one running voice container with a *recent completed* native probe.
 
-    A stopped old container, duplicate identity, Docker error, or a missing
-    healthcheck is unavailable. Never interpret an idle call stream as failure.
+    Docker can retain a 'healthy' state after its healthcheck stops making
+    progress. A missing, stale, future or malformed probe timestamp is down,
+    not evidence that an idle call stream is unhealthy.
     """
     try:
         listing = subprocess.run(
@@ -54,9 +55,26 @@ def docker_voice_ready(compose_project: str) -> bool:
             capture_output=True, text=True, check=True, timeout=8,
         )
         state = json.loads(inspected.stdout)
-        return (isinstance(state, dict) and state.get("Running") is True
+        if not (isinstance(state, dict) and state.get("Running") is True
                 and isinstance(state.get("Health"), dict)
-                and state["Health"].get("Status") == "healthy")
+                and state["Health"].get("Status") == "healthy"):
+            return False
+        # A stale native healthcheck can leave Docker's status as 'healthy'.
+        # Its last completed check must be recent, not just its cached status.
+        log = state["Health"].get("Log")
+        if not isinstance(log, list) or not log or not isinstance(log[-1], dict):
+            return False
+        end = log[-1].get("End")
+        if not isinstance(end, str):
+            return False
+        try:
+            checked_at = datetime.fromisoformat(end.replace("Z", "+00:00"))
+        except ValueError:
+            return False
+        if checked_at.tzinfo is None:
+            return False
+        age = ((now if now is not None else datetime.now(timezone.utc)) - checked_at).total_seconds()
+        return 0 <= age <= 120
     except (OSError, subprocess.SubprocessError, ValueError, TypeError):
         return False
 

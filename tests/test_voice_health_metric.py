@@ -22,7 +22,7 @@ def result(text):
 class VoiceMetricTests(unittest.TestCase):
     def test_only_one_exact_project_voice_container_can_report_healthy(self):
         with mock.patch.object(METRIC.subprocess, "run", side_effect=[
-            result("a1\n"), result('{"Running":true,"Health":{"Status":"healthy"}}')
+            result("a1\n"), result(json.dumps({"Running": True, "Health": {"Status": "healthy", "Log": [{"End": datetime.now(timezone.utc).isoformat()}]}}))
         ]) as run:
             self.assertTrue(METRIC.docker_voice_ready("client-dev"))
         self.assertIn("label=com.docker.compose.project=client-dev", run.call_args_list[0].args[0])
@@ -43,6 +43,28 @@ class VoiceMetricTests(unittest.TestCase):
                 self.assertFalse(METRIC.docker_voice_ready("client-dev"))
         with mock.patch.object(METRIC.subprocess, "run", side_effect=TimeoutError("private detail")):
             self.assertFalse(METRIC.docker_voice_ready("client-dev"))
+
+    def test_stale_or_unverifiable_native_health_never_reports_ready(self):
+        fixed = datetime(2026, 10, 27, tzinfo=timezone.utc)
+
+        def observed(end, *, include_log=True):
+            health = {"Status": "healthy"}
+            if include_log:
+                health["Log"] = [{"End": end}]
+            with mock.patch.object(METRIC.subprocess, "run", side_effect=[
+                result("a1\n"), result(json.dumps({"Running": True, "Health": health}))
+            ]):
+                return METRIC.docker_voice_ready("client-dev", now=fixed)
+
+        # Docker can retain a 'healthy' state after its probe loop stops.
+        # Neither stale nor untrusted probe timestamps may publish a healthy metric.
+        for stamp in ("2026-10-26T23:57:59Z", "2026-10-27T00:00:01Z",
+                      "not-a-time", "", None, "2026-10-27T00:00:00"):
+            with self.subTest(stamp=stamp):
+                self.assertFalse(observed(stamp))
+        self.assertFalse(observed("2026-10-27T00:00:00Z", include_log=False))
+        self.assertTrue(observed("2026-10-26T23:58:00Z"))  # exactly 120 seconds
+        self.assertTrue(observed("2026-10-26T23:59:59Z"))
 
     def test_payload_is_bounded_boolean_and_contains_no_call_or_container_details(self):
         at = datetime(2026, 10, 26, tzinfo=timezone.utc)
