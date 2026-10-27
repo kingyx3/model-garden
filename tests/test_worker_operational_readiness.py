@@ -178,5 +178,24 @@ class WorkerOperationalReadinessTests(unittest.TestCase):
         self.assertIn("scheduler", json.loads(self.path.read_text())["persistentFailures"])
 
 
+    def test_initialized_history_deletion_fails_closed_and_legacy_heartbeat_migrates(self):
+        first = self.restarted()
+        first._beat(T0 + 1, {"scheduler": {"failed": "RuntimeError"}})
+        history = self.path.with_name("failure-streaks.json")
+        history.unlink()
+        with self.assertRaises(worker.WorkerConfigError):
+            self.restarted()
+        # An existing pre-upgrade trusted heartbeat may preserve its already-persistent failures.
+        self.path.with_name("failure-streaks.initialized").unlink()
+        self.write({"at": T0, "failed": ["scheduler"], "persistentFailures": ["scheduler"]})
+        self.assertEqual(self.restarted()._failure_streaks, {"scheduler": 3})
+
+    def test_untrusted_pre_upgrade_heartbeat_is_not_a_clean_first_boot(self):
+        self.write({"at": T0, "failed": [], "persistentFailures": []})
+        self.path.write_text("{ invalid")
+        with self.assertRaises(worker.WorkerConfigError):
+            self.restarted()
+
+
 if __name__ == "__main__":
     unittest.main()
