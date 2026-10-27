@@ -272,11 +272,34 @@ class SupportMailboxTests(Case):
 
     def test_an_unverified_sender_gets_no_draft_through_the_spool_either(self):
         drafts: list = []
-        spool, mailbox = self.spool(), self.mailbox(drafts)
+        notices: list[dict] = []
+        spool, mailbox = self.spool(), self.mailbox(drafts, escalate=notices.append)
         spool.ingest(raw(auth=False, sender="Forged <ceo@acme.example>"), now=T0)
         spool.drain(lambda message: mailbox.handle(message, now=T0), now=T0)
         self.assertEqual(drafts, [])
-        self.assertEqual(self.only(spool)["state"], "done")  # handled: handed to a person, not retried
+        self.assertEqual(self.only(spool)["state"], "done")  # durable human notice, not a draft
+        self.assertEqual(len(notices), 1)
+
+    def test_both_human_routes_down_retries_spooled_mail_until_ticket_recovers(self):
+        drafts: list = []
+        spool = self.spool(max_attempts=3)
+        spool.ingest(raw(), now=T0)
+
+        def broken(_item):
+            raise OSError("sensitive mailbox details must not enter the spool index")
+
+        failing = self.mailbox(drafts, classify=lambda _message: "complaint",
+                               escalate=broken, ticket=broken)
+        self.assertEqual(spool.drain(lambda message: failing.handle(message, now=T0), now=T0)["retry"], 1)
+        self.assertEqual(self.only(spool)["state"], "new")
+        self.assertEqual(drafts, [])
+        recovered = self.mailbox(drafts, classify=lambda _message: "complaint",
+                                 escalate=broken, ticket=lambda _item: {"ticketId": "t-durable"})
+        counts = spool.drain(lambda message: recovered.handle(message, now=T0 + 61), now=T0 + 61)
+        self.assertEqual(counts, {"claimed": 1, "done": 1, "retry": 0, "dead": 0})
+        self.assertEqual(self.only(spool)["outcome"], "needs-person")
+        self.assertEqual(spool.stats()["dead"], 0)
+        self.assertNotIn("sensitive mailbox details", spool.index.read_text() + json.dumps(self.events))
 
     def test_a_failing_handler_retries_then_quarantines_without_touching_other_mail(self):
         drafts: list = []
