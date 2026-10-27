@@ -68,6 +68,45 @@ class DiffTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             change.diff(report(entry("x")), report(entry("x"), agent="other"))
 
+    def test_new_agent_is_not_silently_omitted_from_owner_preview(self):
+        before = report(entry("existing"), agent="receptionist")
+        after = before + report(entry("book", ready=False, remediation="Connect calendar"),
+                                entry("faq"), agent="sales")
+        result = change.diff(before, after)
+        self.assertEqual([item["agent"] for item in result], ["receptionist", "sales"])
+        self.assertTrue(result[1]["addedAgent"])
+        self.assertEqual({row["name"]: row["outcome"] for row in result[1]["changes"]},
+                         {"book": "added", "faq": "added"})
+        text = change.render(result)
+        self.assertIn("Agent sales (new)", text)
+        self.assertIn("- book (blocked) — next step: Connect calendar", text)
+        self.assertIn("- faq (ready)", text)
+
+    def test_duplicate_agents_or_skills_fail_closed_instead_of_hiding_changes(self):
+        duplicate_agents = report(entry("x")) + report(entry("y"))
+        with self.assertRaisesRegex(ValueError, "duplicate Agent"):
+            change.diff(duplicate_agents, report(entry("x")))
+        with self.assertRaisesRegex(ValueError, "duplicate Agent"):
+            change.diff(report(entry("x")), duplicate_agents)
+        duplicate_skills = report(entry("x"), entry("x"))
+        with self.assertRaisesRegex(ValueError, "duplicate Skill"):
+            change.diff(duplicate_skills, report(entry("x")))
+        with self.assertRaisesRegex(ValueError, "duplicate Skill"):
+            change.diff(report(entry("x")), duplicate_skills)
+
+    def test_added_blocked_skill_has_action_and_disabled_skill_is_not_ready(self):
+        before = report()
+        after = report(entry("blocked", ready=False, remediation="Connect crm"),
+                       entry("off", ready=True, enabled=False))
+        result = change.diff(before, after)
+        rows = {row["name"]: row for row in result[0]["changes"]}
+        self.assertEqual(rows["blocked"]["next"], "Connect crm")
+        self.assertEqual(rows["blocked"]["state"], "blocked")
+        self.assertEqual(rows["off"]["state"], "off")
+        rendered = change.render(result)
+        self.assertIn("- blocked (blocked) — next step: Connect crm", rendered)
+        self.assertIn("- off (switched off)", rendered)
+
     def test_render_puts_the_warning_first_and_names_the_next_step(self):
         before = report(entry("keeps"), entry("breaks"), entry("fixes", ready=False))
         after = report(entry("keeps"), entry("breaks", ready=False, remediation="Reconnect crm"), entry("fixes"))
