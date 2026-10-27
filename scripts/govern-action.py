@@ -756,7 +756,7 @@ def complete_handoff(
 
 @contextlib.contextmanager
 def _daily_quota_execution_guard(
-    desired_state: dict[str, Any], audit_path: pathlib.Path | None,
+    desired_state: dict[str, Any], tool_name: str, audit_path: pathlib.Path | None,
 ):
     """Serialize conditional daily-limit decisions through the final execution receipt.
 
@@ -765,13 +765,12 @@ def _daily_quota_execution_guard(
     two workers to spend the same remaining slot. This protects cooperating workers
     on ONE trusted host volume; it does not fence external/remote executors.
     """
-    conditions = (
-        rule.get("conditions")
-        for rule in POLICY.rules_of(desired_state.get("policies"))
-    )
     limited = any(
-        isinstance(item, dict) and ("maxPerDay" in item or "maxPerPrincipalPerDay" in item)
-        for item in conditions
+        rule.get("effect") == "allow"
+        and POLICY._action_matches(rule, tool_name)
+        and isinstance(rule.get("conditions"), dict)
+        and ("maxPerDay" in rule["conditions"] or "maxPerPrincipalPerDay" in rule["conditions"])
+        for rule in POLICY.rules_of(desired_state.get("policies"))
     )
     if not limited or audit_path is None:
         # No ledger means a conditional allow is never automatically granted;
@@ -835,7 +834,7 @@ def execute_action(
     handoff_assignee: str | None = None,
 ) -> dict[str, Any]:
     """Atomically evaluate and spend a local conditional daily allowance."""
-    with _daily_quota_execution_guard(desired_state, audit_path):
+    with _daily_quota_execution_guard(desired_state, tool_name, audit_path):
         return _execute_action_unlocked(
             desired_state, tool_name, arguments, executor,
             approval=approval, initiating_user=initiating_user,
