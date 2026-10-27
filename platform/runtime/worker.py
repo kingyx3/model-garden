@@ -627,7 +627,7 @@ class Worker:
             try:
                 fd, temporary = tempfile.mkstemp(prefix=".told-", dir=path.parent)
                 with os.fdopen(fd, "w", encoding="utf-8") as stream:
-                    stream.write(json.dumps([*known, digest][-MAX_QUEUE:]) + "\\n")
+                    stream.write(json.dumps([*known, digest][-MAX_QUEUE:]) + "\n")
                     stream.flush()
                     os.fsync(stream.fileno())
                 os.replace(temporary, path)
