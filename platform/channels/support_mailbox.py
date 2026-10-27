@@ -266,23 +266,42 @@ class SupportMailbox:
                     )["state"]
                 except Exception as exc:  # noqa: BLE001
                     out["conversation"] = f"unavailable:{type(exc).__name__}"
+            # Audit first: a failed receipt must leave this message retryable in
+            # the spool, even if a draft or human ticket was already persisted.
+            # Retries may repeat a receipt/draft, never an automatic send.
+            self._record(out)
             if self._handled is not None:
                 self._handled.mark(message.message_id)
-            return self._record(out)
+            return out
 
         def to_person(why: str) -> dict[str, Any]:
             out = {**result, "status": "needs-person", "reason": why}
+            handoff_persisted = False
+            item = {"threadRef": out["threadRef"], "category": category, "reason": why}
             if self._escalate is not None:
                 try:
-                    self._escalate({"threadRef": out["threadRef"], "category": category, "reason": why})
-                except Exception:  # noqa: BLE001 - a failed notification must not lose the thread
+                    # The worker queues this notice durably and now raises when
+                    # full. A callback returning False is an explicit failure.
+                    if self._escalate(item) is False:
+                        raise RuntimeError("human notice was not accepted")
+                    handoff_persisted = True
+                except Exception:  # noqa: BLE001 - a ticket can still preserve the handoff
                     out["escalation"] = "failed"
             if self._ticket is not None:
-                try:  # a thread for a person is also a durable work item; redelivery returns the same ticket
-                    opened = self._ticket({"threadRef": out["threadRef"], "category": category, "reason": why})
-                    out["ticket"] = opened.get("ticketId") if isinstance(opened, Mapping) else None
-                except Exception as exc:  # noqa: BLE001 - a failed ticket must not lose the thread
+                try:  # same thread and reason return the same durable ticket on retry
+                    opened = self._ticket(item)
+                    ticket_id = opened.get("ticketId") if isinstance(opened, Mapping) else None
+                    if not isinstance(ticket_id, str) or not ticket_id:
+                        raise ValueError("ticket opener returned no durable reference")
+                    out["ticket"] = ticket_id
+                    handoff_persisted = True
+                except Exception as exc:  # noqa: BLE001 - the notice can still preserve the handoff
                     out["ticket"] = f"failed:{type(exc).__name__}"
+            if not handoff_persisted:
+                # Do not mark the Message-ID handled or complete the spool
+                # lease when both human routes are unavailable. The spool
+                # retries with backoff and eventually quarantines visibly.
+                raise RuntimeError("human handoff unavailable; retry the mail spool")
             out["crm"] = self._file(address if verified else None, thread, category, "needs-person", now)
             return done(out)
 
