@@ -2,10 +2,12 @@
 from __future__ import annotations
 
 import datetime as dt
+import hashlib
 import importlib.util
 import json
 import pathlib
 import subprocess
+import tempfile
 import unittest
 from unittest import mock
 
@@ -194,6 +196,120 @@ class BackupCloudLogTests(unittest.TestCase):
             with self.assertRaises(CLOUD.CloudLogError):
                 CLOUD.emit(**self.kwargs)
             run.assert_not_called()
+
+
+    def test_automatic_monitor_baseline_starts_at_approved_policy_start(self):
+        """Never silently discard a missed slot from a new monitoring installation."""
+        now = dt.datetime(2026, 10, 27, 23, 0, tzinfo=dt.timezone.utc)
+        start = dt.datetime(2026, 10, 23, 0, 0, tzinfo=dt.timezone.utc)
+        policy = {"validFrom": "2026-10-23T00:00:00Z"}
+        with mock.patch.object(CLOUD.SCHEDULE, "_policy", return_value=policy), \
+             mock.patch.object(CLOUD.SCHEDULE, "_private_owned"), \
+             mock.patch.object(CLOUD.INCIDENT, "_state", return_value=None):
+            since = CLOUD._automatic_since(now=now, **{
+                k: self.kwargs[k] for k in ("schedule", "state_dir", "project",
+                                            "slug", "environment", "gcp_project", "recipient")})
+        self.assertEqual(since, start)
+
+    def test_automatic_monitor_overlaps_last_observed_slot_after_restart(self):
+        """An operator timer may restart; its lookback must cover the durable last slot."""
+        now = dt.datetime(2026, 10, 27, 23, 0, tzinfo=dt.timezone.utc)
+        prior = {"lastSlot": "20261023T120000Z", "condition": "unhealthy"}
+        with mock.patch.object(CLOUD.SCHEDULE, "_policy", return_value={
+                 "validFrom": "2026-10-20T00:00:00Z"}), \
+             mock.patch.object(CLOUD.SCHEDULE, "_private_owned"), \
+             mock.patch.object(CLOUD.INCIDENT, "_state", return_value=prior):
+            since = CLOUD._automatic_since(now=now, **{
+                k: self.kwargs[k] for k in ("schedule", "state_dir", "project",
+                                            "slug", "environment", "gcp_project", "recipient")})
+        self.assertEqual(since, dt.datetime(2026, 10, 23, 12, tzinfo=dt.timezone.utc))
+
+    def test_automatic_monitor_refuses_expired_lookback_and_unsafe_state(self):
+        """No healthy Cloud Logging sample can be emitted after an unobserved 31-day gap."""
+        now = dt.datetime(2026, 10, 27, 23, tzinfo=dt.timezone.utc)
+        params = {k: self.kwargs[k] for k in ("schedule", "state_dir", "project",
+                                             "slug", "environment", "gcp_project", "recipient")}
+        with mock.patch.object(CLOUD.SCHEDULE, "_policy", return_value={
+                 "validFrom": "2026-09-01T00:00:00Z"}), \
+             mock.patch.object(CLOUD.SCHEDULE, "_private_owned"), \
+             mock.patch.object(CLOUD.INCIDENT, "_state", return_value=None):
+            with self.assertRaises(CLOUD.CloudLogError):
+                CLOUD._automatic_since(now=now, **params)
+        with mock.patch.object(CLOUD.SCHEDULE, "_policy", return_value={
+                 "validFrom": "2026-10-20T00:00:00Z"}), \
+             mock.patch.object(CLOUD.SCHEDULE, "_private_owned"), \
+             mock.patch.object(CLOUD.INCIDENT, "_state", side_effect=CLOUD.INCIDENT.IncidentError("unsafe state")):
+            with self.assertRaises(CLOUD.INCIDENT.IncidentError):
+                CLOUD._automatic_since(now=now, **params)
+
+    def test_auto_since_reads_real_private_incident_state_and_rejects_foreign_binding(self):
+        """Integration: use the actual policy, inode checks and incident-state parser."""
+        with tempfile.TemporaryDirectory() as temp:
+            root = pathlib.Path(temp)
+            (root / "policy").mkdir(mode=0o700)
+            (root / "state").mkdir(mode=0o700)
+            schedule = root / "policy" / "schedule.json"
+            recipient = self.kwargs["recipient"]
+            policy = {
+                "schemaVersion": 1, "clientProject": "acme-dev",
+                "clientSlug": "acme", "environment": "dev",
+                "gcpProjectId": "sample-project-123",
+                "ageRecipientSha256": hashlib.sha256(recipient.encode()).hexdigest(),
+                "approvedBy": "operator-1", "changeRef": "CHG-123",
+                "validFrom": "2026-10-20T00:00:00Z",
+                "expiresAt": "2026-11-15T00:00:00Z",
+                "weekdaysUTC": [4], "hourUTC": 12, "minuteUTC": 0,
+            }
+            schedule.write_text(json.dumps(policy))
+            schedule.chmod(0o600)
+            params = dict(schedule=schedule, state_dir=root / "state",
+                          project="acme-dev", slug="acme", environment="dev",
+                          gcp_project="sample-project-123", recipient=recipient,
+                          now=dt.datetime(2026, 10, 27, 23, tzinfo=dt.timezone.utc))
+            self.assertEqual(CLOUD._automatic_since(**params),
+                             dt.datetime(2026, 10, 20, tzinfo=dt.timezone.utc))
+            state = root / "state" / "acme-dev.incident.json"
+            record = {
+                "schemaVersion": 1,
+                "binding": CLOUD.INCIDENT._binding(project="acme-dev", slug="acme",
+                    environment="dev", gcp_project="sample-project-123", recipient=recipient),
+                "condition": "unhealthy", "lastSlot": "20261023T120000Z",
+            }
+            state.write_text(json.dumps(record))
+            state.chmod(0o600)
+            self.assertEqual(CLOUD._automatic_since(**params),
+                             dt.datetime(2026, 10, 23, 12, tzinfo=dt.timezone.utc))
+            record["binding"] = "0" * 64
+            state.write_text(json.dumps(record))
+            with self.assertRaises(CLOUD.INCIDENT.IncidentError):
+                CLOUD._automatic_since(**params)
+
+    def test_emit_automatic_since_is_derived_before_any_cloud_write(self):
+        chosen = dt.datetime(2026, 10, 23, tzinfo=dt.timezone.utc)
+        with mock.patch.object(CLOUD, "_automatic_since", return_value=chosen) as automatic, \
+             mock.patch.object(CLOUD.INCIDENT, "monitor", return_value=self.report) as monitor, \
+             mock.patch.object(CLOUD.subprocess, "run",
+                               return_value=subprocess.CompletedProcess([], 0)):
+            CLOUD.emit(**(self.kwargs | {"since": None}))
+        automatic.assert_called_once()
+        self.assertEqual(monitor.call_args.kwargs["since"], chosen)
+
+    def test_cli_requires_exactly_one_manual_or_contiguous_auto_lookback(self):
+        flags = ["--schedule", "/unused/schedule.json", "--claims", "/unused/claims",
+                 "--state-dir", "/unused/state", "--project", "acme-dev",
+                 "--client-slug", "acme", "--environment", "dev",
+                 "--gcp-project-id", "sample-project-123",
+                 "--confirm-gcp-project-id", "sample-project-123",
+                 "--recipient", "age1" + "q" * 55, "--confirm-project", "acme-dev"]
+        with mock.patch.object(CLOUD, "emit", return_value={
+                 "health": "UNKNOWN"}) as emit:
+            self.assertEqual(CLOUD.main(flags + ["--auto-since"]), 3)
+            self.assertIsNone(emit.call_args.kwargs["since"])
+        with self.assertRaises(SystemExit):
+            CLOUD.main(flags)
+        with self.assertRaises(SystemExit):
+            CLOUD.main(flags + ["--auto-since", "--since-utc", "2026-10-23T00:00:00Z"])
+
 
 
 if __name__ == "__main__":

@@ -6,6 +6,7 @@ A successful log write is NOT proof of alert delivery or recovery.
 from __future__ import annotations
 
 import argparse
+import datetime as dt
 import importlib.util
 import json
 import pathlib
@@ -72,15 +73,49 @@ def _signal(report: dict, project: str) -> tuple[dict, str]:
     return payload, severity
 
 
+
+def _automatic_since(*, schedule: pathlib.Path, state_dir: pathlib.Path,
+                     project: str, slug: str, environment: str, gcp_project: str,
+                     recipient: str, now: dt.datetime | None = None) -> dt.datetime:
+    """Choose a contiguous, bounded inspection interval for an operator timer.
+
+    A first poll starts at the approved recurrence start; later polls overlap
+    the durable last observed slot. A damaged state or >31-day gap refuses
+    rather than silently resetting the incident baseline to healthy.
+    """
+    SCHEDULE._private_owned(state_dir, directory=True)
+    policy = SCHEDULE._policy(schedule, project=project, slug=slug,
+                              environment=environment, gcp_project=gcp_project,
+                              recipient=recipient)
+    binding = INCIDENT._binding(project=project, slug=slug,
+                                environment=environment, gcp_project=gcp_project,
+                                recipient=recipient)
+    prior = INCIDENT._state(state_dir / f"{project}.incident.json", binding)
+    clock = now if now is not None else dt.datetime.now(dt.timezone.utc)
+    if clock.tzinfo is None:
+        raise CloudLogError("timezone-aware monitoring clock required")
+    clock = clock.astimezone(dt.timezone.utc)
+    start = SCHEDULE.WINDOW._utc(policy["validFrom"])
+    since = (dt.datetime.strptime(prior["lastSlot"], "%Y%m%dT%H%M%SZ").replace(
+        tzinfo=dt.timezone.utc) if prior is not None else start)
+    if since < start or since > clock or clock - since > dt.timedelta(days=31):
+        raise CloudLogError("automatic monitoring cannot safely bridge the inspection gap")
+    return since
+
+
 def emit(*, schedule: pathlib.Path, claims: pathlib.Path, state_dir: pathlib.Path,
          project: str, slug: str, environment: str, gcp_project: str,
          confirm_gcp_project: str, recipient: str, confirm_project: str,
-         since, now=None) -> dict:
+         since: dt.datetime | None = None, now: dt.datetime | None = None) -> dict:
     if gcp_project != confirm_gcp_project:
         raise CloudLogError("exact GCP project confirmation required")
     # Check the tenant binding before any cloud command is constructed.
     INCIDENT._binding(project=project, slug=slug, environment=environment,
                       gcp_project=gcp_project, recipient=recipient)
+    if since is None:
+        since = _automatic_since(schedule=schedule, state_dir=state_dir,
+                                 project=project, slug=slug, environment=environment,
+                                 gcp_project=gcp_project, recipient=recipient, now=now)
     report = INCIDENT.monitor(schedule=schedule, claims=claims, state_dir=state_dir,
                               project=project, slug=slug, environment=environment,
                               gcp_project=gcp_project, recipient=recipient,
@@ -115,8 +150,12 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     for key in ("schedule", "claims", "state-dir", "project", "client-slug",
                 "environment", "gcp-project-id", "confirm-gcp-project-id",
-                "recipient", "confirm-project", "since-utc"):
+                "recipient", "confirm-project"):
         parser.add_argument("--" + key, required=True)
+    lookback = parser.add_mutually_exclusive_group(required=True)
+    lookback.add_argument("--since-utc", help="explicit UTC lookback start")
+    lookback.add_argument("--auto-since", action="store_true",
+                          help="derive a contiguous lookback from private incident state")
     args = parser.parse_args(argv)
     try:
         result = emit(schedule=pathlib.Path(args.schedule), claims=pathlib.Path(args.claims),
@@ -125,7 +164,7 @@ def main(argv: list[str] | None = None) -> int:
                       gcp_project=args.gcp_project_id,
                       confirm_gcp_project=args.confirm_gcp_project_id,
                       recipient=args.recipient, confirm_project=args.confirm_project,
-                      since=SCHEDULE.WINDOW._utc(args.since_utc))
+                      since=SCHEDULE.WINDOW._utc(args.since_utc) if args.since_utc else None)
     except (CloudLogError, INCIDENT.IncidentError, SCHEDULE.ScheduleError,
             SCHEDULE.WINDOW.WindowError, OSError, ValueError, TypeError, KeyError):
         print(json.dumps({"event": "backup.cloud-log.refused",
