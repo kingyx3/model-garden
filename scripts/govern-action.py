@@ -24,6 +24,7 @@ repeated client requirements justify them.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import datetime as dt
 import fcntl
 import hashlib
@@ -753,7 +754,99 @@ def complete_handoff(
     return document
 
 
+@contextlib.contextmanager
+def _daily_quota_execution_guard(
+    desired_state: dict[str, Any], tool_name: str, audit_path: pathlib.Path | None,
+):
+    """Serialize conditional daily-limit decisions through the final execution receipt.
+
+    A separate persistent advisory lock is required: the Action Ledger lock cannot
+    be held while append_audit_event() reopens it, and a count-only lock would allow
+    two workers to spend the same remaining slot. This protects cooperating workers
+    on ONE trusted host volume; it does not fence external/remote executors.
+    """
+    limited = any(
+        rule.get("effect") == "allow"
+        and POLICY._action_matches(rule, tool_name)
+        and isinstance(rule.get("conditions"), dict)
+        and ("maxPerDay" in rule["conditions"] or "maxPerPrincipalPerDay" in rule["conditions"])
+        for rule in POLICY.rules_of(desired_state.get("policies"))
+    )
+    if not limited or audit_path is None:
+        # No ledger means a conditional allow is never automatically granted;
+        # an explicitly approved action may still execute.
+        yield
+        return
+
+    parent = audit_path.parent
+    parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    parent_info = parent.lstat()
+    if (
+        not stat.S_ISDIR(parent_info.st_mode)
+        or parent_info.st_uid != os.geteuid()
+        or parent_info.st_mode & 0o022
+    ):
+        raise PermissionError("Governed action failed: untrusted daily-limit lock directory")
+    lock_path = audit_path.with_name(audit_path.name + ".quota.lock")
+    descriptor = os.open(
+        lock_path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600,
+    )
+    try:
+        def validate_lock() -> None:
+            opened = os.fstat(descriptor)
+            current = lock_path.lstat()
+            if (
+                not stat.S_ISREG(opened.st_mode)
+                or opened.st_uid != os.geteuid()
+                or opened.st_nlink != 1
+                or opened.st_mode & 0o077
+                or (opened.st_dev, opened.st_ino) != (current.st_dev, current.st_ino)
+                or current.st_nlink != 1
+            ):
+                raise PermissionError("Governed action failed: untrusted daily-limit lock")
+        validate_lock()
+        fcntl.flock(descriptor, fcntl.LOCK_EX)
+        try:
+            validate_lock()  # reject replacement while waiting for another worker
+            yield
+        finally:
+            fcntl.flock(descriptor, fcntl.LOCK_UN)
+    finally:
+        os.close(descriptor)
+
+
 def execute_action(
+    desired_state: dict[str, Any],
+    tool_name: str,
+    arguments: dict[str, Any],
+    executor: Callable[[dict[str, Any]], Any],
+    *,
+    approval: dict[str, Any] | None = None,
+    initiating_user: str | None = None,
+    governance_context: dict[str, Any] | None = None,
+    audit_path: pathlib.Path | None = None,
+    ledger: dict[str, Any] | None = None,
+    principal_access: str | None = None,
+    read_receipt: Callable[[Any], list[dict[str, Any]]] | None = None,
+    read_policy: dict[str, Any] | None = None,
+    external_object_ref: Callable[[Any], str | None] | None = None,
+    handoff_store: pathlib.Path | None = None,
+    handoff_assignee: str | None = None,
+) -> dict[str, Any]:
+    """Atomically evaluate and spend a local conditional daily allowance."""
+    with _daily_quota_execution_guard(desired_state, tool_name, audit_path):
+        return _execute_action_unlocked(
+            desired_state, tool_name, arguments, executor,
+            approval=approval, initiating_user=initiating_user,
+            governance_context=governance_context, audit_path=audit_path,
+            ledger=ledger, principal_access=principal_access,
+            read_receipt=read_receipt, read_policy=read_policy,
+            external_object_ref=external_object_ref, handoff_store=handoff_store,
+            handoff_assignee=handoff_assignee,
+        )
+
+
+def _execute_action_unlocked(
     desired_state: dict[str, Any],
     tool_name: str,
     arguments: dict[str, Any],
