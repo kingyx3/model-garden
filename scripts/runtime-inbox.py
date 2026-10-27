@@ -23,10 +23,26 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--json", action="store_true", help="print JSON instead of text")
+    parser.add_argument("--ack-notice", metavar="KEY", help="acknowledge a posted local notice as the OS host operator (not client-owner approval)")
     parser.add_argument("--data-root", type=pathlib.Path, default=pathlib.Path(
         os.environ.get("MODEL_GARDEN_GOVERNANCE_ROOT", "/opt/data/.modelgarden")))
     args = parser.parse_args(argv)
     try:
+        if args.ack_notice is not None:
+            import pwd
+            actor = pwd.getpwuid(os.geteuid()).pw_name
+            spec = importlib.util.spec_from_file_location("runtime_inbox_worker", ROOT / "platform" / "runtime" / "worker.py")
+            worker = importlib.util.module_from_spec(spec)
+            assert spec.loader is not None
+            sys.modules["runtime_inbox_worker"] = worker
+            spec.loader.exec_module(worker)
+            govern = worker._module("govern")
+            worker.NoticeQueue(args.data_root / "worker").ack_inbox(
+                args.ack_notice, actor=actor,
+                audit=lambda action, by, details: govern.record_operator_action(args.data_root / "audit.jsonl", action, by, details),
+            )
+            print(f"Acknowledged local notice {args.ack_notice} by host operator {actor}; not client-owner consent.")
+            return 0
         spec = importlib.util.spec_from_file_location("runtime_inbox_core", ROOT / "platform" / "core" / "inbox.py")
         module = importlib.util.module_from_spec(spec)
         assert spec.loader is not None
@@ -35,6 +51,7 @@ def main(argv: list[str] | None = None) -> int:
         inbox = module.collect(
             approvals=args.data_root / "approvals", handoffs=args.data_root / "handoffs", contacts=args.data_root / "contacts",
             governance=args.data_root, tickets=args.data_root / "tickets", crm_sync=args.data_root / "crm-sync",
+            notices=args.data_root / "worker",
         )
     except (OSError, ValueError, json.JSONDecodeError) as exc:
         print(f"Runtime inbox failed: {exc}", file=sys.stderr)

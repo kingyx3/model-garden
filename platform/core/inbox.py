@@ -24,6 +24,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import pathlib
+import re
 import sys
 import time
 from typing import Any
@@ -223,6 +224,36 @@ def _connections(root: pathlib.Path | None) -> list[dict[str, Any]]:
     return items
 
 
+def _worker_notices(root: pathlib.Path | None) -> list[dict[str, Any]]:
+    """Show posted host-local owner notices, never their text or customer content."""
+    if root is None:
+        return []
+    path = pathlib.Path(root) / "worker-notices.json"
+    if path.is_symlink():
+        raise ValueError("unsafe worker notice index")
+    if not path.exists():
+        return []
+    state = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(state, dict) or not isinstance(state.get("pending"), dict):
+        raise ValueError("invalid worker notice index")
+    found = []
+    for key, notice in state["pending"].items():
+        if not isinstance(key, str) or re.fullmatch(r"[0-9a-f]{24}", key) is None or not isinstance(notice, dict):
+            raise ValueError("invalid worker notice entry")
+        if notice.get("inboxPosted") is not True:
+            continue
+        to, kind = notice.get("to"), notice.get("kind")
+        if not isinstance(to, str) or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:@/+-]{0,127}", to) is None:
+            raise ValueError("invalid worker notice recipient")
+        if not isinstance(kind, str) or re.fullmatch(r"[a-z][a-z0-9-]{0,63}", kind) is None:
+            raise ValueError("invalid worker notice kind")
+        found.append({
+            "kind": "owner-notice", "noticeKind": kind, "to": to, "key": key,
+            "next": f"Host operator: python3 scripts/runtime-inbox.py --ack-notice {key} after reviewing the underlying item",
+        })
+    return sorted(found, key=lambda item: (item["to"], item["key"]))
+
+
 def collect(
     *,
     approvals: pathlib.Path,
@@ -232,6 +263,7 @@ def collect(
     tickets: pathlib.Path | None = None,
     crm_sync: pathlib.Path | None = None,
     unanswered: pathlib.Path | None = None,
+    notices: pathlib.Path | None = None,
     now: int | None = None,
 ) -> dict[str, Any]:
     """Everything waiting for a person, most urgent first.
@@ -248,13 +280,14 @@ def collect(
     open_tickets = _tickets(tickets, current)
     filings = _crm_filings(crm_sync, current)
     questions = _unanswered(unanswered, current)
+    owner_notices = _worker_notices(notices)
     connections = _connections(governance)
     paused = _paused(governance)
     down = [item for item in connections if item["health"] in ("failed", "revoked")]
     degraded = [item for item in connections if item["health"] == "degraded"]
     return {
         "generatedAt": current,
-        "items": [*paused, *down, *overdue, *waiting, *due, *degraded, *open_tickets, *filings, *questions, *reviews],
+        "items": [*paused, *down, *overdue, *waiting, *due, *owner_notices, *degraded, *open_tickets, *filings, *questions, *reviews],
         "counts": {
             "paused": len(paused),
             "unanswered": sum(item["count"] for item in questions),
@@ -302,6 +335,8 @@ def format_text(inbox: dict[str, Any]) -> str:
             lines.append(f"  TICKETS   {item['count']} open, oldest waiting {_age(item['oldestWaitingSeconds'])}")
         elif item["kind"] == "crm-filing":
             lines.append(f"  CRM       {item['count']} filing(s) blocked, oldest waiting {_age(item['oldestWaitingSeconds'])}")
+        elif item["kind"] == "owner-notice":
+            lines.append(f"  NOTICE    {item['noticeKind']} for {item['to']}  id {item['key']}")
         elif item["kind"] == "handoff":
             due = "OVERDUE" if item["overdue"] else "open"
             lines.append(f"  HAND-OFF  {item['tool']}  for {item['assignee']}  {due} ({item['reason']})  id {item['id']}")
@@ -319,10 +354,12 @@ def for_person(inbox: dict[str, Any], identity: str, *, everything: bool) -> dic
     """
     if everything:
         return inbox
-    mine = [item for item in inbox["items"] if item["kind"] == "handoff" and item.get("assignee") == identity]
+    mine = [item for item in inbox["items"] if
+            (item["kind"] == "handoff" and item.get("assignee") == identity) or
+            (item["kind"] == "owner-notice" and item.get("to") == identity)]
     return {
         "generatedAt": inbox["generatedAt"], "items": mine,
-        "counts": {"approvals": 0, "handoffs": len(mine), "overdueHandoffs": sum(1 for item in mine if item["overdue"]), "reviews": 0, "paused": 0, "unanswered": 0,
+        "counts": {"approvals": 0, "handoffs": sum(item["kind"] == "handoff" for item in mine), "overdueHandoffs": sum(1 for item in mine if item["kind"] == "handoff" and item["overdue"]), "reviews": 0, "paused": 0, "unanswered": 0,
                    "tickets": 0, "crmFilings": 0, "connections": 0},
     }
 
@@ -336,6 +373,9 @@ def format_chat(inbox: dict[str, Any]) -> str:
                                                           ("crmFilings", "CRM filing(s) blocked"), ("unanswered", "unanswered question group(s)"), ("reviews", "record(s) to review"), ("connections", "connection(s) not healthy")) if counts[key]]
     if counts["overdueHandoffs"]:
         parts.append(f"{counts['overdueHandoffs']} overdue")
+    local_notices = sum(item["kind"] == "owner-notice" for item in inbox["items"])
+    if local_notices:
+        parts.append(f"{local_notices} local notice(s)")
     lines = ["Waiting: " + ", ".join(parts) + "."]
     for item in inbox["items"]:
         if item["kind"] == "paused":
@@ -361,6 +401,9 @@ def format_chat(inbox: dict[str, Any]) -> str:
         elif item["kind"] == "crm-filing":
             lines.append(f"- {item['count']} customer email(s) did not reach the CRM and need a person, the oldest waiting "
                          f"{_age(item['oldestWaitingSeconds'])}. An operator can see why on the client host (`crm-sync list`).")
+        elif item["kind"] == "owner-notice":
+            lines.append(f"- Local notice {item['noticeKind']} for {item['to']} (ref {item['key']}). "
+                         "A host operator can review and acknowledge it in the runtime inbox; this is not owner consent.")
         else:
             lines.append(f"- {item['count']} {item['what'].replace('-', ' ')} to review. An operator can show them on the client host.")
     return "\n".join(lines)
