@@ -38,6 +38,7 @@ class PolicyLedgerIntegrityTests(unittest.TestCase):
                                sort_keys=True, separators=(",", ":"), ensure_ascii=False,
                            ).encode()).hexdigest()}
         return {
+            "source": {"name": "receptionist"},
             "agent": {"metadata": {"name": "receptionist"},
                       "spec": {"approvals": {"externalActions": "none"}, "security": {"dataClassification": "internal"}}},
             "tools": [{"metadata": {"name": "mail.send"},
