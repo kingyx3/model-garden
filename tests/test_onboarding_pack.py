@@ -107,13 +107,62 @@ class BuildTests(Case):
             report = [{"agent": "a", "environment": "dev", "skills": [
                 {"name": "s", "kind": "Skill", "ready": False, "enabled": True, "remediation": "Do the thing",
                  "dependencies": [{"capability": "cap", "family": "calendar", "required": True, "status": status, "provider": "p", "tier": 1}]}]}]
-            result = pack.build(report, [])[0]
+            result = pack.build(report, [{"agent": "a", "policyVersion": "policy:test", "skills": []}])[0]
             self.assertTrue(result["needsAction"][0]["missing"][0].startswith("cap:"), status)
 
     def test_an_optional_missing_dependency_degrades_but_does_not_block(self):
         result = self.packs(self.workspace(disabled=["book-appointment"]))
         message = next(skill for skill in result["working"] if skill["name"] == "take-message")
         self.assertIn("tickets (optional): not connected; a simpler fallback (tier 4) is used instead", message["uses"])
+
+
+
+
+class ReportIntegrityTests(unittest.TestCase):
+    """Owner packs must not silently drop an Agent, a Skill or its approval policy."""
+
+    @staticmethod
+    def readiness(agent="front", skills=None):
+        return {"agent": agent, "environment": "dev", "skills": skills if skills is not None else [
+            {"name": "faq", "kind": "Skill", "enabled": True, "ready": True, "dependencies": [
+                {"capability": "kb", "family": "kb", "required": True, "status": "bound",
+                 "provider": "text-knowledge", "tier": 0}]}]}
+
+    @staticmethod
+    def approvals(agent="front"):
+        return {"agent": agent, "policyVersion": "policy:test", "skills": [
+            {"skill": "faq", "actions": [
+                {"tool": "kb.search", "risk": "read", "member": "automatic", "public": "automatic"}]}]}
+
+    def test_missing_approval_report_cannot_claim_no_actions_selected(self):
+        with self.assertRaisesRegex(pack.PackError, "approval report"):
+            pack.build([self.readiness()], [])
+        with self.assertRaisesRegex(pack.PackError, "approval report"):
+            pack.build([self.readiness(), self.readiness("other")], [self.approvals()])
+
+    def test_extra_or_duplicate_agent_reports_are_rejected(self):
+        with self.assertRaisesRegex(pack.PackError, "approval report"):
+            pack.build([self.readiness()], [self.approvals(), self.approvals("other")])
+        with self.assertRaisesRegex(pack.PackError, "duplicate approval"):
+            pack.build([self.readiness()], [self.approvals(), self.approvals()])
+        with self.assertRaisesRegex(pack.PackError, "duplicate readiness"):
+            pack.build([self.readiness(), self.readiness()], [self.approvals()])
+
+    def test_duplicate_skill_cannot_be_listed_twice_as_working(self):
+        skill = self.readiness()["skills"][0]
+        with self.assertRaisesRegex(pack.PackError, "duplicate Skill"):
+            pack.build([self.readiness(skills=[skill, dict(skill)])], [self.approvals()])
+
+    def test_required_unavailable_dependency_cannot_be_described_as_working(self):
+        for status in ("missing", "no-content", "unavailable", "no-grant", "grant-unavailable", "grant-scope"):
+            report = self.readiness()
+            report["skills"][0]["dependencies"][0]["status"] = status
+            with self.subTest(status=status), self.assertRaisesRegex(pack.PackError, "claims ready"):
+                pack.build([report], [self.approvals()])
+
+    def test_missing_policy_version_is_not_presented_as_an_approval_preview(self):
+        with self.assertRaisesRegex(pack.PackError, "policyVersion"):
+            pack.build([self.readiness()], [{"agent": "front", "skills": []}])
 
 
 class RenderTests(Case):
