@@ -26,3 +26,21 @@ Use a locked-down systemd service (`User=`, `NoNewPrivileges=yes`, `ProtectSyste
 `infra/docker-host/gcp/ledger-verifier-health.tf` creates two client-scoped log-based metrics (unhealthy samples and all heartbeat samples) and an OR alert for unhealthy levels or a missing heartbeat for 15 minutes. It is **off by default**. Only set `ledger_verifier_alert_enabled=true` after authorized export configuration, an independent verifier member, an approved same-project notification channel and a **real first verifier sample**. The `gateway_uptime_notification_channels` list is reused; no new public ingress or external SaaS is introduced. The missing-sample condition is necessary because a crashed or credential-blocked verifier cannot publish its own failure. Confirm the log-based metric is populated and the alert actually fires and reaches an operator; Terraform plan success and `gcloud logging write` success are not delivery proof.
 
 The command logs only `clientProject`, `health`, bounded condition names and explicit `notificationsDelivered=false`; it never logs ledger events, paths, token values, provider error text, recipient addresses or customer content. Its local `ExportMonitor` state records due notices but **does not mark them delivered** when a Cloud Logging write succeeds. Cloud Monitoring owns notification delivery and escalation. Failed logging returns a redacted nonzero error; the missing-heartbeat alert is the independent failure signal. Retained live evidence must show the retention lock, distinct principal permissions, exported record/head receipts, chain/truncation verification, failure/recovery and actual notification delivery before closing #80.
+
+## Reviewable independent-host systemd units (v0.8.170)
+
+For a repeatable five-minute poll, an operator can generate **review-only** systemd service and timer text with `scripts/render-ledger-verifier-units.py`. The generator validates two explicit client/GCP project confirmations, a client-prefixed export namespace, distinct verifier/runtime service-account names and an unprivileged local user. It never connects to GCP, installs a unit, enables a timer or reports notification delivery. The generated service executes the existing independent verifier without a shell, runs with a private home/state directory, has read-only access to the named ledger snapshot and a writable per-client state directory only.
+
+```sh
+python3 scripts/render-ledger-verifier-units.py \
+  --client-project acme-dev-mg --confirm-client-project acme-dev-mg \
+  --gcp-project client-project-123 --confirm-gcp-project client-project-123 \
+  --bucket CLIENT_RETENTION_LOCKED_BUCKET --prefix acme-dev-mg \
+  --verifier-identity auditor@client-project-123.iam.gserviceaccount.com \
+  --runtime-identity runtime@client-project-123.iam.gserviceaccount.com \
+  --service-user mg-verifier > reviewed-verifier-units.json
+```
+
+On the **separately administered** verifier host, the authorized operator must review and install the two unit texts from the JSON under `/etc/systemd/system/`, create the dedicated unprivileged user/group, ensure `/opt/model-garden` contains the pinned release, provision `/srv/model-garden-verifier/acme-dev-mg/audit.jsonl` as an authentic current read-only ledger snapshot, and create `/var/lib/model-garden-verifier/acme-dev-mg` owned by the service user with mode `0700`. The service assumes metadata-based identity access on that host; verify the **actual** principal, impersonation grant, separate read-only bucket IAM and logging permissions before any timer enablement. The unit intentionally cannot write to the runtime ledger, export bucket or other clients' state.
+
+After the required client/operator/security approvals, use `systemd-analyze verify` on the reviewed files, then enable only the timer under the host's change procedure. Observe at least one real successful GCS read, a missing-heartbeat failure, a corrupted/truncated-chain failure and recovery, and the actual Cloud Monitoring recipient notification receipts. The timer's presence or a green synthetic test does not establish storage immutability, trusted snapshot freshness, independently enforced identity separation, or delivered alerts. Revoke/disable the timer and associated IAM through the approved retirement process.
