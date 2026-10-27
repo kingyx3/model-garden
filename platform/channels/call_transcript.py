@@ -481,6 +481,17 @@ def finalize(
     """
     if not transcript.config.enabled or transcript.suppressed:
         return None
+    # The worker may shut down before on_enter completes (or a speech notice may
+    # never have played). A configured notice is not evidence of disclosure.
+    # Never persist collected caller speech in that case. An explicitly owned
+    # lawful-basis override is the only no-notice exception; deployment verifies
+    # its signature separately. This is privacy suppression, not an I/O failure.
+    notice = transcript.config.disclosure
+    owner = transcript.config.override_owner
+    if (notice and not transcript._disclosure_played) or (not notice and not (owner and owner.strip())):
+        transcript.suppress()
+        LOGGER.warning("call transcript suppressed: disclosure not played or no lawful-basis owner")
+        return None
     try:
         record = transcript.build(outcome=outcome, summary=summary, request_ids=request_ids, auto_summary=auto_summary)
         store_record(transcript.config, record)

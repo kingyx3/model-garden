@@ -32,6 +32,8 @@ class PrivateTranscriptStorageTests(unittest.TestCase):
     def transcript(self):
         call = T.CallTranscript("synthetic-call", "receptionist", self.config)
         call.add_turn("caller", "Synthetic private request")
+        # Exercise filesystem rejection after a successful spoken notice, not privacy suppression.
+        call.mark_disclosure_played()
         return call
 
     def assert_rejected(self):

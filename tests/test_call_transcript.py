@@ -154,6 +154,7 @@ class RedactionTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             transcript, _ = call(tmp)
             transcript.add_turn("caller", f"Pay with {VISA}")
+            transcript.mark_disclosure_played()
             record = T.finalize(transcript)
             stored = config(tmp).path.read_text(encoding="utf-8")
         self.assertNotIn("4111", stored)
@@ -217,10 +218,49 @@ class ConfigTests(unittest.TestCase):
 
 
 class StorageTests(unittest.TestCase):
+    def test_unplayed_disclosure_cannot_persist_call_content_or_report_write_failure(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            transcript, _ = call(tmp)
+            transcript.add_turn("caller", "sensitive caller speech")
+            failures: list[str] = []
+            self.assertIsNone(T.finalize(transcript, on_failure=failures.append, auto_summary=True))
+            self.assertTrue(transcript.suppressed)
+            self.assertFalse(config(tmp).path.exists())
+            self.assertEqual(failures, [], "privacy suppression is not a failed disk write")
+
+    def test_disclosure_override_allows_no_spoken_notice_only_with_recorded_owner(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            transcript, _ = call(tmp, disclosure=None, override_owner="dpo@client.example")
+            transcript.add_turn("caller", "approved lawful basis")
+            record = T.finalize(transcript)
+            self.assertIsNotNone(record)
+            self.assertEqual(record["disclosure"]["lawfulBasisOverrideOwner"], "dpo@client.example")
+            self.assertTrue(config(tmp).path.exists())
+        with tempfile.TemporaryDirectory() as tmp:
+            transcript, _ = call(tmp, disclosure=None, override_owner=None)
+            transcript.add_turn("caller", "must not persist")
+            self.assertIsNone(T.finalize(transcript))
+            self.assertFalse(config(tmp).path.exists())
+
+    def test_spoken_disclosure_allows_storage_and_suppression_cannot_be_reversed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            transcript, _ = call(tmp)
+            transcript.add_turn("caller", "after notice")
+            transcript.mark_disclosure_played()
+            self.assertIsNotNone(T.finalize(transcript))
+            self.assertTrue(config(tmp).path.exists())
+        with tempfile.TemporaryDirectory() as tmp:
+            transcript, _ = call(tmp)
+            transcript.suppress()
+            transcript.mark_disclosure_played()
+            self.assertIsNone(T.finalize(transcript))
+            self.assertFalse(config(tmp).path.exists())
+
     def test_record_is_stored_with_restrictive_permissions(self):
         with tempfile.TemporaryDirectory() as tmp:
             transcript, _ = call(tmp)
             transcript.add_turn("caller", "hello")
+            transcript.mark_disclosure_played()
             self.assertIsNotNone(T.finalize(transcript))
             path = config(tmp).path
             self.assertEqual(stat.S_IMODE(os.stat(path).st_mode), 0o600)
@@ -233,6 +273,7 @@ class StorageTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             transcript, _ = call(tmp, retention_seconds=0)
             transcript.add_turn("caller", "hello")
+            transcript.mark_disclosure_played()
             T.finalize(transcript)
             self.assertFalse(config(tmp).path.exists())
 
@@ -254,6 +295,7 @@ class StorageTests(unittest.TestCase):
             blocker.write_text("a file where a directory is needed", encoding="utf-8")
             transcript, _ = call(tmp, path=blocker / "transcripts.jsonl")
             transcript.add_turn("caller", f"secret {VISA} text")
+            transcript.mark_disclosure_played()
             failures: list[str] = []
             with self.assertLogs("model-garden.call-transcript", level="ERROR") as logs:
                 result = T.finalize(transcript, on_failure=failures.append)
@@ -271,6 +313,7 @@ class StorageTests(unittest.TestCase):
             def explode(_: str) -> None:
                 raise RuntimeError("ledger unavailable")
 
+            transcript.mark_disclosure_played()
             with self.assertLogs("model-garden.call-transcript", level="ERROR"):
                 self.assertIsNone(T.finalize(transcript, on_failure=explode))
 
@@ -364,6 +407,7 @@ class ExtractiveSummaryTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             transcript.config = T.TranscriptConfig(enabled=True, path=pathlib.Path(tmp) / "t.jsonl", disclosure="This call is recorded.", override_owner=None,
                                                    retention_seconds=86400, patterns=())
+            transcript.mark_disclosure_played()
             record = T.finalize(transcript, auto_summary=True)
         self.assertEqual(record["summarySource"], "extractive")
 
