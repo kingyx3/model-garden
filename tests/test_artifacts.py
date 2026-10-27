@@ -308,7 +308,9 @@ class StoreCase(unittest.TestCase):
         self.assertEqual(other.list(), [])
         with self.assertRaises(Error):
             other.get(entry["id"], requested_by=ALICE, now=T0)
-        (self.root / "globex-prod" / "index.json").write_text((self.root / "acme-prod" / "index.json").read_text())
+        foreign_index = self.root / "globex-prod" / "index.json"
+        foreign_index.write_text((self.root / "acme-prod" / "index.json").read_text())
+        foreign_index.chmod(0o600)  # valid private file, but tenant identifier must still be rejected
         with self.assertRaisesRegex(Error, "another tenant"):
             other.list()
         with self.assertRaises(Error):
