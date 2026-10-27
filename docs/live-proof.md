@@ -141,9 +141,11 @@ python3 scripts/reference-proof.py \
   --require-governed-action
 ```
 
-The collector writes `.model-garden-live-proof/manifest.json` and `reference-proof.md`. It records service status and evidence counts/types only; it deliberately omits credentials, prompts, Tool arguments, caller identifiers and captured message bodies.
+The collector writes `.model-garden-live-proof/manifest.json` and `reference-proof.md`. It records service status and evidence counts/types only; it deliberately omits credentials, prompts, Tool arguments, caller identifiers and captured message bodies. With the strict flags, a pass requires a matched start/end receipt for the **same room and Agent**, a fallback receipt within a completed call's time window, no transcript-write failure, and an actual successful governed execution receipt (not just an authorization or denied action). Duplicate starts/ends and unrelated fallback records do not satisfy these gates.
 
-A successful proof pack is evidence for the live runtime/channel/governance path. Keep the separate keyless-cloud evidence from a successful deployment **after** the temporary bootstrap credential has been revoked/deleted; the proof collector does not infer cloud identity from a running container.
+**Collector PASS is a structural check, not live-provider attestation.** The collector cannot independently prove a SIP trunk connected, that both parties' speech was captured, that a provider performed an action, that a transcript was correctly redacted/filed, or that the client approved the outcome. Independently inspect the real call/transcript, upstream action and delivery receipts, tenant-scoped permissions, ledger chain, and client signoff; retain redacted source evidence with the engagement. A synthetic JSONL record can pass structural checks and must never be called a real live proof.
+
+Keep the separate keyless-cloud evidence from a successful deployment **after** the temporary bootstrap credential has been revoked/deleted; the proof collector does not infer cloud identity from a running container.
 
 ## Per-client P0 operating record
 

@@ -78,6 +78,10 @@ def _audit_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "statuses": dict(sorted(statuses.items())),
         "tools": dict(sorted(tools.items())),
         "approvalEvidenceRecords": approvals,
+        "successfulActions": sum(
+            row.get("event") == "execution" and row.get("outcome") == "succeeded"
+            for row in rows
+        ),
         "auditHeadHash": head_hash,
     }
 
@@ -89,14 +93,44 @@ def _voice_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
         for row in rows
         if row.get("type") == "CallStarted" and isinstance(row.get("roomHash") or row.get("room"), str)
     }
+    # A start alone is not a completed call. Match lifecycle events to the
+    # same room AND Agent with ordered integer timestamps; repeated records
+    # must not inflate the count. These receipts are still not SIP attestation.
+    started: dict[tuple[str, str], int] = {}
+    for row in rows:
+        room, agent, timestamp = row.get("roomHash"), row.get("agent"), row.get("timestamp")
+        if (row.get("type") == "CallStarted" and isinstance(room, str) and room
+                and isinstance(agent, str) and agent and type(timestamp) is int):
+            key = (room, agent)
+            started[key] = min(timestamp, started.get(key, timestamp))
+    completed: dict[str, tuple[int, int]] = {}
+    for row in rows:
+        room, agent, timestamp = row.get("roomHash"), row.get("agent"), row.get("timestamp")
+        if (row.get("type") == "CallEnded" and isinstance(room, str)
+                and isinstance(agent, str) and type(timestamp) is int
+                and (room, agent) in started and timestamp >= started[(room, agent)]):
+            beginning = started[(room, agent)]
+            if room not in completed:
+                completed[room] = (beginning, timestamp)
+    fallback_rooms = {
+        row["roomHash"]
+        for row in rows
+        if row.get("type") in ("HumanTransfer", "FallbackMessage")
+        and isinstance(row.get("roomHash"), str)
+        and row["roomHash"] in completed
+        and type(row.get("timestamp")) is int
+        and completed[row["roomHash"]][0] <= row["timestamp"] <= completed[row["roomHash"]][1]
+    }
     return {
         "records": len(rows),
         "eventTypes": dict(sorted(types.items())),
         "distinctCalls": len(call_ids),
+        "completedCalls": len(completed),
+        "completedCallFallbackEvidence": len(fallback_rooms),
+        "transcriptWriteFailures": types.get("TranscriptWriteFailed", 0),
         "humanTransferEvidence": types.get("HumanTransfer", 0),
         "messageFallbackEvidence": types.get("FallbackMessage", 0),
     }
-
 
 def collect(project: str) -> dict[str, Any]:
     if not PROJECT.fullmatch(project):
@@ -132,12 +166,14 @@ def evaluate(evidence: dict[str, Any], *, require_voice_call: bool, require_fall
         failures.append("governed-tools is not running")
     if "voice" in services and not services["voice"].get("running"):
         failures.append("voice is not running")
-    if require_voice_call and evidence["voice"]["distinctCalls"] < 1:
-        failures.append("no real voice call lifecycle evidence exists")
-    if require_fallback and evidence["voice"]["humanTransferEvidence"] + evidence["voice"]["messageFallbackEvidence"] < 1:
-        failures.append("no human-transfer or message-capture fallback evidence exists")
-    if require_governed_action and evidence["governance"]["records"] < 1:
-        failures.append("no governed business-action audit evidence exists")
+    if require_voice_call and evidence["voice"].get("completedCalls", 0) < 1:
+        failures.append("no completed voice call lifecycle pair exists")
+    if require_voice_call and evidence["voice"].get("transcriptWriteFailures", 0):
+        failures.append("voice transcript write failures require investigation")
+    if require_fallback and evidence["voice"].get("completedCallFallbackEvidence", 0) < 1:
+        failures.append("no human-transfer or message fallback correlated to a completed call")
+    if require_governed_action and evidence["governance"].get("successfulActions", 0) < 1:
+        failures.append("no successful governed business-action execution receipt exists")
     return {"passed": not failures, "failures": failures}
 
 
@@ -147,7 +183,7 @@ def _markdown(evidence: dict[str, Any], result: dict[str, Any]) -> str:
         "",
         f"- Project: `{evidence['project']}`",
         f"- Generated: `{evidence['generatedAt']}`",
-        f"- Result: **{'PASS' if result['passed'] else 'INCOMPLETE'}**",
+        f"- Collector checks: **{'PASS' if result['passed'] else 'INCOMPLETE'}** (not live-provider attestation)",
         "",
         "## Runtime services",
         "",
@@ -159,15 +195,19 @@ def _markdown(evidence: dict[str, Any], result: dict[str, Any]) -> str:
         "## Evidence counts",
         "",
         f"- Governed action records: {evidence['governance']['records']}",
+        f"- Successful governed executions: {evidence['governance']['successfulActions']}",
         f"- Approval evidence records: {evidence['governance']['approvalEvidenceRecords']}",
         f"- Audit head hash present: {'yes' if evidence['governance'].get('auditHeadHash') else 'no'}",
-        f"- Distinct live calls: {evidence['voice']['distinctCalls']}",
+        f"- Call starts observed: {evidence['voice']['distinctCalls']}",
+        f"- Completed call lifecycle pairs: {evidence['voice']['completedCalls']}",
+        f"- Completed calls with correlated fallback: {evidence['voice']['completedCallFallbackEvidence']}",
+        f"- Transcript write failures: {evidence['voice']['transcriptWriteFailures']}",
         f"- Human transfer evidence: {evidence['voice']['humanTransferEvidence']}",
         f"- Message fallback evidence: {evidence['voice']['messageFallbackEvidence']}",
     ])
     if result["failures"]:
         lines.extend(["", "## Remaining evidence", ""] + [f"- {item}" for item in result["failures"]])
-    lines.extend(["", f"> {evidence['redaction']}", ""])
+    lines.extend(["", "> Passing collector checks does not prove real SIP, transcript content, provider receipts, or client acceptance.", f"> {evidence['redaction']}", ""])
     return "\n".join(lines)
 
 
