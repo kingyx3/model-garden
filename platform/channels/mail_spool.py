@@ -14,6 +14,9 @@ drains it on its clock and purges it on retention. It is not a ``mail.*`` provid
   sender is public with no write authority exactly as before.
 - **Idempotent.** A message is identified by a digest of its single ``Message-ID``; delivering it again (an MTA retry) returns the first
   record and stores nothing new. A message with no usable ``Message-ID`` is rejected, because it could not be de-duplicated.
+  An acceptance ledger failure leaves a durable ``auditPending`` marker: the worker cannot claim that mail until a matching
+  retry records its acceptance. The MTA must retry temporary failures. If a ledger append succeeded but its acknowledgement
+  was interrupted, the receipt may be emitted again with the same id (at-least-once, not exactly-once).
 - **Private and bounded.** Messages are written as ``<root>/<tenant>/messages/<id>.eml`` (mode 0600, directory 0700) named by digest,
   never by anything in the message; at most 2 MB each and 5,000 per client; a full spool refuses new mail as a temporary failure so the
   sender's server retries instead of mail being lost. The index and the ledger hold identifiers, sizes, states and error types only:
@@ -142,6 +145,22 @@ class MailSpool:
         if self._audit is not None:
             self._audit(action, IDENTITY, details)
 
+    def _acknowledge_acceptance(self, message_id: str, digest: str, size: int) -> None:
+        """Ledger a persisted intake before allowing the worker to claim it.
+
+        The ledger and spool are separate durable stores, so an interrupted
+        acknowledgement is deliberately retried at least once with the same id.
+        Never clear a pending marker when no ledger sink is configured.
+        """
+        if self._audit is None:
+            raise SpoolError("a pending intake requires an audit sink")
+        self._record("mail-spool.accepted", {"id": message_id, "bytes": size})
+        with self._locked() as state:
+            entry = state["messages"].get(message_id)
+            if entry is None or entry.get("sha256") != digest:
+                raise SpoolError("pending intake changed before audit acknowledgement")
+            entry["auditPending"] = False
+
     def _file(self, message_id: str) -> pathlib.Path:
         if not isinstance(message_id, str) or not _ID.match(message_id):
             raise SpoolError("a spool message id looks like m-0123456789abcdef01234567")
@@ -178,24 +197,35 @@ class MailSpool:
         if len(found) != 1:
             return self._dropped("rejected", "no-single-message-id", len(raw))
         message_id = "m-" + hashlib.sha256(found[0].encode("utf-8")).hexdigest()[:24]
+        digest = hashlib.sha256(raw).hexdigest()
+        duplicate = False
         with self._locked() as state:
             messages = state["messages"]
             if message_id in messages:
-                return {"status": "duplicate", "id": message_id}
-            if len(messages) >= MAX_MESSAGES:
-                raise SpoolFull("the spool is full; the sender should retry later")
-            path = self._file(message_id)
-            descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-            with os.fdopen(descriptor, "wb") as stream:
-                stream.write(raw)
-                stream.flush()
-                os.fsync(stream.fileno())
-            messages[message_id] = {
-                "id": message_id, "state": "new", "receivedAt": stamp, "bytes": len(raw), "sha256": hashlib.sha256(raw).hexdigest(),
-                "attempts": 0, "availableAt": stamp,
-            }
-        self._record("mail-spool.accepted", {"id": message_id, "bytes": len(raw)})
-        return {"status": "accepted", "id": message_id}
+                duplicate = True
+                existing = messages[message_id]
+                pending = existing.get("auditPending", False)
+                # A different payload with the same Message-ID must never
+                # acknowledge an earlier, unaudited intake.
+                if pending and existing.get("sha256") != digest:
+                    raise SpoolError("pending intake retry has a different payload")
+            else:
+                if len(messages) >= MAX_MESSAGES:
+                    raise SpoolFull("the spool is full; the sender should retry later")
+                path = self._file(message_id)
+                descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+                with os.fdopen(descriptor, "wb") as stream:
+                    stream.write(raw)
+                    stream.flush()
+                    os.fsync(stream.fileno())
+                pending = self._audit is not None
+                messages[message_id] = {
+                    "id": message_id, "state": "new", "receivedAt": stamp, "bytes": len(raw), "sha256": digest,
+                    "attempts": 0, "availableAt": stamp, "auditPending": pending,
+                }
+        if pending:
+            self._acknowledge_acceptance(message_id, digest, len(raw))
+        return {"status": "duplicate" if duplicate else "accepted", "id": message_id}
 
     def _dropped(self, status: str, reason: str, size: int) -> dict[str, Any]:
         self._record(f"mail-spool.{status}", {"reason": reason, "bytes": size})
@@ -212,8 +242,9 @@ class MailSpool:
         with self._locked() as state:
             ready = sorted(
                 (entry for entry in state["messages"].values()
-                 if (entry["state"] == "new" and entry["availableAt"] <= stamp)
-                 or (entry["state"] == "leased" and entry["leaseUntil"] <= stamp)),
+                 if not entry.get("auditPending", False) and (
+                     (entry["state"] == "new" and entry["availableAt"] <= stamp)
+                     or (entry["state"] == "leased" and entry["leaseUntil"] <= stamp))),
                 key=lambda entry: (entry["receivedAt"], entry["id"]),
             )
             for entry in ready[:limit]:
@@ -309,6 +340,7 @@ class MailSpool:
             entries = list(state["messages"].values())
         counts = {name: sum(1 for entry in entries if entry["state"] == name) for name in STATES}
         return {"tenant": self.tenant, "total": len(entries), **counts,
+                "auditPending": sum(1 for entry in entries if entry.get("auditPending", False)),
                 "deadIds": sorted(entry["id"] for entry in entries if entry["state"] == "dead")}
 
     def purge(self, *, now: int | None = None) -> dict[str, int]:
