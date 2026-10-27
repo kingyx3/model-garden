@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import importlib.util
 import json
+import os
 import pathlib
 import re
 import stat
@@ -34,22 +35,36 @@ class RestoreError(ValueError):
     pass
 
 
+def _private_input(path: pathlib.Path, *, label: str, directory: bool = False) -> os.stat_result:
+    """Refuse shared, linked, foreign-owned recovery inputs before decrypt/write.
+
+    Snapshot/read-back commands create 0700 directories and 0600 files. A
+    hardlinked identity or ciphertext can be changed through another pathname;
+    a world-readable manifest can disclose client recovery metadata.
+    """
+    try:
+        info = path.lstat()
+    except OSError as exc:
+        raise RestoreError(f"{label} must be an existing private input") from exc
+    kind_ok = stat.S_ISDIR(info.st_mode) if directory else stat.S_ISREG(info.st_mode)
+    if (not kind_ok or info.st_uid != os.geteuid() or info.st_mode & 0o077
+            or (not directory and info.st_nlink != 1)):
+        raise RestoreError(f"{label} must be private and owner-owned (no symlink or hardlink)")
+    return info
+
+
 def _private_identity(identity: pathlib.Path) -> None:
-    if identity.is_symlink() or not identity.is_file():
-        raise RestoreError("age identity must be an existing regular private file, never a symlink")
-    if identity.stat().st_mode & 0o077:
-        raise RestoreError("age identity must be private (mode 0600 or stricter)")
-    if identity.stat().st_size > 16384:
+    info = _private_input(identity, label="age identity")
+    if info.st_size > 16384:
         raise RestoreError("age identity exceeds permitted key-file size")
 
 
 def _validated_manifest(compose: pathlib.Path, project: str, source: pathlib.Path) -> list[tuple[str, pathlib.Path]]:
     SNAPSHOT._name(project, "client project")
-    if source.is_symlink() or not source.is_dir():
-        raise RestoreError("backup source must be an existing directory, not a symlink")
+    _private_input(source, label="backup source directory", directory=True)
     manifest_path = source / "manifest.json"
-    if manifest_path.is_symlink() or not manifest_path.is_file() or manifest_path.stat().st_size > MAX_MANIFEST_BYTES:
-        raise RestoreError("missing, linked or oversized backup manifest")
+    if _private_input(manifest_path, label="backup manifest").st_size > MAX_MANIFEST_BYTES:
+        raise RestoreError("oversized backup manifest")
     try:
         doc = json.loads(manifest_path.read_text(encoding="utf-8"))
     except (ValueError, UnicodeDecodeError) as exc:
@@ -82,8 +97,8 @@ def _validated_manifest(compose: pathlib.Path, project: str, source: pathlib.Pat
         if not isinstance(digest, str) or not SHA256.fullmatch(digest):
             raise RestoreError("invalid encrypted archive digest")
         path = source / f"{name}.tar.age"
-        if path.is_symlink() or not path.is_file():
-            raise RestoreError("encrypted archive is missing or a symlink")
+        if _private_input(path, label="encrypted archive").st_size != size:
+            raise RestoreError("encrypted archive digest/size mismatch; refuse restoration")
         measured, actual_size = SNAPSHOT._digest(path)
         if measured != digest or actual_size != size:
             raise RestoreError("encrypted archive digest/size mismatch; refuse restoration")
