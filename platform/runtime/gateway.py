@@ -152,6 +152,12 @@ def load_config(document: Mapping[str, Any]) -> dict[str, Any]:
         web = sections["web"]
         if web.get("knowledgeUploads") not in (None, True, False):
             raise GatewayConfigError("web.knowledgeUploads must be true or false")
+        review_owner = web.get("knowledgeReviewOwner")
+        if review_owner is not None:
+            if (web.get("knowledgeUploads") is not True or not isinstance(review_owner, str) or
+                    not re.fullmatch(r"[a-z0-9._+\-]+@[a-z0-9.\-]+\.[a-z]{2,}", review_owner) or
+                    review_owner not in (web.get("allowedAddresses") or [])):
+                raise GatewayConfigError("web.knowledgeReviewOwner must be an allowed, lowercase owner email with uploads enabled")
         if not origin:
             raise GatewayConfigError("web chat needs publicOrigin to build sign-in links")
         if not isinstance(web.get("mail"), Mapping) or not {"from", "host"} <= set(web["mail"]):
@@ -985,6 +991,40 @@ class Gateway:
             except OSError:
                 return json_response(503, {"error": "draft upload storage unavailable"})
             return json_response(200 if result["alreadyStaged"] else 201, result)
+        if route == "/channels/web/knowledge-reviews" and method == "POST":
+            owner = (self.config["web"] or {}).get("knowledgeReviewOwner")
+            if not owner or self.config["web"].get("knowledgeUploads") is not True:
+                return json_response(404, {"error": "not found"})
+            normalized = {k.lower(): v for k, v in headers.items()}
+            if normalized.get("origin") != self.config["publicOrigin"]:
+                return json_response(403, {"error": "origin not allowed"})
+            if normalized.get("content-type", "").split(";", 1)[0].strip().lower() != "application/json":
+                return json_response(415, {"error": "application/json required"})
+            principal = self.directory.resolve(identity)
+            if (not principal.can_approve or principal.identity != owner or
+                    identity.channel_user_id != owner):
+                return json_response(403, {"error": "configured client owner approval required"})
+            uploads = _module("uploads")
+            try:
+                document = json.loads(body)
+                if not isinstance(document, dict) or set(document) != {"uploadId", "sha256", "decision"}:
+                    raise ValueError("invalid review fields")
+                result = uploads.attest_owner_review(
+                    self.data / "knowledge-uploads", tenant=self.tenant,
+                    upload_id=document["uploadId"], expected_sha256=document["sha256"],
+                    decision=document["decision"], owner=principal.identity,
+                    now=int(self.clock()), retention_days=_module("artifacts").retention_from_environ(self.environ),
+                    audit=self.audit,
+                )
+            except uploads.UploadConflict:
+                return json_response(409, {"error": "draft review conflicts with existing state or digest"})
+            except uploads.UploadUnavailable:
+                return json_response(503, {"error": "owner review was not accepted"})
+            except (ValueError, TypeError, UnicodeError):
+                return json_response(400, {"error": "invalid owner review"})
+            except OSError:
+                return json_response(503, {"error": "owner review storage unavailable"})
+            return json_response(200 if result["alreadyReviewed"] else 201, result)
         if route == "/channels/web/events" and method == "GET":
             conversation = (query.get("conversationId") or [""])[0]
             after = (query.get("after") or ["0"])[0]

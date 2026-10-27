@@ -628,7 +628,7 @@ def _gateway_settings(binding: dict[str, Any]) -> tuple[dict[str, Any] | None, d
         if web.get("knowledge_uploads") not in (None, True, False):
             raise ValueError("Docker target failed: gateway.web.knowledge_uploads must be true or false")
         mail = (web or {}).get("mail") or {}
-        config["web"] = {"allowedAddresses": web.get("allowed_addresses"), "mail": {"from": mail.get("from"), "host": mail.get("host"), **({"port": mail["port"]} if "port" in mail else {})}, **({"knowledgeUploads": True} if web.get("knowledge_uploads") is True else {})}
+        config["web"] = {"allowedAddresses": web.get("allowed_addresses"), "mail": {"from": mail.get("from"), "host": mail.get("host"), **({"port": mail["port"]} if "port" in mail else {})}, **({"knowledgeUploads": True} if web.get("knowledge_uploads") is True else {}), **({"knowledgeReviewOwner": web["knowledge_review_owner"]} if web.get("knowledge_review_owner") is not None else {})}
         required = {"MODEL_GARDEN_WEBCHAT_KEY"}
     else:
         required = set()

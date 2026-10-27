@@ -200,6 +200,98 @@ def stage(
         os.close(fd)
 
 
+def attest_owner_review(
+    root: pathlib.Path, *, tenant: str, upload_id: str, expected_sha256: str,
+    decision: str, owner: str, now: int, retention_days: int,
+    audit: Callable[[str, str, dict[str, Any]], None],
+) -> dict[str, Any]:
+    """Record a separately authenticated owner's exact-digest review, never promote.
+
+    Caller MUST verify the signed session, mapped approver role and configured
+    client-owner identity. The review marker is not a KnowledgeSource approval.
+    A pending marker after an interrupted audit is deliberately non-replayable.
+    """
+    days = _retention(retention_days)
+    if not isinstance(tenant, str) or not _TENANT.fullmatch(tenant):
+        raise UploadError("invalid tenant")
+    if not isinstance(upload_id, str) or not _REQUEST.fullmatch(upload_id):
+        raise UploadError("invalid upload identifier")
+    if not isinstance(expected_sha256, str) or not re.fullmatch(r"[0-9a-f]{64}", expected_sha256):
+        raise UploadError("invalid source digest")
+    if decision not in ("approve", "reject"):
+        raise UploadError("invalid review decision")
+    if not isinstance(owner, str) or not re.fullmatch(r"[A-Za-z0-9._+@-]{3,254}", owner):
+        raise UploadError("invalid verified owner")
+    directory = pathlib.Path(root) / tenant
+    if not pathlib.Path(root).is_dir() or not directory.is_dir():
+        raise UploadConflict("staged draft not found")
+    _private_dir(pathlib.Path(root))
+    _private_dir(directory)
+    lock = directory / ".upload.lock"
+    if lock.is_symlink():
+        raise UploadConflict("upload lock must not be a symlink")
+    fd = os.open(lock, os.O_CREAT | os.O_RDWR | getattr(os, "O_NOFOLLOW", 0), 0o600)
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+            raise UploadConflict("upload lock must be a regular file")
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        metadata_path = directory / f"u-{upload_id}.json"
+        if not _regular(metadata_path) or metadata_path.stat().st_size > 4096:
+            raise UploadConflict("draft receipt missing or invalid")
+        try:
+            metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            raise UploadConflict("draft receipt invalid") from exc
+        if (not isinstance(metadata, dict) or metadata.get("tenant") != tenant or
+                metadata.get("uploadId") != upload_id or metadata.get("status") != "draft" or
+                metadata.get("sha256") != expected_sha256 or metadata.get("by") == owner or
+                int(now) >= _expires(metadata, days)):
+            raise UploadConflict("draft cannot be reviewed by this owner")
+        filename = metadata.get("filename")
+        if not isinstance(filename, str) or not _NAME.fullmatch(filename) or ".." in filename:
+            raise UploadConflict("draft filename invalid")
+        content_path = directory / f"u-{upload_id}{pathlib.Path(filename).suffix.lower()}"
+        if (not _regular(content_path) or content_path.stat().st_size > MAX_BYTES or
+                content_path.stat().st_size != metadata.get("bytes") or
+                hashlib.sha256(content_path.read_bytes()).hexdigest() != expected_sha256):
+            raise UploadConflict("draft content no longer matches the reviewed digest")
+        if _regular(directory / f".deleted-{upload_id}.json"):
+            raise UploadConflict("draft has been deleted")
+        reviewed = directory / f"r-{upload_id}.json"
+        pending = directory / f".r-{upload_id}.pending"
+        owner_hash = hashlib.sha256(owner.encode("utf-8")).hexdigest()
+        record = {"tenant": tenant, "uploadId": upload_id, "sha256": expected_sha256,
+                  "decision": decision, "ownerHash": owner_hash, "reviewedAt": int(now)}
+        status = "reviewed-for-import" if decision == "approve" else "reviewed-rejected"
+        if _regular(pending):
+            raise UploadConflict("interrupted owner review needs operator reconciliation")
+        if _regular(reviewed):
+            try:
+                existing = json.loads(reviewed.read_text(encoding="utf-8"))
+            except (OSError, ValueError) as exc:
+                raise UploadConflict("owner review receipt invalid") from exc
+            if (not isinstance(existing, dict) or
+                    any(existing.get(k) != record[k] for k in ("tenant", "uploadId", "sha256", "decision", "ownerHash"))):
+                raise UploadConflict("owner review is immutable")
+            return {"uploadId": upload_id, "status": status, "alreadyReviewed": True,
+                    "next": "Private workspace import and protected client-owner promotion remain separate."}
+        # A crashed or failed audit must never create an apparently approved
+        # source. Pending markers are poison until an operator reconciles them.
+        try:
+            _create(pending, (json.dumps(record, sort_keys=True) + "\n").encode("utf-8"))
+            audit("knowledge.upload-owner-reviewed", owner,
+                  {"uploadId": upload_id, "sha256": expected_sha256, "decision": decision})
+            _create(reviewed, (json.dumps(record, sort_keys=True) + "\n").encode("utf-8"))
+            pending.unlink()
+        except Exception as exc:
+            raise UploadUnavailable("owner review not accepted; inspect pending marker and ledger") from exc
+        return {"uploadId": upload_id, "status": status, "alreadyReviewed": False,
+                "next": "Private workspace import and protected client-owner promotion remain separate."}
+    finally:
+        os.close(fd)
+
+
 def purge_expired(
     root: pathlib.Path, *, tenant: str, now: int, retention_days: int,
     audit: Callable[[str, str, dict[str, Any]], None], actor: str,
@@ -273,6 +365,18 @@ def purge_expired(
             if (hashlib.sha256(content_path.read_bytes()).hexdigest() != metadata.get("sha256") or
                     content_path.stat().st_size != metadata.get("bytes")):
                 raise UploadConflict("upload content digest or size mismatch")
+            review_path = directory / f"r-{upload_id}.json"
+            if _regular(directory / f".r-{upload_id}.pending"):
+                raise UploadConflict("interrupted owner review needs operator reconciliation")
+            if _regular(review_path):
+                try:
+                    review = json.loads(review_path.read_text(encoding="utf-8"))
+                except (OSError, ValueError) as exc:
+                    raise UploadConflict("owner review receipt invalid") from exc
+                if (not isinstance(review, dict) or review.get("tenant") != tenant or
+                        review.get("uploadId") != upload_id or review.get("sha256") != metadata["sha256"] or
+                        review.get("decision") not in ("approve", "reject")):
+                    raise UploadConflict("owner review receipt mismatch")
             expired = int(now) >= _expires(metadata, days)
             if not expired and upload_id != erase_id:
                 continue
@@ -300,6 +404,9 @@ def purge_expired(
                                               sort_keys=True) + "\n").encode("utf-8"))
                 content_path.unlink()
                 metadata_path.unlink()
+                review_path = directory / f"r-{upload_id}.json"
+                if _regular(review_path):
+                    review_path.unlink()
                 audit("knowledge.upload-deleted", actor, details)
             except Exception as exc:
                 raise UploadUnavailable("upload deletion incomplete; inspect tombstone and ledger") from exc
