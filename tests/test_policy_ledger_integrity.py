@@ -7,6 +7,7 @@ import json
 import pathlib
 import tempfile
 import unittest
+from unittest import mock
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 spec = importlib.util.spec_from_file_location("govern_policy_integrity_under_test", ROOT / "scripts/govern-action.py")
@@ -93,6 +94,24 @@ class PolicyLedgerIntegrityTests(unittest.TestCase):
         self.assertIsNone(govern.count_executions_today(self.path, "mail.send"))
         self.assertEqual(govern.authorize_action(
             self.state(), "mail.send", {}, audit_path=self.path)["decision"], "require-approval")
+
+
+    def test_ledger_replaced_between_first_inspection_and_open_is_not_trusted(self):
+        self.record()
+        original_open = pathlib.Path.open
+        swapped = False
+
+        def replace_before_open(path, *args, **kwargs):
+            nonlocal swapped
+            if path == self.path and not swapped:
+                swapped = True
+                self.path.rename(self.path.with_name("old-ledger.jsonl"))
+                self.path.write_text("", encoding="utf-8")
+            return original_open(path, *args, **kwargs)
+
+        with mock.patch.object(pathlib.Path, "open", autospec=True, side_effect=replace_before_open):
+            self.assertIsNone(govern.count_executions_today(self.path, "mail.send"))
+        self.assertTrue(swapped)
 
 
 if __name__ == "__main__":
