@@ -41,6 +41,8 @@ import json
 import os
 import pathlib
 import re
+import stat
+import tempfile
 from collections.abc import Callable, Iterable, Iterator
 from typing import Any
 
@@ -109,34 +111,132 @@ class MailSpool:
         self._audit = audit
 
     # -- storage -------------------------------------------------------------------------
+    # This spool accepts network-originated bytes. Never follow a tenant, index,
+    # lock or message link: the receiving process must not truncate or read
+    # unrelated host/client files. The supplied root's ancestors are operator-owned.
+    MAX_INDEX_BYTES = 8 * 1024 * 1024
+
+    @staticmethod
+    def _private_regular(info: os.stat_result, label: str, maximum: int) -> None:
+        if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid()
+                or info.st_nlink != 1 or stat.S_IMODE(info.st_mode) & 0o077
+                or info.st_size > maximum):
+            raise SpoolError(f"unsafe spool {label}")
+
+    @staticmethod
+    def _same_file(first: os.stat_result, second: os.stat_result) -> bool:
+        return (first.st_dev, first.st_ino) == (second.st_dev, second.st_ino)
+
+    def _directories(self) -> tuple[os.stat_result, os.stat_result, os.stat_result]:
+        checked = []
+        for path in (self.directory.parent, self.directory, self.messages):
+            try:
+                path.mkdir(mode=0o700, parents=path == self.directory.parent, exist_ok=True)
+                info = path.lstat()
+            except OSError as exc:
+                raise SpoolError("unsafe spool directory") from exc
+            if (not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid()
+                    or stat.S_IMODE(info.st_mode) & 0o077):
+                raise SpoolError("unsafe spool directory")
+            checked.append(info)
+        return tuple(checked)
+
+    def _read_private(self, path: pathlib.Path, label: str, maximum: int, *, missing_ok: bool = False) -> bytes | None:
+        try:
+            before = path.lstat()
+        except FileNotFoundError:
+            if missing_ok:
+                return None
+            raise
+        self._private_regular(before, label, maximum)
+        try:
+            fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+        except FileNotFoundError:
+            raise SpoolError(f"spool {label} changed during read") from None
+        except OSError as exc:
+            raise SpoolError(f"unsafe spool {label}") from exc
+        try:
+            opened = os.fstat(fd)
+            self._private_regular(opened, label, maximum)
+            if not self._same_file(before, opened):
+                raise SpoolError(f"spool {label} changed during read")
+            with os.fdopen(fd, "rb", closefd=False) as stream:
+                payload = stream.read(maximum + 1)
+            if len(payload) > maximum:
+                raise SpoolError(f"unsafe spool {label}")
+            try:
+                after = path.lstat()
+            except FileNotFoundError:
+                raise SpoolError(f"spool {label} changed during read") from None
+            self._private_regular(after, label, maximum)
+            if not self._same_file(opened, after):
+                raise SpoolError(f"spool {label} changed during read")
+            return payload
+        finally:
+            os.close(fd)
 
     @contextlib.contextmanager
     def _locked(self) -> Iterator[dict[str, Any]]:
-        self.messages.mkdir(parents=True, exist_ok=True, mode=0o700)
-        for path in (self.directory.parent, self.directory, self.messages):
-            try:
-                os.chmod(path, 0o700)
-            except OSError:
-                pass
-        descriptor = os.open(self.directory / ".lock", os.O_RDWR | os.O_CREAT, 0o600)
+        directories = self._directories()
+        try:
+            descriptor = os.open(self.directory / ".lock", os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+        except OSError as exc:
+            raise SpoolError("unsafe spool lock") from exc
         try:
             fcntl.flock(descriptor, fcntl.LOCK_EX)
+            lock_info = os.fstat(descriptor)
+            self._private_regular(lock_info, "lock", 0)
+            if not self._same_file(lock_info, (self.directory / ".lock").lstat()):
+                raise SpoolError("spool lock changed")
+            for path, info in zip((self.directory.parent, self.directory, self.messages), directories):
+                if not self._same_file(info, path.lstat()):
+                    raise SpoolError("spool directory changed")
+            payload = self._read_private(self.index, "index", self.MAX_INDEX_BYTES, missing_ok=True)
+            old_index = self.index.lstat() if payload is not None else None
             state: dict[str, Any] = {"schemaVersion": SCHEMA_VERSION, "tenant": self.tenant, "messages": {}}
-            if self.index.is_file():
-                loaded = json.loads(self.index.read_text(encoding="utf-8"))
-                if not isinstance(loaded, dict) or loaded.get("schemaVersion") != SCHEMA_VERSION or loaded.get("tenant") != self.tenant:
+            if payload is not None:
+                try:
+                    loaded = json.loads(payload)
+                except (ValueError, UnicodeDecodeError) as exc:
+                    raise SpoolError("spool index is invalid") from exc
+                if (not isinstance(loaded, dict) or loaded.get("schemaVersion") != SCHEMA_VERSION
+                        or loaded.get("tenant") != self.tenant or not isinstance(loaded.get("messages"), dict)):
                     raise SpoolError("spool index has an unsupported format or belongs to another client")
                 state = loaded
             before = json.dumps(state, sort_keys=True)
             yield state
             if json.dumps(state, sort_keys=True) != before:
-                temporary = self.index.with_suffix(".tmp")
-                handle = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-                with os.fdopen(handle, "w", encoding="utf-8") as stream:
-                    stream.write(json.dumps(state, sort_keys=True) + "\n")
-                    stream.flush()
-                    os.fsync(stream.fileno())
-                os.replace(temporary, self.index)
+                serialized = (json.dumps(state, sort_keys=True) + "\\n").encode("utf-8")
+                if len(serialized) > self.MAX_INDEX_BYTES:
+                    raise SpoolError("spool index exceeds its limit")
+                # The old fixed index.tmp was attacker-precreatable. mkstemp is
+                # unpredictable, O_EXCL and mode 0600; it never truncates a link.
+                fd, temporary = tempfile.mkstemp(prefix=".index-", dir=self.directory)
+                try:
+                    with os.fdopen(fd, "wb") as stream:
+                        stream.write(serialized)
+                        stream.flush()
+                        os.fsync(stream.fileno())
+                    for path, info in zip((self.directory.parent, self.directory, self.messages), directories):
+                        if not self._same_file(info, path.lstat()):
+                            raise SpoolError("spool directory changed")
+                    try:
+                        current = self.index.lstat()
+                    except FileNotFoundError:
+                        current = None
+                    if (old_index is None) != (current is None) or (
+                            old_index is not None and current is not None
+                            and not self._same_file(old_index, current)):
+                        raise SpoolError("spool index changed during update")
+                    os.replace(temporary, self.index)
+                    directory_fd = os.open(self.directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+                    try:
+                        os.fsync(directory_fd)
+                    finally:
+                        os.close(directory_fd)
+                finally:
+                    if os.path.lexists(temporary):
+                        os.unlink(temporary)
         finally:
             fcntl.flock(descriptor, fcntl.LOCK_UN)
             os.close(descriptor)
@@ -255,7 +355,7 @@ class MailSpool:
                     entry.pop("leaseUntil", None)
                     continue
                 try:
-                    raw = self._file(entry["id"]).read_bytes()
+                    raw = self._read_private(self._file(entry["id"]), "message", MAX_MESSAGE_BYTES)
                 except OSError:
                     entry["state"], entry["lastError"] = "dead", "MissingFile"
                     continue
