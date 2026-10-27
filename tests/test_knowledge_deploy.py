@@ -126,6 +126,26 @@ class Case(unittest.TestCase):
         narrower = self.apply(state(source(audiences=("receptionist",)), digests={"rules": SHA_A}))
         self.assertEqual((narrower["changed"], narrower["critical"]), (True, []))
 
+    def test_public_exposure_and_skill_audience_widening_are_critical(self):
+        self.apply(state(source(classification="confidential", skillAudiences=["answer-faq"]), digests={"rules": SHA_A}))
+        public = self.apply(state(source(classification="internal", skillAudiences=["answer-faq"]), digests={"rules": SHA_A}))
+        self.assertEqual(public["critical"], ["rules"])
+        self.assertEqual(self.events()[-1]["details"]["accessWidened"], ["rules"])
+
+        more_skills = self.apply(state(source(classification="internal", skillAudiences=["answer-faq", "other-skill"]),
+                                       digests={"rules": SHA_A}))
+        self.assertEqual(more_skills["critical"], ["rules"])
+        self.assertEqual(self.events()[-1]["details"]["audienceWidened"], ["rules"])
+        self.assertIn("skillAudiences", self.events()[-1]["details"]["changed"]["rules"])
+
+        unrestricted = self.apply(state(source(classification="internal"), digests={"rules": SHA_A}))
+        self.assertEqual(unrestricted["critical"], ["rules"])
+        self.assertEqual(self.events()[-1]["details"]["audienceWidened"], ["rules"])
+
+        private = self.apply(state(source(classification="confidential", skillAudiences=["answer-faq"]),
+                                   digests={"rules": SHA_A}))
+        self.assertEqual((private["changed"], private["critical"]), (True, []))
+
     def test_retiring_and_removing_a_source_are_recorded(self):
         self.apply(state(source(), source("pricing"), digests={"rules": SHA_A, "pricing": SHA_A}))
         self.apply(state(source(status="retired"), source("pricing"), digests={"rules": SHA_A, "pricing": SHA_A}))
