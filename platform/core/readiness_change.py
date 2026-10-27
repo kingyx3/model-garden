@@ -28,15 +28,32 @@ def _state(entry: Mapping[str, Any]) -> str:
     return "ready" if entry.get("ready") else "blocked"
 
 
-def diff(before: Iterable[Mapping[str, Any]], after: Iterable[Mapping[str, Any]]) -> list[dict[str, Any]]:
-    """One result per Agent: its Skills grouped by what the change does to them."""
-    later = {item["agent"]: item for item in after}
-    results: list[dict[str, Any]] = []
-    for agent in before:
+def _index_agents(reports: Iterable[Mapping[str, Any]]) -> dict[str, Mapping[str, Any]]:
+    """Reject ambiguous preview inputs instead of silently overwriting a coworker or Skill."""
+    indexed: dict[str, Mapping[str, Any]] = {}
+    for agent in reports:
         name = agent["agent"]
+        if name in indexed:
+            raise ValueError(f"duplicate Agent {name!r} in readiness preview")
+        seen: set[tuple[str, str]] = set()
+        for skill in agent["skills"]:
+            key = (skill.get("kind", "Skill"), skill["name"])
+            if key in seen:
+                raise ValueError(f"duplicate Skill {key!r} for Agent {name!r} in readiness preview")
+            seen.add(key)
+        indexed[name] = agent
+    return indexed
+
+
+def diff(before: Iterable[Mapping[str, Any]], after: Iterable[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    """One result per Agent, including newly introduced Agents, with no hidden duplicates."""
+    earlier = _index_agents(before)
+    later = _index_agents(after)
+    results: list[dict[str, Any]] = []
+    for name in sorted(set(earlier) | set(later)):
         if name not in later:
             raise ValueError(f"Agent {name!r} is missing from the after report")
-        old = {(entry.get("kind", "Skill"), entry["name"]): entry for entry in agent["skills"]}
+        old = {(entry.get("kind", "Skill"), entry["name"]): entry for entry in earlier[name]["skills"]} if name in earlier else {}
         new = {(entry.get("kind", "Skill"), entry["name"]): entry for entry in later[name]["skills"]}
         rows: list[dict[str, Any]] = []
         for key in sorted(set(old) | set(new), key=lambda item: (item[0], item[1])):
@@ -56,12 +73,15 @@ def diff(before: Iterable[Mapping[str, Any]], after: Iterable[Mapping[str, Any]]
                 else:
                     outcome = "still-blocked"
             row = {"name": skill, "kind": kind, "outcome": outcome}
-            if outcome in ("still-blocked", "regressed") and key in new and new[key].get("remediation"):
+            if key in new and outcome == "added":
+                row["state"] = _state(new[key])
+            if outcome in ("still-blocked", "regressed", "added") and key in new and _state(new[key]) == "blocked" and new[key].get("remediation"):
                 row["next"] = new[key]["remediation"]
             rows.append(row)
         results.append({
             "agent": name,
             "environment": later[name].get("environment"),
+            "addedAgent": name not in earlier,
             "changes": rows,
             "regressed": any(row["outcome"] == "regressed" or (row["outcome"] == "removed" and _state(old[(row["kind"], row["name"])]) == "ready") for row in rows),
         })
@@ -72,7 +92,7 @@ def render(changes: Iterable[Mapping[str, Any]], *, subject: str = "this change"
     """Plain words for the owner: what works after, what still needs a step, and any warning first."""
     lines: list[str] = []
     for agent in changes:
-        lines.append(f"Agent {agent['agent']}: what {subject} would do")
+        lines.append(f"Agent {agent['agent']}" + (" (new)" if agent.get("addedAgent") else "") + f": what {subject} would do")
         grouped: dict[str, list[Mapping[str, Any]]] = {}
         for row in agent["changes"]:
             grouped.setdefault(row["outcome"], []).append(row)
@@ -87,5 +107,5 @@ def render(changes: Iterable[Mapping[str, Any]], *, subject: str = "this change"
                 continue
             lines.append(f"  {title}:")
             for row in rows:
-                lines.append(f"    - {row['name']}" + (f" — next step: {row['next']}" if row.get("next") else ""))
+                lines.append(f"    - {row['name']}" + (f" ({'switched off' if row.get('state') == 'off' else row['state']})" if outcome == 'added' and row.get('state') else "") + (f" — next step: {row['next']}" if row.get("next") else ""))
     return "\n".join(lines) + "\n"
