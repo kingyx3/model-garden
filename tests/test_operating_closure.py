@@ -132,15 +132,16 @@ class OperatingClosureTests(unittest.TestCase):
             self.assertIn("ARG BASE_IMAGE", dockerfile)
             self.assertIn("requirements-voice.txt", dockerfile)
 
-    def test_reference_proof_requires_real_evidence_only_when_requested(self):
+    def test_reference_proof_requires_correlated_receipts_only_when_requested(self):
         evidence = {
             "services": {
                 "hermes": {"running": True},
                 "governed-tools": {"running": True},
                 "voice": {"running": True},
             },
-            "governance": {"records": 2},
-            "voice": {"distinctCalls": 1, "humanTransferEvidence": 0, "messageFallbackEvidence": 1},
+            "governance": {"records": 2, "successfulActions": 1},
+            "voice": {"distinctCalls": 1, "completedCalls": 1,
+                      "completedCallFallbackEvidence": 1, "transcriptWriteFailures": 0},
         }
         result = reference_proof.evaluate(
             evidence,
@@ -150,7 +151,7 @@ class OperatingClosureTests(unittest.TestCase):
         )
         self.assertTrue(result["passed"])
 
-        evidence["voice"]["distinctCalls"] = 0
+        evidence["voice"]["completedCalls"] = 0
         result = reference_proof.evaluate(
             evidence,
             require_voice_call=True,
@@ -158,7 +159,7 @@ class OperatingClosureTests(unittest.TestCase):
             require_governed_action=True,
         )
         self.assertFalse(result["passed"])
-        self.assertIn("no real voice call lifecycle evidence exists", result["failures"])
+        self.assertIn("no completed voice call lifecycle pair exists", result["failures"])
 
     def test_reference_proof_summaries_do_not_copy_sensitive_payloads(self):
         voice = reference_proof._voice_summary([
