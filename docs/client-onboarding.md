@@ -157,6 +157,8 @@ For the business-side lifecycle, deployment checklist and production handover, u
 
 ## Previewing a connection before it is made
 
+The underlying multi-Agent readiness comparison includes newly added Agents and distinguishes newly listed ready, blocked and switched-off Skills. It refuses duplicate Agent or Skill entries instead of silently overwriting one in the owner preview. This is a credential-free planning check, not owner consent, provider authorization or evidence of a live connection.
+
 `python3 scripts/client-operator.py readiness-change <private-client-workspace> <family> --provider <id> --tier <n> [--scopes a,b] [--owner <person>] [--replace] [--rescope] --agent <name>` shows what a connection would do to each Skill before anything is written (#110, #111): which Skills start working, which stay blocked with the one next step, which stay switched off until the owner enables them, and, first, a warning for anything that works today and would stop. It merges the proposed provider into an in-memory copy of the environment binding with the same rules as the guided connect step (replacing a provider and widening scopes or changing the owner must be explicit) and re-runs the readiness rules, so a provider that is not shipped, or a coworker without its own grant, correctly leaves a Skill blocked. It exits non-zero if the change would break something. It writes no binding, stores no credential and does not connect anything.
 
 ## Employee Studio and change requests
