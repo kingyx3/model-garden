@@ -130,6 +130,57 @@ class GateTests(unittest.TestCase):
         self.assertLess(max(len(token) for token in blob.replace('"', " ").split()), 64)  # digests appear only as short prefixes
 
 
+class AccessEvidenceTests(unittest.TestCase):
+    @staticmethod
+    def state(*, classification="internal", status="approved", skill_audiences=None):
+        document, sha = source(status=status)
+        document["spec"]["classification"] = classification
+        if skill_audiences is not None:
+            document["spec"]["skillAudiences"] = list(skill_audiences)
+        return desired((document, sha))
+
+    def test_public_exposure_requires_new_evals_and_is_detected_as_drift(self):
+        private = self.state(classification="confidential")
+        record = promotion.promote(private, None, evidence_for(private), by=OWNER, now=T0)
+        public = self.state(classification="internal")
+        result = promotion.check(public, record, None, now=T0 + 10)
+        self.assertEqual(result["critical"], ["rules"])
+        self.assertEqual(result["summary"]["accessWidened"], ["rules"])
+        self.assertFalse(promotion.verify(public, record)["matches"])
+        self.assertEqual(promotion.verify(public, record)["drifted"], ["rules"])
+        self.assertIn("evidence-not-for-this-content:rules",
+                      promotion.check(public, record, evidence_for(private), now=T0 + 10)["reasons"])
+        self.assertTrue(promotion.check(public, record, evidence_for(public), now=T0 + 10)["allowed"])
+
+    def test_skill_acl_expansion_requires_evidence_for_exact_audience(self):
+        narrow = self.state(skill_audiences=["answer-faq"])
+        record = promotion.promote(narrow, None, evidence_for(narrow), by=OWNER, now=T0)
+        wide = self.state(skill_audiences=["answer-faq", "other-skill"])
+        result = promotion.check(wide, record, evidence_for(narrow), now=T0 + 10)
+        self.assertEqual(result["critical"], ["rules"])
+        self.assertEqual(result["summary"]["audienceWidened"], ["rules"])
+        self.assertEqual(result["reasons"], ["evidence-not-for-this-content:rules"])
+        self.assertEqual(promotion.verify(wide, record)["drifted"], ["rules"])
+        self.assertTrue(promotion.check(wide, record, evidence_for(wide), now=T0 + 10)["allowed"])
+
+    def test_draft_evaluation_cannot_promote_approved_content(self):
+        draft = self.state(status="draft")
+        approved = self.state(status="approved")
+        result = promotion.check(approved, None, evidence_for(draft), now=T0 + 10)
+        self.assertEqual(result["reasons"], ["evidence-not-for-this-content:rules"])
+
+    def test_inconsistent_or_malformed_eval_result_is_never_passing(self):
+        state = self.state()
+        good = evidence_for(state)
+        for change in ({"passed": True, "failures": 1}, {"passed": True, "failures": -1},
+                       {"passed": True, "failures": "0"}, {"passed": True, "failures": False},
+                       {"passed": 1, "failures": 0}, {"schemaVersion": 999}):
+            with self.subTest(change=change):
+                result = promotion.check(state, None, {**good, **change}, now=T0 + 10)
+                self.assertFalse(result["allowed"], result)
+        self.assertTrue(promotion.check(state, None, good, now=T0 + 10)["allowed"])
+
+
 class PromoteTests(unittest.TestCase):
     def test_promote_records_the_snapshot_the_promoter_and_the_evidence_digest(self):
         state = desired(source())
