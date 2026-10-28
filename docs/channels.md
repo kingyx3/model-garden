@@ -195,3 +195,26 @@ After reviewing the underlying draft, ticket or handoff, a **host operator with 
 The built-in SMTP receiver and worker share a **single client/environment private spool**. Before a client-routable MTA is enabled, the operator must ensure the spool root, tenant directory and messages directory are owned by the runtime UID and inaccessible to group/other users (mode 0700); the index, lock and message files must be owned regular files with one link and no group/other access (mode 0600). The root's ancestor directories must remain operator-controlled. The worker now rejects unsafe symlinks, hardlinks, substituted files and exposed permissions rather than following or silently repairing them. Index publication uses a random exclusive temporary file with file and directory sync, not a predictable truncating `index.tmp`. Duplicate Message-ID intake is acknowledged only if the original private payload is still present and matches the indexed digest; otherwise SMTP returns a temporary failure, not a false 250.
 
 **Upgrade:** stop the gateway and worker before inspecting existing spool directories. Remove any unexpected links or files only after operator review; verify owner/permissions, repair legitimate legacy modes and reconcile the private index against actual message files. Do not discard a quarantine or replace a corrupted index automatically. A spool that fails validation must remain offline until investigated; this is host-local integrity protection, not proof of independently immutable storage, a trusted inbound MTA, verified sender authentication, real notification delivery or client acceptance. Configure a real MTA's SPF/DKIM/DMARC and trusted authserv-id separately; do not expose the plain SMTP listener publicly.
+
+## Email authority-state integrity (v0.8.204)
+
+The inbound email adapter's per-thread automatic-reply quota and the signed
+approval-link one-use receipts live in **separate owner-private directories**
+(mode 0700; files 0600) on the tenant's persistent state volume. These paths
+must be owned by the runtime UID; their parent directories and mount remain
+operator-controlled. The quota refuses linked, permissive, nonregular or
+malformed counters rather than treating them as a fresh thread. An unavailable
+quota suppresses the automatic reply (`thread-reply-state-unavailable`), not
+an unlimited send. Approval preview and consumption refuse redirected or
+exposed receipt directories; any existing one-use marker, including a dangling
+link, is considered spent. New approval markers are fsynced before a decision
+is acknowledged. A storage failure is **not** a successful approval.
+
+**Upgrade:** before enabling customer mail, inspect existing quota/receipt
+state and migrate only verified tenant-owned counters and spent markers to
+private 0700 directories with single-link 0600 files. Do not delete corrupt
+counters or spent markers to restore service: quarantine the volume, reconcile
+provider receipts and approvals, then follow an owner-authorized recovery
+procedure. This is a host-local filesystem safety prerequisite; it does not
+prove real SMTP/DMARC ingress, delivered replies, approved recipients or
+client acceptance for #84/#109/#117.
