@@ -271,6 +271,9 @@ def restore(
             _require_original_manifest(source, original_token)
             _extract(volume, archive, identity, image)
             _require_original_manifest(source, original_token)
+            _private_input(archive, label="encrypted archive")
+            if SNAPSHOT._digest(archive) != expected_digests[name]:
+                raise RestoreError("encrypted archive changed during restore; keep stack stopped")
             SNAPSHOT.assert_volume_exclusive(project, name)
         SNAPSHOT.assert_quiescent(project)
         for name, _volume in owned:
