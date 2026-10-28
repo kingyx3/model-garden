@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import datetime as dt
 import json
+import math
 import pathlib
 import re
 import subprocess
@@ -208,7 +209,86 @@ def _completed_call_actions(voice_rows: list[dict[str, Any]], audit_rows: list[d
     return count
 
 
-def collect(project: str) -> dict[str, Any]:
+
+def _transcript_summary(voice_rows: list[dict[str, Any]], transcript_rows: list[dict[str, Any]]) -> dict[str, int]:
+    """Count disclosed two-sided transcript records paired to completed call lifecycle events.
+
+    Structural evidence only: a local JSONL record cannot attest real SIP audio,
+    client consent, provider delivery or independently signed lawful basis.
+    Never return caller speech, room hashes, or summary text.
+    """
+    started: dict[tuple[str, str], int] = {}
+    for row in voice_rows:
+        room, agent, at = row.get("roomHash"), row.get("agent"), row.get("timestamp")
+        if (row.get("type") == "CallStarted" and isinstance(room, str)
+                and re.fullmatch(r"[0-9a-f]{64}", room) and isinstance(agent, str) and agent
+                and type(at) is int):
+            key = (room, agent)
+            started[key] = min(at, started.get(key, at))
+    completed: dict[tuple[str, str], int] = {}
+    for row in voice_rows:
+        room, agent, at = row.get("roomHash"), row.get("agent"), row.get("timestamp")
+        key = (room, agent)
+        if (row.get("type") == "CallEnded" and type(at) is int
+                and key in started and at >= started[key]):
+            completed[key] = max(at, completed.get(key, at))
+
+    by_call: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    for row in transcript_rows:
+        if row.get("type") != "CallTranscript":
+            continue
+        room, agent = row.get("callHash"), row.get("agent")
+        if isinstance(room, str) and isinstance(agent, str):
+            by_call.setdefault((room, agent), []).append(row)
+
+    complete = 0
+    for key, records in by_call.items():
+        # Conflicting duplicates veto proof, even if one copy looks valid.
+        if len(records) != 1 or key not in completed:
+            continue
+        record = records[0]
+        started_at, ended_at = record.get("timestamp"), record.get("endedAt")
+        if (type(started_at) is not int or started_at != started[key]
+                or type(ended_at) is not int or ended_at < started_at
+                or ended_at > completed[key] + 60):
+            continue
+        disclosure = record.get("disclosure")
+        # An asserted override owner is not proof of an independently signed
+        # lawful-basis exception. Credit only an actually marked spoken notice.
+        if (not isinstance(disclosure, dict) or disclosure.get("configured") is not True
+                or disclosure.get("played") is not True):
+            continue
+        if (not isinstance(record.get("summary"), str) or not record["summary"].strip()
+                or record.get("summarySource") not in ("extractive", "provided", "model", "fallback-extractive")
+                or record.get("droppedTurns", 0) != 0):
+            continue
+        turns = record.get("turns")
+        if not isinstance(turns, list) or not turns:
+            continue
+        speakers: set[str] = set()
+        previous = -1.0
+        valid = True
+        for index, turn in enumerate(turns):
+            if not isinstance(turn, dict):
+                valid = False
+                break
+            offset = turn.get("offsetSeconds")
+            speaker, speech = turn.get("speaker"), turn.get("text")
+            if (type(turn.get("index")) is not int or turn["index"] != index
+                    or type(offset) not in (int, float) or not math.isfinite(offset)
+                    or offset < previous or offset < 0
+                    or speaker not in ("caller", "agent", "human")
+                    or not isinstance(speech, str) or not speech.strip()):
+                valid = False
+                break
+            previous = offset
+            speakers.add(speaker)
+        if valid and {"caller", "agent"} <= speakers:
+            complete += 1
+    return {"records": len(transcript_rows), "completeTwoWayCalls": complete}
+
+
+def collect(project: str, *, read_transcripts: bool = False) -> dict[str, Any]:
     if not PROJECT.fullmatch(project):
         raise ValueError("project name must use lowercase letters, numbers, and internal hyphens")
     services = _containers(project)
