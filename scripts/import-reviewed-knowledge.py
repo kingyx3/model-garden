@@ -75,8 +75,8 @@ def _read_private(path: pathlib.Path, limit: int) -> bytes:
 def _json(path: pathlib.Path) -> dict:
     try:
         value = json.loads(_read_private(path, 4096).decode("utf-8"))
-    except (UnicodeError, json.JSONDecodeError) as exc:
-        raise ValueError("upload receipt is invalid") from exc
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise ValueError("upload receipt is missing or invalid") from exc
     if not isinstance(value, dict):
         raise ValueError("upload receipt is invalid")
     return value
