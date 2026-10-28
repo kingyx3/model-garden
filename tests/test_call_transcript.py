@@ -285,7 +285,7 @@ class StorageTests(unittest.TestCase):
                 cfg = config(tmp)
                 cfg.path.parent.mkdir(parents=True)
                 prior = {"type": "CallTranscript", "timestamp": 1_700_000_000, "callHash": "previous"}
-                original = json.dumps(prior) + "\\n" + invalid + "\\n"
+                original = json.dumps(prior) + "\n" + invalid + "\n"
                 cfg.path.write_text(original, encoding="utf-8")
                 next_record = {"type": "CallTranscript", "timestamp": 1_700_000_010, "callHash": "next"}
                 with self.assertRaisesRegex(ValueError, "invalid existing voice record"):
@@ -299,12 +299,12 @@ class StorageTests(unittest.TestCase):
             transcript.mark_disclosure_played()
             path = config(tmp).path
             path.parent.mkdir(parents=True)
-            path.write_text('{"timestamp":false}\\n', encoding="utf-8")
+            path.write_text('{"timestamp":false}\n', encoding="utf-8")
             failures = []
             with self.assertLogs("model-garden.call-transcript", level="ERROR"):
                 self.assertIsNone(T.finalize(transcript, on_failure=failures.append))
             self.assertEqual(failures, ["ValueError"])
-            self.assertEqual(path.read_text(encoding="utf-8"), '{"timestamp":false}\\n')
+            self.assertEqual(path.read_text(encoding="utf-8"), '{"timestamp":false}\n')
 
     def test_expired_rows_are_dropped_on_write(self):
         with tempfile.TemporaryDirectory() as tmp:
