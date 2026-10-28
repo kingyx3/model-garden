@@ -1,3 +1,14 @@
+> **Migration notice (v0.8.198):** Public `/health/gateway` and
+> `/health/worker` readiness now require a real loopback TCP peer by default.
+> Prefer [private gateway/worker metrics](runtime-private-monitoring.md).
+> Legacy public Cloud Monitoring uptime checks will return 404 after a default
+> gateway upgrade; plan a client-approved monitoring migration **before**
+> deployment. Transitional public probes require an explicitly reviewed
+> `spec.gateway.readiness_exposure: legacy-public` in the generated gateway
+> configuration **and** `gateway_legacy_public_readiness_acknowledged=true`
+> when enabling `gateway_uptime_alert_enabled` in Terraform. These opt-ins
+> are compatibility exceptions, not a production security signoff.
+
 # Optional client gateway uptime alert (#231)
 
 The Terraform in `infra/docker-host/gcp/gateway-uptime.tf` is disabled by default. It reuses the existing HTTPS load balancer and Cloud Monitoring. It does not grant new IAM roles, expose a private VM, or create notification channels.
