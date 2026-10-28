@@ -21,6 +21,7 @@ Repository implementation docs:
 - [`docs/secrets.md`](docs/secrets.md) — credential ownership, storage and authorization mechanics.
 - [`docs/security.md`](docs/security.md) — production hardening for the supported deployment.
 - [`docs/governed-tools.md`](docs/governed-tools.md) — Tool/MCP authority, approvals and action audit.
+- [`docs/deliverables.md`](docs/deliverables.md) — opt-in governed file Skill, synthetic report/spreadsheet evals and provider limits.
 - [`docs/connector-discovery.md`](docs/connector-discovery.md) — untrusted upstream connector candidate review.
 - [`docs/channels.md`](docs/channels.md) — text channel adapter contract and verified principal mapping.
 - [`docs/metering.md`](docs/metering.md) — canonical usage/cost attribution and Lago integration.

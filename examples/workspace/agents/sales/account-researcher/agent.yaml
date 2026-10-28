@@ -12,8 +12,12 @@ spec:
     file: instructions.md
   skills:
     - account-summary
+    - create-deliverable
+  disabledSkills:
+    - create-deliverable  # Opt in only after the client binds and approves docs.
   tools:
     - crm.read
+    - docs.create
   knowledge:
     - sales-playbook
   policies:

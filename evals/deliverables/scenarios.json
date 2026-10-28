@@ -1,0 +1,33 @@
+{
+  "schemaVersion": 1,
+  "purpose": "Credential-free governed deliverable contract evaluation; synthetic data only",
+  "scenarios": [
+    {
+      "id": "report",
+      "title": "Synthetic weekly operating report",
+      "format": "docx",
+      "structure": {
+        "sections": [
+          {"heading": "Summary", "paragraphs": ["Synthetic service desk handled 12 requests.", "Source: approved synthetic operations notes."]},
+          {"heading": "Next actions", "paragraphs": ["Review the synthetic backlog with the owner."]}
+        ]
+      },
+      "sources": ["kb:synthetic-operations#summary"],
+      "packageMember": "word/document.xml",
+      "expectedText": "Synthetic service desk handled 12 requests."
+    },
+    {
+      "id": "spreadsheet",
+      "title": "Synthetic weekly activity",
+      "format": "xlsx",
+      "structure": {
+        "sheets": [
+          {"name": "Activity", "rows": [["Category", "Count"], ["Open", 7], ["Closed", 12], ["=HYPERLINK(\"https://invalid.example\")", 0]]}
+        ]
+      },
+      "sources": ["kb:synthetic-operations#activity"],
+      "packageMember": "xl/worksheets/sheet1.xml",
+      "expectedText": "Closed"
+    }
+  ]
+}
