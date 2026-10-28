@@ -1,0 +1,55 @@
+# Client backup age-recipient rotation preflight (#230)
+
+**Operator-only, offline, read-only prerequisite.** The existing stopped-Compose
+snapshot/upload/read-back/restore pipeline remains authoritative. This command
+does not rotate credentials, modify GCS, install a timer, stop/start services,
+approve a new key, or demonstrate disaster recovery.
+
+Before changing the recipient in a client-approved backup recurrence, obtain an
+**independent inventory** of all GCS backups still covered by retention or legal
+hold, with source bucket/project, object generations, retention dates and
+authorized read identity. Download every retained run through the existing
+`client-backup-readback.py` into a private (0700), operator-owned directory;
+each run directory must contain its complete 0600 manifest and ciphertext.
+Do not use this tool to claim that a local directory represents all cloud data.
+
+On a trusted, isolated operator host, obtain the **old** age identity from
+approved offline custody. Keep it private (0600), owner-owned, and never place
+it in the repo, CI, a command argument, GCS, an issue or a log. Review a distinct
+new **public** age recipient under the client's change approval.
+
+```sh
+python3 scripts/client-backup-key-rotation.py \
+  --compose /trusted/acme-dev/compose.yaml \
+  --project acme-dev \
+  --snapshots /private/acme-dev/retained-readbacks \
+  --old-recipient "$OLD_PUBLIC_AGE_RECIPIENT" \
+  --new-recipient "$NEW_PUBLIC_AGE_RECIPIENT" \
+  --old-identity /private/offline-custody/old-age-identity
+```
+
+The preflight refuses empty, unexpected, linked, foreign-owned, permissive or
+oversized local material, wrong tenant/recipient fingerprints, incomplete
+Compose volume inventories, altered ciphertext, and failed authenticated age
+decryption/TAR safety checks. It reuses `client-volume-restore.py verify` for
+every supplied run, and detects manifest changes during verification. Output
+contains only fingerprints, counts and explicit **non-proof** status; errors
+never echo keys, source paths or customer payloads.
+
+A passing result means **only** that the supplied local old-key snapshots were
+authenticated and could be read by the retained identity. It is not independent
+proof of complete cloud inventory, old-key escrow durability, authorized
+recipient change, new-key decryptability, a replacement-host restore, or
+measured RPO/RTO. Keep the old identity recoverable for the full retention/hold
+period, even after new backups use the new recipient. A recipient change
+requires a fresh, independently signed client approval, a new recurrence and
+per-slot approvals bound to the new recipient fingerprint, a new encrypted
+snapshot, independent cloud read-back, and a replacement-host restore drill
+using the **new** key. Do not silently rewrite historical GCS ciphertext or
+delete/revoke the old identity. Maintain independent restart/deploy exclusion
+and backup/alert monitoring throughout.
+
+Run the credential-free tests with
+`python3 -m unittest tests.test_client_backup_key_rotation -v`.
+Issue #230 remains open until approved live cloud backup/restore, alert delivery,
+key custody and observed RPO/RTO evidence are independently retained.
