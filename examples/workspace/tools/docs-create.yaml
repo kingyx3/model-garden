@@ -1,0 +1,11 @@
+apiVersion: modelgarden.ai/v1
+kind: Tool
+metadata:
+  name: docs.create
+  owner: ai-platform
+  description: Keep an approved finished document for the verified requester in the client's scoped document store.
+spec:
+  type: internal
+  capability: docs
+  risk: write
+  approvalRequired: true
