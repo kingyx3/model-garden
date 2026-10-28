@@ -157,6 +157,14 @@ class ExportIntegrityTests(Case):
         self.assertEqual(pathlib.Path(first["path"]).read_bytes(), original)
         self.assertEqual(len([e for e in self.events if e[0] == "subject-access.exported"]), 1)
 
+    def test_free_text_contact_notes_mask_third_party_identifiers(self):
+        other = self.contacts.create_contact({"name": "Mina", "notes": "Contact her sister at sibling@other.example or +65 9999 8888"})
+        bundle = self.service.export(self.bundles, now=NOW, **PEOPLE, contact_id=other["objectId"])
+        notes = json.loads(pathlib.Path(bundle["path"]).read_text())["subject"]["fields"]["notes"]
+        self.assertNotIn("sibling@other.example", notes)
+        self.assertNotIn("9999", notes)
+        self.assertIn("[email]", notes)
+
     def test_registry_symlink_is_refused_without_overwriting_the_target(self):
         self.service.root.mkdir(mode=0o700, parents=True)
         outside = self.root / "outside.json"
