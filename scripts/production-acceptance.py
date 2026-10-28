@@ -84,10 +84,11 @@ def check(manifest: dict, root: pathlib.Path, *, client: str, environment: str,
             errors.append(prefix + ": unknown or duplicate kind")
             continue
         seen.add(kind)
-        if row.get("artifact") in used_artifacts:
-            errors.append(prefix + ": artifact reused for multiple controls")
-        if isinstance(row.get("artifact"), str):
-            used_artifacts.add(row["artifact"])
+        artifact_name = row.get("artifact")
+        if isinstance(artifact_name, str):
+            if artifact_name in used_artifacts:
+                errors.append(prefix + ": artifact reused for multiple controls")
+            used_artifacts.add(artifact_name)
         if set(row) != {"kind", "observedAt", "artifact", "sha256", "source", "result"}:
             errors.append(prefix + ": unexpected or missing fields")
         if row.get("source") != "live" or row.get("result") != "passed":
