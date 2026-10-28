@@ -189,7 +189,11 @@ class SubjectAccess:
                 current = os.stat(lock_name, dir_fd=directory, follow_symlinks=False)
                 if (current.st_dev, current.st_ino) != (os.fstat(descriptor).st_dev, os.fstat(descriptor).st_ino):
                     raise SubjectAccessError("subject-access lock changed")
-            except OSError as exc:
+            except BaseException as exc:
+                if "descriptor" in locals():
+                    os.close(descriptor)
+                if isinstance(exc, SubjectAccessError):
+                    raise
                 raise SubjectAccessError("subject-access lock is unavailable or untrusted") from exc
             try:
                 fcntl.flock(descriptor, fcntl.LOCK_EX)
@@ -247,7 +251,8 @@ class SubjectAccess:
             "schemaVersion": SCHEMA_VERSION, "kind": "subject-access-export", "tenant": self.tenant, "requestId": request_id,
             "generatedAt": int(now), "expiresAt": int(now) + BUNDLE_DAYS * 86_400, "verifiedBy": verified, "approvedBy": approved,
             "verificationMethod": method,
-            "subject": {"id": subject, "fields": record["fields"], "identityEvidence": record["identityEvidence"], "createdAt": record["createdAt"]},
+            "subject": {"id": subject, "fields": {key: _masked(value) if key == "notes" else value for key, value in record["fields"].items()},
+                        "identityEvidence": record["identityEvidence"], "createdAt": record["createdAt"]},
             "interactions": [{**item, "summary": _masked(item.get("summary"))} for item in record["interactions"]],
             "conversations": [{"conversationId": row["conversationId"], "channel": row["channel"], "at": row.get("at"), "kind": row.get("kind")}
                               for row in linked],
