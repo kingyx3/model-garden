@@ -199,6 +199,12 @@ class ExportIntegrityTests(Case):
             self.service.purge_expired(self.bundles, now=NOW + 8 * 86_400)
         self.assertEqual(outside.read_text(), "do not touch")
 
+    def test_deleting_initialized_registry_never_resets_export_approval_history(self):
+        self.export()
+        self.service.registry.unlink()
+        with self.assertRaises(subject.SubjectAccessError):
+            self.export()
+
     def test_corrupt_registry_fails_closed_instead_of_resetting_approval_history(self):
         self.service.root.mkdir(parents=True, mode=0o700)
         self.service.registry.write_text('{"schemaVersion":1,"exports":[],"corrections":{}}', encoding="utf-8")
