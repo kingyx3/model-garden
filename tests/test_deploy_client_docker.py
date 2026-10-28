@@ -238,7 +238,8 @@ class DeployClientDockerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = pathlib.Path(tmp)
             profile = self._profile(root)
-            base = {"enabled": True, "public_origin": "https://chat.acme.example"}
+            base = {"enabled": True, "public_origin": "https://chat.acme.example",
+                    "mailbox": {"addresses": ["support@acme.example"]}}
             deployer.render_bundle(profile, self._binding(root, {"gateway": base}), root / "private", "acme-dev")
             private = json.loads((root / "private" / "profile" / ".modelgarden" / "gateway.json").read_text())
             self.assertEqual(private["readinessExposure"], "private")
