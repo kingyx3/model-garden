@@ -132,7 +132,7 @@ class ExportTests(Case):
 
     def test_a_store_with_no_conversations_still_exports_the_contact(self):
         bare = subject.SubjectAccess(self.root / "bare", tenant="acme", contacts=self.contacts)
-        self.assertEqual(bare.export(self.bundles, now=NOW, **PEOPLE, contact_id=self.alex)["conversations"], 0)
+        self.assertEqual(bare.export(bare.root / "bundles", now=NOW, **PEOPLE, contact_id=self.alex)["conversations"], 0)
 
 
 
@@ -187,6 +187,17 @@ class ExportIntegrityTests(Case):
         with self.assertRaises(subject.SubjectAccessError):
             self.export()
         self.assertEqual(list(outside.iterdir()), [])
+
+    def test_expiry_purge_rejects_a_forged_registry_path_outside_the_bundle_directory(self):
+        first = self.export()
+        state = json.loads(self.service.registry.read_text())
+        state["exports"][first["requestId"]]["path"] = "../../outside.json"
+        self.service.registry.write_text(json.dumps(state), encoding="utf-8")
+        outside = self.root / "outside.json"
+        outside.write_text("do not touch", encoding="utf-8")
+        with self.assertRaises(subject.SubjectAccessError):
+            self.service.purge_expired(self.bundles, now=NOW + 8 * 86_400)
+        self.assertEqual(outside.read_text(), "do not touch")
 
     def test_corrupt_registry_fails_closed_instead_of_resetting_approval_history(self):
         self.service.root.mkdir(parents=True, mode=0o700)
