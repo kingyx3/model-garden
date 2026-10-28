@@ -73,6 +73,7 @@ def check(manifest: dict, root: pathlib.Path, *, client: str, environment: str,
         records = []
         errors.append("evidence must be an array")
     seen: set[str] = set()
+    used_artifacts: set[str] = set()
     for index, row in enumerate(records):
         prefix = f"evidence[{index}]"
         if not isinstance(row, dict):
@@ -83,6 +84,10 @@ def check(manifest: dict, root: pathlib.Path, *, client: str, environment: str,
             errors.append(prefix + ": unknown or duplicate kind")
             continue
         seen.add(kind)
+        if row.get("artifact") in used_artifacts:
+            errors.append(prefix + ": artifact reused for multiple controls")
+        if isinstance(row.get("artifact"), str):
+            used_artifacts.add(row["artifact"])
         if set(row) != {"kind", "observedAt", "artifact", "sha256", "source", "result"}:
             errors.append(prefix + ": unexpected or missing fields")
         if row.get("source") != "live" or row.get("result") != "passed":
@@ -122,7 +127,9 @@ def main() -> int:
     parser.add_argument("--release", required=True)
     args = parser.parse_args()
     try:
-        if args.manifest.is_symlink() or not args.manifest.is_file() or args.manifest.stat().st_size > MAX_BYTES:
+        if (args.manifest.is_symlink() or args.manifest.parent.is_symlink()
+                or not args.manifest.is_file() or args.manifest.stat().st_size > MAX_BYTES
+                or args.manifest.stat().st_mode & (stat.S_IWGRP | stat.S_IWOTH)):
             raise ValueError("unsafe manifest")
         value = json.loads(args.manifest.read_text(encoding="utf-8"))
         if not isinstance(value, dict):
