@@ -32,6 +32,7 @@ import importlib.util
 import json
 import os
 import pathlib
+import secrets
 import stat
 import sys
 from collections.abc import Callable
@@ -267,8 +268,9 @@ def count_executions_today(
     """Count successful executions in a *verified*, stable ledger snapshot.
 
     A valid-looking JSON edit must not reset a signed policy's daily allowance.
-    This is a host-local tamper-evidence check, not an independent truncation
-    anchor or a cross-process atomic reservation of an execution slot.
+    An unclosed, durably recorded execution start consumes a conservative slot
+    after a worker crash. This is host-local tamper evidence, not independent
+    truncation protection or provider-side exactly-once execution.
     """
     if audit_path is None:
         return None
@@ -296,17 +298,47 @@ def count_executions_today(
                     return None  # swapped path or linked inode
                 _verify_audit_chain_handle(handle)
                 handle.seek(0)
-                for raw in handle:
-                    event = json.loads(raw)
-                    if (
-                        isinstance(event, dict)
-                        and event.get("event") == "execution"
-                        and event.get("outcome") == "succeeded"
-                        and event.get("tool") == tool_name
+                attempts = {}
+                def relevant(event):
+                    return (
+                        event.get("tool") == tool_name
                         and str(event.get("timestamp", "")).startswith(today)
                         and (agent is None or event.get("agent") in (None, agent))
                         and (initiating_user is None or event.get("initiatingUser") == initiating_user)
-                    ):
+                    )
+
+                for raw in handle:
+                    event = json.loads(raw)
+                    if not isinstance(event, dict) or event.get("event") != "execution":
+                        continue
+                    outcome = event.get("outcome")
+                    details = event.get("details")
+                    attempt_id = details.get("attemptId") if isinstance(details, dict) else None
+                    if attempt_id is not None or outcome == "started":
+                        if not (isinstance(attempt_id, str) and len(attempt_id) == 32
+                                and all(char in "0123456789abcdef" for char in attempt_id)):
+                            return None
+                        if outcome == "started":
+                            if attempt_id in attempts:
+                                return None
+                            attempts[attempt_id] = {"start": event, "terminal": None}
+                        elif outcome in ("succeeded", "failed"):
+                            attempt = attempts.get(attempt_id)
+                            if attempt is None or attempt["terminal"] is not None:
+                                return None
+                            start = attempt["start"]
+                            if any(start.get(field) != event.get(field) for field in
+                                   ("requestId", "agent", "tool", "initiatingUser")):
+                                return None
+                            attempt["terminal"] = outcome
+                        else:
+                            return None
+                    if outcome == "succeeded" and relevant(event):
+                        count += 1
+                # A started operation with no terminal receipt may already have
+                # committed externally. Never grant that slot again automatically.
+                for attempt in attempts.values():
+                    if attempt["terminal"] is None and relevant(attempt["start"]):
                         count += 1
                 current = audit_path.lstat()
                 if (opened.st_dev, opened.st_ino) != (current.st_dev, current.st_ino):
@@ -926,17 +958,36 @@ def _execute_action_unlocked(
             raise ValueError("Approved action must record a non-empty approver")
         audit("approval", "approved", {"approver": approver})
 
+    # For a signed daily-limit waiver, durably reserve before any provider call.
+    # The quota lock spans this start and its terminal receipt. If the process
+    # dies after an external write, an unclosed start still consumes the slot.
+    quota_rule = next((rule for rule in POLICY.rules_of(desired_state.get("policies"))
+                       if rule.get("id") == authorization.get("ruleId")
+                       and rule.get("effect") == "allow"
+                       and isinstance(rule.get("conditions"), dict)
+                       and ({"maxPerDay", "maxPerPrincipalPerDay"} & set(rule["conditions"]))), None)
+    attempt_id = secrets.token_hex(16) if (
+        authorization["decision"] == "allow" and quota_rule is not None and audit_path is not None
+    ) else None
+    if attempt_id is not None:
+        audit("execution", "started", {"attemptId": attempt_id})
     try:
         result = executor(arguments)
     except Exception as exc:
-        audit("execution", "failed", {"errorType": type(exc).__name__})
+        details = {"errorType": type(exc).__name__}
+        if attempt_id is not None:
+            details["attemptId"] = attempt_id
+        audit("execution", "failed", details)
         raise
     extra: dict[str, Any] = {}
     if external_object_ref is not None:
         reference = external_object_ref(result)
         if reference:
             extra["externalObjectRef"] = reference
-    audit("execution", "succeeded", _result_receipt(result), extra)
+    details = _result_receipt(result)
+    if attempt_id is not None:
+        details["attemptId"] = attempt_id
+    audit("execution", "succeeded", details, extra)
     if _tool_risk(desired_state, tool_name) == "read":
         sources = read_receipt(result) if read_receipt is not None else [{"sourceId": f"tool:{tool_name}", "content": result}]
         event = make_read_event(request, sources, policy=read_policy, ledger=base_ledger)
