@@ -43,9 +43,9 @@ python3 scripts/production-acceptance.py /private/evidence/manifest.json \
   --client acme --environment prod --gcp-project acme-prod --release 0.8.192
 ```
 
-The tool rejects mismatched identity, missing or duplicate categories, stale
+The tool requires an explicit pinned MAJOR.MINOR.PATCH release and rejects mismatched identity, missing or duplicate categories, stale
 (older than 30 days) or future timestamps, malformed/linked/oversized artifacts,
-unsafe filenames, changed SHA-256 content, mock evidence and failed results.
+unsafe filenames, reused artifacts, changed SHA-256 content, mock evidence and failed results.
 It prints machine-readable JSON without dumping artifact contents.
 
 **Exit codes:** `2` means blocked; `3` means structurally complete but
