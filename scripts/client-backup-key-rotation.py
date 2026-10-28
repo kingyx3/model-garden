@@ -81,7 +81,9 @@ def plan_rotation(*, compose: pathlib.Path, project: str, snapshots: pathlib.Pat
             raise RotationError("snapshot inventory empty or exceeds limit")
         old_fingerprint = hashlib.sha256(old_recipient.encode("ascii")).hexdigest()
         new_fingerprint = hashlib.sha256(new_recipient.encode("ascii")).hexdigest()
-        total_volumes = 0
+        validated: list[tuple[pathlib.Path, bytes, tuple[int, ...]]] = []
+        # Reject a foreign/unsafe run anywhere in the inventory BEFORE trying
+        # to decrypt even the first otherwise-valid snapshot.
         for source in entries:
             # Do not skip incomplete, foreign, linked or unrecognized material.
             if (not RUN_ID.fullmatch(source.name)
@@ -94,6 +96,9 @@ def plan_rotation(*, compose: pathlib.Path, project: str, snapshots: pathlib.Pat
                     or doc.get("clientProject") != project
                     or doc.get("ageRecipientSha256") != old_fingerprint):
                 raise RotationError("snapshot tenant or old-recipient binding mismatch")
+            validated.append((source, original, before_token))
+        total_volumes = 0
+        for source, original, before_token in validated:
             verified = RESTORE.verify(compose, project, source, old_identity)
             if not verified:
                 raise RotationError("snapshot has no verified volumes")
