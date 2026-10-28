@@ -190,6 +190,12 @@ def ledger_transcript_failures(
     A failure the ledger already holds, recognised by a fingerprint of its time, call hash and error type, is not
     recorded again, so the step can run repeatedly over the same worker log.
     """
+    # Never treat a fingerprint from a broken local chain as an authoritative
+    # receipt. In particular, valid JSON with a forged eventHash must not
+    # suppress a failed transcript write or let us append a misleading receipt.
+    # The shared ledger verifier checks every chained event, not just the tail.
+    if audit_path is not None:
+        govern.verify_audit_chain(audit_path)
     known = _known_fingerprints(audit_path)
     totals = {"ledgered": 0, "known": 0}
     for failure in failures:
