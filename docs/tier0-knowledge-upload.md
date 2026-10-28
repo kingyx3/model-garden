@@ -69,3 +69,33 @@ require particular care: confirm whether the original staging receipt exists.
 KnowledgeSources, external copies or immutable ledger export. The operator must
 coordinate their independent retention/erasure procedures. This is credential-free
 implementation evidence, not a live legal-erasure or client-acceptance drill.
+
+## Reviewed staged upload to private draft (v0.8.200)
+
+The opt-in signed owner review is now consumable by a **host-authorized
+operator**, without copying an unverified staged file by hand. The command
+refuses a missing/rejected/interrupted review, wrong owner digest, wrong tenant,
+changed/expired content, linked or exposed files, and a workspace whose final
+directory name is not the exact tenant slug. It reads the staged bytes under
+the existing upload lock and uses the existing Tier 0 importer. The first run
+is review-only and does not edit the workspace:
+
+```sh
+python3 scripts/import-reviewed-knowledge.py /private/workspaces/acme \
+  --data-root /private/data --tenant acme \
+  --upload-id <full-opaque-id> --expected-sha256 <reviewed-digest> \
+  --owner owner@acme.example --actor operator:alice \
+  --name business-rules --agent receptionist --classification internal \
+  --retention-days 30
+```
+
+After independently verifying the client-owner identity, the exact digest,
+client retention setting, workspace, and private Action Ledger, the operator
+may repeat with `--apply --confirm-tenant acme --audit-path /private/data/audit.jsonl`.
+An audit intent is written **before** the workspace import and a completion
+receipt afterward; a failed completion receipt requires operator reconciliation.
+The imported source remains **draft** and cannot ground `kb.search` until
+the client separately approves the protected workspace diff, reruns the
+appropriate evaluations and promotes the exact source through the existing
+reviewed deployment process. The command does not authenticate the operator
+or owner, deliver a notification, prove live SMTP, or authorize production.
