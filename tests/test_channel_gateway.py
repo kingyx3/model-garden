@@ -254,6 +254,35 @@ class SlackTests(GatewayCase):
         self.assertIn("verified person", self.posts()[-1]["text"])
         self.assertEqual(self.coworker.calls, [])
 
+    def test_schedule_commands_in_shared_slack_channel_do_not_disclose_or_mutate_owner_state(self):
+        # A mapped person can mention the bot in an approved shared channel.
+        # Authentication is not consent to publish private schedule goals or change schedules there.
+        self.slack_post("/channels/slack/events", slack_event(
+            "schedule create 0 9 * * 1 | steps=3 | Confidential pipeline",
+            ts="1700000000.001001"))
+        (entry,) = self.gateway._schedule_store().list(owner="alice@acme.example")
+        self.gateway.adapters["slack"]._allowed = {"C0GROUP01"}
+
+        def group(words, stamp):
+            body = json.dumps({"type": "event_callback", "team_id": "T01", "event": {
+                "type": "app_mention", "channel": "C0GROUP01", "user": "U0ALICE01",
+                "text": "<@U0BOT0001> " + words, "ts": stamp,
+            }}).encode()
+            self.assertEqual(self.slack_post("/channels/slack/events", body).status, 200)
+            reply = self.posts()[-1]
+            self.assertEqual(reply["channel"], "C0GROUP01")
+            self.assertIn("direct message", reply["text"].lower())
+            self.assertNotIn("Confidential pipeline", reply["text"])
+            self.assertNotIn(entry["id"], reply["text"])
+
+        group("schedules", "1700000000.001002")
+        group("schedule pause " + entry["id"], "1700000000.001003")
+        group("schedule create 0 10 * * 1 | steps=3 | Secret followup", "1700000000.001004")
+        group("trigger create chat.message | steps=3 | Secret trigger", "1700000000.001005")
+        self.assertEqual(self.gateway._schedule_store().get(entry["id"])["state"], "active")
+        self.assertEqual(len(self.gateway._schedule_store().list(owner="alice@acme.example")), 1)
+        self.assertEqual(self.coworker.calls, [])
+
     def test_handoff_reply_closes_it_under_the_channel_identity(self):
         request = {"requestId": "b" * 64, "tool": "crm.update", "agent": "receptionist", "arguments": {}}
         handoff.create(self.data / "handoffs", request, capability="crm.update", reason="human-only", assignee="alice@acme.example", now=int(time.time()))
