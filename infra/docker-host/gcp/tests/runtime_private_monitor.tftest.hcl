@@ -59,7 +59,8 @@ run "valid_private_runtime_monitors_without_public_ingress" {
       policy.conditions[0].condition_threshold[0].duration == "180s" &&
       strcontains(policy.conditions[0].condition_threshold[0].filter, "custom.googleapis.com/model_garden/${component}_ready") &&
       strcontains(policy.conditions[0].condition_threshold[0].filter, "resource.label.instance_id") &&
-      policy.alert_strategy[0].notification_prompts == ["OPENED"]
+      length(policy.alert_strategy[0].notification_prompts) == 1 &&
+      contains(policy.alert_strategy[0].notification_prompts, "OPENED")
     ])
     error_message = "Private alerts must be tenant-scoped, missing-data-sensitive, and avoid false recovery notices."
   }
