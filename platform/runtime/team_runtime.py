@@ -59,6 +59,7 @@ import os
 import pathlib
 import re
 import secrets
+import stat
 import sys
 import threading
 import time
@@ -102,15 +103,124 @@ def _governed():
     return _load("model_garden_team_runtime_governed_mcp", "platform/runtime/governed_mcp.py")
 
 
+MAX_TEAM_STATE_BYTES = 8 * 1024 * 1024
+
+
+def _trusted_directory(path: pathlib.Path, *, create: bool) -> int:
+    """Pin a private directory and refuse linked ancestors before touching team state."""
+    for ancestor in (path, *path.parents):
+        if ancestor.is_symlink():
+            raise TeamError("team state directory contains a symbolic link")
+    if create:
+        path.mkdir(parents=True, exist_ok=True, mode=0o700)
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+        info = os.fstat(fd)
+        current = path.lstat()
+        if (not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid()
+                or stat.S_IMODE(info.st_mode) & 0o077
+                or (info.st_dev, info.st_ino) != (current.st_dev, current.st_ino)):
+            raise TeamError("team state directory is not private")
+        return fd
+    except (OSError, TeamError) as exc:
+        if "fd" in locals():
+            os.close(fd)
+        raise TeamError("team state directory is not trusted") from exc
+
+
+def _file_identity(info: os.stat_result) -> tuple[int, int, int, int, int]:
+    return info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns
+
+
+def _trusted_file(info: os.stat_result) -> bool:
+    return (stat.S_ISREG(info.st_mode) and info.st_uid == os.getuid()
+            and info.st_nlink == 1 and not stat.S_IMODE(info.st_mode) & 0o077
+            and 0 < info.st_size <= MAX_TEAM_STATE_BYTES)
+
+
+def _read_private(path: pathlib.Path) -> dict[str, Any]:
+    directory = _trusted_directory(path.parent, create=False)
+    try:
+        try:
+            handle = os.open(path.name, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW | os.O_CLOEXEC,
+                             dir_fd=directory)
+        except OSError as exc:
+            raise TeamError("team state file cannot be opened safely") from exc
+        try:
+            before = os.fstat(handle)
+            if not _trusted_file(before):
+                raise TeamError("team state file is not private and regular")
+            raw = os.read(handle, MAX_TEAM_STATE_BYTES + 1)
+            after = os.fstat(handle)
+            current = os.stat(path.name, dir_fd=directory, follow_symlinks=False)
+            if (len(raw) != before.st_size or _file_identity(before) != _file_identity(after)
+                    or (after.st_dev, after.st_ino) != (current.st_dev, current.st_ino)):
+                raise TeamError("team state changed during read")
+            try:
+                result = json.loads(raw.decode("utf-8"))
+            except (UnicodeError, ValueError) as exc:
+                raise TeamError("team state is not valid JSON") from exc
+            if not isinstance(result, dict):
+                raise TeamError("team state must be an object")
+            return result
+        finally:
+            os.close(handle)
+    finally:
+        os.close(directory)
+
+
 def _write_private(path: pathlib.Path, payload: Mapping[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    temporary = path.with_suffix(path.suffix + ".tmp")
-    handle = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(handle, "w", encoding="utf-8") as stream:
-        stream.write(json.dumps(payload, indent=2, sort_keys=True) + "\n")
-        stream.flush()
-        os.fsync(stream.fileno())
-    os.replace(temporary, path)
+    """Atomically replace only a pinned private regular inode; never truncate a known tmp path."""
+    raw = (json.dumps(payload, indent=2, sort_keys=True) + "\n").encode("utf-8")
+    if not 0 < len(raw) <= MAX_TEAM_STATE_BYTES:
+        raise TeamError("team state exceeds its size limit")
+    directory = _trusted_directory(path.parent, create=True)
+    temporary = None
+    try:
+        try:
+            prior = os.stat(path.name, dir_fd=directory, follow_symlinks=False)
+        except FileNotFoundError:
+            prior = None
+        if prior is not None and not _trusted_file(prior):
+            raise TeamError("existing team state is not private and regular")
+        for _ in range(5):
+            candidate = ".team-" + secrets.token_hex(12) + ".tmp"
+            try:
+                handle = os.open(candidate, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,
+                                 0o600, dir_fd=directory)
+                temporary = candidate
+                break
+            except FileExistsError:
+                continue
+        else:
+            raise TeamError("unable to allocate a private team state temporary file")
+        with os.fdopen(handle, "wb") as stream:
+            os.fchmod(stream.fileno(), 0o600)
+            stream.write(raw)
+            stream.flush()
+            os.fsync(stream.fileno())
+        current_dir = path.parent.lstat()
+        pinned = os.fstat(directory)
+        if (current_dir.st_dev, current_dir.st_ino) != (pinned.st_dev, pinned.st_ino):
+            raise TeamError("team state directory changed during write")
+        try:
+            current = os.stat(path.name, dir_fd=directory, follow_symlinks=False)
+        except FileNotFoundError:
+            current = None
+        if (prior is None) != (current is None) or (
+                prior is not None and current is not None
+                and _file_identity(prior) != _file_identity(current)):
+            raise TeamError("team state changed during write")
+        os.replace(temporary, path.name, src_dir_fd=directory, dst_dir_fd=directory)
+        temporary = None
+        os.fsync(directory)
+    finally:
+        if temporary is not None:
+            try:
+                os.unlink(temporary, dir_fd=directory)
+            except FileNotFoundError:
+                pass
+        os.close(directory)
 
 
 class TeamRuntime:
@@ -273,15 +383,31 @@ class TeamRuntime:
         picks it up. A tree already held here is never replaced, so one process's unsaved spending is not overwritten by a stale file.
         """
         directory = self._tasks_dir()
-        if not directory.is_dir():
+        if not directory.exists() and not directory.is_symlink():
             return
+        pinned = _trusted_directory(directory, create=False)
+        os.close(pinned)
         for path in sorted(directory.glob("*.json")):
             root = path.stem
             if root in self._trees:
                 continue
-            tree = TASK_BUDGET.TaskBudgetTree.restore(json.loads(path.read_text(encoding="utf-8")), audit=self._ledger_action, notify=self._notify)
+            snapshot = _read_private(path)
+            nodes = snapshot.get("nodes")
+            if (not isinstance(nodes, dict) or root not in nodes
+                    or not isinstance(nodes[root], dict)
+                    or not isinstance(nodes[root].get("envelope"), dict)
+                    or nodes[root]["envelope"].get("taskId") != root
+                    or nodes[root]["envelope"].get("parentTaskId") is not None):
+                raise TeamError("task snapshot root does not match its file")
+            try:
+                tree = TASK_BUDGET.TaskBudgetTree.restore(snapshot, audit=self._ledger_action, notify=self._notify)
+                rows = tree.timeline()
+            except (KeyError, TypeError, ValueError) as exc:
+                raise TeamError("invalid task snapshot") from exc
+            if any(row["taskId"] in self._root_of for row in rows):
+                raise TeamError("duplicate task id across team snapshots")
             self._trees[root] = tree
-            for row in tree.timeline():
+            for row in rows:
                 self._root_of[row["taskId"]] = root
 
     def _persist(self, root_id: str) -> None:
