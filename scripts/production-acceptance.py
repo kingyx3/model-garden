@@ -17,6 +17,7 @@ import sys
 
 ID = re.compile(r"^[a-z][a-z0-9-]{1,62}$")
 SHA = re.compile(r"^[0-9a-f]{64}$")
+RELEASE = re.compile(r"^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$")
 REQUIRED = (
     "keyless-redeploy", "credential-revocation", "rollback", "model-turn",
     "governed-business-action", "calendar-transaction", "inbound-voice",
@@ -59,8 +60,10 @@ def check(manifest: dict, root: pathlib.Path, *, client: str, environment: str,
     """Check only verifiable local structure; do not promote submitted claims to truth."""
     errors: list[str] = []
     now = now or dt.datetime.now(dt.timezone.utc)
-    if not all(ID.fullmatch(v) for v in (client, environment, project)):
+    if not all(isinstance(v, str) and ID.fullmatch(v) for v in (client, environment, project)):
         return {"status": "blocked", "errors": ["invalid expected identity"]}
+    if not isinstance(release, str) or not RELEASE.fullmatch(release):
+        return {"status": "blocked", "errors": ["release must be a pinned MAJOR.MINOR.PATCH"]}
     expected = {"schemaVersion": 1, "client": client, "environment": environment,
                 "gcpProject": project, "release": release}
     for key, value in expected.items():
