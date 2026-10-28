@@ -81,3 +81,7 @@ Local credential-free tests cover tenant/project isolation, explicit confirmatio
 ## Remaining safety gates
 
 The host-local cooperative lock does **not** prevent out-of-band Docker commands, container restart policies, other hosts or watchdogs. An independently enforced quiescence/freeze is mandatory. This dispatcher does not establish key rotation, live cloud recovery evidence, RPO/RTO, or automatic retries. Issue #230 stays open until those gates are completed and a client-authorized real restore drill is recorded.
+
+## Key rotation readiness
+
+Before changing the scheduled public age recipient, follow [the operator-only retained-snapshot rotation preflight](client-backup-key-rotation.md). It authenticates the **provided** private read-backs under the old identity and refuses missing or cross-tenant material; it does not enumerate GCS or authorize retiring the old identity. Fresh client approvals, a new-key backup/read-back/restore drill, and old-key retention remain mandatory.
