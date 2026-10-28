@@ -148,5 +148,53 @@ class ReferenceProofTests(unittest.TestCase):
 
 
 
+
+    def test_collector_refuses_failed_or_malformed_evidence_reads(self):
+        import subprocess
+        from unittest import mock
+        # Never treat an inaccessible audit log as an empty, successful read.
+        with mock.patch.object(proof, "_run", return_value=subprocess.CompletedProcess([], 1, "", "sensitive error")):
+            with self.assertRaisesRegex(ValueError, "evidence"):
+                proof._jsonl("a" * 12, "/opt/data/.modelgarden/audit.jsonl")
+        for raw in ('{"event":"authorization"}\nnot-json\n',
+                    '{"event":"authorization"}\n[]\n',
+                    '{"event":"authorization"}\n{"event":'):
+            with self.subTest(raw=raw):
+                with mock.patch.object(proof, "_run", return_value=subprocess.CompletedProcess([], 0, raw, "")):
+                    with self.assertRaisesRegex(ValueError, "evidence") as caught:
+                        proof._jsonl("a" * 12, "/opt/data/.modelgarden/audit.jsonl")
+                    self.assertNotIn("authorization", str(caught.exception))
+                    self.assertNotIn("not-json", str(caught.exception))
+
+    def test_duplicate_docker_service_cannot_hide_ambiguous_runtime(self):
+        import subprocess
+        from unittest import mock
+        rows = "hermes|Up 1 minute|" + "a" * 12 + "\nhermes|Up 2 minutes|" + "b" * 12 + "\n"
+        with mock.patch.object(proof, "_run", return_value=subprocess.CompletedProcess([], 0, rows, "")):
+            with self.assertRaisesRegex(ValueError, "duplicate"):
+                proof._containers("acme-dev")
+
+    def test_conflicting_approval_or_execution_cannot_prove_a_call_action(self):
+        rid = "f" * 64
+        base = {"requestId": rid, "agent": "receptionist", "initiatingUser": "runtime:hermes",
+                "governance": {"correlationId": "call:" + ROOM}, "tool": "calendar.book"}
+        authorized = {**base, "event": "authorization", "outcome": "require-approval"}
+        approved = {**base, "event": "approval", "outcome": "approved"}
+        rejected = {**base, "event": "approval", "outcome": "rejected"}
+        success = {**base, "event": "execution", "outcome": "succeeded"}
+        failure = {**base, "event": "execution", "outcome": "failed"}
+        call = [voice("CallStarted"), voice("CallEnded", timestamp=110)]
+        self.assertEqual(evidence(call, [authorized, approved, success])["governance"]["completedCallActions"], 1)
+        self.assertEqual(evidence(call, [authorized, approved, rejected, success])["governance"]["completedCallActions"], 0)
+        self.assertEqual(evidence(call, [authorized, approved, failure, success])["governance"]["completedCallActions"], 0)
+
+    def test_required_service_must_be_observed_not_only_claimed_by_counts(self):
+        data = evidence([voice("CallStarted"), voice("CallEnded", timestamp=110)])
+        data["services"].pop("voice")
+        self.assertFalse(check(data)["passed"])
+        data = evidence(audit_rows=[{"event": "execution", "outcome": "succeeded"}])
+        data["services"].pop("governed-tools")
+        self.assertFalse(check(data, call=False, action=True)["passed"])
+
 if __name__ == "__main__":
     unittest.main()
