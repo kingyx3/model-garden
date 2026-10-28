@@ -1,0 +1,19 @@
+apiVersion: modelgarden.ai/v1
+kind: Skill
+metadata:
+  name: create-deliverable
+  owner: sales-operations
+  version: 1.0.0
+  description: Produce an approved report, spreadsheet, slide deck or PDF as a real governed file.
+spec:
+  instructions:
+    file: instructions.md
+  allowedTools:
+    - docs.create
+  requiredCapabilities:
+    - docs
+  inputs:
+    - requested-format
+    - approved-source-references
+    - requested-content
+  evaluationSuite: evals/deliverables/
