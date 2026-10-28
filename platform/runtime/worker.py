@@ -59,7 +59,9 @@ import math
 import os
 import pathlib
 import re
+import secrets
 import signal
+import stat
 import sys
 import tempfile
 import threading
@@ -230,21 +232,109 @@ class NoticeQueue:
         self.root = pathlib.Path(root)
         self.path = self.root / "worker-notices.json"
 
+    MAX_BYTES = 2_000_000
+
+    @staticmethod
+    def _private_file(info: os.stat_result) -> None:
+        if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1
+                or info.st_uid != os.geteuid() or info.st_mode & 0o077):
+            raise ValueError("unsafe worker notice state; operator repair required")
+
+    def _private_root(self) -> os.stat_result:
+        self.root.mkdir(parents=True, exist_ok=True, mode=0o700)
+        info = self.root.lstat()
+        if (not stat.S_ISDIR(info.st_mode) or info.st_uid != os.geteuid()
+                or info.st_mode & 0o077):
+            raise ValueError("unsafe worker notice directory; operator repair required")
+        return info
+
+    def _read_state(self) -> dict[str, Any]:
+        try:
+            descriptor = os.open(self.path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        except FileNotFoundError:
+            return {"pending": {}}
+        with os.fdopen(descriptor, "rb") as stream:
+            self._private_file(os.fstat(stream.fileno()))
+            raw = stream.read(self.MAX_BYTES + 1)
+        if len(raw) > self.MAX_BYTES:
+            raise ValueError("worker notice state exceeds its size limit")
+        try:
+            state = json.loads(raw.decode("utf-8"))
+        except (UnicodeError, ValueError):
+            raise ValueError("invalid worker notice state; operator repair required") from None
+        if (not isinstance(state, dict) or set(state) != {"pending"}
+                or not isinstance(state["pending"], dict)
+                or len(state["pending"]) > MAX_QUEUE):
+            raise ValueError("invalid worker notice state; operator repair required")
+        for key, notice in state["pending"].items():
+            if (not isinstance(key, str) or re.fullmatch(r"[0-9a-f]{24}", key) is None
+                    or not isinstance(notice, dict)
+                    or not {"key", "kind", "to", "text", "reference"} <= set(notice)
+                    or set(notice) - {"key", "kind", "to", "text", "reference", "inboxPosted"}
+                    or notice["key"] != key
+                    or not isinstance(notice["kind"], str) or len(notice["kind"]) > 128
+                    or not isinstance(notice["text"], str) or len(notice["text"]) > 600
+                    or not isinstance(notice["reference"], str) or len(notice["reference"]) > 40
+                    or (notice["to"] is not None and
+                        (not isinstance(notice["to"], str) or len(notice["to"]) > 256))
+                    or ("inboxPosted" in notice and type(notice["inboxPosted"]) is not bool)):
+                raise ValueError("invalid worker notice entries; operator repair required")
+        return state
+
     @contextlib.contextmanager
     def _locked(self):
-        self.root.mkdir(parents=True, exist_ok=True, mode=0o700)
-        descriptor = os.open(self.root / ".worker-notices.lock", os.O_RDWR | os.O_CREAT, 0o600)
+        directory = self._private_root()
+        lock = self.root / ".worker-notices.lock"
+        descriptor = os.open(
+            lock, os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0), 0o600
+        )
         try:
+            self._private_file(os.fstat(descriptor))
             fcntl.flock(descriptor, fcntl.LOCK_EX)
-            state = json.loads(self.path.read_text(encoding="utf-8")) if self.path.is_file() else {"pending": {}}
+            state = self._read_state()
             before = json.dumps(state, sort_keys=True)
             yield state
             if json.dumps(state, sort_keys=True) != before:
-                temporary = self.path.with_suffix(".tmp")
-                handle = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-                with os.fdopen(handle, "w", encoding="utf-8") as stream:
-                    stream.write(json.dumps(state, sort_keys=True) + "\n")
-                os.replace(temporary, self.path)
+                # The worker must never publish an alert to a replaced directory.
+                current = self.root.lstat()
+                if (current.st_dev, current.st_ino) != (directory.st_dev, directory.st_ino):
+                    raise ValueError("worker notice directory changed during update")
+                self._private_root()
+                temporary = self.root / f".worker-notices-{secrets.token_hex(16)}.tmp"
+                created = False
+                try:
+                    handle = os.open(
+                        temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL
+                        | getattr(os, "O_NOFOLLOW", 0), 0o600
+                    )
+                    created = True
+                    with os.fdopen(handle, "w", encoding="utf-8") as stream:
+                        stream.write(json.dumps(state, sort_keys=True) + "\n")
+                        stream.flush()
+                        os.fsync(stream.fileno())
+                    # Refuse a replaced or newly linked state path, not just a
+                    # malicious path that was present at initial read time.
+                    try:
+                        old = self.path.lstat()
+                    except FileNotFoundError:
+                        old = None
+                    if old is not None:
+                        self._private_file(old)
+                    os.replace(temporary, self.path)
+                    directory_fd = os.open(
+                        self.root, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+                        | getattr(os, "O_NOFOLLOW", 0)
+                    )
+                    try:
+                        opened = os.fstat(directory_fd)
+                        if (opened.st_dev, opened.st_ino) != (directory.st_dev, directory.st_ino):
+                            raise ValueError("worker notice directory changed during update")
+                        os.fsync(directory_fd)
+                    finally:
+                        os.close(directory_fd)
+                finally:
+                    if created:
+                        temporary.unlink(missing_ok=True)
         finally:
             fcntl.flock(descriptor, fcntl.LOCK_UN)
             os.close(descriptor)
