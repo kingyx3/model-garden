@@ -110,6 +110,7 @@ class ChannelIngress:
         assign: Callable[[str, str, str], str] | None = None,
         observed: Callable[[Any], None] | None = None,
         pause: Callable[[str, str, str], str] | None = None,
+        autonomous_send: Callable[[Any, Any, Any, str | None], str] | None = None,
     ) -> None:
         self._adapters = dict(adapters)
         self._inbox = inbox
@@ -120,6 +121,9 @@ class ChannelIngress:
         self._deliverables = deliverables
         self._directory = directory
         self._respond = respond
+        # Optional gateway-owned pause fence: protects the actual outbound
+        # transport after model generation, without locking owner commands.
+        self._autonomous_send = autonomous_send
         self._decide = decide
         self._replies = handoff_replies
         self._schedules = schedules
@@ -301,6 +305,8 @@ class ChannelIngress:
                 except Exception as exc:  # noqa: BLE001 - announcing the message must never stop it being answered
                     self._note("channel.event-failed", "runtime:gateway", {"channel": inbound.channel, "error": type(exc).__name__})
             answer = self._respond(inbound, principal)
+            if self._autonomous_send is not None:
+                return self._autonomous_send(adapter, inbound, principal, answer)
             if answer:
                 self._send(adapter, inbound, answer, self._attachments(inbound, principal, answer))
                 return "answered"
