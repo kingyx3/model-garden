@@ -21,8 +21,9 @@ run "disabled_by_default" {
 run "rejects_alert_without_ingress" {
   command = plan
   variables {
-    gateway_uptime_alert_enabled         = true
-    gateway_uptime_notification_channels = ["projects/sample-project-123/notificationChannels/123"]
+    gateway_uptime_alert_enabled                 = true
+    gateway_legacy_public_readiness_acknowledged = true
+    gateway_uptime_notification_channels         = ["projects/sample-project-123/notificationChannels/123"]
   }
   expect_failures = [var.gateway_uptime_alert_enabled]
 }
@@ -30,9 +31,10 @@ run "rejects_alert_without_ingress" {
 run "rejects_missing_authorized_channel" {
   command = plan
   variables {
-    gateway_ingress_enabled      = true
-    gateway_domain               = "gateway.example.com"
-    gateway_uptime_alert_enabled = true
+    gateway_ingress_enabled                      = true
+    gateway_domain                               = "gateway.example.com"
+    gateway_uptime_alert_enabled                 = true
+    gateway_legacy_public_readiness_acknowledged = true
   }
   expect_failures = [var.gateway_uptime_alert_enabled]
 }
@@ -40,10 +42,11 @@ run "rejects_missing_authorized_channel" {
 run "rejects_cross_project_channel" {
   command = plan
   variables {
-    gateway_ingress_enabled              = true
-    gateway_domain                       = "gateway.example.com"
-    gateway_uptime_alert_enabled         = true
-    gateway_uptime_notification_channels = ["projects/other-project-123/notificationChannels/123"]
+    gateway_ingress_enabled                      = true
+    gateway_domain                               = "gateway.example.com"
+    gateway_uptime_alert_enabled                 = true
+    gateway_legacy_public_readiness_acknowledged = true
+    gateway_uptime_notification_channels         = ["projects/other-project-123/notificationChannels/123"]
   }
   expect_failures = [var.gateway_uptime_notification_channels]
 }
@@ -51,10 +54,11 @@ run "rejects_cross_project_channel" {
 run "rejects_malformed_channel" {
   command = plan
   variables {
-    gateway_ingress_enabled              = true
-    gateway_domain                       = "gateway.example.com"
-    gateway_uptime_alert_enabled         = true
-    gateway_uptime_notification_channels = ["projects/sample-project-123/notificationChannels/not-numeric"]
+    gateway_ingress_enabled                      = true
+    gateway_domain                               = "gateway.example.com"
+    gateway_uptime_alert_enabled                 = true
+    gateway_legacy_public_readiness_acknowledged = true
+    gateway_uptime_notification_channels         = ["projects/sample-project-123/notificationChannels/not-numeric"]
   }
   expect_failures = [var.gateway_uptime_notification_channels]
 }
@@ -62,21 +66,34 @@ run "rejects_malformed_channel" {
 run "rejects_mixed_project_channels" {
   command = plan
   variables {
-    gateway_ingress_enabled              = true
-    gateway_domain                       = "gateway.example.com"
-    gateway_uptime_alert_enabled         = true
-    gateway_uptime_notification_channels = ["projects/sample-project-123/notificationChannels/123", "projects/foreign-project-123/notificationChannels/999"]
+    gateway_ingress_enabled                      = true
+    gateway_domain                               = "gateway.example.com"
+    gateway_uptime_alert_enabled                 = true
+    gateway_legacy_public_readiness_acknowledged = true
+    gateway_uptime_notification_channels         = ["projects/sample-project-123/notificationChannels/123", "projects/foreign-project-123/notificationChannels/999"]
   }
   expect_failures = [var.gateway_uptime_notification_channels]
 }
 
-run "valid_gateway_uptime_alert" {
+run "rejects_unacknowledged_legacy_public_readiness" {
   command = plan
   variables {
     gateway_ingress_enabled              = true
     gateway_domain                       = "gateway.example.com"
     gateway_uptime_alert_enabled         = true
     gateway_uptime_notification_channels = ["projects/sample-project-123/notificationChannels/123"]
+  }
+  expect_failures = [var.gateway_uptime_alert_enabled]
+}
+
+run "valid_gateway_uptime_alert" {
+  command = plan
+  variables {
+    gateway_ingress_enabled                      = true
+    gateway_domain                               = "gateway.example.com"
+    gateway_uptime_alert_enabled                 = true
+    gateway_legacy_public_readiness_acknowledged = true
+    gateway_uptime_notification_channels         = ["projects/sample-project-123/notificationChannels/123"]
   }
   assert {
     condition     = length(google_monitoring_uptime_check_config.gateway) == 1 && length(google_monitoring_alert_policy.gateway_uptime) == 1
