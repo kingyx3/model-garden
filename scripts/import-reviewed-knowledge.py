@@ -25,7 +25,7 @@ HEX32 = re.compile(r"^[0-9a-f]{32}$")
 HEX64 = re.compile(r"^[0-9a-f]{64}$")
 TENANT = re.compile(r"^[a-z0-9][a-z0-9-]{0,62}$")
 ACTOR = re.compile(r"^operator:[A-Za-z0-9._@-]{1,100}$")
-FILENAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,79}\\.(?:md|txt)$", re.I)
+FILENAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,79}\.(?:md|txt)$", re.I)
 
 
 def _load(name: str, path: pathlib.Path):
