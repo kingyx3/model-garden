@@ -234,6 +234,22 @@ class DeployClientDockerTests(unittest.TestCase):
                 binding = self._binding(root, {"gateway": {**base, "approvals": {"receipts": "yes"}}})
                 deployer.render_bundle(profile, binding, root / "c", "acme-dev")
 
+    def test_gateway_readiness_is_private_by_default_and_legacy_requires_explicit_binding(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            profile = self._profile(root)
+            base = {"enabled": True, "public_origin": "https://chat.acme.example"}
+            deployer.render_bundle(profile, self._binding(root, {"gateway": base}), root / "private", "acme-dev")
+            private = json.loads((root / "private" / "profile" / ".modelgarden" / "gateway.json").read_text())
+            self.assertEqual(private["readinessExposure"], "private")
+            deployer.render_bundle(profile, self._binding(root, {"gateway": {**base, "readiness_exposure": "legacy-public"}}), root / "legacy", "acme-dev")
+            legacy = json.loads((root / "legacy" / "profile" / ".modelgarden" / "gateway.json").read_text())
+            self.assertEqual(legacy["readinessExposure"], "legacy-public")
+            for invalid in (True, "public", "", None):
+                with self.subTest(invalid=invalid):
+                    with self.assertRaisesRegex(ValueError, "readiness_exposure"):
+                        deployer.render_bundle(profile, self._binding(root, {"gateway": {**base, "readiness_exposure": invalid}}), root / "bad", "acme-dev")
+
     def test_gateway_rejects_missing_secrets_unknown_settings_and_public_binds_that_are_not_addresses(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = pathlib.Path(tmp)
