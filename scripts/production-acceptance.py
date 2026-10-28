@@ -17,7 +17,7 @@ import sys
 
 ID = re.compile(r"^[a-z][a-z0-9-]{1,62}$")
 SHA = re.compile(r"^[0-9a-f]{64}$")
-RELEASE = re.compile(r"^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$")
+RELEASE = re.compile(r"^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$")
 REQUIRED = (
     "keyless-redeploy", "credential-revocation", "rollback", "model-turn",
     "governed-business-action", "calendar-transaction", "inbound-voice",
