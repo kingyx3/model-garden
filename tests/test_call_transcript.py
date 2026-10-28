@@ -277,13 +277,42 @@ class StorageTests(unittest.TestCase):
             T.finalize(transcript)
             self.assertFalse(config(tmp).path.exists())
 
+    def test_corrupt_existing_voice_record_is_not_silently_deleted(self):
+        # Both transcripts and fallback messages share this retention writer.
+        # A damaged historical row must not disappear when the next call ends.
+        for invalid in ("not json", "[]", '{"timestamp":"invalid"}', '{"timestamp":null}'):
+            with self.subTest(invalid=invalid), tempfile.TemporaryDirectory() as tmp:
+                cfg = config(tmp)
+                cfg.path.parent.mkdir(parents=True)
+                prior = {"type": "CallTranscript", "timestamp": 1_700_000_000, "callHash": "previous"}
+                original = json.dumps(prior) + "\n" + invalid + "\n"
+                cfg.path.write_text(original, encoding="utf-8")
+                next_record = {"type": "CallTranscript", "timestamp": 1_700_000_010, "callHash": "next"}
+                with self.assertRaisesRegex(ValueError, "invalid existing voice record"):
+                    T.store_record(cfg, next_record, now=1_700_000_010)
+                self.assertEqual(cfg.path.read_text(encoding="utf-8"), original)
+
+    def test_corrupt_retention_state_reports_failure_without_interrupting_call(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            transcript, _ = call(tmp)
+            transcript.add_turn("caller", "please help")
+            transcript.mark_disclosure_played()
+            path = config(tmp).path
+            path.parent.mkdir(parents=True)
+            path.write_text('{"timestamp":false}\n', encoding="utf-8")
+            failures = []
+            with self.assertLogs("model-garden.call-transcript", level="ERROR"):
+                self.assertIsNone(T.finalize(transcript, on_failure=failures.append))
+            self.assertEqual(failures, ["ValueError"])
+            self.assertEqual(path.read_text(encoding="utf-8"), '{"timestamp":false}\n')
+
     def test_expired_rows_are_dropped_on_write(self):
         with tempfile.TemporaryDirectory() as tmp:
             cfg = config(tmp, retention_seconds=3600)
             cfg.path.parent.mkdir(parents=True)
             old = {"type": "CallTranscript", "timestamp": 1_000, "callHash": "old"}
             fresh = {"type": "CallTranscript", "timestamp": 1_700_000_000 - 10, "callHash": "fresh"}
-            cfg.path.write_text("\n".join(json.dumps(item) for item in (old, fresh)) + "\nnot json\n", encoding="utf-8")
+            cfg.path.write_text("\n".join(json.dumps(item) for item in (old, fresh)) + "\n", encoding="utf-8")
             record = {"type": "CallTranscript", "timestamp": 1_700_000_000, "callHash": "new"}
             self.assertTrue(T.store_record(cfg, record, now=1_700_000_000))
             hashes = [json.loads(line)["callHash"] for line in cfg.path.read_text(encoding="utf-8").splitlines()]
