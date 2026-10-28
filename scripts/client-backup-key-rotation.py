@@ -96,16 +96,16 @@ def plan_rotation(*, compose: pathlib.Path, project: str, snapshots: pathlib.Pat
                     or doc.get("clientProject") != project
                     or doc.get("ageRecipientSha256") != old_fingerprint):
                 raise RotationError("snapshot tenant or old-recipient binding mismatch")
-            validated.append((source, original, before_token))
+            validated.append((source, hashlib.sha256(original).digest(), before_token))
         total_volumes = 0
-        for source, original, before_token in validated:
+        for source, original_digest, before_token in validated:
             verified = RESTORE.verify(compose, project, source, old_identity)
             if not verified:
                 raise RotationError("snapshot has no verified volumes")
             # An operator swapping a manifest during decryption cannot cause a
             # successful rotation review for a different retained archive.
             _, after, after_token = _private_manifest(source / "manifest.json")
-            if after != original or after_token != before_token:
+            if hashlib.sha256(after).digest() != original_digest or after_token != before_token:
                 raise RotationError("snapshot manifest changed during verification")
             total_volumes += len(verified)
         return {
