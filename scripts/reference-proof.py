@@ -1,6 +1,11 @@
 #!/usr/bin/env python3
 """Collect redacted, machine-readable evidence from a running reference deployment.
 
+With --require-two-way-transcript, read the private default voice transcript
+file and require a structurally complete disclosed caller/agent exchange
+matched to a completed call. This does not prove audible SIP delivery, and a
+custom transcript path requires independent operator review.
+
 The collector never copies prompts, Tool arguments, caller numbers, message text, or
 credentials into the evidence pack. It records service health and the existence/types
 of governance and voice lifecycle records. Run it after deployment and again after the
@@ -302,8 +307,13 @@ def collect(project: str, *, read_transcripts: bool = False) -> dict[str, Any]:
     voice_rows: list[dict[str, Any]] = []
     if "voice" in services:
         voice_rows = _jsonl(services["voice"]["container"], "/opt/data/messages.jsonl")
+    transcript_rows: list[dict[str, Any]] = []
+    if read_transcripts and "voice" in services:
+        # The fixed private default path is never supplied by a model or caller.
+        transcript_rows = _jsonl(services["voice"]["container"], "/opt/data/transcripts.jsonl")
     return {
         "schemaVersion": 1,
+        "transcripts": _transcript_summary(voice_rows, transcript_rows),
         "generatedAt": dt.datetime.now(dt.timezone.utc).isoformat(),
         "project": project,
         "services": service_summary,
@@ -313,7 +323,7 @@ def collect(project: str, *, read_transcripts: bool = False) -> dict[str, Any]:
     }
 
 
-def evaluate(evidence: dict[str, Any], *, require_voice_call: bool, require_fallback: bool, require_governed_action: bool) -> dict[str, Any]:
+def evaluate(evidence: dict[str, Any], *, require_voice_call: bool, require_fallback: bool, require_governed_action: bool, require_two_way_transcript: bool = False) -> dict[str, Any]:
     failures: list[str] = []
     services = evidence["services"]
     if not services.get("hermes", {}).get("running"):
@@ -326,10 +336,14 @@ def evaluate(evidence: dict[str, Any], *, require_voice_call: bool, require_fall
         failures.append("required voice runtime is absent or stopped")
     if require_governed_action and not services.get("governed-tools", {}).get("running"):
         failures.append("required governed Tool runtime is absent or stopped")
-    if require_voice_call and evidence["voice"].get("completedCalls", 0) < 1:
+    if (require_voice_call or require_two_way_transcript) and evidence["voice"].get("completedCalls", 0) < 1:
         failures.append("no completed voice call lifecycle pair exists")
-    if require_voice_call and evidence["voice"].get("transcriptWriteFailures", 0):
+    if (require_voice_call or require_two_way_transcript) and evidence["voice"].get("transcriptWriteFailures", 0):
         failures.append("voice transcript write failures require investigation")
+    if require_two_way_transcript and not services.get("voice", {}).get("running"):
+        failures.append("required voice runtime for two-way transcript is absent or stopped")
+    if require_two_way_transcript and evidence.get("transcripts", {}).get("completeTwoWayCalls", 0) < 1:
+        failures.append("no complete disclosed two-way transcript is paired to a completed call")
     if require_fallback and evidence["voice"].get("completedCallFallbackEvidence", 0) < 1:
         failures.append("no human-transfer or message fallback correlated to a completed call")
     if require_governed_action and evidence["governance"].get("successfulActions", 0) < 1:
@@ -365,6 +379,8 @@ def _markdown(evidence: dict[str, Any], result: dict[str, Any]) -> str:
         f"- Completed call lifecycle pairs: {evidence['voice']['completedCalls']}",
         f"- Completed calls with correlated fallback: {evidence['voice']['completedCallFallbackEvidence']}",
         f"- Transcript write failures: {evidence['voice']['transcriptWriteFailures']}",
+        f"- Private transcript records inspected: {evidence.get('transcripts', {}).get('records', 0)}",
+        f"- Complete disclosed two-way transcripts paired to a call: {evidence.get('transcripts', {}).get('completeTwoWayCalls', 0)}",
         f"- Human transfer evidence: {evidence['voice']['humanTransferEvidence']}",
         f"- Message fallback evidence: {evidence['voice']['messageFallbackEvidence']}",
     ])
@@ -379,16 +395,19 @@ def main() -> int:
     parser.add_argument("--project-name", required=True)
     parser.add_argument("--output-dir", type=pathlib.Path, default=pathlib.Path(".model-garden-live-proof"))
     parser.add_argument("--require-voice-call", action="store_true")
+    parser.add_argument("--require-two-way-transcript", action="store_true",
+                        help="read the voice worker's private default transcript file and require a disclosed two-sided call")
     parser.add_argument("--require-fallback", action="store_true")
     parser.add_argument("--require-governed-action", action="store_true")
     args = parser.parse_args()
     try:
-        evidence = collect(args.project_name)
+        evidence = collect(args.project_name, read_transcripts=args.require_two_way_transcript)
         result = evaluate(
             evidence,
             require_voice_call=args.require_voice_call,
             require_fallback=args.require_fallback,
             require_governed_action=args.require_governed_action,
+            require_two_way_transcript=args.require_two_way_transcript,
         )
         args.output_dir.mkdir(parents=True, exist_ok=True)
         payload = {**evidence, "acceptance": result}
