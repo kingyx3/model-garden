@@ -88,11 +88,24 @@ class LedgerTests(unittest.TestCase):
         for private in ("alex", "Alex", "6123 4567", "61234567", "secret"):
             self.assertNotIn(private, text)
 
-    def test_a_corrupt_ledger_line_does_not_stop_deduplication_of_the_rest(self):
+    def test_corrupt_audit_line_blocks_deduplication_and_new_receipts(self):
         filing.ledger_transcript_failures(govern, self.audit, [failure(10)])
         with self.audit.open("a", encoding="utf-8") as handle:
             handle.write("garbage\n")
-        self.assertEqual(filing.ledger_transcript_failures(govern, self.audit, [failure(10)])["known"], 1)
+        original = self.audit.read_bytes()
+        with self.assertRaisesRegex(ValueError, "Audit chain invalid"):
+            filing.ledger_transcript_failures(govern, self.audit, [failure(10), failure(11)])
+        self.assertEqual(self.audit.read_bytes(), original)
+
+    def test_valid_json_with_broken_chain_cannot_be_used_as_a_known_failure(self):
+        filing.ledger_transcript_failures(govern, self.audit, [failure(10)])
+        rows = self.events()
+        rows[0]["details"]["errorType"] = "ForgedError"
+        self.audit.write_text(json.dumps(rows[0]) + "\n", encoding="utf-8")
+        original = self.audit.read_bytes()
+        with self.assertRaisesRegex(ValueError, "Audit chain invalid"):
+            filing.ledger_transcript_failures(govern, self.audit, [failure(10)])
+        self.assertEqual(self.audit.read_bytes(), original)
 
 
 class CommandTests(unittest.TestCase):
@@ -127,6 +140,19 @@ class CommandTests(unittest.TestCase):
         events = [json.loads(line) for line in (self.root / "audit.jsonl").read_text().splitlines()]
         self.assertEqual(len([e for e in events if e.get("action") == "transcript.write-failed"]), 2)
         self.assertTrue(govern.verify_audit_chain(self.root / "audit.jsonl")["valid"])
+
+    def test_file_calls_refuses_corrupt_ledger_before_processing_voice_records(self):
+        audit = self.root / "audit.jsonl"
+        filing.ledger_transcript_failures(govern, audit, [failure(10)])
+        event = json.loads(audit.read_text(encoding="utf-8"))
+        event["details"]["errorType"] = "ForgedError"
+        audit.write_text(json.dumps(event) + "\n", encoding="utf-8")
+        original = audit.read_bytes()
+        code, output, error = self.run_cli(json.dumps(failure(11)) + "\n")
+        self.assertEqual(code, 1)
+        self.assertEqual(output, "")
+        self.assertIn("Audit chain invalid", error)
+        self.assertEqual(audit.read_bytes(), original)
 
     def test_the_operator_command_reads_the_transcripts_and_the_lifecycle_log_together(self):
         calls = []
