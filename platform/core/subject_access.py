@@ -42,6 +42,7 @@ STATUSES = ("open", "applied", "declined")
 MAX_REQUESTS = 500
 MAX_REGISTRY_BYTES = 2_000_000
 MAX_BUNDLE_BYTES = 4_000_000
+MARKER = ".subject-access.initialized"
 _PERSON = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:@/+-]{0,127}$")
 _CONTACT = re.compile(r"^c-[0-9a-f]{16}$")
 _REQUEST = re.compile(r"^sa-[0-9a-f]{12}$")
@@ -148,8 +149,9 @@ def _read_private(fd: int, name: str, limit: int) -> bytes | None:
 
 def _atomic_private(fd: int, name: str, payload: bytes) -> None:
     """Durable publication with an exclusive unpredictable temporary inode."""
-    if _read_private(fd, name, MAX_BUNDLE_BYTES) is not None:
-        pass  # The existing target must be private and single-linked.
+    if len(payload) > MAX_BUNDLE_BYTES:
+        raise SubjectAccessError("subject-access output is oversized")
+    _read_private(fd, name, MAX_BUNDLE_BYTES)  # Refuse an unsafe existing target.
     temporary = ".subject-access-" + secrets.token_hex(16)
     handle = os.open(temporary, os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW,
                      0o600, dir_fd=fd)
@@ -192,6 +194,9 @@ class SubjectAccess:
             try:
                 fcntl.flock(descriptor, fcntl.LOCK_EX)
                 raw = _read_private(directory, self.registry.name, MAX_REGISTRY_BYTES)
+                marker = _read_private(directory, MARKER, 16)
+                if raw is None and marker is not None:
+                    raise SubjectAccessError("initialized subject-access registry is missing; manual recovery required")
                 state: dict[str, Any] = {"schemaVersion": SCHEMA_VERSION, "exports": {}, "corrections": {}}
                 if raw is not None:
                     try:
@@ -206,8 +211,12 @@ class SubjectAccess:
                 before = json.dumps(state, sort_keys=True)
                 yield state
                 if json.dumps(state, sort_keys=True) != before:
-                    _atomic_private(directory, self.registry.name,
-                                    (json.dumps(state, sort_keys=True) + "\n").encode("utf-8"))
+                    payload = (json.dumps(state, sort_keys=True) + "\n").encode("utf-8")
+                    if len(payload) > MAX_REGISTRY_BYTES:
+                        raise SubjectAccessError("subject-access registry is oversized")
+                    if marker is None:
+                        _atomic_private(directory, MARKER, b"initialized\\n")
+                    _atomic_private(directory, self.registry.name, payload)
             finally:
                 fcntl.flock(descriptor, fcntl.LOCK_UN)
                 os.close(descriptor)
@@ -286,15 +295,28 @@ class SubjectAccess:
                 "conversations": len(bundle["conversations"]), "repeat": not fresh}
 
     def purge_expired(self, out_dir: str | os.PathLike[str], *, now: int, by: str = "runtime:retention") -> int:
+        directory = pathlib.Path(out_dir)
+        if directory != self.root / "bundles":
+            raise SubjectAccessError("purge directory must be this tenant's subject-access bundles directory")
         removed = 0
         with self._locked() as state:
-            for request_id, item in list(state["exports"].items()):
-                if item["expiresAt"] > int(now):
-                    continue
-                with contextlib.suppress(FileNotFoundError):
-                    (pathlib.Path(out_dir) / item["path"]).unlink()
-                del state["exports"][request_id]
-                removed += 1
+            expired = [(request_id, item) for request_id, item in state["exports"].items()
+                       if isinstance(item, dict) and isinstance(item.get("expiresAt"), int)
+                       and item["expiresAt"] <= int(now)]
+            with _private_directory(directory) as bundle_fd:
+                # Validate *every* path before deleting anything. Corrupted registry
+                # content must never turn retention into arbitrary filesystem deletion.
+                for request_id, item in expired:
+                    if (not _REQUEST.fullmatch(request_id) or item.get("path") != f"{request_id}.json"):
+                        raise SubjectAccessError("subject-access retention path is untrusted")
+                    _read_private(bundle_fd, item["path"], MAX_BUNDLE_BYTES)
+                for request_id, item in expired:
+                    with contextlib.suppress(FileNotFoundError):
+                        os.unlink(item["path"], dir_fd=bundle_fd)
+                    del state["exports"][request_id]
+                    removed += 1
+                if removed:
+                    os.fsync(bundle_fd)
         if removed:
             self._note("subject-access.bundle-purged", by, {"bundles": removed})
         return removed
