@@ -135,6 +135,67 @@ class ExportTests(Case):
         self.assertEqual(bare.export(self.bundles, now=NOW, **PEOPLE, contact_id=self.alex)["conversations"], 0)
 
 
+
+class ExportIntegrityTests(Case):
+    """Access bundles are sensitive; a retry must not rewrite an already-approved snapshot."""
+
+    def test_retry_after_contact_changes_never_rewrites_an_unlogged_export(self):
+        first = self.export()
+        original = pathlib.Path(first["path"]).read_bytes()
+        self.contacts.log_interaction({"objectId": self.alex, "interactionType": "call", "channel": "voice",
+                                       "direction": "inbound", "timestamp": "2026-10-21T10:00:00+08:00",
+                                       "summary": "A new private conversation"})
+        with self.assertRaisesRegex(subject.SubjectAccessError, "changed|new approval"):
+            self.export()
+        self.assertEqual(pathlib.Path(first["path"]).read_bytes(), original)
+        self.assertEqual(len([e for e in self.events if e[0] == "subject-access.exported"]), 1)
+
+    def test_registry_symlink_is_refused_without_overwriting_the_target(self):
+        self.service.root.mkdir(mode=0o700, parents=True)
+        outside = self.root / "outside.json"
+        outside.write_text("do not touch", encoding="utf-8")
+        self.service.registry.symlink_to(outside)
+        with self.assertRaises(subject.SubjectAccessError):
+            self.export()
+        self.assertEqual(outside.read_text(), "do not touch")
+
+    def test_existing_bundle_symlink_and_hardlink_are_refused(self):
+        for attack in ("symlink", "hardlink"):
+            with self.subTest(attack=attack):
+                self.bundles.mkdir(parents=True, exist_ok=True, mode=0o700)
+                # Compute the deterministic export id without writing a bundle.
+                request_id = "sa-" + hashlib.sha256(
+                    f"acme|{self.alex}|{PEOPLE['verified_by']}|{PEOPLE['approved_by']}|{PEOPLE['reason']}".encode()
+                ).hexdigest()[:12]
+                path = self.bundles / f"{request_id}.json"
+                outside = self.root / "outside.json"
+                outside.write_text("do not touch", encoding="utf-8")
+                if attack == "symlink":
+                    path.symlink_to(outside)
+                else:
+                    path.hardlink_to(outside)
+                with self.assertRaises(subject.SubjectAccessError):
+                    self.export()
+                self.assertEqual(outside.read_text(), "do not touch")
+                path.unlink()
+
+    def test_untrusted_bundle_directory_is_refused(self):
+        outside = self.root / "outside"
+        outside.mkdir(mode=0o700)
+        self.bundles.parent.mkdir(mode=0o700)
+        self.bundles.symlink_to(outside, target_is_directory=True)
+        with self.assertRaises(subject.SubjectAccessError):
+            self.export()
+        self.assertEqual(list(outside.iterdir()), [])
+
+    def test_corrupt_registry_fails_closed_instead_of_resetting_approval_history(self):
+        self.service.root.mkdir(parents=True, mode=0o700)
+        self.service.registry.write_text('{"schemaVersion":1,"exports":[],"corrections":{}}', encoding="utf-8")
+        self.service.registry.chmod(0o600)
+        with self.assertRaises(subject.SubjectAccessError):
+            self.export()
+
+
 class CorrectionTests(Case):
     def request(self, **extra):
         return self.service.request_correction(contact_id=self.alex, field="phone", now=NOW, **{**{k: v for k, v in PEOPLE.items()}, **extra})
