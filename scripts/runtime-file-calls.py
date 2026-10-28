@@ -122,6 +122,10 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     try:
         runtime_module = _load("runtime_file_calls_governed_mcp", ROOT / "platform" / "runtime" / "governed_mcp.py")
+        # A corrupt audit chain must stop the entire filing pass *before* a
+        # governed CRM action, summary request or conversation write is attempted.
+        # Do not turn an invalid ledger into an apparently successful filing.
+        runtime_module.GOVERN.verify_audit_chain(args.audit_path)
         filing = _load("runtime_file_calls_filing", ROOT / "platform" / "channels" / "conversation_filing.py")
         runtime = runtime_module.GovernedToolRuntime(
             args.desired_state, args.audit_path, args.approval_root,
