@@ -830,7 +830,12 @@ class Gateway:
             # Only the real TCP peer is authoritative. Proxy headers, Host and
             # model-supplied arguments cannot grant private operational access.
             try:
-                loopback = isinstance(peer_ip, str) and ipaddress.ip_address(peer_ip).is_loopback
+                address = ipaddress.ip_address(peer_ip) if isinstance(peer_ip, str) else None
+                # IPv4-mapped IPv6 can inherit is_loopback on newer Python;
+                # only native 127/8 or the exact IPv6 ::1 peer is trusted.
+                loopback = address is not None and address.is_loopback and (
+                    address.version == 4 or address == ipaddress.IPv6Address("::1")
+                )
             except ValueError:
                 loopback = False
             if not loopback:
