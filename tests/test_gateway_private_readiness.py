@@ -41,7 +41,7 @@ class PrivateReadinessTests(unittest.TestCase):
         for route, component in (("/health/gateway", "gateway"), ("/health/worker", "worker")):
             with self.subTest(route=route):
                 self.assertEqual(self.probe(route, "127.0.0.1").status, 503)
-                heartbeat.Beat(self.root / "data" / component / "heartbeat.json").write(T0, {})
+                heartbeat.Beat(self.root / "data" / component / "heartbeat.json").write(T0, {"announce-receipts" if component == "gateway" else "scheduler": False})
                 self.assertEqual(self.probe(route, "::1").status, 200)
                 self.assertEqual(self.probe(route, "203.0.113.9").status, 404)
         self.assertEqual(self.instance.handle("GET", "/healthz", {}, b"", peer_ip="203.0.113.9").status, 200)
