@@ -14,6 +14,7 @@ import importlib.util
 import json
 import os
 import pathlib
+import re
 import stat
 import sys
 from typing import Any
@@ -25,13 +26,14 @@ assert SPEC.loader is not None
 SPEC.loader.exec_module(RESTORE)
 
 MAX_SNAPSHOTS = 4096
+RUN_ID = re.compile(r"^[a-z0-9][a-z0-9-]{2,79}$")
 
 
 class RotationError(ValueError):
     pass
 
 
-def _private_manifest(path: pathlib.Path) -> tuple[dict[str, Any], bytes]:
+def _private_manifest(path: pathlib.Path) -> tuple[dict[str, Any], bytes, tuple[int, ...]]:
     """Read bounded private JSON without following links; return exact bytes for recheck."""
     RESTORE._private_input(path.parent, label="snapshot directory", directory=True)
     try:
@@ -42,6 +44,7 @@ def _private_manifest(path: pathlib.Path) -> tuple[dict[str, Any], bytes]:
                     or info.st_nlink != 1 or info.st_mode & 0o077
                     or not 0 < info.st_size <= RESTORE.MAX_MANIFEST_BYTES):
                 raise RotationError("unsafe or oversized snapshot manifest")
+            token = (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
             payload = stream.read(RESTORE.MAX_MANIFEST_BYTES + 1)
     except OSError as exc:
         raise RotationError("snapshot manifest missing or unsafe") from exc
@@ -53,7 +56,7 @@ def _private_manifest(path: pathlib.Path) -> tuple[dict[str, Any], bytes]:
         raise RotationError("snapshot manifest invalid") from exc
     if not isinstance(doc, dict):
         raise RotationError("snapshot manifest must be an object")
-    return doc, payload
+    return doc, payload, token
 
 
 def plan_rotation(*, compose: pathlib.Path, project: str, snapshots: pathlib.Path,
@@ -81,11 +84,11 @@ def plan_rotation(*, compose: pathlib.Path, project: str, snapshots: pathlib.Pat
         total_volumes = 0
         for source in entries:
             # Do not skip incomplete, foreign, linked or unrecognized material.
-            if (not source.name.startswith(project + "-")
-                    or not source.name[len(project) + 1:].replace("-", "").isalnum()):
+            if (not RUN_ID.fullmatch(source.name)
+                    or not source.name.startswith(project + "-")):
                 raise RotationError("unexpected snapshot run in inventory")
             RESTORE._private_input(source, label="snapshot run", directory=True)
-            doc, original = _private_manifest(source / "manifest.json")
+            doc, original, before_token = _private_manifest(source / "manifest.json")
             if (type(doc.get("schemaVersion")) is not int or doc["schemaVersion"] != 1
                     or doc.get("type") != "stopped-compose-volume-snapshot"
                     or doc.get("clientProject") != project
@@ -96,8 +99,8 @@ def plan_rotation(*, compose: pathlib.Path, project: str, snapshots: pathlib.Pat
                 raise RotationError("snapshot has no verified volumes")
             # An operator swapping a manifest during decryption cannot cause a
             # successful rotation review for a different retained archive.
-            _, after = _private_manifest(source / "manifest.json")
-            if after != original:
+            _, after, after_token = _private_manifest(source / "manifest.json")
+            if after != original or after_token != before_token:
                 raise RotationError("snapshot manifest changed during verification")
             total_volumes += len(verified)
         return {
