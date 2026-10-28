@@ -156,9 +156,9 @@ class ReferenceProofTests(unittest.TestCase):
         with mock.patch.object(proof, "_run", return_value=subprocess.CompletedProcess([], 1, "", "sensitive error")):
             with self.assertRaisesRegex(ValueError, "evidence"):
                 proof._jsonl("a" * 12, "/opt/data/.modelgarden/audit.jsonl")
-        for raw in ('{"event":"authorization"}\\nnot-json\\n',
-                    '{"event":"authorization"}\\n[]\\n',
-                    '{"event":"authorization"}\\n{"event":'):
+        for raw in ('{"event":"authorization"}\nnot-json\n',
+                    '{"event":"authorization"}\n[]\n',
+                    '{"event":"authorization"}\n{"event":'):
             with self.subTest(raw=raw):
                 with mock.patch.object(proof, "_run", return_value=subprocess.CompletedProcess([], 0, raw, "")):
                     with self.assertRaisesRegex(ValueError, "evidence") as caught:
@@ -169,7 +169,7 @@ class ReferenceProofTests(unittest.TestCase):
     def test_duplicate_docker_service_cannot_hide_ambiguous_runtime(self):
         import subprocess
         from unittest import mock
-        rows = "hermes|Up 1 minute|" + "a" * 12 + "\\nhermes|Up 2 minutes|" + "b" * 12 + "\\n"
+        rows = "hermes|Up 1 minute|" + "a" * 12 + "\nhermes|Up 2 minutes|" + "b" * 12 + "\n"
         with mock.patch.object(proof, "_run", return_value=subprocess.CompletedProcess([], 0, rows, "")):
             with self.assertRaisesRegex(ValueError, "duplicate"):
                 proof._containers("acme-dev")
