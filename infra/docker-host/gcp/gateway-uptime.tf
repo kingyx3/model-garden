@@ -2,6 +2,16 @@
 # Uses the existing HTTPS load balancer; never opens a VM port or grants IAM.
 # Enable only after the client authorizes a verified Cloud Monitoring channel.
 
+# Public readiness probes are legacy compatibility only. The gateway now denies
+# non-loopback readiness by default; prefer runtime_private_alert_components.
+# An operator must explicitly acknowledge the temporary legacy exposure and
+# configure gateway.readinessExposure=legacy-public before enabling this path.
+variable "gateway_legacy_public_readiness_acknowledged" {
+  type        = bool
+  description = "Explicit owner-reviewed compatibility acknowledgement for legacy public readiness probes; prefer private metrics."
+  default     = false
+}
+
 variable "gateway_uptime_alert_enabled" {
   type        = bool
   description = "Opt-in HTTPS gateway uptime check and failure/recovery alert, using existing client notification channels."
@@ -10,6 +20,11 @@ variable "gateway_uptime_alert_enabled" {
   validation {
     condition     = !var.gateway_uptime_alert_enabled || var.gateway_ingress_enabled
     error_message = "Gateway uptime alert requires the existing HTTPS gateway ingress."
+  }
+
+  validation {
+    condition     = !var.gateway_uptime_alert_enabled || var.gateway_legacy_public_readiness_acknowledged
+    error_message = "Legacy public readiness monitoring requires explicit owner-reviewed exposure acknowledgement; use private runtime metrics instead."
   }
 
   validation {

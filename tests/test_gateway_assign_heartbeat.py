@@ -109,7 +109,7 @@ class HeartbeatTests(unittest.TestCase):
             self.assertEqual(gateway.main(["--readiness", "--data-root", str(root / "data")]), 1)  # not healthy against the real clock (the beat is dated in the test's fake time)
 
     def test_worker_uptime_probe_is_payload_free_and_fails_closed(self):
-        # The public HTTPS monitor must not mistake an answering gateway for
+        # The private loopback monitor must not mistake an answering gateway for
         # a healthy worker, nor reveal job names or tenant data in its response.
         with tempfile.TemporaryDirectory() as tmp:
             root = pathlib.Path(tmp)
@@ -117,7 +117,7 @@ class HeartbeatTests(unittest.TestCase):
                                        clock=lambda: T0)
             def probe(at, method="GET"):
                 with mock.patch.object(gateway.time, "time", return_value=at):
-                    return instance.handle(method, "/health/worker", {}, b"")
+                    return instance.handle(method, "/health/worker", {}, b"", peer_ip="127.0.0.1")
             missing = probe(T0)
             self.assertEqual((missing.status, missing.body), (503, b"unavailable"))
             self.assertEqual(instance.handle("GET", "/healthz", {}, b"").status, 200)
@@ -148,7 +148,7 @@ class HeartbeatTests(unittest.TestCase):
 
             def probe(at, method="GET"):
                 with mock.patch.object(gateway.time, "time", return_value=at):
-                    return instance.handle(method, "/health/gateway", {}, b"")
+                    return instance.handle(method, "/health/gateway", {}, b"", peer_ip="127.0.0.1")
 
             self.assertEqual(instance.handle("GET", "/healthz", {}, b"").status, 200)
             self.assertEqual((probe(T0).status, probe(T0).body), (503, b"unavailable"))

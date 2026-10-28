@@ -30,10 +30,11 @@ run "reject_worker_monitoring_without_gateway_authorization" {
 run "reject_worker_monitoring_without_authorized_channels" {
   command = plan
   variables {
-    gateway_ingress_enabled      = true
-    gateway_domain               = "gateway.example.com"
-    gateway_uptime_alert_enabled = true
-    worker_uptime_alert_enabled  = true
+    gateway_ingress_enabled                      = true
+    gateway_domain                               = "gateway.example.com"
+    gateway_uptime_alert_enabled                 = true
+    gateway_legacy_public_readiness_acknowledged = true
+    worker_uptime_alert_enabled                  = true
   }
   expect_failures = [var.gateway_uptime_alert_enabled]
 }
@@ -41,11 +42,12 @@ run "reject_worker_monitoring_without_authorized_channels" {
 run "valid_worker_readiness_monitor" {
   command = plan
   variables {
-    gateway_ingress_enabled              = true
-    gateway_domain                       = "gateway.example.com"
-    gateway_uptime_alert_enabled         = true
-    gateway_uptime_notification_channels = ["projects/sample-project-123/notificationChannels/123"]
-    worker_uptime_alert_enabled          = true
+    gateway_ingress_enabled                      = true
+    gateway_domain                               = "gateway.example.com"
+    gateway_uptime_alert_enabled                 = true
+    gateway_legacy_public_readiness_acknowledged = true
+    gateway_uptime_notification_channels         = ["projects/sample-project-123/notificationChannels/123"]
+    worker_uptime_alert_enabled                  = true
   }
   assert {
     condition     = length(google_monitoring_uptime_check_config.worker) == 1 && length(google_monitoring_alert_policy.worker_uptime) == 1
