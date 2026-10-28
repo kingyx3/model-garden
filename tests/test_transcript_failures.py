@@ -154,6 +154,15 @@ class CommandTests(unittest.TestCase):
         self.assertIn("Audit chain invalid", error)
         self.assertEqual(audit.read_bytes(), original)
 
+    def test_untrusted_audit_fields_never_leak_into_cli_error_output(self):
+        audit = self.root / "audit.jsonl"
+        audit.write_text(json.dumps({"schemaVersion": "customer-secret@example.invalid"}) + "\n", encoding="utf-8")
+        code, output, error = self.run_cli(json.dumps(failure(11)) + "\n")
+        self.assertEqual(code, 1)
+        self.assertEqual(output, "")
+        self.assertIn("Audit chain invalid", error)
+        self.assertNotIn("customer-secret", error)
+
     def test_the_operator_command_reads_the_transcripts_and_the_lifecycle_log_together(self):
         calls = []
 
