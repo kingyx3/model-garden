@@ -8,6 +8,7 @@ held age identity are prerequisites; operator identity is enforced by host RBAC.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import importlib.util
 import json
 import os
@@ -57,6 +58,41 @@ def _private_identity(identity: pathlib.Path) -> None:
     info = _private_input(identity, label="age identity")
     if info.st_size > 16384:
         raise RestoreError("age identity exceeds permitted key-file size")
+
+
+def _manifest_seal(source: pathlib.Path) -> tuple[tuple[int, ...], bytes]:
+    """Pin the exact private manifest inode and bytes before archive verification.
+
+    The original manifest is the trust anchor for every later ciphertext digest.
+    Never re-read a mutable manifest to authorize different archive contents.
+    """
+    _private_input(source, label="backup source directory", directory=True)
+    path = source / "manifest.json"
+    try:
+        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))
+    except OSError as exc:
+        raise RestoreError("backup manifest is missing or unsafe") from exc
+    with os.fdopen(fd, "rb") as handle:
+        info = os.fstat(handle.fileno())
+        if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid()
+                or info.st_nlink != 1 or info.st_mode & 0o077
+                or not 0 < info.st_size <= MAX_MANIFEST_BYTES):
+            raise RestoreError("backup manifest must be private and bounded")
+        payload = handle.read(MAX_MANIFEST_BYTES + 1)
+    if not 0 < len(payload) <= MAX_MANIFEST_BYTES:
+        raise RestoreError("backup manifest size is invalid")
+    token = (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns,
+             info.st_ctime_ns, int.from_bytes(hashlib.sha256(payload).digest(), "big"))
+    return token, payload
+
+
+def _require_original_manifest(source: pathlib.Path, token: tuple[int, ...]) -> None:
+    try:
+        current, _ = _manifest_seal(source)
+    except RestoreError as exc:
+        raise RestoreError("backup manifest changed after verification; keep stack stopped") from exc
+    if current != token:
+        raise RestoreError("backup manifest changed after verification; keep stack stopped")
 
 
 def _validated_manifest(compose: pathlib.Path, project: str, source: pathlib.Path) -> list[tuple[str, pathlib.Path]]:
@@ -205,9 +241,15 @@ def restore(
         raise RestoreError("restore helper image must be pinned to an immutable sha256 digest")
     if apply and confirmation != project:
         raise RestoreError("restore requires --confirm-project matching the exact client project")
-    names = verify(compose, project, source, identity)
     if not apply:
-        return names
+        return verify(compose, project, source, identity)
+    original_token, original_bytes = _manifest_seal(source)
+    names = verify(compose, project, source, identity)
+    _require_original_manifest(source, original_token)
+    # The verified manifest is pinned before decryption, not reloaded from a
+    # path that a same-UID process could replace between checks.
+    original_records = json.loads(original_bytes)["volumes"]
+    expected_digests = {row["volume"]: (row["sha256"], row["bytes"]) for row in original_records}
     # Fail before ANY writes: every target must already exist, belong to the
     # exact Compose project, be empty, and have no running containers.
     try:
@@ -222,14 +264,18 @@ def restore(
             _assert_empty(volume, image)
             SNAPSHOT.assert_volume_exclusive(project, name)
             archive = source / f"{name}.tar.age"
-            recorded = next(r for r in json.loads((source / "manifest.json").read_text())["volumes"] if r["volume"] == name)
-            if SNAPSHOT._digest(archive) != (recorded["sha256"], recorded["bytes"]):
+            _require_original_manifest(source, original_token)
+            _private_input(archive, label="encrypted archive")
+            if SNAPSHOT._digest(archive) != expected_digests[name]:
                 raise RestoreError("encrypted archive changed during restore; keep stack stopped")
+            _require_original_manifest(source, original_token)
             _extract(volume, archive, identity, image)
+            _require_original_manifest(source, original_token)
             SNAPSHOT.assert_volume_exclusive(project, name)
         SNAPSHOT.assert_quiescent(project)
         for name, _volume in owned:
             SNAPSHOT.assert_volume_exclusive(project, name)
+        _require_original_manifest(source, original_token)
     except SNAPSHOT.SnapshotError as exc:
         raise RestoreError(str(exc)) from exc
     # Deliberately no docker compose start: the authorized operator audits
