@@ -384,9 +384,14 @@ def _retained(handle: Any, *, now: int, retention_seconds: int) -> list[dict[str
             continue
         try:
             value = json.loads(raw)
-        except json.JSONDecodeError:
-            continue
-        if isinstance(value, dict) and isinstance(value.get("timestamp"), int) and value["timestamp"] >= cutoff:
+        except json.JSONDecodeError as exc:
+            raise ValueError("invalid existing voice record: malformed JSON") from exc
+        # JSON booleans are Python ints; do not accept false as a timestamp.
+        # Refuse any damaged row *before* truncating the original file. Silent
+        # skipping destroys retained call and fallback evidence on the next write.
+        if not isinstance(value, dict) or type(value.get("timestamp")) is not int:
+            raise ValueError("invalid existing voice record: missing or invalid timestamp")
+        if value["timestamp"] >= cutoff:
             rows.append(value)
     return rows
 
