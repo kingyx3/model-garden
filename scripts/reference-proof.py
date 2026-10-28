@@ -35,23 +35,31 @@ def _containers(project: str) -> dict[str, dict[str, str]]:
     services: dict[str, dict[str, str]] = {}
     for line in result.stdout.splitlines():
         parts = line.split("|", 2)
-        if len(parts) == 3 and parts[0]:
-            services[parts[0]] = {"status": parts[1], "container": parts[2]}
+        if len(parts) != 3 or not all(parts):
+            raise ValueError("malformed reference runtime service inventory")
+        if parts[0] in services:
+            raise ValueError("duplicate reference runtime service entry")
+        services[parts[0]] = {"status": parts[1], "container": parts[2]}
     return services
 
 
 def _jsonl(container: str, path: str) -> list[dict[str, Any]]:
-    result = _run(["docker", "exec", container, "sh", "-c", f"test -f {path} && cat {path} || true"])
+    # A missing/unreadable or partially written evidence file is NOT an empty
+    # successful read. In particular, never suppress a failed 'cat' with '|| true'.
+    result = _run(["docker", "exec", container, "sh", "-c", f"test -f {path} && cat {path}"])
     if result.returncode != 0:
-        return []
+        raise ValueError("cannot read reference evidence file")
+    if result.stdout and not result.stdout.endswith("\\n"):
+        raise ValueError("incomplete reference evidence record")
     rows: list[dict[str, Any]] = []
-    for line in result.stdout.splitlines():
+    for number, line in enumerate(result.stdout.splitlines(), start=1):
         try:
             value = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if isinstance(value, dict):
-            rows.append(value)
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"invalid reference evidence record at line {number}") from None
+        if not isinstance(value, dict):
+            raise ValueError(f"non-object reference evidence record at line {number}")
+        rows.append(value)
     return rows
 
 
@@ -171,26 +179,31 @@ def _completed_call_actions(voice_rows: list[dict[str, Any]], audit_rows: list[d
             for value in (row.get("agent"), row.get("initiatingUser"), tag, row.get("tool"))
         )
         request = requests.setdefault(request_id, {
-            "signatures": set(), "authorizations": set(), "approvals": set(), "executed": False,
+            "signatures": set(), "authorizations": set(), "approvals": set(), "executions": set(),
         })
         request["signatures"].add(signature)
         if row.get("event") == "authorization":
             request["authorizations"].add(row.get("outcome") if isinstance(row.get("outcome"), str) else None)
         elif row.get("event") == "approval":
             request["approvals"].add(row.get("outcome") if isinstance(row.get("outcome"), str) else None)
-        elif row.get("event") == "execution" and row.get("outcome") == "succeeded":
-            request["executed"] = True
+        elif row.get("event") == "execution":
+            request["executions"].add(row.get("outcome") if isinstance(row.get("outcome"), str) else None)
 
     count = 0
     for request in requests.values():
-        if len(request["signatures"]) != 1 or not request["executed"]:
+        # An attempt may be started before dispatch, but failed, denied or
+        # malformed execution receipts conflict with a claimed success.
+        if (len(request["signatures"]) != 1 or "succeeded" not in request["executions"]
+                or request["executions"] - {"started", "succeeded"}):
             continue
         agent, actor, tag, tool = next(iter(request["signatures"]))
         if not (agent and actor and tool and isinstance(tag, str) and
                 re.fullmatch(r"call:[0-9a-f]{64}", tag) and (tag[5:], agent) in completed):
             continue
         auth = request["authorizations"]
-        if auth == {"allow"} or (auth == {"require-approval"} and "approved" in request["approvals"]):
+        approvals = request["approvals"]
+        if auth == {"allow"} or (auth == {"require-approval"} and "approved" in approvals
+                                 and not approvals - {"requested", "pending", "approved"}):
             count += 1
     return count
 
@@ -229,6 +242,10 @@ def evaluate(evidence: dict[str, Any], *, require_voice_call: bool, require_fall
         failures.append("governed-tools is not running")
     if "voice" in services and not services["voice"].get("running"):
         failures.append("voice is not running")
+    if (require_voice_call or require_fallback) and not services.get("voice", {}).get("running"):
+        failures.append("required voice runtime is absent or stopped")
+    if require_governed_action and not services.get("governed-tools", {}).get("running"):
+        failures.append("required governed Tool runtime is absent or stopped")
     if require_voice_call and evidence["voice"].get("completedCalls", 0) < 1:
         failures.append("no completed voice call lifecycle pair exists")
     if require_voice_call and evidence["voice"].get("transcriptWriteFailures", 0):
