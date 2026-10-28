@@ -91,6 +91,17 @@ def _delegation():
     return sys.modules[name]
 
 
+def _schedule_io():
+    name = "model_garden_schedule_store_io"
+    if name not in sys.modules:
+        spec = importlib.util.spec_from_file_location(name, pathlib.Path(__file__).with_name("schedule_store_io.py"))
+        module = importlib.util.module_from_spec(spec)
+        assert spec.loader is not None
+        sys.modules[name] = module
+        spec.loader.exec_module(module)
+    return sys.modules[name]
+
+
 # -- cron arithmetic ----------------------------------------------------------------------
 
 
@@ -224,33 +235,9 @@ class ScheduleStore:
 
     @contextlib.contextmanager
     def _locked(self) -> Iterator[dict[str, Any]]:
-        self.root.mkdir(parents=True, exist_ok=True, mode=0o700)
-        try:
-            os.chmod(self.root, 0o700)
-        except OSError:
-            pass
-        descriptor = os.open(self.root / f".{self.tenant}.schedules.lock", os.O_RDWR | os.O_CREAT, 0o600)
-        try:
-            fcntl.flock(descriptor, fcntl.LOCK_EX)
-            state: dict[str, Any] = {"schemaVersion": SCHEMA_VERSION, "tenant": self.tenant, "schedules": {}}
-            if self.path.is_file():
-                loaded = json.loads(self.path.read_text(encoding="utf-8"))
-                if not isinstance(loaded, dict) or loaded.get("schemaVersion") != SCHEMA_VERSION or loaded.get("tenant") != self.tenant:
-                    raise ScheduleError("schedule store has an unsupported format or belongs to another tenant")
-                state = loaded
-            before = json.dumps(state, sort_keys=True)
+        with _schedule_io().locked(self.root, self.tenant, schema_version=SCHEMA_VERSION,
+                                   max_schedules=MAX_SCHEDULES, error=ScheduleError) as state:
             yield state
-            if json.dumps(state, sort_keys=True) != before:
-                temporary = self.path.with_suffix(".tmp")
-                handle = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-                with os.fdopen(handle, "w", encoding="utf-8") as stream:
-                    stream.write(json.dumps(state, sort_keys=True) + "\n")
-                    stream.flush()
-                    os.fsync(stream.fileno())
-                os.replace(temporary, self.path)
-        finally:
-            fcntl.flock(descriptor, fcntl.LOCK_UN)
-            os.close(descriptor)
 
     def _record(self, action: str, by: str, details: dict[str, Any]) -> None:
         if self._audit is not None:
