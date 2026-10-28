@@ -195,7 +195,12 @@ def ledger_transcript_failures(
     # suppress a failed transcript write or let us append a misleading receipt.
     # The shared ledger verifier checks every chained event, not just the tail.
     if audit_path is not None:
-        govern.verify_audit_chain(audit_path)
+        try:
+            govern.verify_audit_chain(audit_path)
+        except ValueError:
+            # The verifier may quote an untrusted schemaVersion; never surface
+            # attacker-controlled ledger fields in operator or worker logs.
+            raise ValueError("Audit chain invalid; operator reconciliation required") from None
     known = _known_fingerprints(audit_path)
     totals = {"ledgered": 0, "known": 0}
     for failure in failures:
