@@ -125,7 +125,10 @@ def main(argv: list[str] | None = None) -> int:
         # A corrupt audit chain must stop the entire filing pass *before* a
         # governed CRM action, summary request or conversation write is attempted.
         # Do not turn an invalid ledger into an apparently successful filing.
-        runtime_module.GOVERN.verify_audit_chain(args.audit_path)
+        try:
+            runtime_module.GOVERN.verify_audit_chain(args.audit_path)
+        except ValueError:
+            raise ValueError("Audit chain invalid; operator reconciliation required") from None
         filing = _load("runtime_file_calls_filing", ROOT / "platform" / "channels" / "conversation_filing.py")
         runtime = runtime_module.GovernedToolRuntime(
             args.desired_state, args.audit_path, args.approval_root,
