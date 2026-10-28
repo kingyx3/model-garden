@@ -11,7 +11,7 @@ holds no credential and sends nothing itself: it is handed the raw request and t
 - **Authority from the channel.** The principal is the verified sender mapped through the ``PrincipalDirectory``. Nothing in the
   text changes it. An unmapped sender is a public, read-only principal.
 - **Routing in a fixed order.** A hand-off reply (``done <ref>``) goes to ``HandoffReplies`` and closes the hand-off under the
-  channel identity; a schedule command (``schedule create ...``) goes to ``schedule_commands`` for a mapped person only; ``inbox``
+  channel identity; a schedule command (``schedule create ...``) goes to ``schedule_commands`` for a mapped person **in a direct conversation only** (shared channels receive a generic refusal, never a schedule listing or mutation); ``inbox``
   shows what is waiting (see ``platform/core/inbox.py``) to a mapped person in a direct conversation only; ``assign <agent>: <goal>``
   hands a task to a team Agent under the speaker's own identity (a mapped person in a direct conversation only; the injected
   ``assign`` callable applies the delegation rules and budget, and the ledger notes who assigned to whom, never the goal); anything
