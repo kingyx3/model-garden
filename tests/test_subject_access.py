@@ -139,6 +139,13 @@ class ExportTests(Case):
 class ExportIntegrityTests(Case):
     """Access bundles are sensitive; a retry must not rewrite an already-approved snapshot."""
 
+    def test_idempotent_retry_later_preserves_original_expiry_and_audit(self):
+        first = self.export()
+        later = self.service.export(self.bundles, now=NOW + 100, **PEOPLE, contact_id=self.alex)
+        self.assertTrue(later["repeat"])
+        self.assertEqual(later["expiresAt"], first["expiresAt"])
+        self.assertEqual(len([e for e in self.events if e[0] == "subject-access.exported"]), 1)
+
     def test_retry_after_contact_changes_never_rewrites_an_unlogged_export(self):
         first = self.export()
         original = pathlib.Path(first["path"]).read_bytes()
