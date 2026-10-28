@@ -49,7 +49,7 @@ def _jsonl(container: str, path: str) -> list[dict[str, Any]]:
     result = _run(["docker", "exec", container, "sh", "-c", f"test -f {path} && cat {path}"])
     if result.returncode != 0:
         raise ValueError("cannot read reference evidence file")
-    if result.stdout and not result.stdout.endswith("\\n"):
+    if result.stdout and not result.stdout.endswith("\n"):
         raise ValueError("incomplete reference evidence record")
     rows: list[dict[str, Any]] = []
     for number, line in enumerate(result.stdout.splitlines(), start=1):
