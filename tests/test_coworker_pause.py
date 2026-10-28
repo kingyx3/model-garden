@@ -1105,5 +1105,103 @@ class OperatorScriptTests(unittest.TestCase):
             self.assertEqual(self.run_script(root, "pause", "--by", " ").returncode, 2)
 
 
+
+class AutonomousReplyFenceTests(unittest.TestCase):
+    """A pause acknowledged while a model is thinking must not leak its late reply."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = pathlib.Path(self.tmp.name)
+        self.store = pause.PauseStore(self.root)
+        self.adapter = FakeAdapter()
+        self.events = []
+        self.model_started = threading.Event()
+        self.pause_during_model = False
+        gateway = _load("gateway_autonomous_reply_fence_test", "platform/runtime/gateway.py")
+        self.service = gateway.Gateway.__new__(gateway.Gateway)
+        self.service.data = self.root
+        self.service._respond = self.respond
+        self.service.audit = lambda action, who, details: self.events.append((action, details))
+        self.service.ingress = ingress.ChannelIngress(
+            {"slack": self.adapter}, text.PrincipalDirectory(DIRECTORY),
+            respond=self.respond, decide=lambda *a, **k: {},
+            autonomous_send=self.service._send_autonomous,
+        )
+
+    def respond(self, inbound, principal):
+        if self.store.is_paused():
+            return "A human will review your request."
+        self.model_started.set()
+        if self.pause_during_model:
+            self.store.pause("owner@client.example", "incident", NOW)
+        return "AUTONOMOUS MODEL ANSWER"
+
+    def send(self, number=1):
+        self.adapter.next = text.InboundMessage(
+            "slack", "D0DIRECT01", None, f"m{number}",
+            text.ChannelIdentity("slack", "UMEMBER", "T01"), "help me",
+        )
+        return self.service.ingress.message("slack", b"{}", {})
+
+    def test_pause_during_model_generation_replaces_late_answer_with_holding(self):
+        self.pause_during_model = True
+        self.send()
+        self.assertEqual([reply.text for reply in self.adapter.sent], ["A human will review your request."])
+        self.assertTrue(any(action == "channel.reply-suppressed-paused" for action, _ in self.events))
+
+    def test_unreadable_pause_state_never_releases_autonomous_model_reply(self):
+        (self.root / "pause.json").write_text("{broken", encoding="utf-8")
+        self.send()
+        self.assertEqual([reply.text for reply in self.adapter.sent], ["A human will review your request."])
+        self.assertTrue(self.store.is_paused())
+
+    def test_inflight_autonomous_send_blocks_owner_pause_acknowledgement(self):
+        entered, release, paused = threading.Event(), threading.Event(), threading.Event()
+        errors = []
+
+        def blocking_send(reply):
+            entered.set()
+            if not release.wait(5):
+                raise TimeoutError("test transport did not release")
+            self.adapter.sent.append(reply)
+
+        self.adapter.send_reply = blocking_send
+
+        def deliver():
+            try:
+                self.send()
+            except BaseException as exc:
+                errors.append(exc)
+
+        def stop():
+            try:
+                self.store.pause("owner@client.example", "incident", NOW)
+            except BaseException as exc:
+                errors.append(exc)
+            finally:
+                paused.set()
+
+        sending = threading.Thread(target=deliver, daemon=True)
+        stopping = threading.Thread(target=stop, daemon=True)
+        sending.start()
+        try:
+            self.assertTrue(entered.wait(3), "transport was not entered")
+            stopping.start()
+            self.assertFalse(paused.wait(0.15), "pause cannot acknowledge before the transport returns")
+        finally:
+            release.set()
+            sending.join(5)
+            if stopping.ident is not None:
+                stopping.join(5)
+        self.assertFalse(sending.is_alive())
+        self.assertFalse(stopping.is_alive())
+        self.assertEqual(errors, [])
+        self.assertEqual([reply.text for reply in self.adapter.sent], ["AUTONOMOUS MODEL ANSWER"])
+        self.assertTrue(self.store.is_paused())
+        self.send(2)
+        self.assertEqual(self.adapter.sent[-1].text, "A human will review your request.")
+
+
 if __name__ == "__main__":
     unittest.main()

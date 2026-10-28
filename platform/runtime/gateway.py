@@ -449,6 +449,7 @@ class Gateway:
             schedules=self._schedule_store(), agent=self.config["agent"], executor=executor, audit=self.audit,
             deliverables=self._deliverables, inbox=self._inbox_text, tickets=self._ticket_command, observed=self._chat_event, pause=self._pause_command,
             assign=self._assign_task if self.config["assign"] else None,
+            autonomous_send=self._send_autonomous,
         )
 
     # -- shared -------------------------------------------------------------------------------------------
@@ -724,6 +725,32 @@ class Gateway:
         session = f"{inbound.channel}:{inbound.conversation_id}:{inbound.thread_id or ''}"
         outcome = self.coworker.complete(instructions, "\n".join([inbound.text, *notes]), session=session)
         return outcome["text"].strip() or None
+
+    def _send_autonomous(self, adapter: Any, inbound: Any, principal: Any, answer: str | None) -> str:
+        """Fence the *actual channel send*, not just the model/Tool invocation.
+
+        A model can finish after an owner has acknowledged pause. Never send
+        that stale answer or its attachments. Instead create/reuse the private
+        human holding ticket and send only the configured pause response.
+        Keep the shared lease through the transport call, so a confirmed pause
+        cannot race an already admitted outbound reply. A hung transport may
+        cause the owner pause command to time out *unconfirmed*; it does not
+        silently cancel a provider operation.
+        """
+        store = _module("pause").PauseStore(self.data)
+        with store.effect_guard():
+            if store.is_paused():
+                # _respond's paused branch creates an idempotent private ticket.
+                # Rechecking also covers a pause committed while the model ran.
+                answer = self._respond(inbound, principal)
+                attachments = ()
+                self.audit("channel.reply-suppressed-paused", IDENTITY, {"channel": inbound.channel})
+            else:
+                attachments = self.ingress._attachments(inbound, principal, answer) if answer else ()
+            if not answer:
+                return "no-answer"
+            self.ingress._send(adapter, inbound, answer, attachments)
+            return "answered"
 
     # -- approval announcements -----------------------------------------------------------------------------
 
