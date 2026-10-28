@@ -916,6 +916,133 @@ class GatewayConfigTests(unittest.TestCase):
             self.assertIn(shipped, deploy)
 
 
+
+class GatewayEgressPauseTests(unittest.TestCase):
+    """A signed chat assignment and a file upload are material effects, not pause exemptions."""
+
+    def setUp(self):
+        import types
+        self.types = types
+        self.gateway = _load("gateway_egress_pause_tests", "platform/runtime/gateway.py")
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = pathlib.Path(self.tmp.name)
+        self.store = pause.PauseStore(self.root)
+        self.assignments = []
+
+        class TaskInbox:
+            def assign_task(inner, person, agent, *, goal):
+                self.assignments.append((person, agent, goal))
+                return {"taskId": "task-synthetic"}
+
+        self.team = TaskInbox()
+        self.service = types.SimpleNamespace(
+            data=self.root, _team_lock=threading.Lock(), _team=lambda: self.team,
+        )
+
+    def test_paused_chat_assignment_creates_no_task_and_resume_restores_it(self):
+        self.store.pause("owner@client.example", "incident", NOW)
+        with self.assertRaisesRegex(ValueError, "paused"):
+            self.gateway.Gateway._assign_task(self.service, "staff@client.example", "sales", "synthetic goal")
+        self.assertEqual(self.assignments, [])
+        self.store.resume("owner@client.example", NOW + 1)
+        self.assertIn("task-synthetic", self.gateway.Gateway._assign_task(
+            self.service, "staff@client.example", "sales", "synthetic goal"))
+        self.assertEqual(len(self.assignments), 1)
+
+    def test_corrupt_pause_state_never_authorizes_delegated_task(self):
+        self.store.resume("owner@client.example", NOW)
+        self.store.path.write_text("{}", encoding="utf-8")
+        self.store.path.chmod(0o600)
+        self.assertTrue(self.store.is_paused())
+        with self.assertRaisesRegex(ValueError, "paused"):
+            self.gateway.Gateway._assign_task(self.service, "staff@client.example", "sales", "synthetic goal")
+        self.assertEqual(self.assignments, [])
+
+    def test_inflight_assignment_finishes_before_pause_is_acknowledged(self):
+        entered, release, pause_done = threading.Event(), threading.Event(), threading.Event()
+        outcomes = []
+
+        class SlowTeam:
+            def assign_task(inner, person, agent, *, goal):
+                entered.set()
+                if not release.wait(3):
+                    raise AssertionError("test release was not signalled")
+                return {"taskId": "task-synthetic"}
+
+        self.service._team = lambda: SlowTeam()
+
+        def assign():
+            try:
+                outcomes.append(self.gateway.Gateway._assign_task(
+                    self.service, "staff@client.example", "sales", "synthetic goal"))
+            except Exception as exc:
+                outcomes.append(exc)
+
+        def pause_owner():
+            try:
+                self.store.pause("owner@client.example", "incident", NOW)
+            finally:
+                pause_done.set()
+
+        worker = threading.Thread(target=assign)
+        worker.start()
+        self.assertTrue(entered.wait(2))
+        owner = threading.Thread(target=pause_owner)
+        owner.start()
+        try:
+            self.assertFalse(pause_done.wait(0.1), "pause must wait for an admitted task write")
+        finally:
+            release.set()
+            worker.join(3)
+            owner.join(3)
+        self.assertFalse(worker.is_alive())
+        self.assertFalse(owner.is_alive())
+        self.assertEqual(outcomes, ["Handed to sales as task task-synthetic. It is in the Agent's inbox."])
+        self.assertTrue(self.store.is_paused())
+
+    def test_paused_slack_file_upload_is_refused_without_fetching_bytes(self):
+        reads, uploads, events = [], [], []
+        attachment = self.types.SimpleNamespace(attachment_id="tier0:tenant/a-0123456789ab", name="safe.txt")
+
+        class Artifacts:
+            def get(inner, artifact_id, *, requested_by):
+                reads.append((artifact_id, requested_by))
+                return {}, b"synthetic"
+
+        service = self.types.SimpleNamespace(
+            data=self.root, _owner_lock=threading.Lock(),
+            _deliverable_owner={attachment.attachment_id: "staff@client.example"},
+            slack_transport=self.types.SimpleNamespace(upload_file=lambda *args: uploads.append(args)),
+            _artifacts=lambda: Artifacts(), audit=lambda *args: events.append(args),
+        )
+        self.store.pause("owner@client.example", "incident", NOW)
+        with self.assertRaisesRegex(PermissionError, "paused"):
+            self.gateway.Gateway._upload_to_slack(service, "D01", None, attachment)
+        self.assertEqual((reads, uploads), ([], []))
+        self.store.resume("owner@client.example", NOW + 1)
+        self.gateway.Gateway._upload_to_slack(service, "D01", None, attachment)
+        self.assertEqual(len(reads), 1)
+        self.assertEqual(len(uploads), 1)
+        self.assertEqual(events[-1][0], "deliverable.uploaded")
+
+    def test_paused_reply_does_not_stage_file_attachments(self):
+        reads = []
+        service = self.types.SimpleNamespace(
+            data=self.root, tenant="tenant",
+            _artifacts=lambda: reads.append("read") or None,
+        )
+        self.store.pause("owner@client.example", "incident", NOW)
+        result = self.gateway.Gateway._deliverables(
+            service, self.types.SimpleNamespace(channel="slack"),
+            self.types.SimpleNamespace(mapped=True, identity="staff@client.example"),
+            "tier0:tenant/a-0123456789ab",
+        )
+        self.assertEqual(result, ())
+        self.assertEqual(reads, [])
+
+
+
 class OperatorScriptTests(unittest.TestCase):
     def run_script(self, root, *args):
         return subprocess.run([sys.executable, str(ROOT / "scripts/runtime-pause.py"), str(root), "--audit-path", str(root / "audit.jsonl"), *args],

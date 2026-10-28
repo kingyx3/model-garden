@@ -16,6 +16,13 @@ The worker holds workspace schedule reconciliation, approved Studio schedule edi
 
 These are local cooperative fences, not proof of cloud-wide pause or cancellation of an in-flight external provider request. The regression tests cover paused startup, deferred digest and schedule edits, but an authorized tenant-live drill is still required for issue #232.
 
+
+## Delegated chat assignments and customer file egress
+
+A verified staff `assign <agent>: <goal>` command is a new task write, even if the delegated Agent would not execute it immediately. The gateway now takes the same shared pause lease as governed material Tools before task creation and denies the assignment while paused or when pause state is untrusted. An assignment already admitted must complete before owner pause can be acknowledged. A later resume does **not** replay refused assignments; the staff member must submit a new command.
+
+The gateway does not stage newly requested deliverable attachments while paused. The opt-in Slack artifact-byte upload independently takes the shared pause lease through the actual provider upload and audit receipt. A paused upload is refused before reading file bytes; the Slack adapter may return a file reference instead of the attachment, but it does not upload the bytes. This fence is local and cooperative, not a provider-side cancellation or a blanket guarantee about all outbound channel text. A real owner-approved channel drill, including races with in-flight messages and non-Slack egress, remains mandatory before claiming complete emergency-pause acceptance.
+
 ## Operational limits
 
 The built-in ticket store is private and bounded (5,000 total tickets), and its current retention/cleanup remains an operator responsibility under the client's data policy. A full or unreadable store fails visibly rather than silently claiming handoff. The local audit receipt is not an independently immutable export. A live acceptance drill must still prove channel authentication, receipt, staff response, restart, in-flight provider behavior, cross-tenant/coworker isolation and authorized owner signoff before #232 can close.
