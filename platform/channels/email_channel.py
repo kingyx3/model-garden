@@ -40,6 +40,7 @@ import json
 import os
 import pathlib
 import re
+import stat
 import time
 from collections.abc import Callable, Mapping
 from typing import Any
@@ -192,6 +193,42 @@ def loop_risk(message: email.message.EmailMessage, own_addresses: frozenset[str]
     return None
 
 
+def _open_private_state_dir(root: pathlib.Path, *, create: bool) -> int | None:
+    """Pin an owner-private state directory; never follow a redirected final component.
+
+    The operator controls its ancestors and the volume mount. A missing directory
+    is acceptable only for a read-only approval preview before first use.
+    """
+    if create:
+        root.mkdir(parents=True, exist_ok=True, mode=0o700)
+    try:
+        expected = root.lstat()
+    except FileNotFoundError:
+        if not create:
+            return None
+        raise
+    if (not stat.S_ISDIR(expected.st_mode) or expected.st_uid != os.geteuid()
+            or expected.st_mode & 0o077):
+        raise OSError("email authority state directory is untrusted")
+    fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    opened = os.fstat(fd)
+    if (opened.st_dev, opened.st_ino) != (expected.st_dev, expected.st_ino):
+        os.close(fd)
+        raise OSError("email authority state directory changed")
+    return fd
+
+
+def _same_private_state_dir(root: pathlib.Path, fd: int) -> bool:
+    try:
+        current = root.lstat()
+        opened = os.fstat(fd)
+        return (stat.S_ISDIR(current.st_mode) and current.st_uid == os.geteuid()
+                and not current.st_mode & 0o077
+                and (current.st_dev, current.st_ino) == (opened.st_dev, opened.st_ino))
+    except OSError:
+        return False
+
+
 class ReplyLimiter:
     """At most ``limit`` automatic replies per thread, counted under a file lock so restarts keep the count."""
 
@@ -203,22 +240,43 @@ class ReplyLimiter:
 
     def consume(self, thread_id: str) -> bool:
         """Count one reply to ``thread_id``; ``False`` (and nothing counted) once the limit is reached."""
-        self._root.mkdir(parents=True, exist_ok=True, mode=0o700)
-        path = self._root / hashlib.sha256(thread_id.encode("utf-8")).hexdigest()[:32]
-        descriptor = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
+        name = hashlib.sha256(thread_id.encode("utf-8")).hexdigest()[:32]
+        root_fd = _open_private_state_dir(self._root, create=True)
+        assert root_fd is not None
         try:
-            fcntl.flock(descriptor, fcntl.LOCK_EX)
-            raw = os.read(descriptor, 16).decode("ascii", "ignore").strip()
-            used = int(raw) if raw.isdigit() else 0
-            if used >= self._limit:
-                return False
-            os.lseek(descriptor, 0, os.SEEK_SET)
-            os.ftruncate(descriptor, 0)
-            os.write(descriptor, str(used + 1).encode("ascii"))
-            os.fsync(descriptor)
-            return True
+            descriptor = os.open(name, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK,
+                                 0o600, dir_fd=root_fd)
+            try:
+                fcntl.flock(descriptor, fcntl.LOCK_EX)
+                opened = os.fstat(descriptor)
+                current = os.stat(name, dir_fd=root_fd, follow_symlinks=False)
+                if (not stat.S_ISREG(opened.st_mode) or opened.st_nlink != 1
+                        or opened.st_uid != os.geteuid() or opened.st_mode & 0o077
+                        or (opened.st_dev, opened.st_ino) != (current.st_dev, current.st_ino)
+                        or not _same_private_state_dir(self._root, root_fd)):
+                    raise OSError("email reply quota state is untrusted")
+                raw = os.read(descriptor, 17)
+                # A corrupt counter is NOT a new thread. Resetting it to zero
+                # would authorize additional automatic customer replies.
+                if len(raw) > 16 or (raw and not raw.isdigit()):
+                    raise OSError("email reply quota state is invalid")
+                used = int(raw) if raw else 0
+                if used >= self._limit:
+                    return False
+                if not _same_private_state_dir(self._root, root_fd):
+                    raise OSError("email reply quota directory changed")
+                os.lseek(descriptor, 0, os.SEEK_SET)
+                updated = str(used + 1).encode("ascii")
+                if os.write(descriptor, updated) != len(updated):
+                    raise OSError("email reply quota state write was incomplete")
+                os.ftruncate(descriptor, len(updated))
+                os.fsync(descriptor)
+                os.fsync(root_fd)
+                return True
+            finally:
+                os.close(descriptor)
         finally:
-            os.close(descriptor)
+            os.close(root_fd)
 
 
 def _digest(text: str) -> str:
@@ -327,19 +385,55 @@ class ApprovalLinks:
         confirmation) ever spends one. A link already used is refused here as well, so a stale page is not offered.
         """
         request_id, approver, decision = self._verified(token)
-        if (self._root / self._pair(request_id, approver)).exists():
-            raise ChannelVerificationError("approval link was already used")
+        try:
+            root_fd = _open_private_state_dir(self._root, create=False)
+            if root_fd is not None:
+                try:
+                    try:
+                        # Do not follow dangling symlinks: any existing marker,
+                        # even malformed, must deny reuse of an approval.
+                        os.stat(self._pair(request_id, approver), dir_fd=root_fd, follow_symlinks=False)
+                    except FileNotFoundError:
+                        pass
+                    else:
+                        raise ChannelVerificationError("approval link was already used")
+                    if not _same_private_state_dir(self._root, root_fd):
+                        raise OSError("approval state directory changed")
+                finally:
+                    os.close(root_fd)
+        except OSError as exc:
+            raise ChannelVerificationError("approval state is unavailable") from exc
         return request_id, approver, decision
 
     def consume(self, token: str) -> ApprovalResponse:
         """Verify and spend a token. Raises ``ChannelVerificationError`` for anything not genuine."""
         request_id, approver, decision = self._verified(token)
-        self._root.mkdir(parents=True, exist_ok=True, mode=0o700)
         try:
-            descriptor = os.open(self._root / self._pair(request_id, approver), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
-        except FileExistsError as exc:
-            raise ChannelVerificationError("approval link was already used") from exc
-        os.close(descriptor)
+            root_fd = _open_private_state_dir(self._root, create=True)
+            assert root_fd is not None
+            try:
+                try:
+                    descriptor = os.open(self._pair(request_id, approver),
+                                         os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW,
+                                         0o600, dir_fd=root_fd)
+                except FileExistsError as exc:
+                    raise ChannelVerificationError("approval link was already used") from exc
+                try:
+                    opened = os.fstat(descriptor)
+                    if (not stat.S_ISREG(opened.st_mode) or opened.st_nlink != 1
+                            or opened.st_uid != os.geteuid() or opened.st_mode & 0o077
+                            or not _same_private_state_dir(self._root, root_fd)):
+                        raise OSError("approval receipt is untrusted")
+                    os.fsync(descriptor)
+                    os.fsync(root_fd)
+                finally:
+                    os.close(descriptor)
+            finally:
+                os.close(root_fd)
+        except OSError as exc:
+            # Never acknowledge an approval unless its one-use marker was
+            # durably committed. On a failed fsync the marker is left spent.
+            raise ChannelVerificationError("approval state is unavailable") from exc
         return ApprovalResponse(
             request_id=request_id, decision=decision, responder=ChannelIdentity(channel=CHANNEL, channel_user_id=approver)
         )
@@ -421,8 +515,12 @@ class EmailChannelAdapter:
         reason = self.loop_reason(body)
         if reason is not None:
             return False, reason
-        if not self.consume_reply(body):
-            return False, "thread-reply-limit"
+        try:
+            if not self.consume_reply(body):
+                return False, "thread-reply-limit"
+        except OSError:
+            # A damaged quota cannot silently reset and send another reply.
+            return False, "thread-reply-state-unavailable"
         return True, None
 
     def loop_reason(self, body: bytes) -> str | None:
