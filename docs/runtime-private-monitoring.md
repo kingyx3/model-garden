@@ -1,7 +1,10 @@
 # Private gateway and worker readiness samples (opt-in; #231)
 
-`scripts/runtime-health-metric.py` offers a **private alternative** to public
-HTTPS `/health/gateway` and `/health/worker` probes. An approved host timer
+`scripts/runtime-health-metric.py` is the **preferred private monitoring path**.
+As of v0.8.198, HTTP `/health/gateway` and `/health/worker` require the
+**actual loopback TCP peer** by default, including when the gateway is published
+through a reverse proxy. `X-Forwarded-For`, `X-Real-IP` and `Host` do not
+authorize these routes. An approved host timer
 finds exactly one Compose `gateway` container and executes fixed Python code
 **inside that container**, fetching `127.0.0.1:8080/health/gateway` and
 `/health/worker`. The existing gateway-loop and worker heartbeats decide
@@ -45,7 +48,15 @@ capture sample, provider incident, **actual recipient delivery and operator
 acknowledgement**, restore both, and verify newer healthy samples. Record
 escalation owner, measured latency and retirement. Offline tests and accepted
 metric API writes are not notification delivery or tenant-live proof.
-Existing public readiness routes remain available if HTTPS ingress is
-separately enabled; restricting/removing them requires compatibility and
-security review. This private option avoids making them a monitoring
-prerequisite, not a blanket claim that public surfaces are secured.
+Existing legacy public uptime checks are **not** compatible with the secure
+default. Before upgrading a client that opted into those checks, obtain owner
+approval and migrate to the private metric publisher and approved channels;
+verify new samples and notifications before disabling the old alerts. A
+transitional legacy public probe requires both the reviewed binding setting
+`spec.gateway.readiness_exposure: legacy-public` and Terraform
+`gateway_legacy_public_readiness_acknowledged=true`, with the existing
+`gateway_uptime_alert_enabled=true` and approved channels. This compatibility
+mode intentionally exposes only payload-free readiness status but does **not**
+satisfy the original private-endpoint security criterion. Record an explicit
+retirement date; never assume this is a production-approved configuration.
+No timer, Terraform plan or cloud policy is applied by this change.
