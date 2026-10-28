@@ -4,7 +4,10 @@
 As of v0.8.198, HTTP `/health/gateway` and `/health/worker` require the
 **actual loopback TCP peer** by default, including when the gateway is published
 through a reverse proxy. `X-Forwarded-For`, `X-Real-IP` and `Host` do not
-authorize these routes. An approved host timer
+authorize these routes. A reverse proxy sharing the gateway's network
+namespace could itself connect from loopback; such a proxy must separately
+deny external `/health/gateway` and `/health/worker` requests. This guard is
+not a substitute for network isolation. An approved host timer
 finds exactly one Compose `gateway` container and executes fixed Python code
 **inside that container**, fetching `127.0.0.1:8080/health/gateway` and
 `/health/worker`. The existing gateway-loop and worker heartbeats decide
