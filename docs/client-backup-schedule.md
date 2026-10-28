@@ -55,6 +55,29 @@ After the irreversible `.claimed` record, the dispatcher also writes a **separat
 
 A skipped slot is not a successful backup. backup.schedule.dispatched means the upload step returned, **not** that independent remote read-back or restore succeeded. A failure emits backup.schedule.failed with no credentials, payloads or exception text. Operators must monitor timer failures and missed slots; deduplicated client-channel failure/recovery alert delivery remains unimplemented.
 
+## Review-only systemd timer bundle
+
+`scripts/render-client-backup-units.py` renders a client/environment-specific oneshot service and once-per-minute calendar timer as **JSON for review only**. It neither writes unit files nor installs, enables, starts or deploys anything. This is a bounded code prerequisite for scheduling, **not** evidence that a backup occurred. The timer polls; the existing dispatcher still requires both the finite client-approved recurrence and a separate valid approval for each exact slot, with a durable no-retry claim. `Persistent=true` may catch up a missed timer tick but cannot bypass those checks.
+
+Example for an authorized DEV operator (substitute a real public age recipient and a reviewed SHA-256-pinned helper image):
+
+~~~bash
+python3 scripts/render-client-backup-units.py \
+  --client-slug acme --environment dev \
+  --client-project acme-dev --confirm-client-project acme-dev \
+  --gcp-project acme-gcp-123 --confirm-gcp-project acme-gcp-123 \
+  --service-user mg-backup \
+  --age-recipient "$APPROVED_PUBLIC_AGE_RECIPIENT" \
+  --snapshot-image "$PINNED_SNAPSHOT_IMAGE" \
+  > /private/review/acme-dev-backup-units.json
+~~~
+
+Before **separately approved** installation, inspect both unit strings and validate them with `systemd-analyze verify`. The renderer fixes its paths per tenant: `/srv/model-garden/<project>/compose.yaml` (reviewed read-only Compose) and `/var/lib/model-garden-backup/<project>/` with `policy/schedule.json`, `approvals/`, `claims/` and `snapshots/`. Provision all directories manually as private (0700) and owned by the dedicated operator UID; policy/approval files must be 0600 and owned by that UID. The separate cooperative lock directory `/run/lock/model-garden` must exist with the reviewed access policy. The timer service does **not** create these paths, consent documents, locks or credentials.
+
+The unit has a fixed interpreter/script path, no shell, no `EnvironmentFile`, a pinned snapshot image, explicit tenant/GCP confirmations, restricted writable paths and a bounded service lifetime. Its only embedded key is the **public** age recipient. Review the service user's Docker socket permissions carefully: Docker access can be effectively root-equivalent, and `NoNewPrivileges=yes` is not a substitute for a trusted, isolated host. Prefer the existing approved keyless GCP host identity; never add a cloud key or OAuth token to a unit, command line or client repository. Verify the service can read the Compose file and approved private paths without broadening permissions. **Do not enable the timer** until client owner authorization, external deployment/restart freeze, least-privilege IAM, key custody and alert delivery are independently verified.
+
+Local credential-free tests cover tenant/project isolation, explicit confirmations, service/user injection, pinned image validation, review-only output and redacted refusal. The timer expression and rendered unit syntax were also checked locally with `systemd-analyze`. Neither those tests nor a generated unit proves an installed timer, an uploaded object, independent read-back, a successful restore, or delivered notification.
+
 ## Remaining safety gates
 
 The host-local cooperative lock does **not** prevent out-of-band Docker commands, container restart policies, other hosts or watchdogs. An independently enforced quiescence/freeze is mandatory. This dispatcher does not establish key rotation, live cloud recovery evidence, RPO/RTO, or automatic retries. Issue #230 stays open until those gates are completed and a client-authorized real restore drill is recorded.
