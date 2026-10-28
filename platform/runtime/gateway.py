@@ -8,8 +8,8 @@ is asked through the Hermes API server (``coworker_client.py``) and governed Too
 Routes (everything else is 404):
 
 - ``GET /healthz`` (gateway HTTP liveness; load-balancer and Docker health)
-- ``GET /health/gateway`` (payload-free, fail-closed periodic gateway-loop readiness for an opt-in HTTPS uptime probe)
-- ``GET /health/worker`` (payload-free, fail-closed worker readiness for an opt-in HTTPS uptime probe)
+- ``GET /health/gateway`` (loopback-only periodic gateway-loop readiness by default)
+- ``GET /health/worker`` (loopback-only worker readiness by default)
 - ``GET /studio`` (when ``studio`` is configured) the owner's Employee Studio and ``/studio/api/*`` (``platform/runtime/studio.py``): everyone
   on the web allow-list can read; only the named owner can propose, approve, reject or roll back a change request.
 - ``GET /chat`` the built-in web chat page, with its script and style served from this origin (the CSP allows nothing else).
@@ -42,6 +42,7 @@ from __future__ import annotations
 import argparse
 import concurrent.futures
 import hashlib
+import ipaddress
 import importlib.util
 import json
 import os
@@ -115,10 +116,13 @@ def load_config(document: Mapping[str, Any]) -> dict[str, Any]:
     """Validate the non-secret configuration rendered from ``EnvironmentBinding.spec.gateway``."""
     if not isinstance(document, Mapping):
         raise GatewayConfigError("gateway configuration must be an object")
-    allowed = {"publicOrigin", "directory", "people", "escalateTo", "web", "slack", "teams", "approvals", "mailbox", "coworker", "agent", "enrollment", "oauth", "studio", "pausedMessage", "assign"}
+    allowed = {"publicOrigin", "directory", "people", "escalateTo", "web", "slack", "teams", "approvals", "mailbox", "coworker", "agent", "enrollment", "oauth", "studio", "pausedMessage", "assign", "readinessExposure"}
     unknown = sorted(set(document) - allowed)
     if unknown:
         raise GatewayConfigError(f"unknown gateway settings: {', '.join(unknown)}")
+    exposure = document.get("readinessExposure", "private")
+    if type(exposure) is not str or exposure not in ("private", "legacy-public"):
+        raise GatewayConfigError("readinessExposure must be private or legacy-public")
     origin = document.get("publicOrigin")
     if origin is not None and not (isinstance(origin, str) and re.fullmatch(r"https://[A-Za-z0-9.-]+(:\d+)?", origin)):
         raise GatewayConfigError("publicOrigin must be an https origin such as https://chat.client.example")
@@ -190,7 +194,7 @@ def load_config(document: Mapping[str, Any]) -> dict[str, Any]:
         except _module("studio").StudioConfigError as exc:
             raise GatewayConfigError(str(exc)) from None
     return {
-        "publicOrigin": origin, "directory": dict(document.get("directory") or {}), "people": dict(document.get("people") or {}),
+        "publicOrigin": origin, "readinessExposure": exposure, "directory": dict(document.get("directory") or {}), "people": dict(document.get("people") or {}),
         "escalateTo": document.get("escalateTo"), "pausedMessage": held.strip() if held else None, "assign": assign, "agent": document.get("agent") or "coworker", **{k: sections.get(k) for k in
         ("web", "slack", "teams", "approvals", "mailbox", "coworker", "enrollment", "oauth", "studio")},
     }
@@ -812,7 +816,7 @@ class Gateway:
             raise _module("text").ChannelVerificationError("no session")
         return self.auth.session(authorization[7:].strip())
 
-    def handle(self, method: str, path: str, headers: Mapping[str, str], body: bytes) -> Any:
+    def handle(self, method: str, path: str, headers: Mapping[str, str], body: bytes, *, peer_ip: str | None = None) -> Any:
         ingress = _module("ingress")
         Response = ingress.Response
         parsed = urllib.parse.urlsplit(path)
@@ -822,6 +826,15 @@ class Gateway:
         def json_response(status: int, document: Mapping[str, Any]) -> Any:
             return Response(status, json.dumps(document, sort_keys=True).encode("utf-8"), headers={"Cache-Control": "no-store"})
 
+        if route in ("/health/gateway", "/health/worker") and self.config["readinessExposure"] == "private":
+            # Only the real TCP peer is authoritative. Proxy headers, Host and
+            # model-supplied arguments cannot grant private operational access.
+            try:
+                loopback = isinstance(peer_ip, str) and ipaddress.ip_address(peer_ip).is_loopback
+            except ValueError:
+                loopback = False
+            if not loopback:
+                return Response(404, b"not found", "text/plain", {"Cache-Control": "no-store"})
         if route == "/healthz" and method == "GET":
             return Response(200, b"ok", "text/plain")
         if route == "/health/gateway" and method == "GET":
@@ -835,7 +848,7 @@ class Gateway:
             return Response(200 if ready else 503, b"ok" if ready else b"unavailable",
                             "text/plain", {"Cache-Control": "no-store"})
         if route == "/health/worker" and method == "GET":
-            # Public Cloud Monitoring probes get a status code only. No worker
+            # Private loopback metric probes get a status code only. No worker
             # job names, tenant identifiers, or customer content cross the ingress.
             # A responsive gateway is not evidence that its worker loop is alive.
             health = _module("heartbeat").check(
@@ -1075,7 +1088,8 @@ def make_handler(gateway: Gateway):
                 return
             body = self.rfile.read(length) if length else b""
             try:
-                response = gateway.handle(self.command, self.path, dict(self.headers.items()), body)
+                response = gateway.handle(self.command, self.path, dict(self.headers.items()), body,
+                                          peer_ip=self.client_address[0])
             except Exception as exc:  # noqa: BLE001 - never a stack trace to the caller
                 try:
                     gateway.audit("gateway.request-failed", IDENTITY, {"error": type(exc).__name__})
