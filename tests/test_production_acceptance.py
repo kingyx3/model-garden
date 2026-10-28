@@ -85,6 +85,20 @@ class ProductionAcceptanceTests(unittest.TestCase):
         self.manifest["approved"] = True
         self.assertEqual(self.check()["status"], "blocked")
 
+    def test_release_must_be_pinned_semver(self):
+        for value in ("latest", "", "v0.8.192", "../0.8.192", "0.8.192-dev"):
+            with self.subTest(release=value):
+                self.manifest["release"] = value
+                result = gate.check(self.manifest, self.root, client="acme", environment="prod",
+                                    project="acme-prod", release=value, now=self.now)
+                self.assertEqual(result["status"], "blocked")
+        self.manifest["release"] = "0.8.192"
+
+    def test_reused_artifact_cannot_satisfy_two_controls(self):
+        self.rows[1]["artifact"] = self.rows[0]["artifact"]
+        self.rows[1]["sha256"] = self.rows[0]["sha256"]
+        self.assertEqual(self.check()["status"], "blocked")
+
     def test_naive_timestamps_and_boolean_schema_block(self):
         self.rows[0]["observedAt"] = "2026-10-28T00:00:00"
         self.assertEqual(self.check()["status"], "blocked")
