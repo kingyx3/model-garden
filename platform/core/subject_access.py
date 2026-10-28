@@ -29,6 +29,8 @@ import json
 import os
 import pathlib
 import re
+import secrets
+import stat
 from collections.abc import Callable, Iterator
 from typing import Any
 
@@ -38,6 +40,9 @@ METHODS = ("email-link", "known-account", "id-document", "call-back", "other")
 CORRECTABLE = ("name", "phone", "email", "notes")
 STATUSES = ("open", "applied", "declined")
 MAX_REQUESTS = 500
+MAX_REGISTRY_BYTES = 2_000_000
+MAX_BUNDLE_BYTES = 4_000_000
+MARKER = ".subject-access.initialized"
 _PERSON = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:@/+-]{0,127}$")
 _CONTACT = re.compile(r"^c-[0-9a-f]{16}$")
 _REQUEST = re.compile(r"^sa-[0-9a-f]{12}$")
@@ -83,6 +88,86 @@ def resolve(contacts: Any, *, contact_id: str | None = None, email: str | None =
     return found[0]
 
 
+
+def _private_file(info: os.stat_result) -> bool:
+    return (stat.S_ISREG(info.st_mode) and info.st_nlink == 1
+            and info.st_uid == os.geteuid() and not info.st_mode & 0o077)
+
+
+@contextlib.contextmanager
+def _private_directory(path: pathlib.Path) -> Iterator[int]:
+    """Pin an owner-private directory; never follow a substituted directory link."""
+    path.mkdir(mode=0o700, parents=True, exist_ok=True)
+    try:
+        before = path.lstat()
+        fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        try:
+            opened = os.fstat(fd)
+            if (not stat.S_ISDIR(before.st_mode) or before.st_uid != os.geteuid()
+                    or before.st_mode & 0o077
+                    or (before.st_dev, before.st_ino) != (opened.st_dev, opened.st_ino)):
+                raise SubjectAccessError("subject-access directory is untrusted")
+            yield fd
+            current = path.lstat()
+            if (current.st_dev, current.st_ino) != (opened.st_dev, opened.st_ino):
+                raise SubjectAccessError("subject-access directory changed")
+        finally:
+            os.close(fd)
+    except (OSError, ValueError) as exc:
+        if isinstance(exc, SubjectAccessError):
+            raise
+        raise SubjectAccessError("subject-access directory is unavailable or untrusted") from exc
+
+
+def _read_private(fd: int, name: str, limit: int) -> bytes | None:
+    try:
+        before = os.stat(name, dir_fd=fd, follow_symlinks=False)
+    except FileNotFoundError:
+        return None
+    try:
+        if not _private_file(before):
+            raise SubjectAccessError("subject-access state or bundle is untrusted")
+        handle = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=fd)
+        try:
+            opened = os.fstat(handle)
+            if (not _private_file(opened)
+                    or (before.st_dev, before.st_ino) != (opened.st_dev, opened.st_ino)):
+                raise SubjectAccessError("subject-access state or bundle changed")
+            with os.fdopen(handle, "rb", closefd=False) as source:
+                data = source.read(limit + 1)
+            if len(data) > limit:
+                raise SubjectAccessError("subject-access state or bundle is oversized")
+            after = os.stat(name, dir_fd=fd, follow_symlinks=False)
+            if (after.st_dev, after.st_ino) != (opened.st_dev, opened.st_ino):
+                raise SubjectAccessError("subject-access state or bundle changed")
+            return data
+        finally:
+            os.close(handle)
+    except OSError as exc:
+        raise SubjectAccessError("subject-access state or bundle is unavailable or untrusted") from exc
+
+
+def _atomic_private(fd: int, name: str, payload: bytes) -> None:
+    """Durable publication with an exclusive unpredictable temporary inode."""
+    if len(payload) > MAX_BUNDLE_BYTES:
+        raise SubjectAccessError("subject-access output is oversized")
+    _read_private(fd, name, MAX_BUNDLE_BYTES)  # Refuse an unsafe existing target.
+    temporary = ".subject-access-" + secrets.token_hex(16)
+    handle = os.open(temporary, os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW,
+                     0o600, dir_fd=fd)
+    try:
+        with os.fdopen(handle, "wb") as stream:
+            stream.write(payload)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, name, src_dir_fd=fd, dst_dir_fd=fd)
+        os.fsync(fd)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(temporary, dir_fd=fd)
+        raise
+
+
 class SubjectAccess:
     def __init__(self, root: str | os.PathLike[str], *, tenant: str, contacts: Any, conversations: Any | None = None, audit: Audit | None = None) -> None:
         if not isinstance(tenant, str) or not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,62}", tenant):
@@ -94,29 +179,51 @@ class SubjectAccess:
 
     @contextlib.contextmanager
     def _locked(self) -> Iterator[dict[str, Any]]:
-        self.root.mkdir(parents=True, exist_ok=True, mode=0o700)
-        descriptor = os.open(self.registry.with_suffix(".lock"), os.O_RDWR | os.O_CREAT, 0o600)
-        try:
-            fcntl.flock(descriptor, fcntl.LOCK_EX)
-            state: dict[str, Any] = {"schemaVersion": SCHEMA_VERSION, "exports": {}, "corrections": {}}
-            if self.registry.is_file():
-                loaded = json.loads(self.registry.read_text(encoding="utf-8"))
-                if not isinstance(loaded, dict) or loaded.get("schemaVersion") != SCHEMA_VERSION:
-                    raise SubjectAccessError("the subject-access registry has an unsupported format")
-                state = loaded
-            before = json.dumps(state, sort_keys=True)
-            yield state
-            if json.dumps(state, sort_keys=True) != before:
-                temporary = self.registry.with_suffix(".tmp")
-                handle = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-                with os.fdopen(handle, "w", encoding="utf-8") as stream:
-                    stream.write(json.dumps(state, sort_keys=True) + "\n")
-                    stream.flush()
-                    os.fsync(stream.fileno())
-                os.replace(temporary, self.registry)
-        finally:
-            fcntl.flock(descriptor, fcntl.LOCK_UN)
-            os.close(descriptor)
+        with _private_directory(self.root) as directory:
+            lock_name = self.registry.with_suffix(".lock").name
+            try:
+                descriptor = os.open(lock_name, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK,
+                                     0o600, dir_fd=directory)
+                if not _private_file(os.fstat(descriptor)):
+                    raise SubjectAccessError("subject-access lock is untrusted")
+                current = os.stat(lock_name, dir_fd=directory, follow_symlinks=False)
+                if (current.st_dev, current.st_ino) != (os.fstat(descriptor).st_dev, os.fstat(descriptor).st_ino):
+                    raise SubjectAccessError("subject-access lock changed")
+            except BaseException as exc:
+                if "descriptor" in locals():
+                    os.close(descriptor)
+                if isinstance(exc, SubjectAccessError):
+                    raise
+                raise SubjectAccessError("subject-access lock is unavailable or untrusted") from exc
+            try:
+                fcntl.flock(descriptor, fcntl.LOCK_EX)
+                raw = _read_private(directory, self.registry.name, MAX_REGISTRY_BYTES)
+                marker = _read_private(directory, MARKER, 16)
+                if raw is None and marker is not None:
+                    raise SubjectAccessError("initialized subject-access registry is missing; manual recovery required")
+                state: dict[str, Any] = {"schemaVersion": SCHEMA_VERSION, "exports": {}, "corrections": {}}
+                if raw is not None:
+                    try:
+                        loaded = json.loads(raw)
+                    except (ValueError, UnicodeError) as exc:
+                        raise SubjectAccessError("the subject-access registry is corrupt") from exc
+                    if (not isinstance(loaded, dict) or loaded.get("schemaVersion") != SCHEMA_VERSION
+                            or not isinstance(loaded.get("exports"), dict)
+                            or not isinstance(loaded.get("corrections"), dict)):
+                        raise SubjectAccessError("the subject-access registry has an unsupported format")
+                    state = loaded
+                before = json.dumps(state, sort_keys=True)
+                yield state
+                if json.dumps(state, sort_keys=True) != before:
+                    payload = (json.dumps(state, sort_keys=True) + "\n").encode("utf-8")
+                    if len(payload) > MAX_REGISTRY_BYTES:
+                        raise SubjectAccessError("subject-access registry is oversized")
+                    if marker is None:
+                        _atomic_private(directory, MARKER, b"initialized\\n")
+                    _atomic_private(directory, self.registry.name, payload)
+            finally:
+                fcntl.flock(descriptor, fcntl.LOCK_UN)
+                os.close(descriptor)
 
     def _note(self, action: str, by: str, details: dict[str, Any]) -> None:
         if self._audit is not None:
@@ -144,7 +251,8 @@ class SubjectAccess:
             "schemaVersion": SCHEMA_VERSION, "kind": "subject-access-export", "tenant": self.tenant, "requestId": request_id,
             "generatedAt": int(now), "expiresAt": int(now) + BUNDLE_DAYS * 86_400, "verifiedBy": verified, "approvedBy": approved,
             "verificationMethod": method,
-            "subject": {"id": subject, "fields": record["fields"], "identityEvidence": record["identityEvidence"], "createdAt": record["createdAt"]},
+            "subject": {"id": subject, "fields": {key: _masked(value) if key == "notes" else value for key, value in record["fields"].items()},
+                        "identityEvidence": record["identityEvidence"], "createdAt": record["createdAt"]},
             "interactions": [{**item, "summary": _masked(item.get("summary"))} for item in record["interactions"]],
             "conversations": [{"conversationId": row["conversationId"], "channel": row["channel"], "at": row.get("at"), "kind": row.get("kind")}
                               for row in linked],
@@ -153,24 +261,46 @@ class SubjectAccess:
         }
         document = json.dumps(bundle, indent=2, sort_keys=True) + "\n"
         directory = pathlib.Path(out_dir)
-        directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+        if directory != self.root / "bundles":
+            raise SubjectAccessError("export directory must be this tenant's subject-access bundles directory")
         path = directory / f"{request_id}.json"
         digest = hashlib.sha256(document.encode("utf-8")).hexdigest()
         with self._locked() as state:
             existing = state["exports"].get(request_id)
-            fresh = existing is None or existing["expiresAt"] <= int(now) or not path.is_file()
-            temporary = path.with_suffix(".tmp")
-            handle = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-            with os.fdopen(handle, "w", encoding="utf-8") as stream:
-                stream.write(document)
-                stream.flush()
-                os.fsync(stream.fileno())
-            os.replace(temporary, path)
-            state["exports"][request_id] = {"requestId": request_id, "contact": subject, "path": path.name, "expiresAt": bundle["expiresAt"],
-                                            "generatedAt": int(now), "digest": digest}
-            if len(state["exports"]) > MAX_REQUESTS:
-                for old in sorted(state["exports"].values(), key=lambda item: item["generatedAt"])[: len(state["exports"]) - MAX_REQUESTS]:
-                    del state["exports"][old["requestId"]]
+            if existing is not None and (not isinstance(existing, dict)
+                    or existing.get("contact") != subject or existing.get("path") != path.name
+                    or not isinstance(existing.get("expiresAt"), int)
+                    or not isinstance(existing.get("generatedAt"), int)
+                    or existing["expiresAt"] <= existing["generatedAt"]
+                    or not isinstance(existing.get("digest"), str)):
+                raise SubjectAccessError("subject-access export history is untrusted")
+            if existing is not None and existing["expiresAt"] > int(now):
+                # The approval was for a snapshot, not for a moving seven-day window.
+                # Recompute the candidate at the original timestamps before comparison.
+                bundle["generatedAt"] = existing["generatedAt"]
+                bundle["expiresAt"] = existing["expiresAt"]
+                document = json.dumps(bundle, indent=2, sort_keys=True) + "\n"
+                digest = hashlib.sha256(document.encode("utf-8")).hexdigest()
+            with _private_directory(directory) as bundle_fd:
+                stored = _read_private(bundle_fd, path.name, MAX_BUNDLE_BYTES)
+                if existing is not None and existing["expiresAt"] > int(now):
+                    if (stored is None or hashlib.sha256(stored).hexdigest() != existing["digest"]
+                            or digest != existing["digest"]):
+                        raise SubjectAccessError("approved export changed; obtain a new approval before re-export")
+                    fresh = False
+                else:
+                    if existing is None and stored is not None:
+                        raise SubjectAccessError("untracked subject-access bundle exists; manual reconciliation required")
+                    _atomic_private(bundle_fd, path.name, document.encode("utf-8"))
+                    fresh = True
+                    state["exports"][request_id] = {
+                        "requestId": request_id, "contact": subject, "path": path.name,
+                        "expiresAt": bundle["expiresAt"], "generatedAt": int(now), "digest": digest,
+                    }
+                    if len(state["exports"]) > MAX_REQUESTS:
+                        for old in sorted(state["exports"].values(), key=lambda item: item["generatedAt"])[:len(state["exports"]) - MAX_REQUESTS]:
+                            del state["exports"][old["requestId"]]
+
         if fresh:
             self._note("subject-access.exported", approved, {"requestId": request_id, "contact": subject, "verifiedBy": verified, "approvedBy": approved,
                                                            "method": method, "interactions": len(bundle["interactions"]),
@@ -179,15 +309,28 @@ class SubjectAccess:
                 "conversations": len(bundle["conversations"]), "repeat": not fresh}
 
     def purge_expired(self, out_dir: str | os.PathLike[str], *, now: int, by: str = "runtime:retention") -> int:
+        directory = pathlib.Path(out_dir)
+        if directory != self.root / "bundles":
+            raise SubjectAccessError("purge directory must be this tenant's subject-access bundles directory")
         removed = 0
         with self._locked() as state:
-            for request_id, item in list(state["exports"].items()):
-                if item["expiresAt"] > int(now):
-                    continue
-                with contextlib.suppress(FileNotFoundError):
-                    (pathlib.Path(out_dir) / item["path"]).unlink()
-                del state["exports"][request_id]
-                removed += 1
+            expired = [(request_id, item) for request_id, item in state["exports"].items()
+                       if isinstance(item, dict) and isinstance(item.get("expiresAt"), int)
+                       and item["expiresAt"] <= int(now)]
+            with _private_directory(directory) as bundle_fd:
+                # Validate *every* path before deleting anything. Corrupted registry
+                # content must never turn retention into arbitrary filesystem deletion.
+                for request_id, item in expired:
+                    if (not _REQUEST.fullmatch(request_id) or item.get("path") != f"{request_id}.json"):
+                        raise SubjectAccessError("subject-access retention path is untrusted")
+                    _read_private(bundle_fd, item["path"], MAX_BUNDLE_BYTES)
+                for request_id, item in expired:
+                    with contextlib.suppress(FileNotFoundError):
+                        os.unlink(item["path"], dir_fd=bundle_fd)
+                    del state["exports"][request_id]
+                    removed += 1
+                if removed:
+                    os.fsync(bundle_fd)
         if removed:
             self._note("subject-access.bundle-purged", by, {"bundles": removed})
         return removed

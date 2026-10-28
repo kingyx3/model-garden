@@ -1,0 +1,17 @@
+# Tier 0 subject-access export integrity (#241)
+
+`scripts/runtime-subject-access.py` is an **operator-only, local** aid for verified client privacy requests. It does not authenticate the requester, verifier or approver: the two `--verified-by` / `--approved-by` names are operator assertions, **not** independently verified signatures or an authorization service. Before running it, the client privacy owner must establish requester identity, a separate authorized reviewer, applicable disclosure scope and a secure delivery channel. Never expose this command as a public Agent Tool.
+
+## Storage and recovery
+
+The registry and one-use export bundles live under the private `ROOT/subject-access/` directory; bundles must be written to its `bundles/` child. The registry, lock, initialization witness and bundle files must be owned by the runtime UID, single-linked, regular and mode 0600; directories must be owner-private. Symlinks, hardlinks, corrupt/oversized registry state, unsafe bundle paths and substituted files fail closed. All writes use exclusive unpredictable temporary files, durable replacement and directory fsync.
+
+A first successful registry mutation writes `.subject-access.initialized` before the registry. If the registry subsequently disappears, **do not delete the witness or reset the registry**. Isolate the runtime, preserve the entire subject-access directory and audit chain, restore from an independently verified backup and reconcile previously issued bundles and approvals before resuming. Legacy registries without a witness remain readable; their first post-upgrade mutation creates one. Pre-upgrade deployments with existing symlinks, shared permissions or hardlinked files must be repaired offline by an authorized operator before upgrading.
+
+An export request ID identifies a **snapshot**, not permission to silently export later changes. An identical retry reuses the original private bundle and expiry without a second ledger entry. Changed contact/interaction content, a missing or modified bundle, or an untracked file at the expected path blocks the retry: obtain a new verified authorization and reconcile the old bundle first. Expiry requires the explicit `purge` command (run it as part of retention operations); it checks every registry path before deletion. A 0600 file is not a secure customer delivery mechanism: do not send filesystem paths, unredacted payloads or secret references in chat, logs or Git.
+
+Contact notes and interaction summaries mask free-text third-party emails, links, long identifiers and phone-like numbers; this heuristic is **not** a complete privacy/legal review. The export lists excluded stores, including transcripts, memory, tickets, uploads and external providers. Corrections are reviewable requests, not automatic writes to every source of truth. Validate the recipient and excluded sources with the client privacy owner before disclosure.
+
+## Evidence boundary
+
+Credential-free regression tests exercise corrupt state, deletion witness, unsafe directories/files, altered snapshots, retry idempotency, retention traversal, tenant isolation and redaction. They do **not** prove authenticated requester identity, independent two-person signoff, a real secure customer delivery, append-only externally retained audit or third-party erasure/correction. Those remain acceptance requirements on #241 and its dependencies (#115, #80). Do not mark this flow production-ready based on CI alone.
