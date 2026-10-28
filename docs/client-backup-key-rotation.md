@@ -53,3 +53,21 @@ Run the credential-free tests with
 `python3 -m unittest tests.test_client_backup_key_rotation -v`.
 Issue #230 remains open until approved live cloud backup/restore, alert delivery,
 key custody and observed RPO/RTO evidence are independently retained.
+
+## Restore-time manifest integrity
+
+The operator restore CLI now pins the original private manifest inode and
+contents **before** authenticated archive verification, then rechecks it
+before and after each Docker volume extraction. It compares ciphertext
+against the digest/size from that original manifest, not a newly read manifest
+that another same-UID process could replace during the recovery window.
+Any detected change fails closed; if a change is detected after extraction,
+treat the destination as **partially restored**, keep the project stopped and
+restart the approved recovery process with a fresh empty destination.
+
+This is a local time-of-check/time-of-use safeguard, **not** an immutable
+remote source attestation or a distributed deployment/restart freeze. Use a
+trusted isolated recovery host, protect the source directory from concurrent
+writers, independently verify GCS object generations and retained receipts,
+and conduct the client-authorized replacement-host recovery drill. No live
+restore, measured RPO/RTO or key rotation is implied by CI.

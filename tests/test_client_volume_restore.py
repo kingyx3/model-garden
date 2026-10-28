@@ -224,6 +224,80 @@ class ClientVolumeRestoreTests(unittest.TestCase):
             self.assertEqual(inspect.call_count, 5)
             inspect.assert_any_call("acme-dev", "hermes-data")
 
+    def test_restore_rejects_rewritten_manifest_and_ciphertext_after_verify(self):
+        # A local process can replace both the manifest and encrypted archive
+        # after authenticated verification, before Docker extraction begins.
+        # The restore must compare with the *originally verified* manifest.
+        swapped = False
+
+        def replace_after_verify(*_args):
+            nonlocal swapped
+            if not swapped:
+                swapped = True
+                self.write_backup(self.tar_bytes("unexpected.txt"))
+            return ""
+
+        with mock.patch.object(RESTORE.SNAPSHOT, "assert_quiescent"), \
+             mock.patch.object(RESTORE.SNAPSHOT, "assert_volume_owner", return_value="acme-dev_hermes-data"), \
+             mock.patch.object(RESTORE.SNAPSHOT, "assert_volume_exclusive"), \
+             mock.patch.object(RESTORE, "_docker", side_effect=replace_after_verify), \
+             mock.patch.object(RESTORE, "_extract") as extract:
+            with self.assertRaisesRegex(RESTORE.RestoreError, "manifest changed"):
+                RESTORE.restore(self.compose, "acme-dev", self.archive, self.identity, IMAGE,
+                                apply=True, confirmation="acme-dev")
+            extract.assert_not_called()
+
+    def test_restore_rejects_manifest_inode_replacement_even_if_bytes_match(self):
+        replaced = False
+
+        def replace_after_verify(*_args):
+            nonlocal replaced
+            if not replaced:
+                replaced = True
+                original = self.archive / "manifest.json"
+                alternate = self.archive / "alternate.json"
+                alternate.write_bytes(original.read_bytes())
+                alternate.chmod(0o600)
+                os.replace(alternate, original)
+            return ""
+
+        with mock.patch.object(RESTORE.SNAPSHOT, "assert_quiescent"), \
+             mock.patch.object(RESTORE.SNAPSHOT, "assert_volume_owner", return_value="acme-dev_hermes-data"), \
+             mock.patch.object(RESTORE.SNAPSHOT, "assert_volume_exclusive"), \
+             mock.patch.object(RESTORE, "_docker", side_effect=replace_after_verify), \
+             mock.patch.object(RESTORE, "_extract") as extract:
+            with self.assertRaisesRegex(RESTORE.RestoreError, "manifest changed"):
+                RESTORE.restore(self.compose, "acme-dev", self.archive, self.identity, IMAGE,
+                                apply=True, confirmation="acme-dev")
+            extract.assert_not_called()
+
+    def test_restore_detects_manifest_rewrite_during_extraction(self):
+        def rewrite_on_extract(*_args):
+            path = self.archive / "manifest.json"
+            path.write_bytes(path.read_bytes() + b" ")
+
+        with mock.patch.object(RESTORE.SNAPSHOT, "assert_quiescent"), \
+             mock.patch.object(RESTORE.SNAPSHOT, "assert_volume_owner", return_value="acme-dev_hermes-data"), \
+             mock.patch.object(RESTORE.SNAPSHOT, "assert_volume_exclusive"), \
+             mock.patch.object(RESTORE, "_docker", return_value=""), \
+             mock.patch.object(RESTORE, "_extract", side_effect=rewrite_on_extract):
+            with self.assertRaisesRegex(RESTORE.RestoreError, "manifest changed"):
+                RESTORE.restore(self.compose, "acme-dev", self.archive, self.identity, IMAGE,
+                                apply=True, confirmation="acme-dev")
+
+    def test_restore_detects_archive_rewrite_during_extraction(self):
+        def rewrite_archive(*_args):
+            (self.archive / "hermes-data.tar.age").write_bytes(self.tar_bytes("unexpected.txt"))
+
+        with mock.patch.object(RESTORE.SNAPSHOT, "assert_quiescent"), \
+             mock.patch.object(RESTORE.SNAPSHOT, "assert_volume_owner", return_value="acme-dev_hermes-data"), \
+             mock.patch.object(RESTORE.SNAPSHOT, "assert_volume_exclusive"), \
+             mock.patch.object(RESTORE, "_docker", return_value=""), \
+             mock.patch.object(RESTORE, "_extract", side_effect=rewrite_archive):
+            with self.assertRaisesRegex(RESTORE.RestoreError, "archive changed"):
+                RESTORE.restore(self.compose, "acme-dev", self.archive, self.identity, IMAGE,
+                                apply=True, confirmation="acme-dev")
+
     def test_refuses_non_digest_pinned_helper(self):
         with self.assertRaisesRegex(RESTORE.RestoreError, "pinned"):
             RESTORE.restore(self.compose, "acme-dev", self.archive, self.identity, "busybox:latest", apply=True, confirmation="acme-dev")
