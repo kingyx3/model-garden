@@ -285,6 +285,19 @@ class ClientVolumeRestoreTests(unittest.TestCase):
                 RESTORE.restore(self.compose, "acme-dev", self.archive, self.identity, IMAGE,
                                 apply=True, confirmation="acme-dev")
 
+    def test_restore_detects_archive_rewrite_during_extraction(self):
+        def rewrite_archive(*_args):
+            (self.archive / "hermes-data.tar.age").write_bytes(self.tar_bytes("unexpected.txt"))
+
+        with mock.patch.object(RESTORE.SNAPSHOT, "assert_quiescent"), \
+             mock.patch.object(RESTORE.SNAPSHOT, "assert_volume_owner", return_value="acme-dev_hermes-data"), \
+             mock.patch.object(RESTORE.SNAPSHOT, "assert_volume_exclusive"), \
+             mock.patch.object(RESTORE, "_docker", return_value=""), \
+             mock.patch.object(RESTORE, "_extract", side_effect=rewrite_archive):
+            with self.assertRaisesRegex(RESTORE.RestoreError, "archive changed"):
+                RESTORE.restore(self.compose, "acme-dev", self.archive, self.identity, IMAGE,
+                                apply=True, confirmation="acme-dev")
+
     def test_refuses_non_digest_pinned_helper(self):
         with self.assertRaisesRegex(RESTORE.RestoreError, "pinned"):
             RESTORE.restore(self.compose, "acme-dev", self.archive, self.identity, "busybox:latest", apply=True, confirmation="acme-dev")
