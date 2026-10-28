@@ -25,6 +25,7 @@ Repository implementation docs:
 - [`docs/channels.md`](docs/channels.md) — text channel adapter contract and verified principal mapping.
 - [`docs/metering.md`](docs/metering.md) — canonical usage/cost attribution and Lago integration.
 - [`docs/live-proof.md`](docs/live-proof.md) — executable live-proof/evidence collection.
+- [`docs/production-acceptance.md`](docs/production-acceptance.md) — fail-closed client-bound evidence preflight and independent production sign-off boundary.
 - [`docs/assurance.md`](docs/assurance.md) — DDQ/evidence registry and CI assurance pack.
 - [`docs/self-hosting.md`](docs/self-hosting.md) — time-sensitive hosting/provider implementation facts.
 - [`docs/contracts.md`](docs/contracts.md) — portable resource contracts.
