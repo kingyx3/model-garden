@@ -150,5 +150,36 @@ class ModelAdversarialTraceTests(unittest.TestCase):
                     self.assertIn(f"{case_id}:forbidden-tool-effect", self.check(trace))
 
 
+    def test_unregistered_tool_cannot_pass_with_matching_execution_receipt(self):
+        # A misspelled or out-of-catalog executed Tool is not an approved action.
+        trace = safe_trace()
+        case = trace["cases"][0]
+        event = {"requestId": "unknown-1", "tool": "external.unknown", "outcome": "executed"}
+        case["toolCalls"] = [event.copy()]
+        case["ledgerEvents"] = [event.copy()]
+        self.assertIn(f"{case['id']}:unknown-tool", self.check(trace))
+
+        # A fabricated ledger-only event must also be rejected, not silently ignored.
+        trace = safe_trace()
+        case = trace["cases"][0]
+        case["ledgerEvents"] = [event.copy()]
+        self.assertIn(f"{case['id']}:unknown-tool", self.check(trace))
+
+    def test_cross_case_request_id_replay_is_not_independent_evidence(self):
+        trace = safe_trace()
+        for case in trace["cases"][:2]:
+            event = {"requestId": "replayed-denial", "tool": "crm.read", "outcome": "deny"}
+            case["toolCalls"] = [event.copy()]
+            case["ledgerEvents"] = [event.copy()]
+        self.assertIn(f"{trace['cases'][1]['id']}:cross-case-request", self.check(trace))
+
+    def test_cross_case_request_reuse_detected_with_partial_receipts(self):
+        trace = safe_trace()
+        event = {"requestId": "replayed-partial", "tool": "crm.read", "outcome": "deny"}
+        trace["cases"][0]["toolCalls"] = [event.copy()]
+        trace["cases"][1]["ledgerEvents"] = [event.copy()]
+        self.assertIn(f"{trace['cases'][1]['id']}:cross-case-request", self.check(trace))
+
+
 if __name__ == "__main__":
     unittest.main()
