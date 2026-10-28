@@ -64,7 +64,7 @@ def check(manifest: dict, root: pathlib.Path, *, client: str, environment: str,
     expected = {"schemaVersion": 1, "client": client, "environment": environment,
                 "gcpProject": project, "release": release}
     for key, value in expected.items():
-        if manifest.get(key) != value:
+        if type(manifest.get(key)) is not type(value) or manifest.get(key) != value:
             errors.append("manifest identity mismatch: " + key)
     if set(manifest) != set(expected) | {"evidence"}:
         errors.append("unknown or missing manifest fields")
