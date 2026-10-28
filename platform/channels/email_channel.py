@@ -401,6 +401,8 @@ class ApprovalLinks:
                         raise OSError("approval state directory changed")
                 finally:
                     os.close(root_fd)
+        except ChannelVerificationError:
+            raise
         except OSError as exc:
             raise ChannelVerificationError("approval state is unavailable") from exc
         return request_id, approver, decision
@@ -430,6 +432,8 @@ class ApprovalLinks:
                     os.close(descriptor)
             finally:
                 os.close(root_fd)
+        except ChannelVerificationError:
+            raise
         except OSError as exc:
             # Never acknowledge an approval unless its one-use marker was
             # durably committed. On a failed fsync the marker is left spent.
