@@ -47,6 +47,9 @@ import importlib.util
 import json
 import os
 import pathlib
+import re
+import secrets
+import stat
 import sys
 from collections.abc import Callable, Iterable, Mapping
 from typing import Any
@@ -88,13 +91,16 @@ def _iso(seconds: int) -> str:
 
 
 class MessageLog:
-    """Which inbound messages were already handled, so a redelivered message never gets a second draft.
+    """Private, durable digest witness for inbound Message-ID deduplication.
 
-    Holds digests of Message-IDs only, in one private file under a lock. A message is recorded *after* it was handled, so a
-    crash in between can produce a second draft (visible to a person, never sent) but can never lose a customer's message.
+    A missing witness is a new mailbox. An existing corrupt, linked, exposed or
+    foreign-owned witness is *not* an empty mailbox: processing must stop so the
+    spool retries/quarantines rather than drafting or sending a duplicate.
     """
 
     MAX_ENTRIES = 20000
+    MAX_BYTES = 1_000_000
+    DIGEST = re.compile(r"[0-9a-f]{32}")
 
     def __init__(self, root: pathlib.Path) -> None:
         self.root = pathlib.Path(root)
@@ -103,33 +109,89 @@ class MessageLog:
     def _digest(self, message_id: str) -> str:
         return hashlib.sha256(message_id.encode("utf-8")).hexdigest()[:32]
 
-    def _read(self) -> list[str]:
+    @staticmethod
+    def _private_regular(info: os.stat_result) -> None:
+        if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1
+                or info.st_uid != os.geteuid() or info.st_mode & 0o077):
+            raise ValueError("unsafe support-mailbox state file; operator repair required")
+
+    def _private_root(self, *, create: bool = False) -> bool:
+        if create:
+            self.root.mkdir(parents=True, exist_ok=True, mode=0o700)
         try:
-            value = json.loads(self.path.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
+            info = self.root.lstat()
+        except FileNotFoundError:
+            return False
+        if (not stat.S_ISDIR(info.st_mode) or info.st_uid != os.geteuid()
+                or info.st_mode & 0o077):
+            raise ValueError("unsafe support-mailbox state directory; operator repair required")
+        return True
+
+    def _read(self) -> list[str]:
+        if not self._private_root():
             return []
-        return [item for item in value if isinstance(item, str)] if isinstance(value, list) else []
+        try:
+            descriptor = os.open(self.path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        except FileNotFoundError:
+            return []
+        with os.fdopen(descriptor, "rb") as stream:
+            self._private_regular(os.fstat(stream.fileno()))
+            raw = stream.read(self.MAX_BYTES + 1)
+        if len(raw) > self.MAX_BYTES:
+            raise ValueError("support-mailbox witness exceeds its bounded size")
+        try:
+            value = json.loads(raw.decode("utf-8"))
+        except (UnicodeDecodeError, ValueError) as exc:
+            raise ValueError("invalid support-mailbox witness; operator repair required") from exc
+        if (not isinstance(value, list) or len(value) > self.MAX_ENTRIES
+                or any(not isinstance(item, str) or not self.DIGEST.fullmatch(item) for item in value)
+                or len(set(value)) != len(value)):
+            raise ValueError("invalid support-mailbox witness entries; operator repair required")
+        return value
 
     def seen(self, message_id: str) -> bool:
         return self._digest(message_id) in self._read()
 
     def mark(self, message_id: str) -> None:
-        self.root.mkdir(parents=True, exist_ok=True, mode=0o700)
-        descriptor = os.open(self.root / ".support-mailbox.lock", os.O_RDWR | os.O_CREAT, 0o600)
+        self._private_root(create=True)
+        lock = self.root / ".support-mailbox.lock"
+        descriptor = os.open(
+            lock, os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0), 0o600
+        )
         try:
+            self._private_regular(os.fstat(descriptor))
             fcntl.flock(descriptor, fcntl.LOCK_EX)
             handled = self._read()
             digest = self._digest(message_id)
             if digest in handled:
                 return
             handled = [*handled, digest][-self.MAX_ENTRIES:]
-            temporary = self.path.with_suffix(".tmp")
-            handle = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-            with os.fdopen(handle, "w", encoding="utf-8") as stream:
-                stream.write(json.dumps(handled))
-                stream.flush()
-                os.fsync(stream.fileno())
-            os.replace(temporary, self.path)
+            # Exclusive unpredictable temp: an existing predictable .tmp hardlink
+            # or symlink must never be truncated by a mailbox write.
+            temporary = self.root / f".support-mailbox-{secrets.token_hex(16)}.tmp"
+            temporary_created = False
+            try:
+                handle = os.open(
+                    temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL
+                    | getattr(os, "O_NOFOLLOW", 0), 0o600
+                )
+                temporary_created = True
+                with os.fdopen(handle, "w", encoding="utf-8") as stream:
+                    stream.write(json.dumps(handled))
+                    stream.flush()
+                    os.fsync(stream.fileno())
+                os.replace(temporary, self.path)
+                directory_fd = os.open(
+                    self.root, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+                    | getattr(os, "O_NOFOLLOW", 0)
+                )
+                try:
+                    os.fsync(directory_fd)
+                finally:
+                    os.close(directory_fd)
+            finally:
+                if temporary_created:
+                    temporary.unlink(missing_ok=True)
         finally:
             fcntl.flock(descriptor, fcntl.LOCK_UN)
             os.close(descriptor)
