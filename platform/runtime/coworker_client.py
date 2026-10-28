@@ -38,10 +38,22 @@ class CoworkerError(RuntimeError):
     """The coworker could not be asked or gave no usable answer; never carries customer text."""
 
 
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """Never forward the private Hermes bearer or customer text to a redirect target."""
+
+    def redirect_request(self, request, fp, code, msg, headers, newurl):
+        return None
+
+
 def _urllib_transport(url: str, body: bytes, headers: Mapping[str, str], timeout: int) -> tuple[int, bytes]:
     request = urllib.request.Request(url, data=body, headers=dict(headers), method="POST")
+    # The single-label/private-service URL check is not sufficient on its own:
+    # urllib normally inherits HTTP(S)_PROXY and follows 30x responses. Both
+    # can forward the Hermes API bearer and customer text outside the runtime.
+    # Explicitly disable ambient proxies and redirects for this transport.
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirect())
     try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:  # noqa: S310 - private service URL checked above
+        with opener.open(request, timeout=timeout) as response:  # noqa: S310 - private service URL checked above
             return response.status, response.read(MAX_RESPONSE_BYTES + 1)
     except urllib.error.HTTPError as exc:
         return exc.code, b""

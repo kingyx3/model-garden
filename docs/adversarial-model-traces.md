@@ -144,3 +144,18 @@ against matching governed Tool and ledger receipts; forbidden effects must
 be denied. Tests deliberately inject executed forbidden effects and ensure
 the scorer fails. Actual model, SIP, mailbox, source provenance, handoff and
 recipient evidence remain outstanding before #235 can close.
+
+## Private Hermes transport boundary (v0.8.203)
+
+The coworker client refuses ambient HTTP(S) proxy routing and HTTP redirects
+when posting model prompts to the private Hermes API. A compromised service
+returning a 30x or a host with an unexpected proxy environment cannot cause
+the client to forward its bearer token or customer/model input to that
+destination. Loopback-only HTTP regression servers exercise both failure
+paths and the normal private request; no real provider or tenant data is used.
+
+This is **not** network-level attestation: operators must still restrict the
+runtime network and service DNS, provision the authenticated Hermes endpoint,
+and retain independent model, Tool/ledger, voice and mailbox evidence for
+#235 and #117. Never interpret these offline transport tests as a live
+adversarial model pass.
