@@ -594,7 +594,7 @@ def _gateway_settings(binding: dict[str, Any]) -> tuple[dict[str, Any] | None, d
     if not isinstance(gateway, dict):
         raise ValueError("Docker target failed: EnvironmentBinding gateway must be an object")
     allowed = {"enabled", "public_origin", "agent", "directory", "people", "escalate_to", "web", "slack", "teams", "approvals", "mailbox",
-               "coworker_api_key_ref", "secrets", "smtp_user", "bind", "smtp_bind", "enrollment", "oauth", "studio"}
+               "coworker_api_key_ref", "secrets", "smtp_user", "bind", "smtp_bind", "enrollment", "oauth", "studio", "readiness_exposure"}
     unknown = sorted(set(gateway) - allowed)
     if unknown:
         raise ValueError(f"Docker target failed: unknown gateway settings: {', '.join(unknown)}")
@@ -615,8 +615,12 @@ def _gateway_settings(binding: dict[str, Any]) -> tuple[dict[str, Any] | None, d
         value = gateway.get(name, "127.0.0.1")
         if not isinstance(value, str) or not re.fullmatch(r"(\d{1,3}\.){3}\d{1,3}", value):
             raise ValueError(f"Docker target failed: gateway.{name} must be an IPv4 address")
+    exposure = gateway.get("readiness_exposure", "private")
+    if type(exposure) is not str or exposure not in ("private", "legacy-public"):
+        raise ValueError("Docker target failed: gateway.readiness_exposure must be private or legacy-public")
     config: dict[str, Any] = {
         "publicOrigin": gateway.get("public_origin"), "directory": gateway.get("directory") or {}, "people": gateway.get("people") or {},
+        "readinessExposure": exposure,
     }
     for source, target in (("escalate_to", "escalateTo"), ("agent", "agent"), ("paused_message", "pausedMessage")):
         if gateway.get(source):
