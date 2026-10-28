@@ -207,10 +207,15 @@ class ChannelIngress:
                 self._send(adapter, inbound, result["reply"])
                 return f"handoff:{result['status']}"
             if self._schedules is not None and SCHEDULE_COMMANDS.is_command(text):
-                reply = SCHEDULE_COMMANDS.handle(
-                    self._schedules, text, principal=principal.identity if principal.mapped else None,
-                    agent=self._agent, admin="admin" in principal.roles,
-                )
+                # A signed, mapped sender in a shared channel is still not a private audience.
+                # Never list goals/IDs or mutate owner state where bystanders can see the reply.
+                if not self._is_direct(inbound):
+                    reply = "Manage schedules only in a direct message."
+                else:
+                    reply = SCHEDULE_COMMANDS.handle(
+                        self._schedules, text, principal=principal.identity if principal.mapped else None,
+                        agent=self._agent, admin="admin" in principal.roles,
+                    )
                 self._send(adapter, inbound, reply or "")
                 return "schedule-command"
             pause_command = PAUSE_COMMAND.match(text.strip()) if self._pause is not None else None
