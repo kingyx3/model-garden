@@ -265,8 +265,17 @@ class SubjectAccess:
             if existing is not None and (not isinstance(existing, dict)
                     or existing.get("contact") != subject or existing.get("path") != path.name
                     or not isinstance(existing.get("expiresAt"), int)
+                    or not isinstance(existing.get("generatedAt"), int)
+                    or existing["expiresAt"] <= existing["generatedAt"]
                     or not isinstance(existing.get("digest"), str)):
                 raise SubjectAccessError("subject-access export history is untrusted")
+            if existing is not None and existing["expiresAt"] > int(now):
+                # The approval was for a snapshot, not for a moving seven-day window.
+                # Recompute the candidate at the original timestamps before comparison.
+                bundle["generatedAt"] = existing["generatedAt"]
+                bundle["expiresAt"] = existing["expiresAt"]
+                document = json.dumps(bundle, indent=2, sort_keys=True) + "\n"
+                digest = hashlib.sha256(document.encode("utf-8")).hexdigest()
             with _private_directory(directory) as bundle_fd:
                 stored = _read_private(bundle_fd, path.name, MAX_BUNDLE_BYTES)
                 if existing is not None and existing["expiresAt"] > int(now):
