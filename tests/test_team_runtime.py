@@ -988,3 +988,75 @@ class DelegationToolTests(Case):
         self.assertEqual(coordinator.delegate_task(task="t9", to_agent="account-researcher", goal="x")["status"], "invalid")
         self.assertEqual(team.runtime("receptionist").report_task(task="t1", outcome="done", result="x")["status"], "invalid")
         self.assertEqual(team.runtime("receptionist").report_task(task="t1", outcome="nope", result="x")["status"], "invalid")
+
+
+class PrivateTeamStateTrustTests(Case):
+    """A compromised same-user file path must not redirect or replace task authority."""
+
+    def test_predictable_legacy_temporary_symlink_cannot_truncate_a_victim(self):
+        directory = self.base / "agents" / "coordinator"
+        directory.mkdir(parents=True, mode=0o700)
+        victim = self.base / "victim.txt"
+        victim.write_text("preserve-me")
+        (directory / "desired-state.json.tmp").symlink_to(victim)
+        self.team()
+        self.assertEqual(victim.read_text(), "preserve-me")
+
+    def test_existing_agent_state_symlink_is_rejected_without_following_it(self):
+        directory = self.base / "agents" / "coordinator"
+        directory.mkdir(parents=True, mode=0o700)
+        victim = self.base / "victim.txt"
+        victim.write_text("preserve-me")
+        (directory / "desired-state.json").symlink_to(victim)
+        with self.assertRaises(team_runtime.TeamError):
+            self.team()
+        self.assertEqual(victim.read_text(), "preserve-me")
+
+    def test_task_snapshot_symlink_or_hardlink_refuses_restart(self):
+        for linked in ("symlink", "hardlink"):
+            with self.subTest(linked=linked):
+                base = self.base / linked
+                team = team_runtime.TeamRuntime(states(), base, environment_binding=BINDING,
+                                                environ={"MODEL_GARDEN_INITIATING_IDENTITY": "alice@acme.example"})
+                team.start_task("coordinator", task_id="t-root", originating_principal="alice@acme.example",
+                                originator_permissions=["kb.search"], goal="Look up hours")
+                path = base / "tasks" / "t-root.json"
+                victim = base / "victim.json"
+                victim.write_bytes(path.read_bytes())
+                victim.chmod(0o600)
+                path.unlink()
+                if linked == "symlink":
+                    path.symlink_to(victim)
+                else:
+                    import os
+                    os.link(victim, path)
+                with self.assertRaises(team_runtime.TeamError):
+                    team_runtime.TeamRuntime(states(), base, environment_binding=BINDING,
+                                             environ={"MODEL_GARDEN_INITIATING_IDENTITY": "alice@acme.example"})
+
+    def test_world_readable_task_snapshot_is_not_loaded(self):
+        team = self.team()
+        self.task(team)
+        path = self.base / "tasks" / "task-1.json"
+        path.chmod(0o644)
+        with self.assertRaises(team_runtime.TeamError):
+            self.team()
+
+    def test_snapshot_root_must_match_filename(self):
+        team = self.team()
+        self.task(team)
+        path = self.base / "tasks" / "task-1.json"
+        snapshot = json.loads(path.read_text())
+        root = snapshot["nodes"].pop("task-1")
+        root["envelope"]["taskId"] = "other-root"
+        snapshot["nodes"]["other-root"] = root
+        path.write_text(json.dumps(snapshot))
+        with self.assertRaises(team_runtime.TeamError):
+            self.team()
+
+    def test_existing_agent_state_with_exposed_permissions_is_refused(self):
+        team = self.team()
+        path = self.base / "agents" / "coordinator" / "desired-state.json"
+        path.chmod(0o666)
+        with self.assertRaises(team_runtime.TeamError):
+            self.team()
