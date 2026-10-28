@@ -52,6 +52,7 @@ import os
 import pathlib
 import re
 import secrets
+import stat
 import sys
 from collections.abc import Callable, Iterable, Iterator, Mapping
 from typing import Any
