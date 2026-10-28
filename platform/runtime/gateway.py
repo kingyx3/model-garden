@@ -503,6 +503,10 @@ class Gateway:
         """
         if not principal.mapped:
             return ()
+        # Do not stage autonomous file delivery while the owner has paused
+        # the coworker. The actual Slack upload takes its own effect lease.
+        if _module("pause").PauseStore(self.data).is_paused():
+            return ()
         wanted: list[str] = []
         for match in re.finditer(rf"tier0:{re.escape(self.tenant)}/(a-[0-9a-f]{{12}})", text):
             if match.group(1) not in wanted:
@@ -554,12 +558,16 @@ class Gateway:
         return self._team_runtime
 
     def _assign_task(self, person: str, agent: str, goal: str) -> str:
-        """``assign <agent>: <goal>`` from a mapped person in a direct chat; a refusal names the rule and never the goal."""
-        with self._team_lock:
-            try:
-                envelope = self._team().assign_task(person, agent, goal=goal)
-            except PermissionError as exc:  # TeamError and DelegationError: unknown Agent, nothing in common, over budget
-                raise ValueError(str(exc)) from None
+        """A chat delegation is a material task write: admit it only under the owner pause fence."""
+        store = _module("pause").PauseStore(self.data)
+        with store.effect_guard():
+            if store.is_paused():
+                raise ValueError("coworker is paused; nothing was assigned")
+            with self._team_lock:
+                try:
+                    envelope = self._team().assign_task(person, agent, goal=goal)
+                except PermissionError as exc:  # TeamError and DelegationError: unknown Agent, nothing in common, over budget
+                    raise ValueError(str(exc)) from None
         return f"Handed to {agent} as task {envelope['taskId']}. It is in the Agent's inbox."
 
     def _pause_command(self, admin: str, verb: str, reason: str) -> str:
@@ -639,14 +647,18 @@ class Gateway:
         return inbox.format_chat(inbox.for_person(snapshot, principal.identity, everything=everything))
 
     def _upload_to_slack(self, conversation_id: str, thread_id: str | None, attachment: Any) -> None:
-        """Upload one deliverable into a Slack thread; read with the requester it was authorised for, never a different identity."""
-        with self._owner_lock:
-            owner = self._deliverable_owner.get(attachment.attachment_id)
-        if owner is None or self.slack_transport is None:
-            raise PermissionError("no authorised requester for this file")
-        _, data = self._artifacts().get(attachment.attachment_id.rsplit("/", 1)[-1], requested_by=owner)
-        self.slack_transport.upload_file(conversation_id, thread_id, attachment.name, data)
-        self.audit("deliverable.uploaded", IDENTITY, {"channel": "slack", "location": attachment.attachment_id, "bytes": len(data)})
+        """Upload only while active; an admitted upload must finish before pause acknowledgement."""
+        store = _module("pause").PauseStore(self.data)
+        with store.effect_guard():
+            if store.is_paused():
+                raise PermissionError("coworker is paused; file was not uploaded")
+            with self._owner_lock:
+                owner = self._deliverable_owner.get(attachment.attachment_id)
+            if owner is None or self.slack_transport is None:
+                raise PermissionError("no authorised requester for this file")
+            _, data = self._artifacts().get(attachment.attachment_id.rsplit("/", 1)[-1], requested_by=owner)
+            self.slack_transport.upload_file(conversation_id, thread_id, attachment.name, data)
+            self.audit("deliverable.uploaded", IDENTITY, {"channel": "slack", "location": attachment.attachment_id, "bytes": len(data)})
 
     # -- answering ----------------------------------------------------------------------------------------
 
