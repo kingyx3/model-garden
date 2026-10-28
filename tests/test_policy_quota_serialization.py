@@ -47,6 +47,19 @@ def competing_worker(audit_path, first, entered, release, second_executed, outpu
         output.put("ERROR:" + type(exc).__name__ + ":" + str(exc))
 
 
+def crash_after_dispatch(audit_path):
+    """Simulate SIGKILL after an external side effect, before its success receipt."""
+    import os
+
+    def provider(_arguments):
+        os._exit(0)
+
+    govern.execute_action(
+        state(), "mail.send", {"category": "faq"}, provider,
+        initiating_user="owner@example.invalid", audit_path=pathlib.Path(audit_path),
+    )
+
+
 class PolicyQuotaSerializationTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
@@ -119,6 +132,65 @@ class PolicyQuotaSerializationTests(unittest.TestCase):
             govern.execute_action(state(), "mail.send", {}, fail, audit_path=self.path)
         result = govern.execute_action(state(), "mail.send", {}, lambda _: {"ok": True}, audit_path=self.path)
         self.assertEqual(result["status"], "executed")
+
+
+    def test_worker_crash_after_dispatch_keeps_the_slot_reserved(self):
+        """An uncertain external write must not be silently counted as unused."""
+        context = multiprocessing.get_context("fork")
+        worker = context.Process(target=crash_after_dispatch, args=(str(self.path),))
+        try:
+            worker.start()
+            worker.join(10)
+            self.assertEqual(worker.exitcode, 0, "worker did not reach the simulated crash")
+            self.assertEqual(govern.count_executions_today(self.path, "mail.send", agent="receptionist"), 1)
+            called = []
+            result = govern.execute_action(
+                state(), "mail.send", {"category": "next"},
+                lambda _: called.append(True), audit_path=self.path,
+            )
+            self.assertEqual(result["status"], "pending-approval")
+            self.assertEqual(called, [])
+        finally:
+            if worker.is_alive():
+                worker.terminate()
+                worker.join(5)
+
+    def test_identical_requests_have_separate_attempt_receipts(self):
+        desired = state()
+        rule = desired["policies"][0]["spec"]["rules"][0]
+        rule["conditions"]["maxPerDay"] = 2
+        rule["signoff"]["ruleDigest"] = govern.POLICY.rule_digest(rule)
+        for _ in range(2):
+            result = govern.execute_action(
+                desired, "mail.send", {"category": "same"},
+                lambda _: {"ok": True}, audit_path=self.path,
+            )
+            self.assertEqual(result["status"], "executed")
+        self.assertEqual(govern.count_executions_today(self.path, "mail.send", agent="receptionist"), 2)
+        blocked = govern.execute_action(
+            desired, "mail.send", {"category": "same"},
+            lambda _: self.fail("provider called after allowance exhausted"), audit_path=self.path,
+        )
+        self.assertEqual(blocked["status"], "pending-approval")
+
+    def test_receipt_failure_after_provider_execution_preserves_reservation(self):
+        called = []
+        def provider(_arguments):
+            called.append(True)
+            return {"ok": True}
+        def broken_receipt(_result):
+            raise RuntimeError("receipt unavailable")
+        with self.assertRaisesRegex(RuntimeError, "receipt unavailable"):
+            govern.execute_action(
+                state(), "mail.send", {}, provider, audit_path=self.path,
+                external_object_ref=broken_receipt,
+            )
+        self.assertEqual(called, [True])
+        self.assertEqual(govern.count_executions_today(self.path, "mail.send", agent="receptionist"), 1)
+        blocked = govern.execute_action(
+            state(), "mail.send", {}, lambda _: self.fail("provider retried"), audit_path=self.path,
+        )
+        self.assertEqual(blocked["status"], "pending-approval")
 
     def test_unlimited_policy_does_not_create_quota_lock(self):
         result = govern.execute_action(state(limited=False), "mail.send", {}, lambda _: {"ok": True},
