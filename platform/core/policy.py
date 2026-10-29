@@ -230,12 +230,15 @@ def evaluate(
     arguments: Mapping[str, Any] | None = None,
     usage_today: int | None = None,
     usage_by_principal: int | None = None,
+    owner_keys: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
     """Return ``{"decision", "reason", "ruleId"}`` for one already-selected Tool call.
 
     ``arguments``, ``usage_today`` (successful executions of this Tool so far today, UTC) and
     ``usage_by_principal`` (those the requesting identity made) feed the bounded conditions of
-    `allow` rules; omit them and conditional rules do not apply.
+    `allow` rules; omit them and conditional rules do not apply. When ``owner_keys`` is
+    provided, approval-relaxing waivers require a valid owner Ed25519 signature at
+    runtime as well as the content digest.
     """
     who = principal or MEMBER
     matched = []
@@ -256,7 +259,23 @@ def evaluate(
     if denied is not None:
         return {"decision": "deny", "reason": "policy-deny", "ruleId": denied["id"]}
     allows = [rule for rule in matched if rule["effect"] == "allow"]
-    waiver = next((rule for rule in allows if signoff_valid(rule)), None)
+    # A digest/name alone is not an authenticated owner waiver. When a deployment
+    # carries its trusted public-key binding, reverify the Ed25519 signature at the
+    # execution boundary, not only when the workspace was compiled. An empty or
+    # malformed key set grants no waiver; legacy unbound states retain their
+    # existing approval behavior until the operator configures owner keys.
+    def signed_waiver(rule: Mapping[str, Any]) -> bool:
+        if not signoff_valid(rule):
+            return False
+        if owner_keys is None:
+            return True
+        if not isinstance(owner_keys, Mapping):
+            return False
+        owner = rule["signoff"]["owner"].strip().lower()
+        key = owner_keys.get(owner)
+        return isinstance(key, str) and signature_valid(rule, key)
+
+    waiver = next((rule for rule in allows if signed_waiver(rule)), None)
 
     if who == PUBLIC and risk != "read":
         # Floor: a public principal never reaches privileged or external-communication

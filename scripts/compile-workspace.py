@@ -474,6 +474,10 @@ def resolve_agent(workspace, agent, resources, source_paths, source_roots, envir
     }
     if resolved["policies"]:
         compiled["policies"] = resolved["policies"]
+    if owner_keys is not None:
+        # Public keys are non-secret; the governed runtime must reverify the
+        # owner's signature instead of trusting a client-editable digest alone.
+        compiled["policyOwnerKeys"] = owner_keys
     owned_schedules = schedule_definitions(resources, name)
     if owned_schedules:
         compiled["schedules"] = owned_schedules
