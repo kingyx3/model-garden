@@ -192,3 +192,21 @@ The following remain external evidence or founder actions rather than missing pl
 - real client economics, ROI, testimonial/case-study/referral permission and pipeline outcomes.
 
 These should stay visibly incomplete until evidence exists. The repository now makes the technical/operating proof repeatable and machine-checkable instead of relying on an informal checklist.
+
+## Reference call evidence attribution (issue #117, v0.8.223)
+
+The LiveKit worker now stamps its configured Agent identity on successful
+`HumanTransfer` and saved `FallbackMessage` lifecycle receipts. The reference
+proof collector credits a fallback only when **room hash, Agent identity and
+event time** match a completed call. A legacy receipt without an Agent identity
+is still retained for operator investigation but **cannot satisfy** the
+reference acceptance gate. Re-run the authorized DEV scenario on the upgraded
+voice worker; do not backfill the missing identity by editing old evidence.
+
+For two-way transcripts, every turn's monotonic offset must fit the recorded
+start/end wall-clock duration (with at most one second for integer timestamp
+rounding). A transcript whose speech extends beyond its own end timestamp
+cannot establish completeness, even if its room hash and disclosure match.
+These are **structural** checks on locally collected evidence, not SIP/provider
+attestation, verified human delivery, owner consent or a client go-live signoff.
+Retain independent provider receipts and real operator acceptance for #117.
