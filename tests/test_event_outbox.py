@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 import pathlib
 import stat
 import sys
@@ -68,20 +69,86 @@ class OutboxTests(unittest.TestCase):
         self.assertTrue(self.box.append("chat.message", REF, at=2))
         self.assertFalse(self.box.append("chat.message", REF, at=3))
 
-    def test_a_half_written_or_corrupt_line_is_never_read_as_an_event(self):
-        self.box.append("chat.message", REF, at=1)
-        with open(self.box.path, "ab") as handle:
-            handle.write(b"not json\n")
-            handle.write(json.dumps({"kind": "chat.message", "ref": "../x", "at": 2}).encode() + b"\n")
-            handle.write(b'{"kind": "chat.message", "ref": "' + REF.encode())  # still being written
-        events, offset = self.box.read(0)
-        self.assertEqual([item["at"] for item in events], [1])
-        self.assertLess(offset, self.box.path.stat().st_size)  # stops before the unfinished line
+    def test_corrupt_or_unterminated_event_refuses_the_whole_batch_instead_of_silently_dropping_work(self):
+        for payload in (b"not json\n", json.dumps({"kind": "chat.message", "ref": "../x", "at": 2}).encode() + b"\n",
+                        b'{"kind": "chat.message", "ref": "' + REF.encode()):
+            with self.subTest(payload=payload[:24]), tempfile.TemporaryDirectory() as tmp:
+                box = outbox_module.EventOutbox(pathlib.Path(tmp) / "events")
+                box.append("chat.message", REF, at=1)
+                with open(box.path, "ab") as handle:
+                    handle.write(payload)
+                with self.assertRaisesRegex(ValueError, "corrupt|incomplete|untrusted"):
+                    box.read(0)
+                with self.assertRaises(ValueError):
+                    box.compact(box.path.stat().st_size)
+                self.assertIn(payload, box.path.read_bytes())
 
-    def test_a_replaced_or_shorter_file_restarts_the_reader_at_the_beginning(self):
+    def test_invalid_or_stale_offset_never_replays_or_discards_events(self):
         self.box.append("chat.message", REF, at=1)
-        events, _ = self.box.read(10_000)
+        events, offset = self.box.read(0)
         self.assertEqual(len(events), 1)
+        for bad in (offset + 1, 1, -1, True):
+            with self.subTest(bad=bad), self.assertRaises(ValueError):
+                self.box.read(bad)
+        self.assertEqual(self.box.read(offset), ([], offset))
+
+    def test_deleted_initialized_outbox_is_not_mistaken_for_a_fresh_empty_workspace(self):
+        self.box.append("chat.message", REF, at=1)
+        self.assertTrue((self.box.root / ".events.initialized").exists())
+        self.box.path.unlink()
+        for operation in (lambda: self.box.read(0), lambda: self.box.append("chat.message", OTHER, at=2),
+                          lambda: self.box.compact(0)):
+            with self.assertRaisesRegex(ValueError, "missing|untrusted"):
+                operation()
+        self.assertFalse(self.box.path.exists())
+
+    def test_linked_or_public_event_file_cannot_be_read_appended_or_compacted(self):
+        for attack in ("symlink", "hardlink", "permissive", "fifo"):
+            with self.subTest(attack=attack), tempfile.TemporaryDirectory() as tmp:
+                box = outbox_module.EventOutbox(pathlib.Path(tmp) / "events")
+                box.append("chat.message", REF, at=1)
+                original = box.path.read_bytes()
+                box.path.unlink()
+                outside = box.root / "outside.jsonl"
+                outside.write_bytes(original)
+                outside.chmod(0o600)
+                if attack == "symlink":
+                    box.path.symlink_to(outside)
+                elif attack == "hardlink":
+                    os.link(outside, box.path)
+                elif attack == "permissive":
+                    box.path.write_bytes(original)
+                    box.path.chmod(0o644)
+                else:
+                    os.mkfifo(box.path)
+                for operation in (lambda: box.read(0), lambda: box.append("chat.message", OTHER, at=2),
+                                  lambda: box.compact(0)):
+                    with self.assertRaises((OSError, ValueError)):
+                        operation()
+                self.assertEqual(outside.read_bytes(), original)
+
+    def test_untrusted_lock_and_directory_refuse_all_operations(self):
+        for attack in ("lock-symlink", "lock-hardlink", "lock-public", "root-public", "root-symlink"):
+            with self.subTest(attack=attack), tempfile.TemporaryDirectory() as tmp:
+                box = outbox_module.EventOutbox(pathlib.Path(tmp) / "events")
+                box.append("chat.message", REF, at=1)
+                lock = box.root / ".events.lock"
+                if attack == "lock-symlink":
+                    lock.rename(box.root / "original.lock")
+                    lock.symlink_to(box.root / "original.lock")
+                elif attack == "lock-hardlink":
+                    os.link(lock, box.root / "other.lock")
+                elif attack == "lock-public":
+                    lock.chmod(0o666)
+                elif attack == "root-public":
+                    box.root.chmod(0o755)
+                else:
+                    box.root.rename(box.root.with_name("original-events"))
+                    box.root.symlink_to(box.root.with_name("original-events"), target_is_directory=True)
+                for operation in (lambda: box.read(0), lambda: box.append("chat.message", OTHER, at=2),
+                                  lambda: box.compact(0)):
+                    with self.assertRaises((OSError, ValueError)):
+                        operation()
 
     def test_it_empties_only_when_everything_was_read_and_the_file_is_large(self):
         self.box.append("chat.message", REF, at=1)
