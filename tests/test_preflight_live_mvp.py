@@ -62,9 +62,9 @@ class LiveMvpPreflightTests(unittest.TestCase):
         for directory in ("contracts/v1", "platform/connectors", "tests", "assurance/provider-proof"):
             (root / directory).mkdir(parents=True, exist_ok=True)
         adapter = root / "platform/connectors/upstream_calendar.py"
-        adapter.write_text("# synthetic governed upstream adapter\\n", encoding="utf-8")
+        adapter.write_text("# synthetic governed upstream adapter\n", encoding="utf-8")
         (root / "tests/test_upstream_calendar.py").write_text(
-            "platform/connectors/upstream_calendar.py\\n    def test_upstream(self): pass\\n", encoding="utf-8")
+            "platform/connectors/upstream_calendar.py\n    def test_upstream(self): pass\n", encoding="utf-8")
         provider = {
             "id": "upstream-calendar", "name": "Synthetic Calendar", "family": "calendar", "tier": 2,
             "method": "governed-mcp", "status": "live", "issue": 66,
@@ -78,7 +78,7 @@ class LiveMvpPreflightTests(unittest.TestCase):
         (root / "contracts/v1/integrations.json").write_text(json.dumps({
             "registryVersion": "1.0.0", "providers": [provider],
         }), encoding="utf-8")
-        (root / "VERSION").write_text("9.9.9\\n", encoding="utf-8")
+        (root / "VERSION").write_text("9.9.9\n", encoding="utf-8")
         proof = {
             "schemaVersion": 1, "provider": "upstream-calendar", "redacted": True,
             "provedAt": "2026-10-01T00:00:00Z", "expiresAt": "2026-12-01T00:00:00Z",
