@@ -145,10 +145,10 @@ class VoiceIngestionIntegrityTests(unittest.TestCase):
     """An unsafe voice export must never be partially accepted as a complete filing batch."""
 
     def test_corrupt_nonobject_and_unterminated_records_fail_closed(self):
-        for bad in ("not json\\n", "[]\\n", '{"type":"CallTranscript"', json.dumps(transcript("last"))):
+        for bad in ("not json\n", "[]\n", '{"type":"CallTranscript"', json.dumps(transcript("last"))):
             with self.subTest(bad=bad[:30]), tempfile.TemporaryDirectory() as tmp:
                 path = pathlib.Path(tmp) / "voice.jsonl"
-                path.write_text(json.dumps(transcript("good")) + "\\n" + bad, encoding="utf-8")
+                path.write_text(json.dumps(transcript("good")) + "\n" + bad, encoding="utf-8")
                 with self.assertRaises(ValueError):
                     filing.read_voice_records(path)
 
@@ -156,14 +156,14 @@ class VoiceIngestionIntegrityTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             path = pathlib.Path(tmp) / "voice.jsonl"
             for duplicate in (transcript("same"), transcript("same", started=1_790_000_500)):
-                path.write_text(json.dumps(transcript("same")) + "\\n" + json.dumps(duplicate) + "\\n")
+                path.write_text(json.dumps(transcript("same")) + "\n" + json.dumps(duplicate) + "\n")
                 with self.assertRaisesRegex(ValueError, "duplicate"):
                     filing.read_voice_records(path)
 
     def test_over_limit_export_is_an_error_not_a_successful_prefix(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = pathlib.Path(tmp) / "voice.jsonl"
-            path.write_text((json.dumps({"type": "FallbackMessage"}) + "\\n") * (filing.MAX_RECORDS + 1))
+            path.write_text((json.dumps({"type": "FallbackMessage"}) + "\n") * (filing.MAX_RECORDS + 1))
             with self.assertRaisesRegex(ValueError, "limit"):
                 filing.read_voice_records(path)
 
@@ -173,7 +173,7 @@ class VoiceIngestionIntegrityTests(unittest.TestCase):
             events = [transcript("later", started=200), {"type": "FallbackMessage"},
                       {"type": "TranscriptWriteFailed", "timestamp": 150, "errorType": "OSError"},
                       transcript("earlier", started=100)]
-            path.write_text("".join(json.dumps(row) + "\\n" for row in events))
+            path.write_text("".join(json.dumps(row) + "\n" for row in events))
             snapshot = filing.read_voice_records(path)
             self.assertEqual([row["callHash"] for row in filing.call_transcripts(snapshot)], ["earlier", "later"])
             self.assertEqual(len(filing.transcript_failures(snapshot)), 1)
@@ -323,8 +323,8 @@ class CommandTests(FilingCase):
 
     def test_invalid_late_voice_row_prevents_all_governed_side_effects(self):
         common = self.common()
-        good = json.dumps(transcript("first")) + "\\n"
-        for tail in ("not-json\\n", json.dumps(transcript("first")) + "\\n"):
+        good = json.dumps(transcript("first")) + "\n"
+        for tail in ("not-json\n", json.dumps(transcript("first")) + "\n"):
             with self.subTest(tail=tail[:15]):
                 code, out, err = self.run_cli(["--transcripts", "-", *common], stdin=good + tail)
                 self.assertEqual(code, 1)
