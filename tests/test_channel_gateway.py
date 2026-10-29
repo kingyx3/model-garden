@@ -187,8 +187,11 @@ class SlackTests(GatewayCase):
 
     def test_a_full_outbox_drops_the_event_loudly_and_the_message_is_still_answered(self):
         outbox = self.gateway_outbox()
-        outbox.root.mkdir(parents=True, exist_ok=True)
-        outbox.path.write_bytes(b"x" * outbox_module.MAX_BYTES)
+        # Fill a legitimately private queue with valid records. An unsafe or
+        # malformed queue is a different failure from normal backpressure.
+        self.assertTrue(outbox.append("chat.message", "ab" * 16, at=NOW))
+        line = outbox.path.read_bytes()
+        outbox.path.write_bytes(line * (outbox_module.MAX_BYTES // len(line)))
         self.slack_post("/channels/slack/events", slack_event(ts="1700000000.000930"))
         self.assertEqual(self.posts()[-1]["text"], "Hello from the coworker")
         dropped = [json.loads(line) for line in (self.data / "audit.jsonl").read_text().splitlines() if "channel.event-dropped" in line]
