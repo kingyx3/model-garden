@@ -324,5 +324,49 @@ class SameCallScenarioTests(unittest.TestCase):
         self.assertEqual(data["referenceScenario"]["completeCalls"], 0)
         self.assertFalse(result["passed"])
 
+
+class ReferenceProvenanceRegressionTests(unittest.TestCase):
+    """Do not certify a call using another agent's fallback or impossible speech times."""
+
+    def test_fallback_requires_matching_agent_even_when_room_and_time_match(self):
+        lifecycle = [voice("CallStarted"), voice("CallEnded", timestamp=110)]
+        for kind in ("HumanTransfer", "FallbackMessage"):
+            for other_agent in ("other-employee", None):
+                with self.subTest(kind=kind, other_agent=other_agent):
+                    receipt = voice(kind, timestamp=105)
+                    if other_agent is None:
+                        receipt.pop("agent")
+                    else:
+                        receipt["agent"] = other_agent
+                    rows = lifecycle + [receipt]
+                    self.assertEqual(proof._voice_summary(rows)["completedCallFallbackEvidence"], 0)
+                    self.assertEqual(
+                        proof._single_call_scenario_count(
+                            rows, SameCallScenarioTests.action_rows(), [transcript()]
+                        ), 0
+                    )
+
+    def test_same_agent_fallback_still_counts_for_completed_call(self):
+        rows = [voice("CallStarted"), voice("CallEnded", timestamp=110),
+                voice("FallbackMessage", timestamp=105)]
+        self.assertEqual(proof._voice_summary(rows)["completedCallFallbackEvidence"], 1)
+        self.assertEqual(
+            proof._single_call_scenario_count(rows, SameCallScenarioTests.action_rows(), [transcript()]), 1
+        )
+
+    def test_transcript_turns_must_fit_inside_recorded_call_duration(self):
+        lifecycle = [voice("CallStarted"), voice("CallEnded", timestamp=110)]
+        base = transcript()
+        for changed in (
+            {"turns": [base["turns"][0], {**base["turns"][1], "offsetSeconds": 30.0}]},
+            {"endedAt": 101},
+            {"endedAt": 105, "turns": [base["turns"][0], {**base["turns"][1], "offsetSeconds": 7.0}]},
+        ):
+            with self.subTest(changed=changed):
+                self.assertEqual(
+                    proof._transcript_summary(lifecycle, [{**base, **changed}])["completeTwoWayCalls"], 0
+                )
+
+
 if __name__ == "__main__":
     unittest.main()
