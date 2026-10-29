@@ -668,7 +668,7 @@ class Gateway:
             if (not isinstance(manifest, dict) or manifest.get("kind") != "CapabilityManifest"
                     or manifest.get("schemaVersion") != 1
                     or not isinstance(source, dict)
-                    or manifest.get("client") != source.get("client")
+                    or tenant_of({"source": {"client": manifest.get("client")}}) != self.tenant
                     or manifest.get("agent") != source.get("name")):
                 return unavailable
             capabilities = _module("capabilities")
