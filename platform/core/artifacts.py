@@ -255,6 +255,8 @@ class ArtifactStore:
             artifacts = state["artifacts"]
             existing = next((entry for entry in artifacts.values()
                              if entry["sha256"] == digest and entry["requestedBy"] == who and entry["name"] == label
+                             and entry["agent"] == agent and entry["mediaType"] == media_type
+                             and entry["classification"] == classification and entry["sources"] == listed
                              and self._expires_at(entry) > stamp), None)
             if existing is not None:
                 # Idempotent success must not bless an unsafe or altered payload.
@@ -281,9 +283,12 @@ class ArtifactStore:
 
     # -- reads --------------------------------------------------------------------------
 
-    def list(self, *, requested_by: str | None = None) -> list[dict[str, Any]]:
+    def list(self, *, requested_by: str | None = None, now: int | None = None) -> list[dict[str, Any]]:
+        """Return only unexpired metadata; retention applies before manual cleanup runs."""
+        stamp = int(dt.datetime.now(dt.timezone.utc).timestamp()) if now is None else now
         with self._locked() as state:
-            entries = [dict(entry) for entry in state["artifacts"].values()]
+            entries = [dict(entry) for entry in state["artifacts"].values()
+                       if self._expires_at(entry) > stamp]
         if requested_by is not None:
             entries = [entry for entry in entries if entry["requestedBy"] == requested_by]
         return sorted(entries, key=lambda entry: (entry["createdAt"], entry["id"]))
