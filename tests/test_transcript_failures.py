@@ -39,15 +39,19 @@ def failure(at=1_790_000_000, *, error="OSError", room=CALL_HASH, **extra) -> di
 
 
 class ReadTests(unittest.TestCase):
-    def test_only_failure_events_with_a_timestamp_are_read_oldest_first(self):
+    def test_only_valid_failure_events_are_read_oldest_first(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = pathlib.Path(tmp) / "messages.jsonl"
             path.write_text("\n".join([
-                json.dumps(failure(30)), "not json", json.dumps({"type": "CallEnded", "timestamp": 1}),
-                json.dumps({"type": "TranscriptWriteFailed"}), json.dumps(failure(10, room="cd" * 32)), "[]", "",
+                json.dumps(failure(30)), json.dumps({"type": "CallEnded", "timestamp": 1}),
+                json.dumps(failure(10, room="cd" * 32)), "",
             ]), encoding="utf-8")
             self.assertEqual([f["timestamp"] for f in filing.read_transcript_failures(path)], [10, 30])
             self.assertEqual(filing.read_transcript_failures(pathlib.Path(tmp) / "missing"), [])
+            for invalid in ("not json\n", "[]\n", '{"type":"TranscriptWriteFailed"}\n'):
+                path.write_text(json.dumps(failure(30)) + "\n" + invalid, encoding="utf-8")
+                with self.assertRaises(ValueError):
+                    filing.read_transcript_failures(path)
 
 
 class LedgerTests(unittest.TestCase):
