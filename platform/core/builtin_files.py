@@ -109,10 +109,10 @@ class Tier0Files:
         entry = self._write(_text(args.get("name"), "name", 120), args.get("content"), now=now)
         return {"provider": PROVIDER_ID, "fileId": entry["id"], "externalObjectRef": entry["location"], "duplicate": entry["duplicate"]}
 
-    def files_search(self, arguments: dict[str, Any]) -> dict[str, Any]:
+    def files_search(self, arguments: dict[str, Any], *, now: int | None = None) -> dict[str, Any]:
         args = _only(arguments, {"query"}, "files.search")
         query = _text(args.get("query"), "query", MAX_QUERY).strip().lower()
-        found = [entry for entry in self._store.list(requested_by=self._by) if query in entry["name"].lower()]
+        found = [entry for entry in self._store.list(requested_by=self._by, now=now) if query in entry["name"].lower()]
         found.sort(key=lambda entry: (entry["createdAt"], entry["id"]), reverse=True)
         return {"provider": PROVIDER_ID, "files": [self._shape(entry) for entry in found[:MAX_RESULTS]]}
 
@@ -147,6 +147,6 @@ class Tier0Files:
             "docs.create": lambda args: self.docs_create(args, now=clock()),
             "docs.read": lambda args: self.docs_read(args, now=clock()),
             "files.write": lambda args: self.files_write(args, now=clock()),
-            "files.search": self.files_search,
+            "files.search": lambda args: self.files_search(args, now=clock()),
             "files.read": lambda args: self.files_read(args, now=clock()),
         }
