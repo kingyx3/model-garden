@@ -129,15 +129,57 @@ class CallInteractionTests(unittest.TestCase):
         self.assertNotIn("client.example", json.dumps(arguments))
         self.assertEqual(arguments["interactionType"], "email")
 
-    def test_reading_stored_transcripts_skips_other_records_and_garbage_in_time_order(self):
+    def test_reading_stored_transcripts_skips_other_valid_record_types_but_not_corruption(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = pathlib.Path(tmp) / "t.jsonl"
             path.write_text("\n".join([
-                json.dumps(transcript("b", started=200)), "not json", json.dumps({"type": "FallbackMessage", "message": "x"}),
+                json.dumps(transcript("b", started=200)), json.dumps({"type": "FallbackMessage", "message": "x"}),
                 json.dumps(transcript("a", started=100)), "",
             ]), encoding="utf-8")
             self.assertEqual([r["callHash"] for r in filing.read_call_transcripts(path)], ["a", "b"])
             self.assertEqual(filing.read_call_transcripts(pathlib.Path(tmp) / "missing.jsonl"), [])
+            path.write_text(path.read_text() + "not json\n", encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "malformed voice record"):
+                filing.read_call_transcripts(path)
+
+
+
+class VoiceIngestionIntegrityTests(unittest.TestCase):
+    """An unsafe voice export must never be partially accepted as a complete filing batch."""
+
+    def test_corrupt_nonobject_and_unterminated_records_fail_closed(self):
+        for bad in ("not json\n", "[]\n", '{"type":"CallTranscript"', json.dumps(transcript("last"))):
+            with self.subTest(bad=bad[:30]), tempfile.TemporaryDirectory() as tmp:
+                path = pathlib.Path(tmp) / "voice.jsonl"
+                path.write_text(json.dumps(transcript("good")) + "\n" + bad, encoding="utf-8")
+                with self.assertRaises(ValueError):
+                    filing.read_voice_records(path)
+
+    def test_conflicting_or_identical_duplicate_call_hashes_refuse_the_entire_batch(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = pathlib.Path(tmp) / "voice.jsonl"
+            for duplicate in (transcript("same"), transcript("same", started=1_790_000_500)):
+                path.write_text(json.dumps(transcript("same")) + "\n" + json.dumps(duplicate) + "\n")
+                with self.assertRaisesRegex(ValueError, "duplicate"):
+                    filing.read_voice_records(path)
+
+    def test_over_limit_export_is_an_error_not_a_successful_prefix(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = pathlib.Path(tmp) / "voice.jsonl"
+            path.write_text((json.dumps({"type": "FallbackMessage"}) + "\n") * (filing.MAX_RECORDS + 1))
+            with self.assertRaisesRegex(ValueError, "limit"):
+                filing.read_voice_records(path)
+
+    def test_mixed_voice_records_are_split_from_one_validated_snapshot(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = pathlib.Path(tmp) / "voice.jsonl"
+            events = [transcript("later", started=200), {"type": "FallbackMessage"},
+                      {"type": "TranscriptWriteFailed", "timestamp": 150, "errorType": "OSError"},
+                      transcript("earlier", started=100)]
+            path.write_text("".join(json.dumps(row) + "\n" for row in events))
+            snapshot = filing.read_voice_records(path)
+            self.assertEqual([row["callHash"] for row in filing.call_transcripts(snapshot)], ["earlier", "later"])
+            self.assertEqual(len(filing.transcript_failures(snapshot)), 1)
 
 
 class CallFilingTests(FilingCase):
@@ -280,6 +322,19 @@ class CommandTests(FilingCase):
         self.assertEqual((code, json.loads(out)["filed"], json.loads(out)["records"]), (0, 1, 1))
         code, out, _ = self.run_cli(["--transcripts", "-", *common], stdin=path.read_text())
         self.assertEqual((code, json.loads(out)["duplicate"], json.loads(out)["filed"]), (0, 1, 0))
+
+
+    def test_invalid_late_voice_row_prevents_all_governed_side_effects(self):
+        common = self.common()
+        good = json.dumps(transcript("first")) + "\n"
+        for tail in ("not-json\n", json.dumps(transcript("first")) + "\n"):
+            with self.subTest(tail=tail[:15]):
+                code, out, err = self.run_cli(["--transcripts", "-", *common], stdin=good + tail)
+                self.assertEqual(code, 1)
+                self.assertEqual(out, "")
+                self.assertIn("Runtime file-calls failed:", err)
+                self.assertFalse(any(row.get("event") == "execution" for row in self.audit()))
+                self.assertNotIn(SECRET_WORDS, err)
 
     def test_no_transcripts_is_a_clean_no_op(self):
         code, out, _ = self.run_cli(["--transcripts", str(self.root / "none.jsonl"), *self.common()])

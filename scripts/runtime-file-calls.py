@@ -140,11 +140,13 @@ def main(argv: list[str] | None = None) -> int:
             with tempfile.NamedTemporaryFile("w", encoding="utf-8", suffix=".jsonl") as handle:
                 handle.write(sys.stdin.read())
                 handle.flush()
-                records = filing.read_call_transcripts(pathlib.Path(handle.name))
-                write_failures = filing.read_transcript_failures(pathlib.Path(handle.name))
+                snapshot = filing.read_voice_records(pathlib.Path(handle.name))
         else:
-            records = filing.read_call_transcripts(pathlib.Path(args.transcripts))
-            write_failures = filing.read_transcript_failures(pathlib.Path(args.transcripts))
+            snapshot = filing.read_voice_records(pathlib.Path(args.transcripts))
+        # One validated file generation, before any summary, CRM or ledger write.
+        # A truncated or duplicate late call must not allow earlier rows to file.
+        records = filing.call_transcripts(snapshot)
+        write_failures = filing.transcript_failures(snapshot)
         failures: list[str] = []
         summarizer = _summarizer(args)
         totals = filing.file_call_transcripts(runtime, store, records, log=failures.append, recorder=recorder, summarizer=summarizer)

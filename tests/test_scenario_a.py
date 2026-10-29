@@ -81,7 +81,7 @@ class ScenarioA(W.Case):
 
     def file_call(self, *records) -> dict:
         path = self.root / "calls.jsonl"
-        path.write_text("\n".join(json.dumps(record) for record in records), encoding="utf-8")
+        path.write_text("".join(json.dumps(record) + "\n" for record in records), encoding="utf-8")
         out = io.StringIO()
         argv = ["--transcripts", str(path), "--desired-state", str(self.root / "desired-state.json"), "--audit-path", str(self.data / "audit.jsonl"),
                 "--approval-root", str(self.data / "approvals"), "--conversations-root", str(self.data / "conversations")]

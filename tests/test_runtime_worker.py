@@ -675,11 +675,20 @@ class CallFilingTests(Case):
         store.resume(OWNER, T0 + 1)
         self.assertEqual(runtime.run_calls(T0 + 2)["filed"], 1)
 
+    def test_late_corruption_blocks_worker_filing_and_model_summary_for_entire_batch(self):
+        coworker = FakeCoworker()
+        runtime = self.runtime([call_record()], coworker=coworker)
+        runtime.voice_transcripts.write_text(runtime.voice_transcripts.read_text() + "not-json\n", encoding="utf-8")
+        with self.assertRaisesRegex(ValueError, "malformed voice record"):
+            runtime.run_calls(T0)
+        self.assertEqual(coworker.calls, [])
+        self.assertEqual(self.interactions(runtime), [])
+
     def test_inflight_transcript_filing_cannot_race_a_confirmed_owner_pause(self):
         runtime = self.runtime([call_record()])
         store = worker._module("pause").PauseStore(self.data)
         filing = worker._module("filing")
-        original = filing.read_call_transcripts
+        original = filing.read_voice_records
         entered, release = threading.Event(), threading.Event()
         reports, failures = [], []
 
@@ -696,7 +705,7 @@ class CallFilingTests(Case):
                 failures.append(type(exc).__name__)
 
         thread = threading.Thread(target=run_filing, daemon=True)
-        with mock.patch.object(filing, "read_call_transcripts", side_effect=blocked_read):
+        with mock.patch.object(filing, "read_voice_records", side_effect=blocked_read):
             thread.start()
             try:
                 self.assertTrue(entered.wait(3), "filing must enter its guarded work")

@@ -710,14 +710,19 @@ class Worker:
             except PermissionError:
                 return {"skipped": "no-crm-bound"}
             filing = _module("filing")
-            records = filing.read_call_transcripts(path)
+            # Validate one atomic generation before any model, CRM, timeline or
+            # ledger effect. A corrupt late failure/call must not be hidden by
+            # a valid prefix or by a concurrent voice-writer replacement.
+            snapshot = filing.read_voice_records(path)
+            records = filing.call_transcripts(snapshot)
+            write_failures = filing.transcript_failures(snapshot)
             try:
                 records = _module("call_requests").attach_request_ids(records, _module("audit_query").read_ledger(self.audit_path))
             except ValueError:  # an unreadable ledger only means the calls are filed without request ids
                 pass
             summarizer = _module("call_summary").CallSummarizer(self.coworker, cache_path=self.data / "call-summaries.json")
             totals = filing.file_call_transcripts(sidecar, store, records, recorder=self._conversation_recorder(), summarizer=summarizer)
-            ledgered = filing.ledger_transcript_failures(_module("govern"), self.audit_path, filing.read_transcript_failures(path), performed_by=CALL_FILING_IDENTITY)
+            ledgered = filing.ledger_transcript_failures(_module("govern"), self.audit_path, write_failures, performed_by=CALL_FILING_IDENTITY)
             totals["notFiled"] = totals.pop("failed")  # a "failed" key would read as the job itself failing
             return {"records": len(records), **totals, "writeFailures": ledgered, "summaries": summarizer.counts}
 
