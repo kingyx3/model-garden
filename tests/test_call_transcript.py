@@ -10,6 +10,7 @@ import stat
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 spec = importlib.util.spec_from_file_location("call_transcript_under_test", ROOT / "platform" / "channels" / "call_transcript.py")
@@ -291,6 +292,51 @@ class StorageTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "invalid existing voice record"):
                     T.store_record(cfg, next_record, now=1_700_000_010)
                 self.assertEqual(cfg.path.read_text(encoding="utf-8"), original)
+
+    def test_unterminated_historical_jsonl_row_is_never_repaired_by_a_new_call(self):
+        # A syntactically complete JSON object without the final newline is
+        # still an incomplete JSONL snapshot. Do not normalize away evidence
+        # of an interrupted/foreign writer while appending a new call.
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = config(tmp)
+            cfg.path.parent.mkdir(parents=True)
+            previous = {"type": "CallTranscript", "timestamp": 1_700_000_000, "callHash": "previous"}
+            original = json.dumps(previous)  # deliberately no terminating newline
+            cfg.path.write_text(original, encoding="utf-8")
+            next_record = {"type": "CallTranscript", "timestamp": 1_700_000_010, "callHash": "next"}
+            with self.assertRaisesRegex(ValueError, "unterminated"):
+                T.store_record(cfg, next_record, now=1_700_000_010)
+            self.assertEqual(cfg.path.read_text(encoding="utf-8"), original)
+
+    def test_oversized_historical_jsonl_fails_before_retention_rewrite(self):
+        # Bound memory and CPU before decoding an attacker-sized retained
+        # transcript/fallback file. Use a tiny test limit, not a huge fixture.
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = config(tmp)
+            cfg.path.parent.mkdir(parents=True)
+            previous = {"type": "CallTranscript", "timestamp": 1_700_000_000,
+                        "callHash": "previous", "payload": "x" * 500}
+            original = json.dumps(previous) + "\\n"
+            cfg.path.write_text(original, encoding="utf-8")
+            next_record = {"type": "CallTranscript", "timestamp": 1_700_000_010, "callHash": "next"}
+            with mock.patch.object(T, "MAX_RETAINED_BYTES", 256, create=True):
+                with self.assertRaisesRegex(ValueError, "exceeds.*limit"):
+                    T.store_record(cfg, next_record, now=1_700_000_010)
+            self.assertEqual(cfg.path.read_text(encoding="utf-8"), original)
+
+    def test_excessive_historical_rows_fail_without_silent_truncation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = config(tmp)
+            cfg.path.parent.mkdir(parents=True)
+            original = "".join(json.dumps({"type": "CallTranscript",
+                "timestamp": 1_700_000_000, "callHash": f"previous-{n}"}) + "\\n"
+                for n in range(2))
+            cfg.path.write_text(original, encoding="utf-8")
+            next_record = {"type": "CallTranscript", "timestamp": 1_700_000_010, "callHash": "next"}
+            with mock.patch.object(T, "MAX_RETAINED_ROWS", 1, create=True):
+                with self.assertRaisesRegex(ValueError, "exceeds.*limit"):
+                    T.store_record(cfg, next_record, now=1_700_000_010)
+            self.assertEqual(cfg.path.read_text(encoding="utf-8"), original)
 
     def test_corrupt_retention_state_reports_failure_without_interrupting_call(self):
         with tempfile.TemporaryDirectory() as tmp:
