@@ -513,7 +513,7 @@ def store_private_jsonl(path: pathlib.Path, record: dict[str, Any], *, retention
                     try:
                         with os.fdopen(temp_fd, "w", encoding="utf-8", closefd=False) as handle:
                             for row in rows:
-                                handle.write(json.dumps(row, sort_keys=True, ensure_ascii=False, separators=(",", ":")) + "\\n")
+                                handle.write(json.dumps(row, sort_keys=True, ensure_ascii=False, separators=(",", ":")) + "\n")
                             handle.flush()
                             os.fsync(temp_fd)
                         assert_directory()
