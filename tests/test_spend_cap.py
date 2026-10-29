@@ -149,6 +149,91 @@ class SpendCapTests(base.Case):
         self.assertTrue(base.worker._module("pause").PauseStore(self.data).is_paused())  # the store the sidecar reads at every call
 
 
+    def test_tick_records_fresh_usage_and_applies_cap_before_autonomous_mailbox_work(self):
+        runtime = self.make_runtime()
+        runtime.usage_sources = {"api": self.root / "api.db"}
+        observed = []
+
+        def meter(now):
+            observed.append("usage")
+            self.spend(runtime, 1000)
+            return {"api": {"recorded": 1}}
+
+        def mailbox(now):
+            observed.append("mailbox")
+            self.assertTrue(self.pause_state()["paused"])
+            return {"skipped": "paused"}
+
+        with base.mock.patch.object(runtime, "run_usage", side_effect=meter), \
+                base.mock.patch.object(runtime, "run_mailbox", side_effect=mailbox):
+            report = runtime.tick()
+        self.assertEqual(observed, ["usage", "mailbox"])
+        self.assertTrue(report["spend"]["paused"])
+        self.assertEqual(len([e for e in self.events() if e.get("action") == "spend.cap-reached"]), 1)
+
+    def test_missing_usage_sources_hold_billable_worker_jobs_and_notify_owner(self):
+        runtime = self.make_runtime()
+        with base.mock.patch.object(runtime, "run_scheduler", side_effect=AssertionError("no model work")):
+            report = runtime.tick()
+        self.assertEqual(report["spend"]["reason"], "metering-unavailable")
+        self.assertTrue(self.pause_state()["paused"])
+        self.assertEqual(self.pause_state()["cause"], "spend-cap")
+        self.assertIn("notices", report)  # human notice delivery remains possible
+        self.assertEqual(len(self.notices("spend-metering-unavailable")), 1)
+        self.assertEqual(len([e for e in self.events() if e.get("action") == "spend.metering-unavailable"]), 1)
+
+    def test_failed_and_missing_usage_store_hold_until_a_complete_fresh_metering_pass(self):
+        runtime = self.make_runtime()
+        runtime.usage_sources = {"api": self.root / "api.db"}
+        error = base.worker._module("usage").UsageError("private store failed")
+        with base.mock.patch.object(runtime, "run_usage", side_effect=error):
+            self.assertEqual(runtime.tick()["usage"]["failed"], "UsageError")
+        self.assertTrue(self.pause_state()["paused"])
+        self.clock[0] += 10
+        with base.mock.patch.object(runtime, "run_usage", return_value={"api": {"skipped": "no-store-yet"}}):
+            self.assertEqual(runtime.tick()["spend"]["reason"], "metering-unavailable")
+        self.assertTrue(self.pause_state()["paused"])
+        self.clock[0] += 10
+        with base.mock.patch.object(runtime, "run_usage", return_value={"api": {"recorded": 0}}):
+            report = runtime.tick()
+        self.assertEqual(report["spend"]["paused"], False)
+        self.assertFalse(self.pause_state()["paused"])
+        self.assertEqual(len([e for e in self.events() if e.get("action") == "spend.metering-restored"]), 1)
+        self.assertEqual(len([e for e in self.events() if e.get("action") == "spend.cap-cleared"]), 0)
+
+    def test_spend_calculation_failure_is_not_a_permission_to_run_schedules(self):
+        runtime = self.make_runtime()
+        runtime.usage_sources = {"api": self.root / "api.db"}
+        with base.mock.patch.object(runtime, "run_usage", return_value={"api": {"recorded": 0}}), \
+                base.mock.patch.object(runtime, "run_spend", side_effect=ValueError("untrusted spend ledger")), \
+                base.mock.patch.object(runtime, "run_scheduler", side_effect=AssertionError("no model work")):
+            report = runtime.tick()
+        self.assertEqual(report["spend"]["failed"], "ValueError")
+        self.assertTrue(report["spendHold"]["held"])
+        self.assertTrue(self.pause_state()["paused"])
+
+    def test_metering_outage_does_not_replace_an_independent_owner_pause(self):
+        runtime = self.make_runtime()
+        base.worker._module("pause").PauseStore(self.data).pause(OWNER, "owner incident", T0)
+        runtime.tick()
+        self.assertEqual(self.pause_state()["by"], OWNER)
+        self.assertNotIn("cause", self.pause_state())
+
+    def test_cap_preflight_rechecks_every_tick_without_changing_uncapped_job_intervals(self):
+        runtime = self.make_runtime()
+        runtime.usage_sources = {"api": self.root / "api.db"}
+        with base.mock.patch.object(runtime, "run_usage", return_value={"api": {"recorded": 0}}) as usage, \
+                base.mock.patch.object(runtime, "run_spend", return_value={"paused": False}) as spend:
+            runtime.tick()
+            runtime.tick()
+        self.assertEqual((usage.call_count, spend.call_count), (2, 2))
+        uncapped = self.make_runtime({})
+        with base.mock.patch.object(uncapped, "run_usage", return_value={"skipped": "no-usage-sources"}) as normal:
+            uncapped.tick()
+            uncapped.tick()
+        self.assertEqual(normal.call_count, 1)
+
+
 class SpendCapPlumbingTests(unittest.TestCase):
     def test_the_cause_shows_in_status_and_an_owner_pause_has_none(self):
         import tempfile
