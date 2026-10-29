@@ -293,6 +293,53 @@ def _transcript_summary(voice_rows: list[dict[str, Any]], transcript_rows: list[
     return {"records": len(transcript_rows), "completeTwoWayCalls": complete}
 
 
+
+def _single_call_scenario_count(
+    voice_rows: list[dict[str, Any]], audit_rows: list[dict[str, Any]],
+    transcript_rows: list[dict[str, Any]],
+) -> int:
+    """Structural intersection of disclosure, two-sided speech, action and fallback on ONE call.
+
+    Counting each positive requirement independently can certify a reference
+    scenario assembled from unrelated customers' calls. Reuse the individual
+    strict correlation checks, but evaluate them against each unique call
+    identity. The raw identifiers and speech never leave this function.
+    A room reused by different agents is ambiguous and cannot prove acceptance.
+    """
+    room_agents: dict[str, set[str | None]] = {}
+    for row in voice_rows:
+        if row.get("type") not in ("CallStarted", "CallEnded"):
+            continue
+        room = row.get("roomHash")
+        if not isinstance(room, str) or not re.fullmatch(r"[0-9a-f]{64}", room):
+            continue
+        agent = row.get("agent")
+        room_agents.setdefault(room, set()).add(agent if isinstance(agent, str) and agent else None)
+
+    complete = 0
+    for room, agents in room_agents.items():
+        if len(agents) != 1 or None in agents:
+            continue
+        agent = next(iter(agents))
+        scoped = [
+            row for row in voice_rows if row.get("roomHash") == room
+            and (row.get("agent") == agent or (
+                row.get("type") in ("HumanTransfer", "FallbackMessage")
+                and row.get("agent") in (None, agent)
+            ))
+        ]
+        if _voice_summary(scoped)["completedCallFallbackEvidence"] != 1:
+            continue
+        if _transcript_summary(scoped, transcript_rows)["completeTwoWayCalls"] != 1:
+            continue
+        # Check the entire audit log, not a prefiltered subset: another call
+        # reusing the same request ID must still veto authorization proof.
+        if _completed_call_actions(scoped, audit_rows) < 1:
+            continue
+        complete += 1
+    return complete
+
+
 def collect(project: str, *, read_transcripts: bool = False) -> dict[str, Any]:
     if not PROJECT.fullmatch(project):
         raise ValueError("project name must use lowercase letters, numbers, and internal hyphens")
@@ -314,6 +361,7 @@ def collect(project: str, *, read_transcripts: bool = False) -> dict[str, Any]:
     return {
         "schemaVersion": 1,
         "transcripts": _transcript_summary(voice_rows, transcript_rows),
+        "referenceScenario": {"completeCalls": _single_call_scenario_count(voice_rows, audit_rows, transcript_rows) if read_transcripts else 0},
         "generatedAt": dt.datetime.now(dt.timezone.utc).isoformat(),
         "project": project,
         "services": service_summary,
@@ -350,6 +398,9 @@ def evaluate(evidence: dict[str, Any], *, require_voice_call: bool, require_fall
         failures.append("no successful governed business-action execution receipt exists")
     if require_governed_action and require_voice_call and evidence["governance"].get("completedCallActions", 0) < 1:
         failures.append("no authorized successful Tool request is explicitly correlated to a completed call")
+    if (require_two_way_transcript and require_fallback and require_governed_action
+            and evidence.get("referenceScenario", {}).get("completeCalls", 0) < 1):
+        failures.append("no same completed call has a disclosed two-way transcript, authorized Tool action and human fallback")
     return {"passed": not failures, "failures": failures}
 
 
@@ -381,6 +432,7 @@ def _markdown(evidence: dict[str, Any], result: dict[str, Any]) -> str:
         f"- Transcript write failures: {evidence['voice']['transcriptWriteFailures']}",
         f"- Private transcript records inspected: {evidence.get('transcripts', {}).get('records', 0)}",
         f"- Complete disclosed two-way transcripts paired to a call: {evidence.get('transcripts', {}).get('completeTwoWayCalls', 0)}",
+        f"- Same-call transcript, governed action and human fallback: {evidence.get('referenceScenario', {}).get('completeCalls', 0)}",
         f"- Human transfer evidence: {evidence['voice']['humanTransferEvidence']}",
         f"- Message fallback evidence: {evidence['voice']['messageFallbackEvidence']}",
     ])
