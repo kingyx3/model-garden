@@ -113,6 +113,7 @@ def evaluate_anchored(suite, trace, bindings, records, report) -> list[str]:
             if isinstance(event, dict) and isinstance(event.get("requestId"), str):
                 request_owner[event["requestId"]] = case_id
     anchored = defaultdict(dict)
+    seen_tools = defaultdict(dict)
     started = defaultdict(set)
     if not isinstance(records, list) or len(records) > MAX_RECORDS:
         return sorted(set(failures + ["export:invalid-records"]))
@@ -139,6 +140,9 @@ def evaluate_anchored(suite, trace, bindings, records, report) -> list[str]:
             continue
         if request_id in request_owner and request_owner[request_id] != case_id:
             failures.append(f"{case_id}:cross-case-request")
+        prior_tool = seen_tools[case_id].setdefault(request_id, event["tool"])
+        if prior_tool != event["tool"]:
+            failures.append(f"{case_id}:conflicting-anchored-tools")
         status = _terminal(event)
         if status == "unknown":
             failures.append(f"{case_id}:unknown-anchored-outcome")
