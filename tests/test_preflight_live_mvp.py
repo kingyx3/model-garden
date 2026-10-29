@@ -27,7 +27,7 @@ class LiveMvpPreflightTests(unittest.TestCase):
     def test_calendar_never_passes_without_upstream_proof(self, _which):
         result = preflight.check(self.complete_env())
         self.assertFalse(result["ready"])
-        self.assertIn("approved upstream MCP execution", result["missing"]["calendar"][0])
+        self.assertIn("approved upstream calendar provider", result["missing"]["calendar"][0])
 
     @mock.patch.object(preflight.shutil, "which", return_value=None)
     def test_reports_missing_capabilities_without_secret_values(self, _which):
@@ -35,7 +35,7 @@ class LiveMvpPreflightTests(unittest.TestCase):
         del env["LIVEKIT_API_SECRET"]
         result = preflight.check(env)
         self.assertFalse(result["ready"])
-        self.assertIn("approved upstream MCP execution", result["missing"]["calendar"][0])
+        self.assertIn("approved upstream calendar provider", result["missing"]["calendar"][0])
         self.assertEqual(result["missing"]["voice"], ["LIVEKIT_API_SECRET"])
         self.assertEqual(result["missing"]["runtime"], ["docker"])
         rendered = repr(result)
