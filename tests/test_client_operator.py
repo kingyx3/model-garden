@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import contextlib
 import importlib.util
+import io
 import json
 import pathlib
 import subprocess
+import sys
 import tempfile
 import unittest
 from unittest import mock
@@ -170,6 +173,89 @@ class ClientOperatorTests(unittest.TestCase):
         ):
             with self.assertRaisesRegex(ValueError, "exactly one"):
                 operator.runtime_approval("acme-dev", "list")
+
+
+    def _connect_preview(self, *arguments):
+        """Exercise the actual operator CLI without a provider, secret store or workspace mutation."""
+        output, errors = io.StringIO(), io.StringIO()
+        with mock.patch.object(sys, "argv", ["client-operator.py", "connect", *arguments]):
+            with contextlib.redirect_stdout(output), contextlib.redirect_stderr(errors):
+                status = operator.main()
+        return status, output.getvalue(), errors.getvalue()
+
+    def test_connect_requires_a_named_coworker_before_previewing_permissions(self):
+        status, output, errors = self._connect_preview(
+            "crm", "--provider", "built-in-crm", "--tools", "crm.read",
+            "--owner", "owner@example.invalid", "--operator", "operator@example.invalid",
+        )
+        self.assertNotEqual(status, 0)
+        self.assertEqual(output, "")
+        self.assertIn("coworker", errors.lower())
+
+    def test_connect_preview_is_agent_bound_non_authorizing_and_tier_zero_credential_free(self):
+        args = ("crm", "--provider", "built-in-crm", "--tools", "crm.read",
+                "--owner", "owner@example.invalid", "--operator", "operator@example.invalid")
+        first, output, errors = self._connect_preview(*args, "--agent", "receptionist")
+        self.assertEqual((first, errors), (0, ""))
+        preview = json.loads(output)
+        self.assertEqual(preview["agent"], "receptionist")
+        self.assertEqual(preview["tools"], ["crm.read"])
+        self.assertEqual(preview["scopes"], [])
+        self.assertEqual(preview["tier"], 0)
+        self.assertFalse(preview["connectable"])
+        self.assertTrue(preview["previewOnly"])
+        self.assertFalse(preview["ownerConsentVerified"])
+        self.assertFalse(preview["providerConnectionTested"])
+        self.assertFalse(preview["bindingChanged"])
+        self.assertEqual(len(preview["digest"]), 64)
+        other, second_output, _ = self._connect_preview(*args, "--agent", "researcher")
+        self.assertEqual(other, 0)
+        self.assertNotEqual(preview["digest"], json.loads(second_output)["digest"])
+        self.assertNotIn("secret://", output)
+
+    def test_planned_provider_never_offers_connection_or_scopes_even_with_a_coworker(self):
+        status, output, _ = self._connect_preview(
+            "calendar", "--provider", "google-calendar", "--tools", "calendar.book",
+            "--agent", "receptionist", "--owner", "owner@example.invalid",
+            "--operator", "operator@example.invalid",
+        )
+        self.assertNotEqual(status, 0)
+        preview = json.loads(output)
+        self.assertEqual(preview["agent"], "receptionist")
+        self.assertFalse(preview["connectable"])
+        self.assertEqual(preview["scopes"], [])
+        self.assertIn("not implemented", preview["reason"])
+
+    def test_mailbox_preview_requires_explicit_kind_address_and_personal_exception(self):
+        base = ("mail", "--provider", "gmail", "--tools", "mail.draft",
+                "--agent", "receptionist", "--owner", "owner@example.invalid",
+                "--operator", "operator@example.invalid")
+        status, _, error = self._connect_preview(*base)
+        self.assertNotEqual(status, 0)
+        self.assertIn("mailbox", error)
+        status, _, error = self._connect_preview(
+            *base, "--mailbox-kind", "personal", "--mailbox-address", "person@example.invalid",
+        )
+        self.assertNotEqual(status, 0)
+        self.assertIn("personal mailbox", error)
+        status, output, error = self._connect_preview(
+            *base, "--mailbox-kind", "shared", "--mailbox-address", "support@example.invalid",
+        )
+        self.assertNotEqual(status, 0)  # Gmail remains planned; no credentials requested.
+        self.assertEqual(error, "")
+        preview = json.loads(output)
+        self.assertEqual(preview["mailbox"], {"kind": "shared", "address": "support@example.invalid"})
+        self.assertFalse(preview["connectable"])
+
+    def test_connect_rejects_unreviewed_tool_and_unsafe_agent_identity(self):
+        base = ("calendar", "--provider", "google-calendar", "--tools", "calendar.book",
+                "--owner", "owner@example.invalid", "--operator", "operator@example.invalid")
+        for extra in (("--agent", "../other"), ("--agent", "receptionist", "--tools", "mail.send")):
+            with self.subTest(extra=extra):
+                status, output, errors = self._connect_preview(*base, *extra)
+                self.assertNotEqual(status, 0)
+                self.assertEqual(output, "")
+                self.assertTrue(errors)
 
     def test_runtime_approval_rejects_unsafe_project_or_request(self):
         with self.assertRaisesRegex(ValueError, "project name"):
