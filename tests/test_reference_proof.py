@@ -359,7 +359,7 @@ class ReferenceProvenanceRegressionTests(unittest.TestCase):
         base = transcript()
         for changed in (
             {"turns": [base["turns"][0], {**base["turns"][1], "offsetSeconds": 30.0}]},
-            {"endedAt": 101},
+            {"endedAt": 100},
             {"endedAt": 105, "turns": [base["turns"][0], {**base["turns"][1], "offsetSeconds": 7.0}]},
         ):
             with self.subTest(changed=changed):
