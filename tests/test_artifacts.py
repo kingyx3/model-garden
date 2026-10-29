@@ -163,6 +163,40 @@ class StoreCase(unittest.TestCase):
         self.assertNotEqual(self.put(requested_by=BOB)["id"], first["id"])
         self.assertEqual(len(self.store().list()), 2)
 
+    def test_duplicate_retries_cannot_silently_change_artifact_provenance(self):
+        store = self.store(allow_restricted=True)
+        original = self.put(store)
+        self.assertEqual(self.put(store, now=T0 + 1)["id"], original["id"])
+        variants = (
+            {"agent": "assistant"},
+            {"media_type": "text/markdown"},
+            {"classification": "confidential"},
+            {"classification": "restricted"},
+            {"sources": ["kb:another#source"]},
+        )
+        ids = set()
+        for changed in variants:
+            entry = self.put(store, now=T0 + 2, **changed)
+            self.assertFalse(entry["duplicate"], changed)
+            self.assertNotEqual(entry["id"], original["id"])
+            ids.add(entry["id"])
+        self.assertEqual(len(ids), len(variants))
+        self.assertEqual(len(store.list(now=T0 + 2)), 1 + len(variants))
+        self.assertEqual(len([e for e in self.events if e[0] == "artifact.create"]), 1 + len(variants))
+
+    def test_retention_hides_expired_metadata_without_requiring_manual_purge(self):
+        short = self.store(retention_days=1)
+        entry = self.put(short, now=T0)
+        self.assertEqual([e["id"] for e in short.list(requested_by=ALICE, now=T0)], [entry["id"]])
+        self.assertEqual(short.list(requested_by=ALICE, now=T0 + 86400), [])
+        self.assertEqual(short.list(now=T0 + 86400), [])
+        # An operator increasing retention later cannot resurrect a file whose
+        # original expiry has passed.
+        long = self.store(retention_days=365)
+        self.assertEqual(long.list(now=T0 + 86400), [])
+        self.assertTrue((self.root / "acme-prod" / entry["id"]).exists())
+        self.assertEqual(short.purge_expired(now=T0 + 86400), {"expired": 1})
+
     def test_hostile_names_cannot_leave_the_directory_and_files_are_private(self):
         entry = self.put(name="../../etc/passwd")
         self.assertEqual(entry["name"], "etc passwd")

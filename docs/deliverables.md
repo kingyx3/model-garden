@@ -51,3 +51,19 @@ formats, client-approved connected destination, verified channel
 delivery and a real client scenario remain open on #101/#91.
 Reuse an approved upstream MCP/provider integration rather than
 introducing bespoke SaaS connectors.
+
+## Tier 0 artifact retention and retry provenance (v0.8.217)
+
+The private artifact index is not a durable public catalog. `files.search` and the
+operator's metadata listing exclude expired entries immediately, even before
+`runtime-artifacts.py purge-expired` physically deletes the payload. A shorter
+reviewed retention policy takes effect on previously created files; increasing
+retention does not revive artifacts past their original expiry. Operators must
+still schedule and verify the purge job and its audit receipts for actual erasure.
+
+A repeated write returns an existing artifact only when **content digest, name,
+requester, producing Agent, media type, classification and source references**
+all match. A changed provenance field creates a separately audited artifact
+instead of silently returning an older object with misleading metadata. This is
+host-local credential-free behavior, not independently immutable evidence or
+proof of real tenant delivery and retention enforcement.

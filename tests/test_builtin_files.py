@@ -73,6 +73,16 @@ class Case(unittest.TestCase):
         with self.assertRaises(Error):
             self.files().docs_read({"documentId": theirs["documentId"]}, now=T0)
 
+    def test_files_search_excludes_expired_files_even_without_purge(self):
+        short = artifacts.ArtifactStore(pathlib.Path(self._tmp.name), tenant="acme-prod",
+                                        retention_days=1, audit=lambda *event: self.events.append(event))
+        requester = files.Tier0Files(short, agent="receptionist", requested_by=ALICE)
+        created = requester.files_write({"name": "private.txt", "content": "sensitive"}, now=T0)
+        self.assertEqual(len(requester.executors(now=lambda: T0)["files.search"]({"query": "private"})["files"]), 1)
+        self.assertEqual(requester.executors(now=lambda: T0 + 86400)["files.search"]({"query": "private"})["files"], [])
+        with self.assertRaisesRegex(artifacts.ArtifactError, "expired"):
+            short.get(created["fileId"], requested_by=ALICE, now=T0 + 86400)
+
     def test_binary_deliverables_show_as_metadata_only(self):
         entry = deliverables.deliver(self.store, kind="xlsx", name="pipeline", content={"sheets": [{"name": "S", "rows": [["a", 1]]}]},
                                      agent="receptionist", requested_by=ALICE, now=T0)
