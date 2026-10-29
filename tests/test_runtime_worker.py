@@ -675,6 +675,15 @@ class CallFilingTests(Case):
         store.resume(OWNER, T0 + 1)
         self.assertEqual(runtime.run_calls(T0 + 2)["filed"], 1)
 
+    def test_late_corruption_blocks_worker_filing_and_model_summary_for_entire_batch(self):
+        coworker = FakeCoworker()
+        runtime = self.runtime([call_record()], coworker=coworker)
+        runtime.voice_transcripts.write_text(runtime.voice_transcripts.read_text() + "not-json\n", encoding="utf-8")
+        with self.assertRaisesRegex(ValueError, "malformed voice record"):
+            runtime.run_calls(T0)
+        self.assertEqual(coworker.calls, [])
+        self.assertEqual(self.interactions(runtime), [])
+
     def test_inflight_transcript_filing_cannot_race_a_confirmed_owner_pause(self):
         runtime = self.runtime([call_record()])
         store = worker._module("pause").PauseStore(self.data)
