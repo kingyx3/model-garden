@@ -197,7 +197,15 @@ class OverlayTests(unittest.TestCase):
     def test_the_worker_reads_the_voice_volume_read_only(self):
         overlay = voice.worker_overlay({"services": {"hermes": {}, "governed-worker": {}}})
         self.assertEqual(overlay["volumes"], ["voice-data:/opt/voice:ro"])
-        self.assertEqual(overlay["environment"], {"MODEL_GARDEN_VOICE_TRANSCRIPTS": "/opt/voice/transcripts.jsonl"})
+        self.assertEqual(overlay["environment"], {"MODEL_GARDEN_VOICE_TRANSCRIPTS": "/opt/voice/transcripts.jsonl",
+                                                  "MODEL_GARDEN_VOICE_AGENT_NAME": "model-garden-receptionist"})
+
+    def test_voice_worker_mount_is_bound_to_exact_deployed_agent(self):
+        overlay = voice.worker_overlay({"services": {"governed-worker": {}}}, agent_name="client-receptionist")
+        self.assertEqual(overlay["environment"]["MODEL_GARDEN_VOICE_AGENT_NAME"], "client-receptionist")
+        for invalid in ("", " ", "../other", "agent/name"):
+            with self.subTest(invalid=invalid), self.assertRaisesRegex(ValueError, "voice agent"):
+                voice.worker_overlay({"services": {"governed-worker": {}}}, agent_name=invalid)
 
     def test_no_worker_in_the_base_means_nothing_is_added(self):
         self.assertIsNone(voice.worker_overlay({"services": {"hermes": {}}}))

@@ -445,6 +445,13 @@ class Worker:
         self.export_sink = export_sink
         self.usage_sources = dict(usage_sources or {})
         self.voice_transcripts = pathlib.Path(voice_transcripts) if voice_transcripts else None
+        # The voice overlay pins the exact LiveKit worker identity. A missing
+        # overlay setting falls back to the compiled Agent only for standalone
+        # worker/fixture use; records without attribution are never trusted.
+        self.voice_agent = os.environ.get("MODEL_GARDEN_VOICE_AGENT_NAME", self._agent())
+        if (not isinstance(self.voice_agent, str)
+                or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}", self.voice_agent) is None):
+            raise WorkerConfigError("MODEL_GARDEN_VOICE_AGENT_NAME must be a valid voice agent identity")
         self.queue = NoticeQueue(self.data / "worker")
         self.last_run: dict[str, float] = {}
         self.heartbeat = self.data / "worker" / "heartbeat.json"
@@ -714,6 +721,12 @@ class Worker:
             # ledger effect. A corrupt late failure/call must not be hidden by
             # a valid prefix or by a concurrent voice-writer replacement.
             snapshot = filing.read_voice_records(path)
+            # Check the complete snapshot before any model request, CRM write,
+            # conversation timeline or failure receipt. Never attribute another
+            # voice Agent's transcript to this coworker's tenant or ledger.
+            for row in snapshot:
+                if row.get("type") in {"CallTranscript", "TranscriptWriteFailed"} and row.get("agent") != self.voice_agent:
+                    raise ValueError("voice record agent mismatch; operator reconciliation required")
             records = filing.call_transcripts(snapshot)
             write_failures = filing.transcript_failures(snapshot)
             try:
