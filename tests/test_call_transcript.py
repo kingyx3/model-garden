@@ -338,6 +338,20 @@ class StorageTests(unittest.TestCase):
                     T.store_record(cfg, next_record, now=1_700_000_010)
             self.assertEqual(cfg.path.read_text(encoding="utf-8"), original)
 
+    def test_new_record_cannot_publish_an_over_limit_store(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = config(tmp)
+            cfg.path.parent.mkdir(parents=True)
+            original = json.dumps({"type": "CallTranscript",
+                "timestamp": 1_700_000_000, "callHash": "previous"}) + "\n"
+            cfg.path.write_text(original, encoding="utf-8")
+            next_record = {"type": "CallTranscript", "timestamp": 1_700_000_010,
+                           "callHash": "next", "payload": "x" * 500}
+            with mock.patch.object(T, "MAX_RETAINED_BYTES", 256, create=True):
+                with self.assertRaisesRegex(ValueError, "exceeds.*limit"):
+                    T.store_record(cfg, next_record, now=1_700_000_010)
+            self.assertEqual(cfg.path.read_text(encoding="utf-8"), original)
+
     def test_corrupt_retention_state_reports_failure_without_interrupting_call(self):
         with tempfile.TemporaryDirectory() as tmp:
             transcript, _ = call(tmp)
