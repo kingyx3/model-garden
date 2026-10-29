@@ -63,3 +63,42 @@ mode intentionally exposes only payload-free readiness status but does **not**
 satisfy the original private-endpoint security criterion. Record an explicit
 retirement date; never assume this is a production-approved configuration.
 No timer, Terraform plan or cloud policy is applied by this change.
+
+
+## Review-only host timer bundle (v0.8.214 prerequisite)
+
+Instead of manually composing a host timer, a named operator can render a
+**review-only** tenant-bound systemd bundle from a trusted release checkout:
+
+```bash
+python3 scripts/render-runtime-health-units.py \\
+  --client acme --environment dev \\
+  --compose-project acme-dev --confirm-compose-project acme-dev \\
+  --project-id sample-project-123 --confirm-project-id sample-project-123 \\
+  --service-user mg-monitor
+```
+
+The output is JSON containing a oneshot service and 60-second monotonic timer.
+It never writes unit files, calls Docker, grants IAM, starts services, or
+enables monitoring. It refuses inconsistent tenant/Compose/GCP identities,
+unsafe systemd arguments and privileged service usernames. The service runs
+the existing fixed, private loopback sampler; it does not create public health
+endpoints or accept secrets. Each run publishes **both** gateway and worker
+readiness signals; enable Cloud Monitoring policies only for components
+actually deployed and after confirming initialized metric series.
+
+**Host privilege boundary:** membership in the `docker` group is effectively
+root-equivalent even with systemd sandbox settings. The named `mg-monitor`
+account, Docker socket access, pinned checkout path and host controls require
+client-owner and security approval. Never install this bundle on an untrusted
+host or assume `NoNewPrivileges` removes Docker daemon privileges.
+Before an authorized install, review the generated text, check its fixed
+`ExecStart`, verify the host's Python/Docker and GCE metricWriter identity,
+run `systemd-analyze verify` on the staged units, and check the initial two
+samples. Install the reviewed files as root-owned systemd units only through
+the approved change process, then explicitly enable the timer. Record the
+owner, rollback/retirement plan, alert recipients and actual failure/recovery
+notification delivery. A stopped sampler produces missing telemetry rather
+than a successful health report; Cloud Monitoring may require an initialized
+series to alert on missing data. Unit rendering and offline tests do **not**
+satisfy the live #231 acceptance drill.
