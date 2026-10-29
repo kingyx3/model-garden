@@ -1,6 +1,11 @@
 #!/usr/bin/env python3
 """Collect redacted, machine-readable evidence from a running reference deployment.
 
+With --require-two-way-transcript, read the private default voice transcript
+file and require a structurally complete disclosed caller/agent exchange
+matched to a completed call. This does not prove audible SIP delivery, and a
+custom transcript path requires independent operator review.
+
 The collector never copies prompts, Tool arguments, caller numbers, message text, or
 credentials into the evidence pack. It records service health and the existence/types
 of governance and voice lifecycle records. Run it after deployment and again after the
@@ -11,6 +16,7 @@ from __future__ import annotations
 import argparse
 import datetime as dt
 import json
+import math
 import pathlib
 import re
 import subprocess
@@ -208,7 +214,86 @@ def _completed_call_actions(voice_rows: list[dict[str, Any]], audit_rows: list[d
     return count
 
 
-def collect(project: str) -> dict[str, Any]:
+
+def _transcript_summary(voice_rows: list[dict[str, Any]], transcript_rows: list[dict[str, Any]]) -> dict[str, int]:
+    """Count disclosed two-sided transcript records paired to completed call lifecycle events.
+
+    Structural evidence only: a local JSONL record cannot attest real SIP audio,
+    client consent, provider delivery or independently signed lawful basis.
+    Never return caller speech, room hashes, or summary text.
+    """
+    started: dict[tuple[str, str], int] = {}
+    for row in voice_rows:
+        room, agent, at = row.get("roomHash"), row.get("agent"), row.get("timestamp")
+        if (row.get("type") == "CallStarted" and isinstance(room, str)
+                and re.fullmatch(r"[0-9a-f]{64}", room) and isinstance(agent, str) and agent
+                and type(at) is int):
+            key = (room, agent)
+            started[key] = min(at, started.get(key, at))
+    completed: dict[tuple[str, str], int] = {}
+    for row in voice_rows:
+        room, agent, at = row.get("roomHash"), row.get("agent"), row.get("timestamp")
+        key = (room, agent)
+        if (row.get("type") == "CallEnded" and type(at) is int
+                and key in started and at >= started[key]):
+            completed[key] = max(at, completed.get(key, at))
+
+    by_call: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    for row in transcript_rows:
+        if row.get("type") != "CallTranscript":
+            continue
+        room, agent = row.get("callHash"), row.get("agent")
+        if isinstance(room, str) and isinstance(agent, str):
+            by_call.setdefault((room, agent), []).append(row)
+
+    complete = 0
+    for key, records in by_call.items():
+        # Conflicting duplicates veto proof, even if one copy looks valid.
+        if len(records) != 1 or key not in completed:
+            continue
+        record = records[0]
+        started_at, ended_at = record.get("timestamp"), record.get("endedAt")
+        if (type(started_at) is not int or started_at != started[key]
+                or type(ended_at) is not int or ended_at < started_at
+                or ended_at > completed[key] + 60):
+            continue
+        disclosure = record.get("disclosure")
+        # An asserted override owner is not proof of an independently signed
+        # lawful-basis exception. Credit only an actually marked spoken notice.
+        if (not isinstance(disclosure, dict) or disclosure.get("configured") is not True
+                or disclosure.get("played") is not True):
+            continue
+        if (not isinstance(record.get("summary"), str) or not record["summary"].strip()
+                or record.get("summarySource") not in ("extractive", "provided", "model", "fallback-extractive")
+                or record.get("droppedTurns", 0) != 0):
+            continue
+        turns = record.get("turns")
+        if not isinstance(turns, list) or not turns:
+            continue
+        speakers: set[str] = set()
+        previous = -1.0
+        valid = True
+        for index, turn in enumerate(turns):
+            if not isinstance(turn, dict):
+                valid = False
+                break
+            offset = turn.get("offsetSeconds")
+            speaker, speech = turn.get("speaker"), turn.get("text")
+            if (type(turn.get("index")) is not int or turn["index"] != index
+                    or type(offset) not in (int, float) or not math.isfinite(offset)
+                    or offset < previous or offset < 0
+                    or speaker not in ("caller", "agent", "human")
+                    or not isinstance(speech, str) or not speech.strip()):
+                valid = False
+                break
+            previous = offset
+            speakers.add(speaker)
+        if valid and {"caller", "agent"} <= speakers:
+            complete += 1
+    return {"records": len(transcript_rows), "completeTwoWayCalls": complete}
+
+
+def collect(project: str, *, read_transcripts: bool = False) -> dict[str, Any]:
     if not PROJECT.fullmatch(project):
         raise ValueError("project name must use lowercase letters, numbers, and internal hyphens")
     services = _containers(project)
@@ -222,8 +307,13 @@ def collect(project: str) -> dict[str, Any]:
     voice_rows: list[dict[str, Any]] = []
     if "voice" in services:
         voice_rows = _jsonl(services["voice"]["container"], "/opt/data/messages.jsonl")
+    transcript_rows: list[dict[str, Any]] = []
+    if read_transcripts and "voice" in services:
+        # The fixed private default path is never supplied by a model or caller.
+        transcript_rows = _jsonl(services["voice"]["container"], "/opt/data/transcripts.jsonl")
     return {
         "schemaVersion": 1,
+        "transcripts": _transcript_summary(voice_rows, transcript_rows),
         "generatedAt": dt.datetime.now(dt.timezone.utc).isoformat(),
         "project": project,
         "services": service_summary,
@@ -233,7 +323,7 @@ def collect(project: str) -> dict[str, Any]:
     }
 
 
-def evaluate(evidence: dict[str, Any], *, require_voice_call: bool, require_fallback: bool, require_governed_action: bool) -> dict[str, Any]:
+def evaluate(evidence: dict[str, Any], *, require_voice_call: bool, require_fallback: bool, require_governed_action: bool, require_two_way_transcript: bool = False) -> dict[str, Any]:
     failures: list[str] = []
     services = evidence["services"]
     if not services.get("hermes", {}).get("running"):
@@ -246,10 +336,14 @@ def evaluate(evidence: dict[str, Any], *, require_voice_call: bool, require_fall
         failures.append("required voice runtime is absent or stopped")
     if require_governed_action and not services.get("governed-tools", {}).get("running"):
         failures.append("required governed Tool runtime is absent or stopped")
-    if require_voice_call and evidence["voice"].get("completedCalls", 0) < 1:
+    if (require_voice_call or require_two_way_transcript) and evidence["voice"].get("completedCalls", 0) < 1:
         failures.append("no completed voice call lifecycle pair exists")
-    if require_voice_call and evidence["voice"].get("transcriptWriteFailures", 0):
+    if (require_voice_call or require_two_way_transcript) and evidence["voice"].get("transcriptWriteFailures", 0):
         failures.append("voice transcript write failures require investigation")
+    if require_two_way_transcript and not services.get("voice", {}).get("running"):
+        failures.append("required voice runtime for two-way transcript is absent or stopped")
+    if require_two_way_transcript and evidence.get("transcripts", {}).get("completeTwoWayCalls", 0) < 1:
+        failures.append("no complete disclosed two-way transcript is paired to a completed call")
     if require_fallback and evidence["voice"].get("completedCallFallbackEvidence", 0) < 1:
         failures.append("no human-transfer or message fallback correlated to a completed call")
     if require_governed_action and evidence["governance"].get("successfulActions", 0) < 1:
@@ -285,6 +379,8 @@ def _markdown(evidence: dict[str, Any], result: dict[str, Any]) -> str:
         f"- Completed call lifecycle pairs: {evidence['voice']['completedCalls']}",
         f"- Completed calls with correlated fallback: {evidence['voice']['completedCallFallbackEvidence']}",
         f"- Transcript write failures: {evidence['voice']['transcriptWriteFailures']}",
+        f"- Private transcript records inspected: {evidence.get('transcripts', {}).get('records', 0)}",
+        f"- Complete disclosed two-way transcripts paired to a call: {evidence.get('transcripts', {}).get('completeTwoWayCalls', 0)}",
         f"- Human transfer evidence: {evidence['voice']['humanTransferEvidence']}",
         f"- Message fallback evidence: {evidence['voice']['messageFallbackEvidence']}",
     ])
@@ -299,16 +395,19 @@ def main() -> int:
     parser.add_argument("--project-name", required=True)
     parser.add_argument("--output-dir", type=pathlib.Path, default=pathlib.Path(".model-garden-live-proof"))
     parser.add_argument("--require-voice-call", action="store_true")
+    parser.add_argument("--require-two-way-transcript", action="store_true",
+                        help="read the voice worker's private default transcript file and require a disclosed two-sided call")
     parser.add_argument("--require-fallback", action="store_true")
     parser.add_argument("--require-governed-action", action="store_true")
     args = parser.parse_args()
     try:
-        evidence = collect(args.project_name)
+        evidence = collect(args.project_name, read_transcripts=args.require_two_way_transcript)
         result = evaluate(
             evidence,
             require_voice_call=args.require_voice_call,
             require_fallback=args.require_fallback,
             require_governed_action=args.require_governed_action,
+            require_two_way_transcript=args.require_two_way_transcript,
         )
         args.output_dir.mkdir(parents=True, exist_ok=True)
         payload = {**evidence, "acceptance": result}

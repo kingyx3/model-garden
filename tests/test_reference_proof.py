@@ -196,5 +196,84 @@ class ReferenceProofTests(unittest.TestCase):
         data["services"].pop("governed-tools")
         self.assertFalse(check(data, call=False, action=True)["passed"])
 
+
+def transcript(*, room=ROOM, agent="receptionist", turns=None, disclosure=None, summary="Caller asked about opening hours."):
+    return {
+        "type": "CallTranscript", "callHash": room, "agent": agent,
+        "timestamp": 100, "endedAt": 110,
+        "disclosure": {"configured": True, "played": True} if disclosure is None else disclosure,
+        "turns": [
+            {"index": 0, "speaker": "caller", "offsetSeconds": 1.0, "text": "What time are you open?"},
+            {"index": 1, "speaker": "agent", "offsetSeconds": 2.0, "text": "We open at nine."},
+        ] if turns is None else turns,
+        "summary": summary, "summarySource": "extractive", "requestIds": [],
+    }
+
+
+class ReferenceTranscriptEvidenceTests(unittest.TestCase):
+    def test_valid_two_way_transcript_is_structurally_correlated_without_copying_content(self):
+        lifecycle = [voice("CallStarted"), voice("CallEnded", timestamp=110)]
+        report = proof._transcript_summary(lifecycle, [transcript()])
+        self.assertEqual(report["records"], 1)
+        self.assertEqual(report["completeTwoWayCalls"], 1)
+        self.assertNotIn("What time", str(report))
+        self.assertNotIn(ROOM, str(report))
+        data = evidence(lifecycle)
+        data["transcripts"] = report
+        self.assertTrue(proof.evaluate(data, require_voice_call=True, require_fallback=False,
+                                       require_governed_action=False, require_two_way_transcript=True)["passed"])
+
+    def test_missing_or_unpaired_transcript_fails_explicit_acceptance(self):
+        lifecycle = [voice("CallStarted"), voice("CallEnded", timestamp=110)]
+        for rows in ([], [transcript(room=OTHER)], [transcript(agent="wrong")]):
+            with self.subTest(rows=rows):
+                report = proof._transcript_summary(lifecycle, rows)
+                self.assertEqual(report["completeTwoWayCalls"], 0)
+                data = evidence(lifecycle)
+                data["transcripts"] = report
+                result = proof.evaluate(data, require_voice_call=True, require_fallback=False,
+                                        require_governed_action=False, require_two_way_transcript=True)
+                self.assertFalse(result["passed"])
+                self.assertIn("two-way transcript", " ".join(result["failures"]))
+
+    def test_unplayed_disclosure_one_sided_speech_and_bad_summary_cannot_pass(self):
+        lifecycle = [voice("CallStarted"), voice("CallEnded", timestamp=110)]
+        base = transcript()
+        for altered in (
+            {"disclosure": {"configured": True, "played": False}},
+            {"disclosure": {"configured": False, "played": False, "lawfulBasisOverrideOwner": "asserted"}},
+            {"turns": [base["turns"][0]]},
+            {"turns": [base["turns"][1]]},
+            {"summary": ""},
+            {"turns": [base["turns"][1], base["turns"][0]]},
+            {"turns": [{**base["turns"][0], "offsetSeconds": -1}, base["turns"][1]]},
+            {"turns": [{**base["turns"][0], "text": ""}, base["turns"][1]]},
+        ):
+            with self.subTest(altered=altered):
+                self.assertEqual(proof._transcript_summary(lifecycle, [{**base, **altered}])["completeTwoWayCalls"], 0)
+
+    def test_conflicting_duplicate_transcripts_and_orphan_call_are_not_proof(self):
+        lifecycle = [voice("CallStarted"), voice("CallEnded", timestamp=110)]
+        self.assertEqual(proof._transcript_summary(lifecycle, [transcript(), transcript()])["completeTwoWayCalls"], 0)
+        self.assertEqual(proof._transcript_summary([voice("CallStarted")], [transcript()])["completeTwoWayCalls"], 0)
+        self.assertEqual(proof._transcript_summary(lifecycle, [transcript(), transcript(summary="")])["completeTwoWayCalls"], 0)
+
+    def test_collector_only_reads_private_transcripts_when_requested(self):
+        from unittest import mock
+        services = {"hermes": {"container": "h", "status": "Up 1m"},
+                    "voice": {"container": "v", "status": "Up 1m"}}
+        lifecycle = [voice("CallStarted"), voice("CallEnded", timestamp=110)]
+        def read(container, path):
+            if path == "/opt/data/messages.jsonl":
+                return lifecycle
+            if path == "/opt/data/transcripts.jsonl":
+                return [transcript()]
+            raise AssertionError(path)
+        with mock.patch.object(proof, "_containers", return_value=services), mock.patch.object(proof, "_jsonl", side_effect=read) as reader:
+            self.assertEqual(proof.collect("acme-dev")["transcripts"]["completeTwoWayCalls"], 0)
+            self.assertEqual(reader.call_count, 1)
+            self.assertEqual(proof.collect("acme-dev", read_transcripts=True)["transcripts"]["completeTwoWayCalls"], 1)
+            self.assertEqual(reader.call_count, 3)
+
 if __name__ == "__main__":
     unittest.main()
