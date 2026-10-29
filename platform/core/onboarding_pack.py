@@ -8,8 +8,8 @@ function over already-computed, non-secret reports: it reads no workspace, calls
 
 - **Plain language, same facts.** Nothing is added that the reports do not already say; this only rewords it and groups it by what
   the owner can do next. A Skill is *working*, *needs one thing from you* or *switched off*.
-- **The one next step.** A blocked Skill shows what it is missing and the single action that unblocks it. When the missing piece is a
-  capability family the pack gives the ``connect`` command and the options with their honest status: a provider that is only planned
+- **The one next step.** A blocked Skill shows what it is missing and the next operator action without claiming that a preview authorizes access. When the missing piece is a
+  capability family the pack gives the coworker-bound ``connect`` discovery command and the options with their honest status: a provider that is only planned
   is listed as not usable yet, never as available.
 - **What happens without asking.** For each Skill's Tools the pack states, for people on the team and for the public, whether the action
   runs by itself, waits for approval, runs by itself only inside the signed limits, is handed to a named person or is never done.
@@ -26,6 +26,9 @@ from collections.abc import Callable, Iterable, Mapping
 from typing import Any
 
 BUILT = {"live", "built-credential-free"}
+_AGENT_NAME = re.compile(r"^[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?$")
+_CAPABILITY_FAMILY = re.compile(r"^[a-z]+$")
+_CONNECTION_BLOCKERS = {"missing", "unavailable", "no-grant", "grant-unavailable", "grant-scope"}
 _SECRETISH = re.compile(r"secret://|token|credential|password|passwd|api[-_]?key|private[-_]?key|bearer ", re.IGNORECASE)
 RUNS = {
     "automatic": "runs by itself",
@@ -89,11 +92,15 @@ def build(
     approvals_by_agent: dict[str, Mapping[str, Any]] = {}
     for entry in readiness_reports:
         name = entry["agent"]
+        if not isinstance(name, str) or not _AGENT_NAME.fullmatch(name):
+            raise PackError("invalid readiness Agent identity for owner guidance")
         if name in readiness_by_agent:
             raise PackError(f"duplicate readiness Agent {name!r}")
         readiness_by_agent[name] = entry
     for entry in approval_reports:
         name = entry["agent"]
+        if not isinstance(name, str) or not _AGENT_NAME.fullmatch(name):
+            raise PackError("invalid approval Agent identity for owner guidance")
         if name in approvals_by_agent:
             raise PackError(f"duplicate approval Agent {name!r}")
         if not isinstance(entry.get("policyVersion"), str) or not entry["policyVersion"]:
@@ -127,13 +134,17 @@ def build(
                 working.append({**label, "uses": [_dependency(item) for item in entry["dependencies"]]})
             else:
                 blocked = [item for item in entry["dependencies"] if item["status"] != "bound" and item.get("required", True)]
-                families = sorted({item["family"] for item in blocked if item["status"] == "missing"})
+                if not blocked:
+                    raise PackError(f"blocked Skill {entry['name']!r} has no required blocking dependency")
+                families = sorted({item["family"] for item in blocked if item["status"] in _CONNECTION_BLOCKERS})
+                if any(not isinstance(family, str) or not _CAPABILITY_FAMILY.fullmatch(family) for family in families):
+                    raise PackError("invalid capability family for coworker connection guidance")
                 needs.append({
                     **label,
                     "missing": [_dependency(item) for item in blocked],
                     "action": entry.get("remediation"),
                     "connect": [
-                        {"family": family, "command": f"python3 scripts/client-operator.py connect {family}",
+                        {"family": family, "command": f"python3 scripts/client-operator.py connect {family} --agent {name}",
                          "options": _connect_options(family, options)}
                         for family in families
                     ],
@@ -181,12 +192,13 @@ def render(packs: Iterable[Mapping[str, Any]]) -> str:
                 if skill["action"]:
                     lines.append(f"  - Next step: {skill['action']}")
                 for family in skill["connect"]:
-                    lines.append(f"  - Connect it with: `{family['command']}`")
+                    lines.append(f"  - Review choices for this coworker: `{family['command']}` (does not grant or repair access).")
                     usable = [choice for choice in family["options"] if choice["usable"]]
                     if usable:
                         lines.append("  - Ready to use: " + ", ".join(f"{choice['id']} (tier {choice['tier']})" for choice in usable))
                     else:
                         lines.append("  - No usable connector for this is shipped yet; your consultant can tell you the plan.")
+            lines.append("  - A consultant must review the selected provider, exact Tools and owner/operator identities before any separate consent, health test and activation. This pack cannot authorize access.")
         else:
             lines.append("- Nothing is blocked.")
         if pack["switchedOff"]:
