@@ -46,6 +46,16 @@ python3 scripts/production-acceptance.py /private/evidence/manifest.json \
 The tool requires an explicit pinned MAJOR.MINOR.PATCH release and rejects mismatched identity, missing or duplicate categories, stale
 (older than 30 days) or future timestamps, malformed/linked/oversized artifacts,
 unsafe filenames, reused artifacts, changed SHA-256 content, mock evidence and failed results.
+
+The manifest and every artifact are read relative to **one pinned, owner-controlled
+evidence-directory descriptor**. The directory must not be a symlink or
+group/world writable, and each input must be a single-link, non-symlink
+regular file that is not group/world writable. Reads are bounded by the
+verified file-descriptor size, rejecting in-flight truncation or growth.
+Hardlinked artifacts and manifests are refused, as are substituted symlinks
+and unsafe directory permissions. The operator must protect the parent path
+and host from privileged replacement; file-descriptor pinning is not a
+cryptographic witness or independent provider attestation.
 It prints machine-readable JSON without dumping artifact contents.
 
 **Exit codes:** `2` means blocked; `3` means structurally complete but
