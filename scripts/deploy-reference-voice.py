@@ -15,6 +15,7 @@ import importlib.util
 import json
 import os
 import pathlib
+import re
 import shutil
 import subprocess
 import sys
@@ -197,17 +198,23 @@ def _context(root: pathlib.Path) -> pathlib.Path:
 VOICE_DATA_MOUNT = "/opt/voice"
 
 
-def worker_overlay(base: dict[str, Any]) -> dict[str, Any] | None:
+def worker_overlay(base: dict[str, Any], *, agent_name: str = "model-garden-receptionist") -> dict[str, Any] | None:
     """The governed worker's share of the voice overlay: the voice container's data volume, read-only, and where its transcripts are.
 
     Transcripts live in the voice container's own volume, which the worker could not see. With this mount the worker files each
     finished call (summary, CRM, timeline) itself; it can read the store and never write to it. ``None`` when the base has no worker.
     """
+    if (not isinstance(agent_name, str)
+            or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}", agent_name) is None):
+        raise ValueError("voice agent name must be a valid identifier")
     services = base.get("services") if isinstance(base, dict) else None
     if not isinstance(services, dict) or "governed-worker" not in services:
         return None
     return {
-        "environment": {"MODEL_GARDEN_VOICE_TRANSCRIPTS": f"{VOICE_DATA_MOUNT}/transcripts.jsonl"},
+        "environment": {
+            "MODEL_GARDEN_VOICE_TRANSCRIPTS": f"{VOICE_DATA_MOUNT}/transcripts.jsonl",
+            "MODEL_GARDEN_VOICE_AGENT_NAME": agent_name,
+        },
         "volumes": [f"voice-data:{VOICE_DATA_MOUNT}:ro"],
     }
 
@@ -292,7 +299,7 @@ def _apply_selected_voice(binding: dict[str, Any], voice: dict[str, Any], bundle
         "volumes": {"voice-data": {}},
     }
     base_document = yaml.safe_load(base.read_text(encoding="utf-8"))
-    shared = worker_overlay(base_document)
+    shared = worker_overlay(base_document, agent_name=agent_name.strip())
     if shared is not None:
         document["services"]["governed-worker"] = shared
     required_services = _required_services(base_document, document)
