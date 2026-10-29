@@ -95,7 +95,7 @@ class RuntimeOwnerSignatureTests(unittest.TestCase):
                 "environment": "dev",
                 "connectors": {"crm": {"provider": "built-in-crm", "tier": 0},
                                "kb": {"provider": "text-knowledge", "tier": 0}},
-                "governance": {"owners": [OWNER], "ownerKeys": self.keys},
+                "governance": {"owners": [OWNER, "business-owner"], "ownerKeys": self.keys},
             }
             compiled = compiler.compile_workspace(workspace, "receptionist", environment_binding=binding)[0]
             self.assertEqual(compiled["policyOwnerKeys"], self.keys)
