@@ -509,6 +509,32 @@ class IndependentlyAnchoredExportTests(unittest.TestCase):
                 report = export.verify_remote_export(ws.sink, expected_sequence=2, expected_hash=pinned)
                 self.assertFalse(report["ok"], report)
 
+    def test_remote_anchor_rejects_boolean_schema_and_event_sequence_even_when_rehashed(self):
+        for target in ("record-schema", "event-sequence", "head-schema"):
+            with self.subTest(target=target), tempfile.TemporaryDirectory() as tmp:
+                ws = Workspace(tmp)
+                write_ledger(ws.ledger, 1)
+                ws.export(exported_at=100)
+                record_path = next((ws.sink.root / "records").glob("*.json"))
+                head_path = next((ws.sink.root / "heads").glob("*.json"))
+                record = json.loads(record_path.read_text())
+                head = json.loads(head_path.read_text())
+                if target == "record-schema":
+                    record["exportSchema"] = True
+                elif target == "event-sequence":
+                    record["event"]["sequence"] = True  # True == 1 must not pass
+                    digest = export.event_hash(record["event"])
+                    record["event"]["eventHash"] = digest
+                    record["recordId"] = digest
+                    head["headHash"] = digest
+                else:
+                    head["exportSchema"] = True
+                record_path.write_text(json.dumps(record))
+                head_path.write_text(json.dumps(head))
+                pinned = record["recordId"]
+                self.assertFalse(export.verify_remote_export(
+                    ws.sink, expected_sequence=1, expected_hash=pinned)["ok"])
+
     def test_remote_anchor_rejects_tampered_or_missing_head(self):
         for change in (
             lambda h: h.update(headHash="0" * 64),
