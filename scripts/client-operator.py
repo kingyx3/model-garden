@@ -1109,6 +1109,10 @@ def main() -> int:
     connect.add_argument("--tools", nargs="+", help="exact portable Tools approved by the client owner")
     connect.add_argument("--owner", help="named client owner authorizing the connection (non-secret)")
     connect.add_argument("--operator", help="named Model Garden operator (non-secret)")
+    connect.add_argument("--agent", help="specific coworker receiving this grant (required for provider preview)")
+    connect.add_argument("--mailbox-kind", choices=("shared", "delegated", "personal"), help="mail only: approved mailbox type")
+    connect.add_argument("--mailbox-address", help="mail only: mailbox address, not a credential")
+    connect.add_argument("--owner-exception", help="mail only: recorded owner exception for a personal mailbox")
 
     connections = sub.add_parser("connections", help="show live connector health on a client runtime")
     connections.add_argument("--project-name", required=True)
@@ -1208,11 +1212,31 @@ def main() -> int:
                 return 0
             if not args.owner or not args.operator:
                 raise ValueError("connection plan requires --owner and --operator identities (no passwords or tokens)")
-            plan = registry.plan(args.family, args.provider, args.tools or [])
-            plan["clientOwner"] = args.owner
-            plan["operator"] = args.operator
-            print(json.dumps(plan, sort_keys=True, indent=2))
-            return 0 if plan["status"] in registry.BUILT else 1
+            if not args.agent:
+                raise ValueError("choose the specific coworker with --agent before previewing connection permissions")
+            if bool(args.mailbox_kind) != bool(args.mailbox_address):
+                raise ValueError("a mailbox preview requires both --mailbox-kind and --mailbox-address")
+            if args.owner_exception and not args.mailbox_kind:
+                raise ValueError("--owner-exception requires a personal mailbox selection")
+            mailbox = (
+                {"kind": args.mailbox_kind, "address": args.mailbox_address}
+                if args.mailbox_kind else None
+            )
+            # The core plan revalidates reviewed operation scopes and binds the preview
+            # digest to the exact coworker, owner and operator. This is not OAuth
+            # consent, an authorization token, a live provider test or a grant write.
+            connect_core = _load_script("modelgarden_connect_preview", "../platform/core/connect.py")
+            proposal = connect_core.plan(
+                family=args.family, provider=args.provider, tools=args.tools or [],
+                agent=args.agent, owner=args.owner, operator=args.operator,
+                mailbox=mailbox, owner_exception=args.owner_exception,
+            )
+            proposal.update(
+                previewOnly=True, ownerConsentVerified=False,
+                providerConnectionTested=False, bindingChanged=False,
+            )
+            print(json.dumps(proposal, sort_keys=True, indent=2))
+            return 0 if proposal["status"] in registry.BUILT else 1
         if args.command == "connections":
             return runtime_connection(args.project_name, "list")
         if args.command == "offboard":
