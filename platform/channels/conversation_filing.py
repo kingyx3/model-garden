@@ -120,44 +120,79 @@ def file_interaction(
     }
 
 
-def read_call_transcripts(path: pathlib.Path) -> list[dict[str, Any]]:
-    """Stored call transcript records, oldest first; unreadable lines are skipped."""
+def read_voice_records(path: pathlib.Path) -> list[dict[str, Any]]:
+    """Validate the *entire* bounded voice JSONL snapshot before any governed action.
+
+    A valid prefix is not proof of a complete file. The voice writer publishes
+    complete newline-terminated records atomically; reject partial lines,
+    malformed records, duplicate call identities and oversized exports instead
+    of silently dropping a customer call or a failed-write receipt. One read
+    also avoids mixing two generations of an atomically replaced voice file.
+    Error messages contain line numbers only, never caller content.
+    """
     if not path.is_file():
-        return []
+        return []  # a never-provisioned voice store is an empty input, not live proof
     records: list[dict[str, Any]] = []
+    seen_calls: set[str] = set()
     with path.open("r", encoding="utf-8") as handle:
-        for raw in handle:
+        for number, raw in enumerate(handle, start=1):
+            if not raw.strip():
+                continue
+            if len(records) >= MAX_RECORDS:
+                raise ValueError("voice record limit exceeded; split and reconcile input before filing")
+            if not raw.endswith("\n"):
+                raise ValueError(f"incomplete voice record at line {number}")
             try:
                 value = json.loads(raw)
             except json.JSONDecodeError:
-                continue
-            if isinstance(value, dict) and value.get("type") == "CallTranscript":
-                records.append(value)
-            if len(records) >= MAX_RECORDS:
-                break
-    return sorted(records, key=lambda item: (item.get("timestamp", 0), item.get("callHash", "")))
+                raise ValueError(f"malformed voice record at line {number}") from None
+            if not isinstance(value, dict):
+                raise ValueError(f"non-object voice record at line {number}")
+            if value.get("type") == "CallTranscript":
+                if (interaction_from_call(value) is None
+                        or not isinstance(value.get("agent"), str) or not value["agent"].strip()
+                        or type(value.get("endedAt")) is not int
+                        or value["endedAt"] < value["timestamp"]):
+                    raise ValueError(f"invalid call transcript at line {number}")
+                call_hash = value["callHash"]
+                if call_hash in seen_calls:
+                    raise ValueError(f"duplicate call transcript at line {number}")
+                seen_calls.add(call_hash)
+            elif value.get("type") == "TranscriptWriteFailed":
+                if type(value.get("timestamp")) is not int:
+                    raise ValueError(f"invalid transcript failure at line {number}")
+            records.append(value)
+    return records
+
+
+def call_transcripts(records: Iterable[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    """Select transcripts from a previously validated snapshot, oldest first."""
+    return sorted(
+        (dict(row) for row in records if row.get("type") == "CallTranscript"),
+        key=lambda item: (item["timestamp"], item["callHash"]),
+    )
+
+
+def read_call_transcripts(path: pathlib.Path) -> list[dict[str, Any]]:
+    """Compatibility helper; callers needing both event types should read once."""
+    return call_transcripts(read_voice_records(path))
 
 
 _ERROR_TYPE = re.compile(r"^[A-Za-z][A-Za-z0-9_]{0,63}$")
 FAILURE_ACTION = "transcript.write-failed"
 
 
+def transcript_failures(records: Iterable[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    """Select failure receipts from the same validated voice snapshot."""
+    return sorted(
+        (dict(row) for row in records if row.get("type") == "TranscriptWriteFailed"),
+        key=lambda item: (item["timestamp"], str(item.get("roomHash", ""))),
+    )
+
+
 def read_transcript_failures(path: pathlib.Path) -> list[dict[str, Any]]:
-    """The voice worker's ``TranscriptWriteFailed`` lifecycle events (error type and time only), oldest first."""
-    if not path.is_file():
-        return []
-    failures: list[dict[str, Any]] = []
-    with path.open("r", encoding="utf-8") as handle:
-        for raw in handle:
-            try:
-                value = json.loads(raw)
-            except json.JSONDecodeError:
-                continue
-            if isinstance(value, dict) and value.get("type") == "TranscriptWriteFailed" and isinstance(value.get("timestamp"), int):
-                failures.append(value)
-            if len(failures) >= MAX_RECORDS:
-                break
-    return sorted(failures, key=lambda item: (item["timestamp"], str(item.get("roomHash", ""))))
+    """Compatibility helper; callers needing calls too should read once."""
+    return transcript_failures(read_voice_records(path))
 
 
 def _failure_fingerprint(failure: Mapping[str, Any]) -> str:
