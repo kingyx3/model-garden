@@ -644,7 +644,7 @@ class CrmFilingTests(Case):
 
 
 def call_record(call_hash="a" * 64, start=T0 - 600, end=T0 - 540):
-    return {"type": "CallTranscript", "callHash": call_hash, "timestamp": start, "endedAt": end, "outcome": "completed",
+    return {"type": "CallTranscript", "agent": "receptionist", "callHash": call_hash, "timestamp": start, "endedAt": end, "outcome": "completed",
             "turns": [{"index": 0, "speaker": "caller", "text": "Hi, what are your hours?", "offsetSeconds": 0},
                       {"index": 1, "speaker": "agent", "text": "We are open 9 to 6.", "offsetSeconds": 4}]}
 
@@ -674,6 +674,39 @@ class CallFilingTests(Case):
         self.assertEqual(self.interactions(runtime), [], "paused worker must not file a transcript")
         store.resume(OWNER, T0 + 1)
         self.assertEqual(runtime.run_calls(T0 + 2)["filed"], 1)
+
+    def test_other_agent_or_missing_attribution_blocks_entire_voice_batch_before_effects(self):
+        for foreign in ("other-coworker", None):
+            with self.subTest(agent=foreign):
+                coworker = FakeCoworker()
+                good, bad = call_record("a" * 64), call_record("b" * 64)
+                if foreign is None:
+                    bad.pop("agent")
+                else:
+                    bad["agent"] = foreign
+                runtime = self.runtime([good, bad], coworker=coworker)
+                with self.assertRaisesRegex(ValueError, "voice record agent mismatch"):
+                    runtime.run_calls(T0)
+                self.assertEqual(coworker.calls, [])
+                self.assertEqual(self.interactions(runtime), [])
+                self.assertFalse(any(event.get("tool") == "crm.log-interaction" for event in self.events()))
+                # The next case must not reuse the prior transcript directory.
+                self.transcripts.unlink()
+                self.transcripts.parent.rmdir()
+
+    def test_foreign_failure_receipt_cannot_be_ledgered_as_this_coworkers_failure(self):
+        failure = {"type": "TranscriptWriteFailed", "agent": "another-agent", "timestamp": T0 - 30,
+                   "roomHash": "b" * 64, "errorType": "OSError"}
+        runtime = self.runtime([call_record()], extra_lines=[failure])
+        with self.assertRaisesRegex(ValueError, "voice record agent mismatch"):
+            runtime.run_calls(T0)
+        self.assertEqual(self.interactions(runtime), [])
+        self.assertFalse(any(event.get("action") == "transcript.write-failed" for event in self.events()))
+
+    def test_explicit_voice_agent_name_is_checked_against_transcript_attribution(self):
+        runtime = self.runtime([dict(call_record(), agent="voice-livekit")])
+        runtime.voice_agent = "voice-livekit"
+        self.assertEqual(runtime.run_calls(T0)["filed"], 1)
 
     def test_late_corruption_blocks_worker_filing_and_model_summary_for_entire_batch(self):
         coworker = FakeCoworker()
@@ -748,7 +781,7 @@ class CallFilingTests(Case):
         self.assertEqual(runtime.tick()["calls"], {"skipped": "no-crm-bound"})
 
     def test_a_transcript_write_failure_is_ledgered_once(self):
-        failure = {"type": "TranscriptWriteFailed", "timestamp": T0 - 30, "roomHash": "b" * 64, "errorType": "OSError"}
+        failure = {"type": "TranscriptWriteFailed", "agent": "receptionist", "timestamp": T0 - 30, "roomHash": "b" * 64, "errorType": "OSError"}
         runtime = self.runtime([], extra_lines=[failure])
         self.assertEqual(runtime.tick()["calls"]["writeFailures"], {"ledgered": 1, "known": 0})
         self.clock[0] += 120
