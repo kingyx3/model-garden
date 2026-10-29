@@ -849,7 +849,7 @@ class SkillStatusTests(GatewayCase):
         source = self.gateway.desired_state["source"]
         manifest = {
             "schemaVersion": 1, "kind": "CapabilityManifest", "agent": source["name"],
-            "client": source["client"] if client is None else client, "environment": "dev",
+            "client": source.get("client", self.gateway.tenant) if client is None else client, "environment": "dev",
             "skills": skills, "capabilities": capabilities or [],
         }
         path = self.root / "skill-status-manifest.json"
