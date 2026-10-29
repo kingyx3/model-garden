@@ -44,6 +44,7 @@ MAX_SEEN = 5000
 MAX_REPLY_CHARS = 3500
 MAX_ATTACHMENTS = 3
 INBOX_COMMAND = re.compile(r"^/?inbox$", re.IGNORECASE)
+SKILLS_COMMAND = re.compile(r"^/?skills$", re.IGNORECASE)
 APPROVAL_TEXT_COMMAND = re.compile(r"^/?(approve|reject)\s+(\S+)\s*$", re.IGNORECASE)
 EXACT_APPROVAL_ID = re.compile(r"^[0-9a-f]{64}$")
 TICKETS_COMMAND = re.compile(r"^/?tickets$", re.IGNORECASE)
@@ -106,6 +107,7 @@ class ChannelIngress:
         audit: Audit | None = None,
         deliverables: Callable[[Any, Any, str], Any] | None = None,
         inbox: Callable[[Any, Any], str] | None = None,
+        skill_status: Callable[[], str] | None = None,
         tickets: Callable[[str, str, str | None, str | None], str] | None = None,
         assign: Callable[[str, str, str], str] | None = None,
         observed: Callable[[Any], None] | None = None,
@@ -114,6 +116,7 @@ class ChannelIngress:
     ) -> None:
         self._adapters = dict(adapters)
         self._inbox = inbox
+        self._skill_status = skill_status  # deterministic runtime readiness, not a model answer
         self._tickets = tickets  # signed, direct staff-only Tier 0 list and status transition; gateway enforces pause and ledgers
         self._pause = pause  # (admin, "pause" | "resume", reason) -> reply; only a mapped admin in a direct conversation reaches it
         self._assign = assign  # (person, agent, goal) -> reply; raises ValueError with a safe message when refused
@@ -232,6 +235,17 @@ class ChannelIngress:
                     reply = "Only an administrator can pause or resume me, in a direct message."
                 self._send(adapter, inbound, reply)
                 return "pause-command"
+            if self._skill_status is not None and SKILLS_COMMAND.fullmatch(text.strip()):
+                if principal.mapped and principal.access == "member" and self._is_direct(inbound):
+                    try:
+                        reply = self._skill_status()
+                    except (OSError, ValueError, TypeError):
+                        reply = "Skill status is unavailable. Ask the operator to check readiness."
+                    self._note("channel.skills-viewed", principal.identity, {"channel": inbound.channel})
+                else:
+                    reply = "I can show Skill readiness only to a team member in a direct message."
+                self._send(adapter, inbound, reply)
+                return "skills-command"
             if self._inbox is not None and INBOX_COMMAND.match(text.strip()):
                 if principal.mapped and self._is_direct(inbound):
                     reply = self._inbox(inbound, principal)
