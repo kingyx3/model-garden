@@ -71,7 +71,7 @@ class BuildTests(Case):
         self.assertIn("calendar: not connected yet", item["missing"])
         self.assertIn("connect calendar", item["action"])
         family = item["connect"][0]
-        self.assertEqual((family["family"], family["command"]), ("calendar", "python3 scripts/client-operator.py connect calendar"))
+        self.assertEqual((family["family"], family["command"]), ("calendar", "python3 scripts/client-operator.py connect calendar --agent receptionist"))
         self.assertTrue(family["options"])
 
     def test_planned_providers_are_never_presented_as_usable(self):
@@ -109,6 +109,60 @@ class BuildTests(Case):
                  "dependencies": [{"capability": "cap", "family": "calendar", "required": True, "status": status, "provider": "p", "tier": 1}]}]}]
             result = pack.build(report, [{"agent": "a", "policyVersion": "policy:test", "skills": []}])[0]
             self.assertTrue(result["needsAction"][0]["missing"][0].startswith("cap:"), status)
+
+    def test_grant_failures_offer_only_coworker_bound_review_not_false_reauthorization(self):
+        for status in ("unavailable", "no-grant", "grant-unavailable", "grant-scope"):
+            report = [{"agent": "front.office", "environment": "dev", "skills": [
+                {"name": "follow-up", "kind": "Skill", "ready": False, "enabled": True,
+                 "remediation": "Ask the owner to review the connection",
+                 "dependencies": [{"capability": "crm", "family": "crm", "required": True,
+                                   "status": status, "provider": "p", "tier": 1}]}]}]
+            result = pack.build(report, [{"agent": "front.office", "policyVersion": "policy:test", "skills": []}])[0]
+            self.assertEqual(result["needsAction"][0]["connect"][0]["command"],
+                             "python3 scripts/client-operator.py connect crm --agent front.office")
+            text = pack.render([result])
+            self.assertIn("does not grant or repair access", text)
+            self.assertNotIn("Connect it with:", text)
+
+    def test_multi_agent_blockers_have_separate_remediation_commands(self):
+        reports = [{"agent": name, "environment": "dev", "skills": [
+            {"name": "book", "kind": "Skill", "ready": False, "enabled": True,
+             "dependencies": [{"capability": "calendar", "family": "calendar",
+                               "required": True, "status": "missing"}]}]}
+                   for name in ("front", "back")]
+        approvals = [{"agent": name, "policyVersion": "policy:test", "skills": []}
+                     for name in ("front", "back")]
+        result = pack.build(reports, approvals)
+        self.assertEqual([p["needsAction"][0]["connect"][0]["command"] for p in result],
+                         ["python3 scripts/client-operator.py connect calendar --agent front",
+                          "python3 scripts/client-operator.py connect calendar --agent back"])
+
+    def test_content_blocker_requires_content_not_a_new_connection(self):
+        report = [{"agent": "front", "environment": "dev", "skills": [
+            {"name": "faq", "kind": "Skill", "ready": False, "enabled": True,
+             "remediation": "Upload approved business rules for this coworker",
+             "dependencies": [{"capability": "kb", "family": "kb", "required": True,
+                               "status": "no-content", "provider": "text-knowledge", "tier": 0}]}]}]
+        result = pack.build(report, [{"agent": "front", "policyVersion": "policy:test", "skills": []}])[0]
+        self.assertEqual(result["needsAction"][0]["connect"], [])
+        self.assertIn("Upload approved business rules", pack.render([result]))
+
+    def test_untrusted_agent_or_family_cannot_become_a_shell_command(self):
+        for agent, family in (("front;echo", "crm"), ("front", "crm;echo")):
+            report = [{"agent": agent, "environment": "dev", "skills": [
+                {"name": "follow-up", "kind": "Skill", "ready": False, "enabled": True,
+                 "dependencies": [{"capability": "crm", "family": family,
+                                   "required": True, "status": "missing"}]}]}]
+            with self.subTest(agent=agent, family=family), self.assertRaises(pack.PackError):
+                pack.build(report, [{"agent": agent, "policyVersion": "policy:test", "skills": []}])
+
+    def test_blocked_without_a_required_blocker_is_not_presented_as_actionable(self):
+        report = [{"agent": "front", "environment": "dev", "skills": [
+            {"name": "follow-up", "kind": "Skill", "ready": False, "enabled": True,
+             "dependencies": [{"capability": "tickets", "family": "tickets",
+                               "required": False, "status": "degraded", "fallbackTier": 4}]}]}]
+        with self.assertRaisesRegex(pack.PackError, "no required blocking dependency"):
+            pack.build(report, [{"agent": "front", "policyVersion": "policy:test", "skills": []}])
 
     def test_an_optional_missing_dependency_degrades_but_does_not_block(self):
         result = self.packs(self.workspace(disabled=["book-appointment"]))
@@ -171,7 +225,7 @@ class RenderTests(Case):
         for heading in ("## What it can do now", "## What needs one thing from you first", "## What it will and will not do without asking you"):
             self.assertIn(heading, text)
         self.assertIn("- **book-appointment** cannot work yet: calendar: not connected yet.", text)
-        self.assertIn("Connect it with: `python3 scripts/client-operator.py connect calendar`", text)
+        self.assertIn("Review choices for this coworker: `python3 scripts/client-operator.py connect calendar --agent receptionist`", text)
         self.assertIn("| crm.create | log-conversation | write | waits for a person's approval | is never done |", text)
         self.assertIn("A public caller can never approve", text)
         self.assertIn("does not show that any outside account is connected", text)
