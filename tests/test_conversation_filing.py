@@ -129,15 +129,18 @@ class CallInteractionTests(unittest.TestCase):
         self.assertNotIn("client.example", json.dumps(arguments))
         self.assertEqual(arguments["interactionType"], "email")
 
-    def test_reading_stored_transcripts_skips_other_records_and_garbage_in_time_order(self):
+    def test_reading_stored_transcripts_skips_other_valid_record_types_but_not_corruption(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = pathlib.Path(tmp) / "t.jsonl"
             path.write_text("\n".join([
-                json.dumps(transcript("b", started=200)), "not json", json.dumps({"type": "FallbackMessage", "message": "x"}),
+                json.dumps(transcript("b", started=200)), json.dumps({"type": "FallbackMessage", "message": "x"}),
                 json.dumps(transcript("a", started=100)), "",
             ]), encoding="utf-8")
             self.assertEqual([r["callHash"] for r in filing.read_call_transcripts(path)], ["a", "b"])
             self.assertEqual(filing.read_call_transcripts(pathlib.Path(tmp) / "missing.jsonl"), [])
+            path.write_text(path.read_text() + "not json\n", encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "malformed voice record"):
+                filing.read_call_transcripts(path)
 
 
 
