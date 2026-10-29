@@ -11,10 +11,10 @@ import json
 import re
 import sys
 
-CLIENT = re.compile(r"[a-z0-9][a-z0-9-]{1,19}\\Z")
-PROJECT = re.compile(r"[a-z][a-z0-9-]{4,28}[a-z0-9]\\Z")
-COMPOSE = re.compile(r"[a-z0-9][a-z0-9_-]{0,62}\\Z")
-USER = re.compile(r"[a-z_][a-z0-9_-]{0,31}\\Z")
+CLIENT = re.compile(r"[a-z0-9][a-z0-9-]{1,19}\Z")
+PROJECT = re.compile(r"[a-z][a-z0-9-]{4,28}[a-z0-9]\Z")
+COMPOSE = re.compile(r"[a-z0-9][a-z0-9_-]{0,62}\Z")
+USER = re.compile(r"[a-z_][a-z0-9_-]{0,31}\Z")
 
 
 class UnitError(ValueError):
