@@ -127,6 +127,15 @@ class AnchoredLedgerTests(unittest.TestCase):
         args[3][0]["event"]["outcome"] = "unknown"
         self.assertIn("hostile-1:unknown-anchored-outcome", self.check(*args))
 
+    def test_nonterminal_tool_identity_cannot_be_swapped_before_execution(self):
+        args = list(fixture())
+        extra = copy.deepcopy(args[3][0])
+        extra["event"].update(event="execution", outcome="succeeded", tool="crm.read")
+        # Same request ID but a different Tool must fail even when the trace
+        # claims a safe denial and the authorization receipt remains unchanged.
+        args[3].append(extra)
+        self.assertIn("hostile-1:conflicting-anchored-tools", self.check(*args))
+
     def test_actual_export_verifier_and_head_witness_are_required(self):
         spec = importlib.util.spec_from_file_location(
             "adversarial_export_fixture", ROOT / "platform" / "core" / "ledger_export.py"
