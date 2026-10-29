@@ -44,3 +44,18 @@ python3 scripts/render-ledger-verifier-units.py \
 On the **separately administered** verifier host, the authorized operator must review and install the two unit texts from the JSON under `/etc/systemd/system/`, create the dedicated unprivileged user/group, ensure `/opt/model-garden` contains the pinned release, provision `/srv/model-garden-verifier/acme-dev-mg/audit.jsonl` as an authentic current read-only ledger snapshot, and create `/var/lib/model-garden-verifier/acme-dev-mg` owned by the service user with mode `0700`. The service assumes metadata-based identity access on that host; verify the **actual** principal, impersonation grant, separate read-only bucket IAM and logging permissions before any timer enablement. The unit intentionally cannot write to the runtime ledger, export bucket or other clients' state.
 
 After the required client/operator/security approvals, use `systemd-analyze verify` on the reviewed files, then enable only the timer under the host's change procedure. Observe at least one real successful GCS read, a missing-heartbeat failure, a corrupted/truncated-chain failure and recovery, and the actual Cloud Monitoring recipient notification receipts. The timer's presence or a green synthetic test does not establish storage immutability, trusted snapshot freshness, independently enforced identity separation, or delivered alerts. Revoke/disable the timer and associated IAM through the approved retirement process.
+
+## Independently pinned exported-chain readback (v0.8.216)
+
+A separately administered, read-only verifier can now check an exported chain **without any copy of the runtime ledger**, provided the security owner has independently retained a trusted head witness (sequence and SHA-256) **outside the export bucket and runtime host**. Use this only as a supplemental integrity check; the existing `ledger-verifier-health.py` still requires a trusted current local snapshot to test local/export parity and detect local truncation.
+
+```sh
+python3 scripts/ledger-export.py verify-remote \
+  --gcs-bucket CLIENT_RETENTION_LOCKED_BUCKET --gcs-prefix APPROVED_CLIENT_NAMESPACE \
+  --gcs-impersonate APPROVED_READ_ONLY_VERIFIER_IDENTITY \
+  --expected-head-sequence 123 --expected-head-hash INDEPENDENTLY_RETAINED_64_HEX_DIGEST
+```
+
+The command fails closed on a missing or different pinned head, missing/extra exported sequences, altered event/schema/hash/linkage, inconsistent historical head manifests, or missing first chained record. It emits only counts, a bounded integrity status and the explicit scope `exported-chain-only`. For an older ledger with unexported v1 records preceding the first chained event, the owner must independently establish `--expected-first-sequence`; `legacyPrefixVerified=false` records that those v1 records are **not** proven by this mode. Never infer the witness from the same bucket being verified: that would not independently anchor the result.
+
+A successful result has `localComparisonPerformed=false` and `localTruncationProven=false`. It does **not** prove the local ledger was not truncated, that the newest event was exported, the trustworthiness of the head witness, retention lock, separate IAM, client authorization, actual alert delivery, or operational acceptance. Run the original `verify` mode with a trusted current local snapshot and retain real GCS object, identity and alert receipts for #80. No cloud apply or verifier installation is performed by this feature.

@@ -451,5 +451,139 @@ class CliTests(unittest.TestCase):
             self.assertIn("LEDGER_EXPORT_TEST_TOKEN", err)
 
 
+
+class IndependentlyAnchoredExportTests(unittest.TestCase):
+    """A separately operated reader can verify an independently pinned export head.
+
+    This intentionally does not claim local-ledger parity or current-host freshness.
+    """
+
+    def test_pinned_remote_chain_verifies_without_local_ledger_access(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ws = Workspace(tmp)
+            write_ledger(ws.ledger, 3)
+            ws.export(exported_at=100)
+            pinned = ws.sink.records()[-1]["recordId"]
+            ws.ledger.unlink()  # the independent verifier has no runtime ledger
+            report = export.verify_remote_export(ws.sink, expected_sequence=3, expected_hash=pinned)
+            self.assertTrue(report["ok"], report["problems"])
+            self.assertEqual(report["scope"], "exported-chain-only")
+            self.assertFalse(report["localComparisonPerformed"])
+            self.assertFalse(report["localTruncationProven"])
+            self.assertEqual(report["exportedRecords"], 3)
+
+    def test_remote_anchor_rejects_missing_prefix_middle_and_unexpected_tail(self):
+        for removed in (1, 2, None):
+            with self.subTest(removed=removed), tempfile.TemporaryDirectory() as tmp:
+                ws = Workspace(tmp)
+                write_ledger(ws.ledger, 3)
+                ws.export(exported_at=100)
+                pinned = ws.sink.records()[-1]["recordId"]
+                if removed is None:
+                    write_ledger(ws.ledger, 1, start=4)
+                    ws.export(exported_at=101)
+                else:
+                    path = next(p for p in (ws.sink.root / "records").glob("*.json")
+                                if int(p.name.split("-", 1)[0]) == removed)
+                    path.unlink()
+                report = export.verify_remote_export(ws.sink, expected_sequence=3, expected_hash=pinned)
+                self.assertFalse(report["ok"], report)
+
+    def test_remote_anchor_rejects_forged_record_schema_sequence_and_hash(self):
+        for change in (
+            lambda r: r.update(exportSchema=99),
+            lambda r: r["event"].update(sequence=999),
+            lambda r: r["event"].update(previousEventHash="0" * 64),
+            lambda r: r["event"].update(schemaVersion=1),
+            lambda r: r.update(recordId="f" * 64),
+        ):
+            with tempfile.TemporaryDirectory() as tmp:
+                ws = Workspace(tmp)
+                write_ledger(ws.ledger, 2)
+                ws.export(exported_at=100)
+                pinned = ws.sink.records()[-1]["recordId"]
+                path = sorted((ws.sink.root / "records").glob("*.json"))[-1]
+                record = json.loads(path.read_text())
+                change(record)
+                path.write_text(json.dumps(record))
+                report = export.verify_remote_export(ws.sink, expected_sequence=2, expected_hash=pinned)
+                self.assertFalse(report["ok"], report)
+
+    def test_remote_anchor_rejects_boolean_schema_and_event_sequence_even_when_rehashed(self):
+        for target in ("record-schema", "event-sequence", "head-schema"):
+            with self.subTest(target=target), tempfile.TemporaryDirectory() as tmp:
+                ws = Workspace(tmp)
+                write_ledger(ws.ledger, 1)
+                ws.export(exported_at=100)
+                record_path = next((ws.sink.root / "records").glob("*.json"))
+                head_path = next((ws.sink.root / "heads").glob("*.json"))
+                record = json.loads(record_path.read_text())
+                head = json.loads(head_path.read_text())
+                if target == "record-schema":
+                    record["exportSchema"] = True
+                elif target == "event-sequence":
+                    record["event"]["sequence"] = True  # True == 1 must not pass
+                    digest = export.event_hash(record["event"])
+                    record["event"]["eventHash"] = digest
+                    record["recordId"] = digest
+                    head["headHash"] = digest
+                else:
+                    head["exportSchema"] = True
+                record_path.write_text(json.dumps(record))
+                head_path.write_text(json.dumps(head))
+                pinned = record["recordId"]
+                self.assertFalse(export.verify_remote_export(
+                    ws.sink, expected_sequence=1, expected_hash=pinned)["ok"])
+
+    def test_remote_anchor_rejects_tampered_or_missing_head(self):
+        for change in (
+            lambda h: h.update(headHash="0" * 64),
+            lambda h: h.update(events=1),
+            lambda h: h.update(exportSchema=2),
+            lambda h: h.update(exportedAt=True),
+        ):
+            with tempfile.TemporaryDirectory() as tmp:
+                ws = Workspace(tmp)
+                write_ledger(ws.ledger, 2)
+                ws.export(exported_at=100)
+                pinned = ws.sink.records()[-1]["recordId"]
+                path = next((ws.sink.root / "heads").glob("*.json"))
+                head = json.loads(path.read_text())
+                change(head)
+                path.write_text(json.dumps(head))
+                self.assertFalse(export.verify_remote_export(
+                    ws.sink, expected_sequence=2, expected_hash=pinned)["ok"])
+
+    def test_remote_anchor_requires_explicit_trusted_first_sequence_for_legacy(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ws = Workspace(tmp)
+            ws.ledger.write_text(json.dumps({"event": "legacy"}) + "\n")
+            write_ledger(ws.ledger, 2)
+            ws.export(exported_at=100)
+            pinned = ws.sink.records()[-1]["recordId"]
+            self.assertFalse(export.verify_remote_export(
+                ws.sink, expected_sequence=3, expected_hash=pinned)["ok"])
+            report = export.verify_remote_export(
+                ws.sink, expected_sequence=3, expected_hash=pinned, expected_first_sequence=2)
+            self.assertTrue(report["ok"], report["problems"])
+            self.assertFalse(report["legacyPrefixVerified"])
+
+    def test_remote_anchor_cli_refuses_wrong_witness_without_reading_local_ledger(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ws = Workspace(tmp)
+            write_ledger(ws.ledger, 2)
+            ws.export(exported_at=100)
+            pinned = ws.sink.records()[-1]["recordId"]
+            out, err = io.StringIO(), io.StringIO()
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                code = cli.main(["verify-remote", "--sink-dir", str(ws.sink.root),
+                                 "--expected-head-sequence", "2", "--expected-head-hash", pinned])
+            self.assertEqual(code, 0, err.getvalue())
+            self.assertEqual(json.loads(out.getvalue())["scope"], "exported-chain-only")
+            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                code = cli.main(["verify-remote", "--sink-dir", str(ws.sink.root),
+                                 "--expected-head-sequence", "2", "--expected-head-hash", "0" * 64])
+            self.assertEqual(code, 2)
+
 if __name__ == "__main__":
     unittest.main()

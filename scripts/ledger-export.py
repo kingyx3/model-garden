@@ -84,6 +84,15 @@ def main(argv: list[str] | None = None) -> int:
     verify.add_argument("--gcs-prefix", help="optional object prefix inside the bucket")
     verify.add_argument("--max-lag-events", type=int, help="alert when the local ledger is more than this many events ahead of the export")
     verify.add_argument("--max-head-age-seconds", type=int, help="alert when events are waiting and the newest head manifest is older than this")
+    remote = sub.add_parser("verify-remote", help="verify a read-only export against an independently retained head witness (NOT local truncation proof)")
+    remote_where = remote.add_mutually_exclusive_group(required=True)
+    remote_where.add_argument("--sink-dir")
+    remote_where.add_argument("--gcs-bucket")
+    remote.add_argument("--gcs-impersonate", help="read-only verifier identity for GCS")
+    remote.add_argument("--gcs-prefix", help="approved client export namespace")
+    remote.add_argument("--expected-head-sequence", type=int, required=True, help="sequence from an independently retained trusted witness")
+    remote.add_argument("--expected-head-hash", required=True, help="SHA-256 head from the same independent witness")
+    remote.add_argument("--expected-first-sequence", type=int, default=1, help="first chained sequence from a trusted witness (default 1; v1 legacy prefix requires explicit value)")
     args = parser.parse_args(argv)
 
     try:
@@ -91,6 +100,19 @@ def main(argv: list[str] | None = None) -> int:
             summary = EXPORT.export_ledger(args.ledger, build_sink(args), args.state, batch_size=args.batch_size)
             print(json.dumps(summary, sort_keys=True))
             return 0
+        if args.command == "verify-remote":
+            sink = EXPORT.DirectorySink(pathlib.Path(args.sink_dir)) if args.sink_dir else build_gcs_sink(args)
+            report = EXPORT.verify_remote_export(
+                sink, expected_sequence=args.expected_head_sequence,
+                expected_hash=args.expected_head_hash, expected_first_sequence=args.expected_first_sequence,
+            )
+            print(json.dumps({key: report[key] for key in (
+                "ok", "scope", "localComparisonPerformed", "localTruncationProven",
+                "legacyPrefixVerified", "exportedRecords", "exportedHeadSequence",
+            )}, sort_keys=True))
+            for problem in report["problems"]:
+                print(f"ALERT: {problem}", file=sys.stderr)
+            return 0 if report["ok"] else 2
         report = EXPORT.verify_export(
             args.ledger, EXPORT.DirectorySink(pathlib.Path(args.sink_dir)) if args.sink_dir else build_gcs_sink(args),
             max_lag_events=args.max_lag_events, max_head_age_seconds=args.max_head_age_seconds,

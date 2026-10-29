@@ -558,6 +558,127 @@ def verify_export(
     }
 
 
+
+def verify_remote_export(
+    sink: Any, *, expected_sequence: int, expected_hash: str,
+    expected_first_sequence: int = 1,
+) -> dict[str, Any]:
+    """Verify an exported chain against a head witness kept OUTSIDE the export sink.
+
+    A separate read-only verifier can run this without mounting the runtime ledger.
+    The caller must obtain the expected head sequence/hash and (for historical v1
+    prefixes) the first chained sequence from a trusted, independently retained
+    witness, not from the same bucket. This verifies exported bytes only: it
+    cannot prove local-ledger parity/truncation, latest-write freshness, GCS IAM,
+    retention lock, or the witness's authenticity.
+    """
+    if type(expected_sequence) is not int or expected_sequence < 1:
+        raise ValueError("expected_sequence must be a positive integer")
+    if not isinstance(expected_hash, str) or re.fullmatch(r"[0-9a-f]{64}", expected_hash) is None:
+        raise ValueError("expected_hash must be a lowercase SHA-256 digest")
+    if (type(expected_first_sequence) is not int
+            or not 1 <= expected_first_sequence <= expected_sequence):
+        raise ValueError("expected_first_sequence must be between 1 and expected_sequence")
+
+    problems: list[str] = []
+    records = sink.records()
+    heads = sink.heads()
+    if not isinstance(records, list) or not isinstance(heads, list):
+        raise LedgerExportError("export reader returned invalid collections")
+    if not records:
+        problems.append("no exported records")
+    by_sequence: dict[int, dict[str, Any]] = {}
+    for record in records:
+        if not isinstance(record, dict):
+            problems.append("exported record has invalid structure")
+            continue
+        sequence = record.get("sequence")
+        if type(sequence) is not int or sequence < 1 or sequence in by_sequence:
+            problems.append("exported record has invalid or duplicate sequence")
+            continue
+        by_sequence[sequence] = record
+
+    previous_hash: str | None = None
+    previous_schema = 1
+    last_sequence = expected_first_sequence - 1
+    for sequence, record in sorted(by_sequence.items()):
+        if sequence != last_sequence + 1:
+            problems.append("exported chain has a missing or unexpected sequence")
+        last_sequence = sequence
+        event = record.get("event")
+        if (type(record.get("exportSchema")) is not int or record["exportSchema"] != EXPORT_SCHEMA_VERSION
+                or not isinstance(event, dict)
+                or type(event.get("sequence")) is not int or event["sequence"] != sequence
+                or type(event.get("schemaVersion")) is not int
+                or event["schemaVersion"] not in CHAINED_SCHEMA_VERSIONS
+                or event["schemaVersion"] < previous_schema):
+            problems.append("exported record has invalid schema, sequence or event")
+            previous_hash = None
+            continue
+        previous_schema = event["schemaVersion"]
+        digest = event.get("eventHash")
+        record_id = record.get("recordId")
+        try:
+            valid_hash = (isinstance(digest, str) and re.fullmatch(r"[0-9a-f]{64}", digest) is not None
+                          and record_id == digest and event_hash(event) == digest)
+        except (TypeError, ValueError, OverflowError):
+            valid_hash = False
+        if not valid_hash:
+            problems.append("exported record fails its content hash")
+        link = event.get("previousEventHash")
+        if sequence == expected_first_sequence:
+            if expected_first_sequence == 1 and link is not None:
+                problems.append("first exported event has an unexpected predecessor")
+            elif expected_first_sequence > 1 and (
+                not isinstance(link, str) or re.fullmatch(r"[0-9a-f]{64}", link) is None
+            ):
+                problems.append("legacy-prefix first event has an invalid predecessor")
+        elif previous_hash is None or link != previous_hash:
+            problems.append("exported chain has a broken predecessor link")
+        previous_hash = digest if valid_hash else None
+
+    latest_sequence = max(by_sequence, default=0)
+    if latest_sequence != expected_sequence or (
+        by_sequence.get(expected_sequence, {}).get("recordId") != expected_hash
+    ):
+        problems.append("exported chain does not match the independently pinned head")
+
+    witnessed_head = False
+    sequences = sorted(by_sequence)
+    for head in heads:
+        if not isinstance(head, dict):
+            problems.append("exported head has invalid structure")
+            continue
+        sequence = head.get("sequence")
+        timestamp = head.get("exportedAt")
+        count = head.get("events")
+        if (type(head.get("exportSchema")) is not int or head["exportSchema"] != EXPORT_SCHEMA_VERSION
+                or head.get("kind") != "head" or type(sequence) is not int or sequence < 1
+                or type(timestamp) is not int or timestamp < 0
+                or type(count) is not int or count != bisect_right(sequences, sequence)
+                or not isinstance(head.get("headHash"), str)
+                or re.fullmatch(r"[0-9a-f]{64}", head["headHash"]) is None
+                or by_sequence.get(sequence, {}).get("recordId") != head["headHash"]):
+            problems.append("exported head has invalid metadata or does not match a record")
+            continue
+        if sequence == expected_sequence and head["headHash"] == expected_hash:
+            witnessed_head = True
+        if sequence > expected_sequence:
+            problems.append("exported head is newer than the pinned witness")
+    if not witnessed_head:
+        problems.append("no exported head matches the independently pinned witness")
+    return {
+        "ok": not problems,
+        "scope": "exported-chain-only",
+        "localComparisonPerformed": False,
+        "localTruncationProven": False,
+        "legacyPrefixVerified": expected_first_sequence == 1,
+        "exportedRecords": len(records),
+        "exportedHeadSequence": latest_sequence,
+        "problems": problems,
+    }
+
+
 def iter_gap_sequences(sequences: Iterable[int]) -> Iterator[int]:
     """Yield missing sequence numbers between 1 and the highest present (helper for alerting)."""
     present = set(sequences)
