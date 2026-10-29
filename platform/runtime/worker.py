@@ -781,6 +781,30 @@ class Worker:
                     total += cost
         return total
 
+    def _hold_unmetered_spend(self, now: int) -> dict[str, Any]:
+        """Fail closed for autonomous worker work when a configured cap cannot be reconciled.
+
+        A spend-cap hold also blocks ordinary owner resume. Only a subsequent
+        successful metering pass and cap reconciliation may release it. This is
+        a worker-local safety gate, not a reservation of provider-side spend.
+        """
+        window = dt.datetime.fromtimestamp(now, dt.timezone.utc).strftime("%Y-%m")
+        store = _module("pause").PauseStore(self.data)
+        state = store.status()
+        if not state["paused"]:
+            store.pause(IDENTITY, "monthly model spend metering unavailable", now, cause="spend-cap", window=window)
+            self.audit("spend.metering-unavailable", IDENTITY, {"window": window})
+        to = self.config["escalateTo"] or (self.config["mailbox"] or {}).get("owner")
+        if to:
+            self._queue_once(
+                "spend-metering-unavailable", f"{window}|metering", to,
+                "Model-spend metering is unavailable, so autonomous coworker work is held until the worker "
+                "can read every configured Hermes usage store and reconcile the monthly cap. "
+                "This is a safety hold, not proof that the cap was reached.",
+                notice_reference=f"{window}:metering",
+            )
+        return {"held": True, "reason": "metering-unavailable"}
+
     def run_spend(self, now: int) -> dict[str, Any]:
         """Warn at configured percentages of a monthly cap, and at the cap pause the coworker (#238, using the #232 pause).
 
@@ -805,7 +829,16 @@ class Worker:
             # An owner resume/repause cannot erase this hold between worker passes.
             cap_window = state.get("window")
             if isinstance(cap_window, str) and store.clear_spend_cap(now, expected_window=cap_window):
-                self.audit("spend.cap-cleared", IDENTITY, {"window": window, "previousWindow": cap_window})
+                metering_hold = state.get("reason") == "monthly model spend metering unavailable"
+                self.audit("spend.metering-restored" if metering_hold else "spend.cap-cleared", IDENTITY,
+                           {"window": window, "previousWindow": cap_window})
+                if metering_hold and to:
+                    self._queue_once(
+                        "spend-metering-restored", f"{window}|metering-restored", to,
+                        "Model-spend metering has recovered and the current monthly estimate is below the configured cap. "
+                        "The worker's metering safety hold was released; this is not an invoice reconciliation.",
+                        notice_reference=f"{window}:restored",
+                    )
                 state = {"paused": False}
         told = 0
         for threshold in settings["warnAtPercent"]:
@@ -1279,7 +1312,31 @@ class Worker:
         """One pass: every job whose interval has elapsed runs once; a failure is ledgered and the rest still run."""
         now = int(self.clock())
         report: dict[str, Any] = {}
-        if not self._schedules_applied:
+        blocked = False
+        if self.config["spend"] is not None:
+            # When a cap is configured, every worker tick first collects the
+            # latest session counters and reconciles the cap. The old ordering
+            # ran schedules/mailbox before both jobs, then evaluated the cap
+            # before the newly metered usage. Do not honor slower intervals for
+            # these two safety checks while a cap is enabled.
+            report["usage"] = self._guard("usage", self.run_usage, now)
+            self.last_run["usage"] = now
+            metered = bool(self.usage_sources) and all(
+                isinstance(report["usage"].get(surface), Mapping)
+                and type(report["usage"][surface].get("recorded")) is int
+                and report["usage"][surface]["recorded"] >= 0
+                for surface in self.usage_sources
+            )
+            if metered:
+                report["spend"] = self._guard("spend", self.run_spend, now)
+                if "failed" in report["spend"]:
+                    report["spendHold"] = self._guard("spend-hold", self._hold_unmetered_spend, now)
+                    blocked = True
+            else:
+                report["spend"] = self._guard("spend-hold", self._hold_unmetered_spend, now)
+                blocked = True
+            self.last_run["spend"] = now
+        if not self._schedules_applied and not blocked:
             report["schedules"] = self._guard("schedules", self.apply_schedules, now)
             # A paused or failed startup must be retried after resume/recovery;
             # otherwise the one-shot flag silently drops the workspace schedules.
@@ -1288,6 +1345,10 @@ class Worker:
                 and "failed" not in report["schedules"]
             )
         for name, job in self.jobs():
+            if self.config["spend"] is not None and name in ("usage", "spend"):
+                continue  # already run as the mandatory preflight
+            if blocked and name not in ("notices", "retention", "export"):
+                continue  # preserve human alerts and housekeeping, never start model work
             if now - self.last_run.get(name, float("-inf")) < self.config["intervals"][name]:
                 continue
             self.last_run[name] = now
