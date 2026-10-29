@@ -53,6 +53,12 @@ MAX_TURNS = 2000
 MAX_TURN_CHARS = 4000
 MAX_SUMMARY_CHARS = 2000
 MAX_REQUEST_IDS = 200
+# Conservative bounds for the shared private transcript/fallback retention snapshot.
+# These limits are not an archival quota: a full/corrupt store needs operator
+# recovery, never silent deletion or an unbounded in-call rewrite.
+MAX_RETAINED_BYTES = 128 * 1024 * 1024
+MAX_RETAINED_ROWS = 100_000
+MAX_RETAINED_LINE_CHARS = 16 * 1024 * 1024
 EXTRACT_CHARS = 160
 MAX_PATTERNS = 20
 MAX_PATTERN_CHARS = 200
@@ -377,25 +383,43 @@ class CallTranscript:
 
 
 def _retained(handle: Any, *, now: int, retention_seconds: int) -> list[dict[str, Any]]:
+    """Read one complete, bounded historical JSONL snapshot before any rewrite.
+
+    Reject partial final rows and excessive input instead of silently repairing
+    evidence or exhausting a voice worker. Count expired rows too: they must be
+    validated before retention may discard them.
+    """
+    if os.fstat(handle.fileno()).st_size > MAX_RETAINED_BYTES:
+        raise ValueError("existing voice record snapshot exceeds byte limit")
     cutoff = now - retention_seconds
     handle.seek(0)
     rows: list[dict[str, Any]] = []
-    for raw in handle:
+    count = 0
+    while True:
+        raw = handle.readline(MAX_RETAINED_LINE_CHARS + 1)
+        if not raw:
+            break
+        if len(raw) > MAX_RETAINED_LINE_CHARS:
+            raise ValueError("existing voice record line exceeds size limit")
+        if not raw.endswith("\n"):
+            raise ValueError("invalid existing voice record: unterminated JSONL row")
         if not raw.strip():
             continue
+        count += 1
+        if count > MAX_RETAINED_ROWS:
+            raise ValueError("existing voice record snapshot exceeds row limit")
         try:
             value = json.loads(raw)
         except json.JSONDecodeError as exc:
             raise ValueError("invalid existing voice record: malformed JSON") from exc
         # JSON booleans are Python ints; do not accept false as a timestamp.
-        # Refuse any damaged row *before* truncating the original file. Silent
+        # Refuse any damaged row BEFORE replacing the original file. Silent
         # skipping destroys retained call and fallback evidence on the next write.
         if not isinstance(value, dict) or type(value.get("timestamp")) is not int:
             raise ValueError("invalid existing voice record: missing or invalid timestamp")
         if value["timestamp"] >= cutoff:
             rows.append(value)
     return rows
-
 
 def _append_call_record(rows: list[dict[str, Any]], record: dict[str, Any]) -> bool:
     """One retained transcript per callHash; refuse ambiguous or conflicting evidence.
@@ -502,6 +526,8 @@ def store_private_jsonl(path: pathlib.Path, record: dict[str, Any], *, retention
                                           retention_seconds=retention_seconds))
                     if retention_seconds > 0 and _append_call_record(rows, record):
                         rows.append(record)
+                    if len(rows) > MAX_RETAINED_ROWS:
+                        raise ValueError("new voice record snapshot exceeds row limit")
                     assert_directory()
                     assert_lock()
                     assert_target()
@@ -512,8 +538,15 @@ def store_private_jsonl(path: pathlib.Path, record: dict[str, Any], *, retention
                     )
                     try:
                         with os.fdopen(temp_fd, "w", encoding="utf-8", closefd=False) as handle:
+                            written_bytes = 0
                             for row in rows:
-                                handle.write(json.dumps(row, sort_keys=True, ensure_ascii=False, separators=(",", ":")) + "\n")
+                                encoded = json.dumps(row, sort_keys=True, ensure_ascii=False, separators=(",", ":")) + "\n"
+                                if len(encoded) > MAX_RETAINED_LINE_CHARS:
+                                    raise ValueError("new voice record line exceeds size limit")
+                                written_bytes += len(encoded.encode("utf-8"))
+                                if written_bytes > MAX_RETAINED_BYTES:
+                                    raise ValueError("new voice record snapshot exceeds byte limit")
+                                handle.write(encoded)
                             handle.flush()
                             os.fsync(temp_fd)
                         assert_directory()
