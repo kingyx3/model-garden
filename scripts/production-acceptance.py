@@ -10,6 +10,7 @@ import argparse
 import datetime as dt
 import hashlib
 import json
+import os
 import pathlib
 import re
 import stat
@@ -41,23 +42,53 @@ def _time(value: object) -> dt.datetime:
     return parsed.astimezone(dt.timezone.utc)
 
 
-def _file(root: pathlib.Path, name: object) -> bytes:
+def _open_root(root: pathlib.Path) -> int:
+    """Pin one owner-private evidence directory for manifest and all artifacts."""
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+    fd = os.open(root, flags)
+    info = os.fstat(fd)
+    if (not stat.S_ISDIR(info.st_mode) or info.st_uid != os.geteuid()
+            or info.st_mode & 0o022):
+        os.close(fd)
+        raise ValueError("evidence directory must be owner-controlled and not writable by others")
+    return fd
+
+
+def _file(root_fd: int, name: object) -> bytes:
+    """Read a pinned, single-link regular file; never follow a substituted path."""
     if not isinstance(name, str) or not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}", name):
         raise ValueError("artifact must be a single safe basename")
-    path = root / name
-    if path.is_symlink() or not path.is_file():
-        raise ValueError("artifact missing, linked, or not regular")
-    mode = path.stat().st_mode
-    if mode & (stat.S_IWGRP | stat.S_IWOTH):
-        raise ValueError("artifact must not be group/world writable")
-    if path.stat().st_size == 0 or path.stat().st_size > MAX_BYTES:
-        raise ValueError("artifact size invalid")
-    return path.read_bytes()
+    fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC,
+                 dir_fd=root_fd)
+    with os.fdopen(fd, "rb") as stream:
+        info = os.fstat(stream.fileno())
+        if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+            raise ValueError("artifact must be a single-link regular file")
+        if info.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+            raise ValueError("artifact must not be group/world writable")
+        if info.st_size == 0 or info.st_size > MAX_BYTES:
+            raise ValueError("artifact size invalid")
+        data = stream.read(MAX_BYTES + 1)
+        if len(data) != info.st_size:
+            raise ValueError("artifact changed during bounded read")
+        return data
 
 
 def check(manifest: dict, root: pathlib.Path, *, client: str, environment: str,
-          project: str, release: str, now: dt.datetime | None = None) -> dict:
-    """Check only verifiable local structure; do not promote submitted claims to truth."""
+          project: str, release: str, now: dt.datetime | None = None,
+          root_fd: int | None = None) -> dict:
+    """Check one pinned evidence snapshot; never promote submitted claims to truth."""
+    if root_fd is None:
+        try:
+            fd = _open_root(root)
+        except (OSError, ValueError):
+            return {"status": "blocked", "errors": ["unsafe evidence directory"],
+                    "reviewRequired": True}
+        try:
+            return check(manifest, root, client=client, environment=environment,
+                         project=project, release=release, now=now, root_fd=fd)
+        finally:
+            os.close(fd)
     errors: list[str] = []
     now = now or dt.datetime.now(dt.timezone.utc)
     if not all(isinstance(v, str) and ID.fullmatch(v) for v in (client, environment, project)):
@@ -106,7 +137,7 @@ def check(manifest: dict, root: pathlib.Path, *, client: str, environment: str,
             digest = row.get("sha256")
             if not isinstance(digest, str) or not SHA.fullmatch(digest):
                 raise ValueError("invalid sha256")
-            actual = hashlib.sha256(_file(root, row.get("artifact"))).hexdigest()
+            actual = hashlib.sha256(_file(root_fd, row.get("artifact"))).hexdigest()
             if actual != digest:
                 raise ValueError("artifact digest mismatch")
         except (OSError, ValueError) as exc:
@@ -131,16 +162,16 @@ def main() -> int:
     parser.add_argument("--release", required=True)
     args = parser.parse_args()
     try:
-        if (args.manifest.is_symlink() or args.manifest.parent.is_symlink()
-                or not args.manifest.is_file() or args.manifest.stat().st_size > MAX_BYTES
-                or args.manifest.stat().st_mode & (stat.S_IWGRP | stat.S_IWOTH)):
-            raise ValueError("unsafe manifest")
-        value = json.loads(args.manifest.read_text(encoding="utf-8"))
-        if not isinstance(value, dict):
-            raise ValueError("manifest must be an object")
-        result = check(value, args.manifest.parent, client=args.client,
-                       environment=args.environment, project=args.gcp_project,
-                       release=args.release)
+        root_fd = _open_root(args.manifest.parent)
+        try:
+            value = json.loads(_file(root_fd, args.manifest.name).decode("utf-8"))
+            if not isinstance(value, dict):
+                raise ValueError("manifest must be an object")
+            result = check(value, args.manifest.parent, client=args.client,
+                           environment=args.environment, project=args.gcp_project,
+                           release=args.release, root_fd=root_fd)
+        finally:
+            os.close(root_fd)
     except (OSError, UnicodeError, ValueError, json.JSONDecodeError) as exc:
         result = {"status": "blocked", "errors": ["invalid manifest: " + str(exc)], "reviewRequired": True}
     print(json.dumps(result, sort_keys=True))
