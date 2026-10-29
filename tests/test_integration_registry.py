@@ -120,14 +120,16 @@ class IntegrationRegistryTests(unittest.TestCase):
         self.assertIn("built-in-crm", listed.stdout)
         planned = subprocess.run(
             [sys.executable, str(cli), "connect", "crm", "--provider", "hubspot",
-             "--tools", "crm.read", "--owner", "owner@example.test", "--operator", "operator@example.test"],
+             "--tools", "crm.read", "--agent", "receptionist", "--owner", "owner@example.test", "--operator", "operator@example.test"],
             capture_output=True, text=True, cwd=ROOT,
         )
         self.assertEqual(planned.returncode, 1)
         self.assertIn("Connector not implemented", planned.stdout)
+        self.assertEqual(json.loads(planned.stdout)["agent"], "receptionist")
+        self.assertEqual(json.loads(planned.stdout)["scopes"], [])
         retired = subprocess.run(
             [sys.executable, str(cli), "connect", "calendar", "--provider", "google-calendar",
-             "--tools", "calendar.availability", "--owner", "owner@example.test", "--operator", "operator@example.test"],
+             "--tools", "calendar.availability", "--agent", "receptionist", "--owner", "owner@example.test", "--operator", "operator@example.test"],
             capture_output=True, text=True, cwd=ROOT,
         )
         self.assertEqual(retired.returncode, 1)
