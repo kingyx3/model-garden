@@ -60,6 +60,8 @@ def _calendar_blockers(
             return ["selected provider does not declare both calendar availability and booking"]
         registry = json.loads((root / "contracts/v1/integrations.json").read_text(encoding="utf-8"))
         registered = next(item for item in registry["providers"] if item["id"] == provider)
+        if registered.get("proof") != f"assurance/provider-proof/{provider}.json":
+            return ["selected calendar route has no reviewed provider-specific proof pointer"]
         scoped = registered.get("scopeByTool")
         if not isinstance(scoped, dict) or any(
             not isinstance(scoped.get(tool), list) or not scoped[tool]
