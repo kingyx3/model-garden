@@ -679,7 +679,7 @@ class CallFilingTests(Case):
         runtime = self.runtime([call_record()])
         store = worker._module("pause").PauseStore(self.data)
         filing = worker._module("filing")
-        original = filing.read_call_transcripts
+        original = filing.read_voice_records
         entered, release = threading.Event(), threading.Event()
         reports, failures = [], []
 
@@ -696,7 +696,7 @@ class CallFilingTests(Case):
                 failures.append(type(exc).__name__)
 
         thread = threading.Thread(target=run_filing, daemon=True)
-        with mock.patch.object(filing, "read_call_transcripts", side_effect=blocked_read):
+        with mock.patch.object(filing, "read_voice_records", side_effect=blocked_read):
             thread.start()
             try:
                 self.assertTrue(entered.wait(3), "filing must enter its guarded work")
