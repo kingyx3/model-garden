@@ -121,7 +121,7 @@ class CallWiringTests(filing_tests.CommandTests):
 
     def run_filing(self, *records, extra=()):
         path = self.root / "t.jsonl"
-        path.write_text("\n".join(json.dumps(record) for record in records), encoding="utf-8")
+        path.write_text("".join(json.dumps(record) + "\n" for record in records), encoding="utf-8")
         code, out, err = self.run_cli(["--transcripts", str(path), "--conversations-root", str(self.conversations_root()), *self.common(), *extra])
         return code, json.loads(out) if out.strip() else None, err
 
