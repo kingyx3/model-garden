@@ -120,7 +120,17 @@ export LIVEKIT_SIP_TRUNK_ID='...'
 python3 scripts/preflight-live-mvp.py --json
 ```
 
-The preflight never prints secret values. Until the upstream governed Calendar execution path and a real tenant proof are implemented, it explicitly reports booking as **blocked**, even if a legacy Calendar token is present.
+The preflight never prints secret values. With no approved Calendar selection it explicitly reports booking as **blocked**, even if a legacy Calendar token is present. It no longer has an unconditional `calendar: not implemented` result: after a vetted upstream route has been reviewed, qualified and recorded, an operator can run the following **read-only configuration check** against the same release and the private tenant grant registry:
+
+```bash
+python3 scripts/preflight-live-mvp.py --json \\
+  --calendar-provider <reviewed-provider-id> \\
+  --grant-root /path/to/private/grants \\
+  --tenant <client-environment> --agent receptionist \\
+  --calendar-connection-id <approved-connection-id>
+```
+
+The selected registry provider must be an external upstream Calendar route, declare both `calendar.availability` and `calendar.book` with reviewed operation scopes, have a tested adapter and a **current, redacted, adapter-bound tenant proof**, and be explicitly marked `live`. The same tenant's private grant registry must resolve **both** operations for one healthy, independently isolated receptionist grant at the exact connection and provider. A revoked, expired, degraded, wrong-coworker, shared-login or insufficiently scoped grant blocks preflight. This is a local eligibility check: it does **not** authenticate the currently running Agent or originator, contact Calendar, prove a real provider-side acting identity, inspect secret custody, verify booking/denial/revocation receipts or establish live go-live acceptance. An operator must separately verify these against the deployed runtime and real provider logs, and retain the signed-off Scenario A/B evidence before claiming readiness. Synthetic fixture tests cannot establish these claims.
 
 ## Evidence-producing acceptance
 
