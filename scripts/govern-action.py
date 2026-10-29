@@ -381,6 +381,7 @@ def authorize_action(
         desired_state.get("policies"),
         arguments=arguments,
         usage_today=count_executions_today(audit_path, tool_name, agent=agent_name) if limited else None,
+        owner_keys=desired_state.get("policyOwnerKeys"),
         # Unattributed requesters have no count of their own, so a per-person limit is not proven and the rule does not apply.
         usage_by_principal=(
             count_executions_today(audit_path, tool_name, agent=agent_name, initiating_user=initiating_user)
