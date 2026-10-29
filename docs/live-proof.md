@@ -40,10 +40,10 @@ The tool validates client/environment binding and the exact Terraform-derived bu
 Example on an authorized operator host with existing `gcloud` read-only credentials, a private destination parent (mode 0700), and the **exact approved client Compose inventory**:
 
 ```sh
-python3 scripts/client-backup-readback.py \\
-  --compose /approved/bundle/compose.yaml --project acme-dev \\
-  --gcp-project-id approved-client-gcp-project --client-slug acme \\
-  --environment dev --run-id acme-dev-run12345 \\
+python3 scripts/client-backup-readback.py \
+  --compose /approved/bundle/compose.yaml --project acme-dev \
+  --gcp-project-id approved-client-gcp-project --client-slug acme \
+  --environment dev --run-id acme-dev-run12345 \
   --destination /private/recovery/acme-dev-retrieved
 ```
 
@@ -123,10 +123,10 @@ python3 scripts/preflight-live-mvp.py --json
 The preflight never prints secret values. With no approved Calendar selection it explicitly reports booking as **blocked**, even if a legacy Calendar token is present. It no longer has an unconditional `calendar: not implemented` result: after a vetted upstream route has been reviewed, qualified and recorded, an operator can run the following **read-only configuration check** against the same release and the private tenant grant registry:
 
 ```bash
-python3 scripts/preflight-live-mvp.py --json \\
-  --calendar-provider <reviewed-provider-id> \\
-  --grant-root /path/to/private/grants \\
-  --tenant <client-environment> --agent receptionist \\
+python3 scripts/preflight-live-mvp.py --json \
+  --calendar-provider <reviewed-provider-id> \
+  --grant-root /path/to/private/grants \
+  --tenant <client-environment> --agent receptionist \
   --calendar-connection-id <approved-connection-id>
 ```
 
