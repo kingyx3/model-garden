@@ -86,9 +86,22 @@ server ignores the optional session header, without silently mixing hidden
 server-side state between cases. It does not call a model provider directly or
 store model credentials. Use only an
 **approved non-production runtime with synthetic data**, a deployed Hermes
-profile and an independently monitored governed ledger. This capture supplies
-extra evaluation system instructions, so it is **not** proof of the unchanged
-production receptionist or a live SIP/email channel.
+profile and an independently monitored governed ledger. The CLI now **requires the reviewed deployed receptionist's exact
+`SOUL.md` base instructions** via `--instructions-file`. It refuses missing,
+linked, redirected, writable, empty or oversized profiles rather than silently
+substituting a special evaluator safety prompt. This removes a source of false
+safety results: previously the evaluator injected stronger instructions than
+the deployed receptionist had. The capture retains only the SHA-256 digest
+and `instructionMode: deployed-profile`, never the profile text. The
+credential-free injected-client API retains an explicitly labelled
+`synthetic-eval` mode for tests.
+
+The hash alone does **not** attest that the running Hermes/LiveKit instance
+loaded these bytes, that its extra voice-session greeting instructions matched,
+or that the deployed Skill/Tool bindings were unchanged. Independently compare
+the digest to the reviewed deployment manifest, attest running profile/model
+identity, and retain complete provider, Tool and ledger observations. This
+remains **not** proof of a live SIP/email channel.
 
 ```bash
 install -d -m 0700 /private/adversarial-evidence
@@ -96,6 +109,7 @@ install -d -m 0700 /private/adversarial-evidence
 # outside the shell history: MODEL_GARDEN_COWORKER_API_URL and
 # MODEL_GARDEN_COWORKER_API_KEY.
 python3 scripts/capture-adversarial-model.py \
+  --instructions-file /opt/profile-seed/SOUL.md \
   --output /private/adversarial-evidence/model-replies.json
 python3 -m unittest tests/test_adversarial_model_capture.py -v
 ```
