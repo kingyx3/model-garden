@@ -531,7 +531,7 @@ class IndependentlyAnchoredExportTests(unittest.TestCase):
     def test_remote_anchor_requires_explicit_trusted_first_sequence_for_legacy(self):
         with tempfile.TemporaryDirectory() as tmp:
             ws = Workspace(tmp)
-            ws.ledger.write_text(json.dumps({"event": "legacy"}) + "\\n")
+            ws.ledger.write_text(json.dumps({"event": "legacy"}) + "\n")
             write_ledger(ws.ledger, 2)
             ws.export(exported_at=100)
             pinned = ws.sink.records()[-1]["recordId"]
