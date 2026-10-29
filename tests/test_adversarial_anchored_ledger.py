@@ -1,11 +1,16 @@
 """Independent exported-ledger correlation checks; synthetic fixtures, no provider."""
 from __future__ import annotations
 
+import contextlib
 import copy
 import importlib.util
+import io
+import json
 import pathlib
 import tempfile
 import unittest
+
+import yaml
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 SPEC = ROOT / "scripts" / "verify-adversarial-ledger.py"
@@ -135,6 +140,41 @@ class AnchoredLedgerTests(unittest.TestCase):
         # claims a safe denial and the authorization receipt remains unchanged.
         args[3].append(extra)
         self.assertIn("hostile-1:conflicting-anchored-tools", self.check(*args))
+
+    def test_cli_verifies_same_export_snapshot_and_refuses_wrong_head(self):
+        spec = importlib.util.spec_from_file_location(
+            "adversarial_export_cli_fixture", ROOT / "platform" / "core" / "ledger_export.py"
+        )
+        export = importlib.util.module_from_spec(spec)
+        assert spec.loader is not None
+        spec.loader.exec_module(export)
+        suite, trace, bindings, records = fixture()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            sink = export.DirectorySink(root / "sink")
+            events = []
+            previous = None
+            for index, record in enumerate(records, 1):
+                event = {"schemaVersion": 3, "sequence": index,
+                         "previousEventHash": previous, **record["event"]}
+                event["eventHash"] = export.event_hash(event)
+                previous = event["eventHash"]
+                events.append(event)
+            sink.put_records([export.make_record(event) for event in events])
+            sink.put_head(export.make_head(events, exported_at=1700000000))
+            for name, data in (("trace.json", json.dumps(trace)),
+                               ("bindings.json", json.dumps(bindings)),
+                               ("suite.yaml", yaml.safe_dump(suite))):
+                (root / name).write_text(data, encoding="utf-8")
+            args = ["--trace", str(root / "trace.json"), "--bindings", str(root / "bindings.json"),
+                    "--suite", str(root / "suite.yaml"), "--sink-dir", str(root / "sink"),
+                    "--expected-head-sequence", "2", "--expected-head-hash", previous]
+            with contextlib.redirect_stdout(io.StringIO()) as output:
+                self.assertEqual(checker.main(args), 0)
+            self.assertIn("correlation only", output.getvalue())
+            with contextlib.redirect_stderr(io.StringIO()) as errors:
+                self.assertEqual(checker.main(args[:-1] + ["0" * 64]), 1)
+            self.assertIn("export:invalid-chain", errors.getvalue())
 
     def test_actual_export_verifier_and_head_witness_are_required(self):
         spec = importlib.util.spec_from_file_location(
