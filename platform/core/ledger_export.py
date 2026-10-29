@@ -606,9 +606,9 @@ def verify_remote_export(
             problems.append("exported chain has a missing or unexpected sequence")
         last_sequence = sequence
         event = record.get("event")
-        if (record.get("exportSchema") != EXPORT_SCHEMA_VERSION
+        if (type(record.get("exportSchema")) is not int or record["exportSchema"] != EXPORT_SCHEMA_VERSION
                 or not isinstance(event, dict)
-                or event.get("sequence") != sequence
+                or type(event.get("sequence")) is not int or event["sequence"] != sequence
                 or type(event.get("schemaVersion")) is not int
                 or event["schemaVersion"] not in CHAINED_SCHEMA_VERSIONS
                 or event["schemaVersion"] < previous_schema):
@@ -652,8 +652,8 @@ def verify_remote_export(
         sequence = head.get("sequence")
         timestamp = head.get("exportedAt")
         count = head.get("events")
-        if (head.get("exportSchema") != EXPORT_SCHEMA_VERSION or head.get("kind") != "head"
-                or type(sequence) is not int or sequence < 1
+        if (type(head.get("exportSchema")) is not int or head["exportSchema"] != EXPORT_SCHEMA_VERSION
+                or head.get("kind") != "head" or type(sequence) is not int or sequence < 1
                 or type(timestamp) is not int or timestamp < 0
                 or type(count) is not int or count != bisect_right(sequences, sequence)
                 or not isinstance(head.get("headHash"), str)
