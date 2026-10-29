@@ -49,6 +49,7 @@ namespace.update({
     "get_job_context": lambda: SimpleNamespace(room=SimpleNamespace(name="synthetic-room")),
     "_sip_participant": lambda ctx: None, "_safe_digest": lambda value: "digest",
     "LOGGER": logging.getLogger("voice-fallback-test"),
+    "AGENT_NAME": "model-garden-receptionist",
 })
 agent_node = next(node for node in tree.body if isinstance(node, ast.ClassDef)
                   and node.name == "ReceptionistVoiceAgent")
@@ -170,6 +171,13 @@ class PrivateFallbackMessageTests(unittest.TestCase):
         self.assertIn("no message was saved", result)
         self.assertEqual(transcript.outcomes, [])
         self.assertEqual(self.path.read_text(), "")
+
+    def test_saved_fallback_message_records_its_emitting_agent(self):
+        agent = namespace["ReceptionistVoiceAgent"]("test")
+        result = asyncio.run(agent.capture_message(None, "synthetic private request"))
+        self.assertIn("captured", result)
+        (row,) = [T.json.loads(line) for line in self.path.read_text().splitlines()]
+        self.assertEqual(row["agent"], namespace["AGENT_NAME"])
 
     def test_message_capture_does_not_claim_success_when_private_store_is_unsafe(self):
         target = self.root / "other-client.jsonl"

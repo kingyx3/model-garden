@@ -117,7 +117,7 @@ def _voice_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
                 and isinstance(agent, str) and agent and type(timestamp) is int):
             key = (room, agent)
             started[key] = min(timestamp, started.get(key, timestamp))
-    completed: dict[str, tuple[int, int]] = {}
+    completed: dict[str, tuple[int, int, str]] = {}
     for row in rows:
         room, agent, timestamp = row.get("roomHash"), row.get("agent"), row.get("timestamp")
         if (row.get("type") == "CallEnded" and isinstance(room, str)
@@ -125,13 +125,14 @@ def _voice_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
                 and (room, agent) in started and timestamp >= started[(room, agent)]):
             beginning = started[(room, agent)]
             if room not in completed:
-                completed[room] = (beginning, timestamp)
+                completed[room] = (beginning, timestamp, agent)
     fallback_rooms = {
         row["roomHash"]
         for row in rows
         if row.get("type") in ("HumanTransfer", "FallbackMessage")
         and isinstance(row.get("roomHash"), str)
         and row["roomHash"] in completed
+        and row.get("agent") == completed[row["roomHash"]][2]
         and type(row.get("timestamp")) is int
         and completed[row["roomHash"]][0] <= row["timestamp"] <= completed[row["roomHash"]][1]
     }
@@ -282,6 +283,9 @@ def _transcript_summary(voice_rows: list[dict[str, Any]], transcript_rows: list[
             if (type(turn.get("index")) is not int or turn["index"] != index
                     or type(offset) not in (int, float) or not math.isfinite(offset)
                     or offset < previous or offset < 0
+                    # Wall-clock timestamps are integer seconds; permit one second
+                    # of rounding drift, never arbitrary speech beyond the call.
+                    or offset > ended_at - started_at + 1
                     or speaker not in ("caller", "agent", "human")
                     or not isinstance(speech, str) or not speech.strip()):
                 valid = False
@@ -325,7 +329,7 @@ def _single_call_scenario_count(
             row for row in voice_rows if row.get("roomHash") == room
             and (row.get("agent") == agent or (
                 row.get("type") in ("HumanTransfer", "FallbackMessage")
-                and row.get("agent") in (None, agent)
+                and row.get("agent") == agent
             ))
         ]
         if _voice_summary(scoped)["completedCallFallbackEvidence"] != 1:
