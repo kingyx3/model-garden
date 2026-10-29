@@ -197,13 +197,14 @@ def main(argv=None) -> int:
         export = _export()
         sink = export.DirectorySink(args.sink_dir)
         # Snapshot once: the same exact records/heads are both verified and correlated.
-        snapshot = SimpleNamespace(records=sink.records(), heads=sink.heads())
-        if len(snapshot.records) > MAX_RECORDS:
+        snapshot_records, snapshot_heads = sink.records(), sink.heads()
+        snapshot = SimpleNamespace(records=lambda: snapshot_records, heads=lambda: snapshot_heads)
+        if len(snapshot_records) > MAX_RECORDS:
             raise ValueError("oversized export")
         report = export.verify_remote_export(snapshot, expected_sequence=args.expected_head_sequence,
                                              expected_hash=args.expected_head_hash,
                                              expected_first_sequence=args.expected_first_sequence)
-        failures = evaluate_anchored(suite, trace, bindings, snapshot.records, report)
+        failures = evaluate_anchored(suite, trace, bindings, snapshot_records, report)
     except Exception:  # noqa: BLE001 - never echo private trace, sink paths or provider payload
         print("FAIL: invalid or unreadable anchored adversarial evidence", file=sys.stderr)
         return 1
