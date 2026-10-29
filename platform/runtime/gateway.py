@@ -49,6 +49,7 @@ import os
 import pathlib
 import re
 import signal
+import stat
 import smtplib
 import sys
 import threading
@@ -96,7 +97,7 @@ def _module(key: str):
         "handoff_reply": "platform/core/handoff_reply.py", "schedules": "platform/core/schedules.py",
         "artifacts": "platform/core/artifacts.py", "coworker": "platform/runtime/coworker_client.py",
         "enrollment": "platform/core/secret_enrollment.py", "vault": "platform/core/sealed_vault.py",
-        "receipts": "platform/channels/receipts.py", "pause": "platform/core/pause.py", "tickets": "platform/core/tickets.py", "heartbeat": "platform/core/heartbeat.py", "team_runtime": "platform/runtime/team_runtime.py", "inbox": "platform/core/inbox.py", "event_outbox": "platform/core/event_outbox.py", "oauth": "platform/core/oauth_consent.py", "readiness": "platform/core/grant_readiness.py", "studio": "platform/runtime/studio.py", "uploads": "platform/core/knowledge_uploads.py",
+        "receipts": "platform/channels/receipts.py", "pause": "platform/core/pause.py", "tickets": "platform/core/tickets.py", "heartbeat": "platform/core/heartbeat.py", "team_runtime": "platform/runtime/team_runtime.py", "inbox": "platform/core/inbox.py", "event_outbox": "platform/core/event_outbox.py", "oauth": "platform/core/oauth_consent.py", "readiness": "platform/core/grant_readiness.py", "capabilities": "platform/core/capabilities.py", "studio": "platform/runtime/studio.py", "uploads": "platform/core/knowledge_uploads.py",
     }
     # Shared names, so an error class raised in one module is the class another module catches.
     shared = {"text": "model_garden_text_channel", "schedules": "model_garden_schedule_commands_store"}
@@ -447,7 +448,8 @@ class Gateway:
         self.ingress = _module("ingress").ChannelIngress(
             self.adapters, self.directory, respond=self._respond, decide=self._decide, handoff_replies=self._handoff_replies(),
             schedules=self._schedule_store(), agent=self.config["agent"], executor=executor, audit=self.audit,
-            deliverables=self._deliverables, inbox=self._inbox_text, tickets=self._ticket_command, observed=self._chat_event, pause=self._pause_command,
+            deliverables=self._deliverables, inbox=self._inbox_text, skill_status=self._skills_text,
+            tickets=self._ticket_command, observed=self._chat_event, pause=self._pause_command,
             assign=self._assign_task if self.config["assign"] else None,
             autonomous_send=self._send_autonomous,
         )
@@ -639,6 +641,74 @@ class Gateway:
                 # The store already committed: never falsely say no action occurred.
                 return "Ticket status changed but its audit receipt failed. Contact the operator before retrying."
         return f"Ticket {ticket_id} recorded as {result['status']} by you."
+
+    def _skills_text(self) -> str:
+        """Read-only, non-model Skill readiness for an authenticated direct-message colleague (#111).
+
+        A manifest is a configuration preview, not provider-side proof. Re-evaluate
+        connection health and per-coworker grants on each request; never echo
+        arbitrary manifest fields, grant details, credentials or shell commands.
+        """
+        unavailable = "Skill status is unavailable. Ask the operator to check readiness."
+        location = self.environ.get("MODEL_GARDEN_CAPABILITY_MANIFEST")
+        if not location:
+            return unavailable
+        try:
+            descriptor = os.open(location, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+            with os.fdopen(descriptor, "rb") as stream:
+                info = os.fstat(stream.fileno())
+                if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1
+                        or info.st_mode & 0o022 or info.st_size > 1_000_000):
+                    return unavailable
+                raw = stream.read(1_000_001)
+            if len(raw) > 1_000_000:
+                return unavailable
+            manifest = json.loads(raw)
+            source = self.desired_state.get("source", {})
+            if (not isinstance(manifest, dict) or manifest.get("kind") != "CapabilityManifest"
+                    or manifest.get("schemaVersion") != 1
+                    or not isinstance(source, dict)
+                    or tenant_of({"source": {"client": manifest.get("client")}}) != self.tenant
+                    or manifest.get("agent") != source.get("name")):
+                return unavailable
+            capabilities = _module("capabilities")
+            manifest = capabilities.apply_connection_health(
+                manifest, capabilities.read_connection_health(self.data))
+            manifest = _module("readiness").overlay_from_root(
+                manifest, self.data / "provider-grants", now=int(self.clock()))
+            skills = manifest.get("skills")
+            if not isinstance(skills, list) or len(skills) > 32:
+                return unavailable
+            lines, seen = [], set()
+            allowed_status = capabilities.BLOCKING | {"bound", "degraded", "available"}
+            known_families = capabilities.families()
+            for item in skills:
+                if not isinstance(item, dict):
+                    return unavailable
+                name, enabled, ready = item.get("name"), item.get("enabled"), item.get("ready")
+                deps = item.get("dependencies")
+                if (not isinstance(name, str) or re.fullmatch(r"[a-z][a-z0-9-]{0,63}", name) is None
+                        or name in seen or type(enabled) is not bool or type(ready) is not bool
+                        or not isinstance(deps, list) or len(deps) > 32):
+                    return unavailable
+                seen.add(name)
+                safe_deps = []
+                for dep in deps:
+                    if (not isinstance(dep, dict) or dep.get("family") not in known_families
+                            or dep.get("status") not in allowed_status):
+                        return unavailable
+                    safe_deps.append({"family": dep["family"], "status": dep["status"]})
+                if not enabled:
+                    lines.append(f"{name}: switched off by the owner.")
+                elif ready and not any(dep["status"] in capabilities.BLOCKING for dep in safe_deps):
+                    lines.append(f"{name}: ready (configuration only; provider proof may still be required).")
+                else:
+                    fix = capabilities.remediation_for(safe_deps, plain=True)
+                    lines.append(f"{name}: blocked. {fix or 'Ask the operator to check its prerequisites.'}.")
+            reply = "Skill readiness (current configuration):\n" + "\n".join(sorted(lines)) if lines else "No Skills are configured for this coworker."
+            return reply if len(reply) <= 3400 else unavailable
+        except (OSError, ValueError, TypeError, KeyError, AttributeError):
+            return unavailable
 
     def _inbox_text(self, inbound: Any, principal: Any) -> str:
         """What is waiting, for the mapped person asking: everything for an approver or admin, otherwise their own hand-offs."""

@@ -841,5 +841,92 @@ class TicketChatTests(GatewayCase):
         self.assertEqual(self.coworker.calls, [])
 
 
+
+class SkillStatusTests(GatewayCase):
+    """A verified colleague gets a deterministic, live-revalidated answer, not model guesses (#111)."""
+
+    def set_manifest(self, skills, capabilities=None, *, client=None):
+        source = self.gateway.desired_state["source"]
+        manifest = {
+            "schemaVersion": 1, "kind": "CapabilityManifest", "agent": source["name"],
+            "client": source.get("client", self.gateway.tenant) if client is None else client, "environment": "dev",
+            "skills": skills, "capabilities": capabilities or [],
+        }
+        path = self.root / "skill-status-manifest.json"
+        path.write_text(json.dumps(manifest), encoding="utf-8")
+        self.gateway.environ = {**ENV, "MODEL_GARDEN_CAPABILITY_MANIFEST": str(path)}
+        return path
+
+    def ask(self, text="skills", *, user="U0ALICE01", channel="D0DIRECT01", index=1):
+        self.slack_post("/channels/slack/events", slack_event(text, user=user, channel=channel,
+                                                              ts=f"1700000000.009{index:03d}"))
+        return self.posts()[-1]["text"]
+
+    def test_verified_direct_member_gets_one_safe_step_for_each_blocked_skill(self):
+        self.set_manifest([
+            {"name": "answer-faq", "enabled": True, "ready": False, "dependencies": [
+                {"family": "kb", "capability": "kb", "status": "no-content", "required": True}],
+             "remediation": "SECRET://must-not-leak"},
+            {"name": "take-message", "enabled": True, "ready": True, "dependencies": []},
+            {"name": "book-appointment", "enabled": False, "ready": False, "dependencies": [],
+             "reason": "Disabled by owner"},
+        ])
+        answer = self.ask("/skills")
+        self.assertIn("answer-faq: blocked", answer)
+        self.assertIn("Approve business knowledge", answer)
+        self.assertIn("take-message: ready", answer)
+        self.assertIn("book-appointment: switched off", answer)
+        self.assertNotIn("SECRET", answer)
+        self.assertNotIn("scripts/client-operator", answer)
+        self.assertEqual(self.coworker.calls, [])
+
+    def test_unmapped_sender_and_shared_channel_never_receive_skill_details(self):
+        self.set_manifest([{"name": "private-skill", "enabled": True, "ready": False,
+                            "dependencies": [{"family": "crm", "capability": "crm", "required": True, "status": "missing"}]}])
+        for i, kwargs in enumerate(({"user": "U0STRANGER"}, {"channel": "C0GROUP0001"}), 1):
+            answer = self.ask(index=i, **kwargs)
+            self.assertIn("direct message", answer)
+            self.assertNotIn("private-skill", answer)
+            self.assertNotIn("crm", answer)
+        self.assertEqual(self.coworker.calls, [])
+
+    def test_missing_invalid_or_cross_client_manifest_fails_closed(self):
+        self.gateway.environ = dict(ENV)
+        self.assertIn("unavailable", self.ask(index=1).lower())
+        path = self.set_manifest([], client="other-client")
+        self.assertIn("unavailable", self.ask(index=2).lower())
+        path.write_text("{bad-json", encoding="utf-8")
+        self.assertIn("unavailable", self.ask(index=3).lower())
+        path.unlink()
+        path.symlink_to(self.gateway.desired_state_path)
+        self.assertIn("unavailable", self.ask(index=4).lower())
+        self.assertEqual(self.coworker.calls, [])
+
+    def test_revoked_connection_is_rechecked_at_request_time(self):
+        self.set_manifest([
+            {"name": "book-appointment", "enabled": True, "ready": True,
+             "dependencies": [{"family": "calendar", "capability": "calendar.book",
+                               "status": "bound", "required": True}]},
+        ], capabilities=[{"family": "calendar", "status": "available", "provider": "google"}])
+        self.assertIn("book-appointment: ready", self.ask(index=1))
+        health = self.data / "connections"
+        health.mkdir(parents=True)
+        (health / "calendar.json").write_text(json.dumps({"family": "calendar", "health": "revoked",
+                                                          "reason": "SECRET-ACCOUNT-IDENTIFIER"}), encoding="utf-8")
+        answer = self.ask(index=2)
+        self.assertIn("book-appointment: blocked", answer)
+        self.assertIn("reauthorize", answer)
+        self.assertNotIn("SECRET-ACCOUNT", answer)
+        self.assertEqual(self.coworker.calls, [])
+
+    def test_malformed_skill_name_never_becomes_a_channel_response(self):
+        self.set_manifest([{"name": "private\\nSECRET", "enabled": True, "ready": False,
+                            "dependencies": []}])
+        answer = self.ask(index=1)
+        self.assertIn("unavailable", answer.lower())
+        self.assertNotIn("SECRET", answer)
+        self.assertEqual(self.coworker.calls, [])
+
+
 if __name__ == "__main__":
     unittest.main()
