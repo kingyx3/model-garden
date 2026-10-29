@@ -316,7 +316,7 @@ class StorageTests(unittest.TestCase):
             cfg.path.parent.mkdir(parents=True)
             previous = {"type": "CallTranscript", "timestamp": 1_700_000_000,
                         "callHash": "previous", "payload": "x" * 500}
-            original = json.dumps(previous) + "\\n"
+            original = json.dumps(previous) + "\n"
             cfg.path.write_text(original, encoding="utf-8")
             next_record = {"type": "CallTranscript", "timestamp": 1_700_000_010, "callHash": "next"}
             with mock.patch.object(T, "MAX_RETAINED_BYTES", 256, create=True):
@@ -329,7 +329,7 @@ class StorageTests(unittest.TestCase):
             cfg = config(tmp)
             cfg.path.parent.mkdir(parents=True)
             original = "".join(json.dumps({"type": "CallTranscript",
-                "timestamp": 1_700_000_000, "callHash": f"previous-{n}"}) + "\\n"
+                "timestamp": 1_700_000_000, "callHash": f"previous-{n}"}) + "\n"
                 for n in range(2))
             cfg.path.write_text(original, encoding="utf-8")
             next_record = {"type": "CallTranscript", "timestamp": 1_700_000_010, "callHash": "next"}
