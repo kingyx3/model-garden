@@ -150,7 +150,6 @@ def read_voice_records(path: pathlib.Path) -> list[dict[str, Any]]:
                 raise ValueError(f"non-object voice record at line {number}")
             if value.get("type") == "CallTranscript":
                 if (interaction_from_call(value) is None
-                        or not isinstance(value.get("agent"), str) or not value["agent"].strip()
                         or type(value.get("endedAt")) is not int
                         or value["endedAt"] < value["timestamp"]):
                     raise ValueError(f"invalid call transcript at line {number}")
