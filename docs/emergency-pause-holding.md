@@ -26,3 +26,10 @@ The gateway does not stage newly requested deliverable attachments while paused.
 ## Operational limits
 
 The built-in ticket store is private and bounded (5,000 total tickets), and its current retention/cleanup remains an operator responsibility under the client's data policy. A full or unreadable store fails visibly rather than silently claiming handoff. The local audit receipt is not an independently immutable export. A live acceptance drill must still prove channel authentication, receipt, staff response, restart, in-flight provider behavior, cross-tenant/coworker isolation and authorized owner signoff before #232 can close.
+
+
+## Event-trigger integrity during pause and restart
+
+The gateway suppresses new `chat.message` triggers under the pause lease, and the worker leaves previously queued triggers untouched while paused. The digest-only `events/events.jsonl` queue is now owner-private, bounded and validated in full before the worker may run any of its events. A durable `.events.initialized` witness is written before the first append; a missing initialized queue, unsafe linked/public state or lock, malformed/unterminated record, or stale/non-boundary reader offset fails the event job visibly rather than skipping work or resetting to an untrusted empty state. Local writer, reader and compactor share the checked host-local lock. Legacy valid queues without a witness enroll on their next append.
+
+**Operator recovery:** on an outbox-integrity error, isolate the affected client runtime and keep it paused; preserve the queue, witness, worker event cursor and audit for investigation. Reconcile channel-originated messages and worker trigger receipts with the client before repairing the queue or cursor from a verified backup. Do not delete the witness, reset the cursor or truncate an unknown queue to make the job green. The outbox is not an immutable remote queue, exactly-once provider proof or protection against a privileged host actor; a crash between event execution, compaction and cursor persistence can still require manual reconciliation. No real provider or client channel was exercised by these offline tests.
