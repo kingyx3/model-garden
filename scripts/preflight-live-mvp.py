@@ -89,7 +89,7 @@ def _calendar_blockers(
             for access in accesses
         ) or len({access["grantId"] for access in accesses}) != 1:
             return ["calendar operations lack one healthy, matching, independently isolated coworker grant"]
-    except (OSError, ValueError, KeyError, TypeError, IndexError, OverflowError):
+    except (OSError, PermissionError, ValueError, KeyError, TypeError, IndexError, OverflowError):
         # Provider/grant records and their paths are not a safe error-reporting surface.
         return ["calendar provider evidence or coworker grant is missing, invalid, expired or unreadable"]
     return []
