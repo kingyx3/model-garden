@@ -134,6 +134,7 @@ class LiveMvpPreflightTests(unittest.TestCase):
         registry_path = root / "contracts/v1/integrations.json"
         for changed in (
             {**provider, "family": "crm"},
+            {**provider, "proof": "assurance/provider-proof/another-provider.json"},
             {**provider, "tools": ["calendar.availability"]},
             {**provider, "scopeByTool": {"calendar.availability": ["calendar.read"]}},
         ):
