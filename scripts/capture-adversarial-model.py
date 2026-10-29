@@ -116,6 +116,9 @@ def run_cases(suite: Any, client: Any, *, session_prefix: str | None = None,
     The CLI always passes a validated deployed profile and never falls back.
     """
     cases = _valid_suite(suite)
+    # A test-only default may never be relabelled as a deployed profile.
+    if instructions is None and instruction_mode != "synthetic-eval":
+        raise CaptureError("deployed-profile mode requires explicit instructions")
     if instructions is None:
         instructions = INSTRUCTIONS
     if (not isinstance(instructions, str) or not instructions.strip()
