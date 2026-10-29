@@ -125,6 +125,7 @@ class ReceptionistVoiceAgent(Agent):
                 {
                     "type": "HumanTransfer",
                     "timestamp": int(time.time()),
+                    "agent": AGENT_NAME,
                     "roomHash": _safe_digest(job_ctx.room.name),
                     "participantHash": _safe_digest(participant.identity),
                     "targetHash": _safe_digest(target),
@@ -156,6 +157,7 @@ class ReceptionistVoiceAgent(Agent):
                 {
                     "type": "FallbackMessage",
                     "timestamp": int(time.time()),
+                    "agent": AGENT_NAME,
                     "roomHash": _safe_digest(job_ctx.room.name),
                     "caller_name": caller_name.strip() or None,
                     "caller_number": caller_number,
