@@ -32,6 +32,7 @@ import logging
 import os
 import pathlib
 import re
+import secrets
 import stat
 import time
 from collections.abc import Callable, Iterable, Mapping
@@ -396,12 +397,42 @@ def _retained(handle: Any, *, now: int, retention_seconds: int) -> list[dict[str
     return rows
 
 
-def store_private_jsonl(path: pathlib.Path, record: dict[str, Any], *, retention_seconds: int, now: int | None = None) -> None:
-    """Append a retained private voice record under a pinned, owned regular inode.
+def _append_call_record(rows: list[dict[str, Any]], record: dict[str, Any]) -> bool:
+    """One retained transcript per callHash; refuse ambiguous or conflicting evidence.
 
-    Used by both call transcripts and fallback messages. Retention zero clears
-    the existing file rather than silently preserving previously stored PII.
-    Only a trusted deployment-owned volume and ancestors may contain this path.
+    Fallback/lifecycle records keep their normal append semantics. Existing duplicate
+    transcript identities are corruption, not a reason to silently choose a winner.
+    """
+    is_transcript = record.get("type") == "CallTranscript"
+    call_hash = record.get("callHash") if is_transcript else None
+    if is_transcript and (not isinstance(call_hash, str) or not call_hash or len(call_hash) > 200):
+        raise ValueError("invalid new call transcript identity")
+    seen: set[str] = set()
+    identical = False
+    for row in rows:
+        if row.get("type") != "CallTranscript":
+            continue
+        existing = row.get("callHash")
+        if not isinstance(existing, str) or not existing or len(existing) > 200:
+            raise ValueError("invalid existing call transcript identity")
+        if existing in seen:
+            raise ValueError("duplicate existing call transcript identity")
+        seen.add(existing)
+        if is_transcript and existing == call_hash:
+            if row != record:
+                raise ValueError("conflicting call transcript identity")
+            identical = True
+    return not identical
+
+
+def store_private_jsonl(path: pathlib.Path, record: dict[str, Any], *, retention_seconds: int, now: int | None = None) -> None:
+    """Crash-consistent private voice records, serialized by a persistent sidecar lock.
+
+    Never truncate an existing transcript/lifecycle file in place: a crash during
+    retention rewriting must leave the previous complete file available. The lock
+    belongs to the *path*, not the replaced inode, so concurrent writers cannot
+    lose one another's updates after atomic publication. All paths stay within the
+    pinned owner-private directory and refuse symlink/hardlink redirection.
     """
     if retention_seconds < 0 or retention_seconds > MAX_RETENTION_SECONDS:
         raise ValueError("invalid voice record retention")
@@ -412,53 +443,103 @@ def store_private_jsonl(path: pathlib.Path, record: dict[str, Any], *, retention
         if not stat.S_ISDIR(parent_stat.st_mode) or parent_stat.st_uid != os.geteuid():
             raise OSError("transcript directory is not owned by this worker")
         os.fchmod(directory, 0o700)
-        descriptor = os.open(
-            path.name, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC,
+
+        def assert_directory() -> None:
+            current = os.stat(path.parent, follow_symlinks=False)
+            held = os.fstat(directory)
+            if ((current.st_dev, current.st_ino) != (held.st_dev, held.st_ino)
+                    or not stat.S_ISDIR(held.st_mode) or held.st_uid != os.geteuid()
+                    or stat.S_IMODE(held.st_mode) != 0o700):
+                raise OSError("transcript directory replaced or unsafe")
+
+        lock_name = f".{path.name}.lock"
+        assert_directory()
+        lock_fd = os.open(
+            lock_name, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC,
             0o600, dir_fd=directory,
         )
         try:
-            file_stat = os.fstat(descriptor)
-            if not stat.S_ISREG(file_stat.st_mode) or file_stat.st_uid != os.geteuid() or file_stat.st_nlink != 1:
-                raise OSError("transcript target must be a singly linked, owned regular file")
-            os.fchmod(descriptor, 0o600)
+            lock_stat = os.fstat(lock_fd)
+            if (not stat.S_ISREG(lock_stat.st_mode) or lock_stat.st_uid != os.geteuid()
+                    or lock_stat.st_nlink != 1):
+                raise OSError("transcript lock must be a singly linked owned regular file")
+            os.fchmod(lock_fd, 0o600)
+            fcntl.flock(lock_fd, fcntl.LOCK_EX)
+            try:
+                def assert_lock() -> None:
+                    current = os.stat(lock_name, dir_fd=directory, follow_symlinks=False)
+                    held = os.fstat(lock_fd)
+                    if ((current.st_dev, current.st_ino) != (held.st_dev, held.st_ino)
+                            or not stat.S_ISREG(held.st_mode) or held.st_uid != os.geteuid()
+                            or held.st_nlink != 1 or stat.S_IMODE(held.st_mode) != 0o600):
+                        raise OSError("transcript lock replaced or unsafe")
 
-            def assert_pinned() -> None:
-                current_dir = os.stat(path.parent, follow_symlinks=False)
-                current_file = os.stat(path.name, dir_fd=directory, follow_symlinks=False)
-                held_dir = os.fstat(directory)
-                held_file = os.fstat(descriptor)
-                if (current_dir.st_dev, current_dir.st_ino) != (held_dir.st_dev, held_dir.st_ino):
-                    raise OSError("transcript directory replaced during write")
-                if (current_file.st_dev, current_file.st_ino) != (held_file.st_dev, held_file.st_ino):
-                    raise OSError("transcript file replaced during write")
-                if (not stat.S_ISDIR(held_dir.st_mode) or held_dir.st_uid != os.geteuid()
-                        or stat.S_IMODE(held_dir.st_mode) != 0o700):
-                    raise OSError("transcript directory permissions changed")
-                if (not stat.S_ISREG(held_file.st_mode) or held_file.st_uid != os.geteuid()
-                        or held_file.st_nlink != 1 or stat.S_IMODE(held_file.st_mode) != 0o600):
-                    raise OSError("transcript file ownership or permissions changed")
-
-            with os.fdopen(descriptor, "r+", encoding="utf-8", closefd=False) as handle:
-                fcntl.flock(descriptor, fcntl.LOCK_EX)
+                assert_directory()
+                assert_lock()
+                target_fd = os.open(
+                    path.name, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC,
+                    0o600, dir_fd=directory,
+                )
                 try:
-                    assert_pinned()
-                    rows = ([] if retention_seconds == 0 else
-                            _retained(handle, now=int(time.time()) if now is None else now,
-                                      retention_seconds=retention_seconds))
-                    if retention_seconds > 0:
+                    target_stat = os.fstat(target_fd)
+                    if (not stat.S_ISREG(target_stat.st_mode) or target_stat.st_uid != os.geteuid()
+                            or target_stat.st_nlink != 1):
+                        raise OSError("transcript target must be a singly linked owned regular file")
+                    os.fchmod(target_fd, 0o600)
+
+                    def assert_target() -> None:
+                        current = os.stat(path.name, dir_fd=directory, follow_symlinks=False)
+                        held = os.fstat(target_fd)
+                        if ((current.st_dev, current.st_ino) != (held.st_dev, held.st_ino)
+                                or not stat.S_ISREG(held.st_mode) or held.st_uid != os.geteuid()
+                                or held.st_nlink != 1 or stat.S_IMODE(held.st_mode) != 0o600):
+                            raise OSError("transcript target replaced or unsafe")
+
+                    assert_target()
+                    with os.fdopen(target_fd, "r", encoding="utf-8", closefd=False) as handle:
+                        rows = ([] if retention_seconds == 0 else
+                                _retained(handle, now=int(time.time()) if now is None else now,
+                                          retention_seconds=retention_seconds))
+                    if retention_seconds > 0 and _append_call_record(rows, record):
                         rows.append(record)
-                    assert_pinned()  # refuse replacement while reading existing rows
-                    handle.seek(0)
-                    handle.truncate()
-                    for row in rows:
-                        handle.write(json.dumps(row, sort_keys=True, ensure_ascii=False, separators=(",", ":")) + "\n")
-                    handle.flush()
-                    os.fsync(descriptor)
-                    assert_pinned()  # never acknowledge success for a detached path
+                    assert_directory()
+                    assert_lock()
+                    assert_target()
+                    temporary = f".{path.name}.{secrets.token_hex(16)}.tmp"
+                    temp_fd = os.open(
+                        temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,
+                        0o600, dir_fd=directory,
+                    )
+                    try:
+                        with os.fdopen(temp_fd, "w", encoding="utf-8", closefd=False) as handle:
+                            for row in rows:
+                                handle.write(json.dumps(row, sort_keys=True, ensure_ascii=False, separators=(",", ":")) + "\\n")
+                            handle.flush()
+                            os.fsync(temp_fd)
+                        assert_directory()
+                        assert_lock()
+                        assert_target()
+                        os.replace(temporary, path.name, src_dir_fd=directory, dst_dir_fd=directory)
+                        os.fsync(directory)
+                        published = os.stat(path.name, dir_fd=directory, follow_symlinks=False)
+                        written = os.fstat(temp_fd)
+                        if ((published.st_dev, published.st_ino) != (written.st_dev, written.st_ino)
+                                or published.st_nlink != 1 or stat.S_IMODE(published.st_mode) != 0o600):
+                            raise OSError("transcript publication replaced or unsafe")
+                        assert_directory()
+                        assert_lock()
+                    finally:
+                        os.close(temp_fd)
+                        try:
+                            os.unlink(temporary, dir_fd=directory)
+                        except FileNotFoundError:
+                            pass
                 finally:
-                    fcntl.flock(descriptor, fcntl.LOCK_UN)
+                    os.close(target_fd)
+            finally:
+                fcntl.flock(lock_fd, fcntl.LOCK_UN)
         finally:
-            os.close(descriptor)
+            os.close(lock_fd)
     finally:
         os.close(directory)
 
