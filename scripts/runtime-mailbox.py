@@ -42,11 +42,20 @@ SPOOL = _load("runtime_mailbox_spool", ROOT / "platform" / "channels" / "mail_sp
 
 
 def tenant_of(desired_state: pathlib.Path) -> str:
+    """Resolve a single exact client slug, never silently route mail into 'default'.
+
+    A missing or corrupt compiled identity is an MTA temporary failure, not
+    permission to accept customer messages under a different client's spool.
+    """
     try:
-        client = json.loads(desired_state.read_text(encoding="utf-8")).get("source", {}).get("client")
-    except (OSError, json.JSONDecodeError, AttributeError):
-        client = None
-    return re.sub(r"[^a-z0-9-]+", "-", str(client or "").lower()).strip("-")[:63] or "default"
+        desired = json.loads(desired_state.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, ValueError) as exc:
+        raise ValueError("tenant identity unavailable") from exc
+    source = desired.get("source") if isinstance(desired, dict) else None
+    client = source.get("client") if isinstance(source, dict) else None
+    if not isinstance(client, str) or not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,62}", client):
+        raise ValueError("tenant identity unavailable")
+    return client
 
 
 def main(argv: list[str] | None = None, stdin=None) -> int:
@@ -66,8 +75,13 @@ def main(argv: list[str] | None = None, stdin=None) -> int:
     args = parser.parse_args(argv)
     audit_path = args.audit_path or args.store.parent / "audit.jsonl"
     try:
+        tenant = args.tenant if args.tenant is not None else tenant_of(DEFAULT_DESIRED_STATE)
+    except ValueError:
+        print("Runtime mailbox tenant identity unavailable; supply --tenant or repair desired state", file=sys.stderr)
+        return TEMPFAIL if args.command == "ingest" else 1
+    try:
         spool = SPOOL.MailSpool(
-            args.store, tenant=args.tenant or tenant_of(DEFAULT_DESIRED_STATE), addresses=args.address,
+            args.store, tenant=tenant, addresses=args.address,
             retention_days=args.retention_days,
             audit=lambda action, by, details: GOVERN.record_operator_action(audit_path, action, by, details),
         )
