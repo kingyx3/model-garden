@@ -275,5 +275,54 @@ class ReferenceTranscriptEvidenceTests(unittest.TestCase):
             self.assertEqual(proof.collect("acme-dev", read_transcripts=True)["transcripts"]["completeTwoWayCalls"], 1)
             self.assertEqual(reader.call_count, 3)
 
+
+class SameCallScenarioTests(unittest.TestCase):
+    """A positive transcript, action and handoff on three unrelated calls is not Scenario A proof."""
+
+    @staticmethod
+    def action_rows(room=ROOM):
+        base = {"requestId": "c" * 64, "agent": "receptionist", "initiatingUser": "runtime:hermes",
+                "governance": {"correlationId": "call:" + room}, "tool": "calendar.book"}
+        return [{**base, "event": "authorization", "outcome": "allow"},
+                {**base, "event": "execution", "outcome": "succeeded"}]
+
+    @staticmethod
+    def check_scenario(lifecycle, transcripts, actions):
+        data = evidence(lifecycle, actions)
+        data["transcripts"] = proof._transcript_summary(lifecycle, transcripts)
+        data["referenceScenario"] = {"completeCalls": proof._single_call_scenario_count(lifecycle, actions, transcripts)}
+        result = proof.evaluate(data, require_voice_call=True, require_fallback=True,
+                                require_governed_action=True, require_two_way_transcript=True)
+        return data, result
+
+    def test_disjoint_positive_evidence_cannot_pass_full_reference_scenario(self):
+        lifecycle = [voice("CallStarted"), voice("CallEnded", timestamp=110),
+                     voice("CallStarted", OTHER, 200), voice("CallEnded", OTHER, 210),
+                     voice("FallbackMessage", OTHER, 205)]
+        data, result = self.check_scenario(lifecycle, [transcript()], self.action_rows())
+        self.assertEqual(data["voice"]["completedCallFallbackEvidence"], 1)
+        self.assertEqual(data["governance"]["completedCallActions"], 1)
+        self.assertEqual(data["transcripts"]["completeTwoWayCalls"], 1)
+        self.assertEqual(data["referenceScenario"]["completeCalls"], 0)
+        self.assertFalse(result["passed"])
+        self.assertIn("same completed call", " ".join(result["failures"]))
+
+    def test_one_disclosed_call_with_governed_action_and_handoff_passes_structural_gate(self):
+        lifecycle = [voice("CallStarted"), voice("CallEnded", timestamp=110),
+                     voice("FallbackMessage", ROOM, 105)]
+        data, result = self.check_scenario(lifecycle, [transcript()], self.action_rows())
+        self.assertEqual(data["referenceScenario"], {"completeCalls": 1})
+        self.assertTrue(result["passed"])
+        self.assertNotIn(ROOM, str(data["referenceScenario"]))
+        self.assertNotIn("What time", str(data["referenceScenario"]))
+
+    def test_reused_room_with_two_agents_is_not_unique_call_proof(self):
+        lifecycle = [voice("CallStarted"), voice("CallEnded", timestamp=110),
+                     voice("CallStarted", agent="other"), voice("CallEnded", timestamp=110, agent="other"),
+                     voice("FallbackMessage", ROOM, 105)]
+        data, result = self.check_scenario(lifecycle, [transcript()], self.action_rows())
+        self.assertEqual(data["referenceScenario"]["completeCalls"], 0)
+        self.assertFalse(result["passed"])
+
 if __name__ == "__main__":
     unittest.main()
