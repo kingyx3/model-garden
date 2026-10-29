@@ -457,5 +457,54 @@ class CommandTests(Case):
         self.assertEqual(code, 1)
 
 
+    def test_ingest_without_tenant_fails_temporarily_when_desired_state_is_missing_or_invalid(self):
+        original = runtime.DEFAULT_DESIRED_STATE
+        state = self.root / "desired-state.json"
+        runtime.DEFAULT_DESIRED_STATE = state
+        self.addCleanup(setattr, runtime, "DEFAULT_DESIRED_STATE", original)
+        args = [str(self.root / "gov" / "mail"), "--address", MAILBOX, "ingest"]
+        for contents in (None, "{not json", "{}", '{"source":{"client":"acme prod"}}'):
+            with self.subTest(contents=contents):
+                if contents is None:
+                    state.unlink(missing_ok=True)
+                else:
+                    state.write_text(contents)
+                output, errors = io.StringIO(), io.StringIO()
+                with contextlib.redirect_stdout(output), contextlib.redirect_stderr(errors):
+                    code = runtime.main(args, stdin=io.BytesIO(raw()))
+                self.assertEqual(code, runtime.TEMPFAIL)
+                self.assertEqual(output.getvalue(), "")
+                self.assertIn("tenant identity unavailable", errors.getvalue())
+                self.assertFalse((self.root / "gov" / "mail").exists())
+
+    def test_unscoped_mailbox_uses_exact_valid_desired_state_client_or_explicit_tenant(self):
+        original = runtime.DEFAULT_DESIRED_STATE
+        state = self.root / "desired-state.json"
+        runtime.DEFAULT_DESIRED_STATE = state
+        self.addCleanup(setattr, runtime, "DEFAULT_DESIRED_STATE", original)
+        state.write_text('{"source":{"client":"acme-prod"}}')
+        args = [str(self.root / "gov" / "mail"), "--address", MAILBOX, "ingest"]
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(runtime.main(args, stdin=io.BytesIO(raw())), 0)
+        self.assertTrue((self.root / "gov" / "mail" / "acme-prod").exists())
+        self.assertFalse((self.root / "gov" / "mail" / "default").exists())
+        state.unlink()
+        explicit = [str(self.root / "gov" / "mail"), "--tenant", "other-prod",
+                    "--address", MAILBOX, "ingest"]
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(runtime.main(explicit, stdin=io.BytesIO(raw(message_id="<other@x>"))), 0)
+        self.assertTrue((self.root / "gov" / "mail" / "other-prod").exists())
+
+    def test_unscoped_non_ingest_command_fails_without_creating_default_tenant(self):
+        original = runtime.DEFAULT_DESIRED_STATE
+        runtime.DEFAULT_DESIRED_STATE = self.root / "missing-state.json"
+        self.addCleanup(setattr, runtime, "DEFAULT_DESIRED_STATE", original)
+        args = [str(self.root / "gov" / "mail"), "--address", MAILBOX, "stats"]
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()) as errors:
+            self.assertEqual(runtime.main(args), 1)
+        self.assertIn("tenant identity unavailable", errors.getvalue())
+        self.assertFalse((self.root / "gov" / "mail").exists())
+
+
 if __name__ == "__main__":
     unittest.main()
