@@ -278,7 +278,16 @@ def count_executions_today(
     try:
         path_info = audit_path.lstat()
     except FileNotFoundError:
-        return 0  # legacy first-run ledger; no independent initialization witness
+        # A persistent conditional-quota lock witnesses that this ledger was
+        # initialized before. Its loss must not reset the daily allowance.
+        # No lock is still compatible with a never-used legacy workspace.
+        try:
+            audit_path.with_name(audit_path.name + ".quota.lock").lstat()
+        except FileNotFoundError:
+            return 0
+        except OSError:
+            return None
+        return None
     except OSError:
         return None
     # Symlinks (including dangling ones) and hardlinks can bypass the locked
@@ -821,9 +830,13 @@ def _daily_quota_execution_guard(
     ):
         raise PermissionError("Governed action failed: untrusted daily-limit lock directory")
     lock_path = audit_path.with_name(audit_path.name + ".quota.lock")
-    descriptor = os.open(
-        lock_path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600,
-    )
+    flags = os.O_RDWR | os.O_NOFOLLOW | os.O_CLOEXEC
+    try:
+        descriptor = os.open(lock_path, flags | os.O_CREAT | os.O_EXCL, 0o600)
+        created_lock = True
+    except FileExistsError:
+        descriptor = os.open(lock_path, flags)
+        created_lock = False
     try:
         def validate_lock() -> None:
             opened = os.fstat(descriptor)
@@ -841,6 +854,40 @@ def _daily_quota_execution_guard(
         fcntl.flock(descriptor, fcntl.LOCK_EX)
         try:
             validate_lock()  # reject replacement while waiting for another worker
+            # The same persistent lock is an initialization witness. An older
+            # empty lock is migrated only while its ledger still exists.
+            # A missing ledger after an existing lock is a recovery incident,
+            # not a new daily allowance. Never recreate it automatically.
+            os.lseek(descriptor, 0, os.SEEK_SET)
+            witness = os.read(descriptor, 64)
+            if witness not in (b"", b"initialized\\n".replace(b"\\n", b"\n")):
+                raise PermissionError("Governed action failed: invalid daily-limit witness")
+            try:
+                ledger_info = audit_path.lstat()
+            except FileNotFoundError:
+                if not created_lock:
+                    raise PermissionError("Governed action failed: daily-limit ledger missing after initialization")
+                # First use only: publish an empty private ledger before
+                # recording the witness or authorizing any provider effect.
+                ledger_fd = os.open(
+                    audit_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600,
+                )
+                try:
+                    os.fsync(ledger_fd)
+                finally:
+                    os.close(ledger_fd)
+                directory_fd = os.open(parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+                try:
+                    os.fsync(directory_fd)
+                finally:
+                    os.close(directory_fd)
+            else:
+                if not stat.S_ISREG(ledger_info.st_mode) or ledger_info.st_nlink != 1:
+                    raise PermissionError("Governed action failed: untrusted daily-limit ledger")
+            if witness == b"":
+                os.lseek(descriptor, 0, os.SEEK_SET)
+                os.write(descriptor, b"initialized\\n".replace(b"\\n", b"\n"))
+                os.fsync(descriptor)
             yield
         finally:
             fcntl.flock(descriptor, fcntl.LOCK_UN)
