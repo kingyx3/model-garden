@@ -173,6 +173,84 @@ class SummarizerCacheTests(unittest.TestCase):
         self.assertEqual(summary.CallSummarizer(None, cache_path=blocked / "x.json")(record())["summarySource"], "fallback-extractive")
 
 
+
+class SummaryCompletionJournalTests(unittest.TestCase):
+    """A completed model/fallback summary is a separate private, call-bound receipt, never a rewrite of voice evidence."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.path = pathlib.Path(self.tmp.name) / "private" / "summary-completions.jsonl"
+
+    def make(self, fake=None):
+        return summary.CallSummarizer(fake.client if fake else None, completion_path=self.path)
+
+    def test_model_completion_is_private_and_bound_to_exact_call_and_summary(self):
+        fake = FakeCoworker(answer="Caller requested a boiler visit.")
+        completed = self.make(fake)(record())
+        self.assertEqual(completed["summarySource"], "model")
+        (row,) = [json.loads(x) for x in self.path.read_text().splitlines()]
+        self.assertEqual((row["type"], row["callHash"], row["agent"]), ("CallSummaryCompletion", "call-1", "receptionist"))
+        self.assertEqual((row["summary"], row["summarySource"]), ("Caller requested a boiler visit.", "model"))
+        self.assertEqual(len(row["transcriptDigest"]), 64)
+        self.assertEqual(len(row["summaryDigest"]), 64)
+        self.assertNotIn("boiler is broken", self.path.read_text())
+        self.assertEqual(stat.S_IMODE(self.path.stat().st_mode), 0o600)
+        self.assertEqual(stat.S_IMODE(self.path.parent.stat().st_mode), 0o700)
+
+    def test_retry_reuses_journal_even_if_cache_is_lost_and_does_not_call_model(self):
+        self.make(FakeCoworker(answer="Approved exact wording."))(record())
+        fake = FakeCoworker(answer="Different wording.")
+        again = self.make(fake)(record())
+        self.assertEqual(again["summary"], "Approved exact wording.")
+        self.assertEqual(fake.requests, [])
+        self.assertEqual(len(self.path.read_text().splitlines()), 1)
+
+    def test_changed_call_or_agent_refuses_existing_completion_before_any_model_or_crm_action(self):
+        self.make(FakeCoworker())(record())
+        for changed in (record(outcome="transferred"), record(agent="another-agent"),
+                        record(turns=[{"index": 0, "speaker": "caller", "offsetSeconds": 0, "text": "Changed"}])):
+            fake = FakeCoworker()
+            with self.assertRaises(summary.SummaryCompletionError):
+                self.make(fake)(changed)
+            self.assertEqual(fake.requests, [])
+
+    def test_corrupt_and_symlinked_journal_fail_closed(self):
+        self.make(FakeCoworker())(record())
+        self.path.write_text("{corrupt\n")
+        with self.assertRaises(summary.SummaryCompletionError):
+            self.make(FakeCoworker())(record())
+        self.path.unlink()
+        victim = pathlib.Path(self.tmp.name) / "victim"
+        victim.write_text("leave intact")
+        self.path.symlink_to(victim)
+        with self.assertRaises(summary.SummaryCompletionError):
+            self.make(FakeCoworker())(record())
+        self.assertEqual(victim.read_text(), "leave intact")
+
+    def test_fallback_is_explicit_not_misreported_as_model(self):
+        result = self.make()(record())
+        self.assertEqual(result["summarySource"], "fallback-extractive")
+        (row,) = [json.loads(x) for x in self.path.read_text().splitlines()]
+        self.assertEqual(row["summarySource"], "fallback-extractive")
+
+    def test_failed_completion_persistence_prevents_governed_crm_filing(self):
+        self.path.parent.mkdir(mode=0o700)
+        self.path.write_text("invalid\n")
+        runtime = filing_tests.FilingCase()
+        runtime.setUp()
+        try:
+            governed = runtime.runtime()
+            store = governed.crm_store()
+            counts = filing_tests.filing.file_call_transcripts(
+                governed, store, [filing_tests.transcript("c1", started=1_790_000_000)],
+                summarizer=self.make(FakeCoworker()))
+            self.assertEqual((counts["filed"], counts["failed"]), (0, 1))
+            self.assertEqual(store.review_queue()["unmatchedInteractions"], [])
+        finally:
+            runtime.doCleanups()
+
+
 class FilingWithSummaryTests(filing_tests.FilingCase):
     def test_the_summary_is_what_the_governed_filing_carries_and_the_timeline_records_only_its_digest(self):
         runtime = self.runtime()
