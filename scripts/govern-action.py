@@ -860,7 +860,7 @@ def _daily_quota_execution_guard(
             # not a new daily allowance. Never recreate it automatically.
             os.lseek(descriptor, 0, os.SEEK_SET)
             witness = os.read(descriptor, 64)
-            if witness not in (b"", b"initialized\\n".replace(b"\\n", b"\n")):
+            if witness not in (b"", b"initialized\n"):
                 raise PermissionError("Governed action failed: invalid daily-limit witness")
             try:
                 ledger_info = audit_path.lstat()
@@ -886,7 +886,7 @@ def _daily_quota_execution_guard(
                     raise PermissionError("Governed action failed: untrusted daily-limit ledger")
             if witness == b"":
                 os.lseek(descriptor, 0, os.SEEK_SET)
-                os.write(descriptor, b"initialized\\n".replace(b"\\n", b"\n"))
+                os.write(descriptor, b"initialized\n")
                 os.fsync(descriptor)
             yield
         finally:
