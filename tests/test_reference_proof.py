@@ -473,6 +473,30 @@ class ModelSummaryCompletionEvidenceTests(unittest.TestCase):
             self.assertEqual(proof.collect("acme-dev", read_model_summary_completions=True)["modelSummaryCompletions"]["matchedModelCalls"], 1)
             self.assertEqual(reader.call_count, 4)
 
+    def test_combined_model_summary_action_and_fallback_must_share_one_call(self):
+        lifecycle = [voice("CallStarted"), voice("CallEnded", timestamp=110),
+                     voice("FallbackMessage", timestamp=105),
+                     voice("CallStarted", OTHER, 200), voice("CallEnded", OTHER, 210)]
+        call_a = transcript()
+        call_b = {**transcript(room=OTHER), "timestamp": 200, "endedAt": 210}
+        completion_b = {**self.completion(call_b), "timestamp": 220}
+        actions = SameCallScenarioTests.action_rows()
+        data = evidence(lifecycle, actions)
+        data["transcripts"] = proof._transcript_summary(lifecycle, [call_a, call_b])
+        data["modelSummaryCompletions"] = proof._model_completion_summary(
+            lifecycle, [call_a, call_b], [completion_b])
+        self.assertEqual(data["modelSummaryCompletions"]["matchedModelCalls"], 1)
+        data["services"]["governed-worker"] = {"running": True}
+        data["referenceScenario"] = {
+            "completeCalls": proof._single_call_scenario_count(
+                lifecycle, actions, [call_a, call_b], [completion_b],
+                require_model_summary=True)}
+        result = proof.evaluate(
+            data, require_voice_call=True, require_fallback=True,
+            require_governed_action=True, require_model_summary_completion=True)
+        self.assertFalse(result["passed"])
+        self.assertIn("same completed call", " ".join(result["failures"]))
+
     def test_strict_gate_requires_running_worker_and_real_matched_completion(self):
         data = evidence([voice("CallStarted"), voice("CallEnded", timestamp=110)])
         data["transcripts"] = {"records": 1, "completeTwoWayCalls": 1}
