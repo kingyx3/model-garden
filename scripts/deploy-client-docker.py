@@ -51,6 +51,7 @@ RUNTIME_SOURCE_PATHS = (
     pathlib.Path("platform/core/notification_prefs.py"),
     pathlib.Path("scripts/runtime-notification-prefs.py"),
     pathlib.Path("platform/core/subject_access.py"),
+    pathlib.Path("platform/core/tenant_identity.py"),
     pathlib.Path("scripts/runtime-subject-access.py"),
     pathlib.Path("platform/core/unanswered.py"),
     pathlib.Path("scripts/runtime-unanswered.py"),

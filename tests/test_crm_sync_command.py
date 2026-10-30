@@ -106,7 +106,7 @@ class CommandTests(unittest.TestCase):
         self.sync_root = self.root / "crm-sync"
         self.audit = self.root / "audit.jsonl"
         self.desired = self.root / "desired.json"
-        self.desired.write_text(json.dumps({"source": {"client": "Acme Prod"}}))
+        self.desired.write_text(json.dumps({"source": {"client": "acme-prod"}}))
         self.ledger = sync.SyncLedger(self.sync_root, tenant="acme-prod")
         self.store = filing.PayloadStore(self.sync_root / "payloads")
 
