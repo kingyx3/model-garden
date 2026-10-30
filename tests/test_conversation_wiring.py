@@ -226,7 +226,8 @@ class OperatorCommandTests(unittest.TestCase):
         desired = self.root / "d.json"
         desired.write_text(json.dumps({"source": {"client": "Acme Dental"}}))
         self.assertEqual(timeline_cli.default_tenant(desired), "acme-dental")
-        self.assertEqual(timeline_cli.default_tenant(self.root / "missing.json"), "default")
+        with self.assertRaisesRegex(ValueError, "tenant identity unavailable"):
+            timeline_cli.default_tenant(self.root / "missing.json")
 
 
 class OperatorCliTests(unittest.TestCase):

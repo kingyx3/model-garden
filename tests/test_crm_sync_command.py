@@ -174,7 +174,8 @@ class CommandTests(unittest.TestCase):
 
     def test_the_tenant_defaults_to_the_deployments_client(self):
         self.assertEqual(command.default_tenant(self.desired), "acme-prod")
-        self.assertEqual(command.default_tenant(self.root / "missing.json"), "default")
+        with self.assertRaisesRegex(ValueError, "tenant identity unavailable"):
+            command.default_tenant(self.root / "missing.json")
 
 
 class OperatorTests(unittest.TestCase):

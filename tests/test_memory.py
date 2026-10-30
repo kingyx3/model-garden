@@ -244,7 +244,8 @@ class CommandTests(Case):
             desired = pathlib.Path(tmp) / "d.json"
             desired.write_text(json.dumps({"source": {"client": "Acme Dental"}}))
             self.assertEqual(cli.default_tenant(desired), "acme-dental")
-            self.assertEqual(cli.default_tenant(pathlib.Path(tmp) / "missing.json"), "default")
+            with self.assertRaisesRegex(ValueError, "tenant identity unavailable"):
+                cli.default_tenant(pathlib.Path(tmp) / "missing.json")
 
     def test_the_operator_command_validates_before_touching_docker_and_passes_arguments(self):
         calls = []
