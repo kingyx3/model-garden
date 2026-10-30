@@ -39,12 +39,11 @@ PREFS = _load("runtime_notification_prefs_store", ROOT / "platform" / "core" / "
 GOVERN = _load("runtime_notification_prefs_govern", ROOT / "scripts" / "govern-action.py")
 
 
+TENANT = _load("runtime_notification_prefs_tenant", ROOT / "platform" / "core" / "tenant_identity.py")
+
+
 def default_tenant(desired_state: pathlib.Path) -> str:
-    try:
-        client = json.loads(desired_state.read_text(encoding="utf-8")).get("source", {}).get("client")
-    except (OSError, ValueError, AttributeError):
-        client = None
-    return re.sub(r"[^a-z0-9-]+", "-", str(client or "").lower()).strip("-")[:63] or "default"
+    return TENANT.tenant_of(desired_state)
 
 
 def main(argv: list[str] | None = None, *, now: int | None = None) -> int:
@@ -74,8 +73,12 @@ def main(argv: list[str] | None = None, *, now: int | None = None) -> int:
     forget.add_argument("--by", required=True)
     commands.add_parser("counts")
     args = parser.parse_args(argv)
-    store = PREFS.NotificationPrefs(args.root, tenant=args.tenant or default_tenant(args.desired_state),
-                                    audit=lambda action, by, details: GOVERN.record_operator_action(args.audit_path, action, by, details))
+    try:
+        store = PREFS.NotificationPrefs(args.root, tenant=(args.tenant if args.tenant is not None else default_tenant(args.desired_state)),
+                                        audit=lambda action, by, details: GOVERN.record_operator_action(args.audit_path, action, by, details))
+    except (OSError, ValueError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
     moment = int(time.time()) if now is None else now
     try:
         if args.command == "record":

@@ -15,3 +15,7 @@ Contact notes and interaction summaries mask free-text third-party emails, links
 ## Evidence boundary
 
 Credential-free regression tests exercise corrupt state, deletion witness, unsafe directories/files, altered snapshots, retry idempotency, retention traversal, tenant isolation and redaction. They do **not** prove authenticated requester identity, independent two-person signoff, a real secure customer delivery, append-only externally retained audit or third-party erasure/correction. Those remain acceptance requirements on #241 and its dependencies (#115, #80). Do not mark this flow production-ready based on CI alone.
+
+## Compiled tenant identity preflight (v0.8.231)
+
+The subject-access CLI and the other Tier 0 operator CLIs no longer invent a shared `default` tenant when compiled `source.client` is missing, malformed or unreadable. Supply an **explicit trusted** `--tenant <exact-client-slug>` for isolated offline maintenance, or repair the compiled desired state first. A missing identity exits before any state or audit path is created. Case-folded, truncated or punctuation-normalized client names are refused. This is local routing safety only; the CLI does not authenticate the asserted verifier/approver or prove customer delivery.
