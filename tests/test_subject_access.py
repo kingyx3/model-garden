@@ -80,6 +80,23 @@ class ExportTests(Case):
         bundle = self.bundles / f"{details['requestId']}.json"
         self.assertEqual(details["digest"], hashlib.sha256(bundle.read_bytes()).hexdigest()[:16])
 
+    def test_export_redacts_free_text_outcomes_and_indexes_store_provenance(self):
+        self.contacts.log_interaction({"objectId": self.alex, "interactionType": "call", "channel": "voice",
+                                       "direction": "inbound", "timestamp": "2026-10-21T10:00:00+08:00",
+                                       "summary": "Follow up", "outcome": "Contact priya.n@other.example at +65 9123 4567",
+                                       "transcriptRef": "voice:9123456789"})
+        bundle = json.loads(pathlib.Path(self.export()["path"]).read_text())
+        self.assertEqual(bundle["subject"]["sourceStore"], "tier0:contacts")
+        self.assertEqual(bundle["conversations"][0]["sourceStore"], "tier0:conversations")
+        self.assertTrue(all(row["sourceStore"] == "tier0:contacts/interactions" for row in bundle["interactions"]))
+        indexed = next(row for row in bundle["interactions"] if "transcriptRefDigest" in row)
+        self.assertEqual(indexed["transcriptRefDigest"], hashlib.sha256(b"voice:9123456789").hexdigest())
+        self.assertNotIn("transcriptRef", indexed)
+        self.assertIn("[email]", indexed["outcome"])
+        self.assertIn("[number]", indexed["outcome"])
+        self.assertNotIn("priya.n@other.example", json.dumps(bundle))
+        self.assertNotIn("9123456789", json.dumps(bundle))
+
     def test_a_hash_collision_with_synthetic_phone_digits_is_not_a_false_privacy_failure(self):
         self.export()
         details = self.events[-1][2]
@@ -252,6 +269,18 @@ class CorrectionTests(Case):
             visible = {key: value for key, value in details.items() if key not in ("requestId", "contact")}
             for private in ("6123", "Alex"):
                 self.assertNotIn(private, json.dumps(visible))
+
+    def test_correction_retry_rejects_changed_verification_or_tampered_approval(self):
+        first = self.request()
+        with self.assertRaisesRegex(subject.SubjectAccessError, "verification|approval|untrusted"):
+            self.request(method="call-back")
+        self.assertEqual(len([event for event in self.events if event[0] == "subject-access.correction-requested"]), 1)
+        self.assertEqual(self.service.corrections()[0]["method"], "email-link")
+        state = json.loads(self.service.registry.read_text())
+        state["corrections"][first["requestId"]]["approvedBy"] = "unknown@acme.example"
+        self.service.registry.write_text(json.dumps(state), encoding="utf-8")
+        with self.assertRaisesRegex(subject.SubjectAccessError, "verification|approval|untrusted"):
+            self.request()
 
     def test_bad_requests_are_refused(self):
         for bad in ({"field": "ssn"}, {"approved_by": "jordan@acme.example"}):
