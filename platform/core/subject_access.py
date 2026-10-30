@@ -42,6 +42,7 @@ STATUSES = ("open", "applied", "declined")
 MAX_REQUESTS = 500
 MAX_REGISTRY_BYTES = 2_000_000
 MAX_BUNDLE_BYTES = 4_000_000
+MAX_PROVENANCE_STORE_BYTES = 20_000_000
 MARKER = ".subject-access.initialized"
 _PERSON = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:@/+-]{0,127}$")
 _CONTACT = re.compile(r"^c-[0-9a-f]{16}$")
@@ -169,12 +170,14 @@ def _atomic_private(fd: int, name: str, payload: bytes) -> None:
 
 
 class SubjectAccess:
-    def __init__(self, root: str | os.PathLike[str], *, tenant: str, contacts: Any, conversations: Any | None = None, audit: Audit | None = None) -> None:
+    def __init__(self, root: str | os.PathLike[str], *, tenant: str, contacts: Any, conversations: Any | None = None, audit: Audit | None = None,
+                 memory: Any | None = None, sync: Any | None = None) -> None:
         if not isinstance(tenant, str) or not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,62}", tenant):
             raise SubjectAccessError("a tenant is a short lowercase slug")
         self.root = pathlib.Path(root)
         self.tenant = tenant
         self.contacts, self.conversations, self._audit = contacts, conversations, audit
+        self.memory, self.sync = memory, sync
         self.registry = self.root / f"{tenant}.subject-access.json"
 
     @contextlib.contextmanager
@@ -254,6 +257,92 @@ class SubjectAccess:
         row["sourceStore"] = "tier0:contacts/interactions"
         return row
 
+    def _provenance_state(self, store: Any | None, suffix: str) -> dict[str, Any] | None:
+        """Read a single private, pinned tenant store without creating or mutating it.
+
+        The regular store API initializes missing stores and reads mutable paths again.
+        Subject-access instead snapshots one validated inode for each optional store.
+        """
+        if store is None:
+            return None
+        expected = pathlib.Path(store.root) / f"{self.tenant}.{suffix}.json"
+        if store.tenant != self.tenant or pathlib.Path(store.path) != expected:
+            raise SubjectAccessError("provenance store tenant or path does not match this client")
+        if not pathlib.Path(store.root).exists() and not pathlib.Path(store.root).is_symlink():
+            return {"status": "missing", "entries": {}}
+        with _private_directory(pathlib.Path(store.root)) as fd:
+            raw = _read_private(fd, expected.name, MAX_PROVENANCE_STORE_BYTES)
+        if raw is None:
+            return {"status": "missing", "entries": {}}
+        try:
+            data = json.loads(raw)
+        except (ValueError, UnicodeError) as exc:
+            raise SubjectAccessError("provenance store is corrupt; no export was issued") from exc
+        if (not isinstance(data, dict) or data.get("schemaVersion") != 1 or data.get("tenant") != self.tenant
+                or not isinstance(data.get("entries"), dict)):
+            raise SubjectAccessError("provenance store is untrusted or has an unsupported format")
+        if len(data["entries"]) > 20000:
+            raise SubjectAccessError("provenance store exceeds the bounded inventory")
+        return {"status": "indexed", "entries": data["entries"]}
+
+    def _provenance(self, subject: str, linked: list[dict[str, Any]], interactions: list[dict[str, Any]]) -> dict[str, Any]:
+        """Review-only cross-store index. Never infer identity from caller/sender or copy source payloads."""
+        links = set()
+        if self.conversations is not None:
+            # Includes linked conversations with no interactions; never infer a link from a shared phone/email.
+            for row in self.conversations.list_conversations():
+                if row.get("linked") and row.get("customerId") == subject:
+                    links.add(row["id"])
+        links.update(row["conversationId"] for row in linked)
+        digests = {hashlib.sha256(identifier.encode("utf-8")).hexdigest() for identifier in links}
+        memory = self._provenance_state(self.memory, "memory")
+        sync = self._provenance_state(self.sync, "crm-sync")
+        result: dict[str, Any] = {
+            "snapshotConsistency": "sequential-review-required",
+            "transcripts": {"status": "references-only", "sourceStore": "tier0:contacts/interactions",
+                            "references": sum("transcriptRefDigest" in row for row in interactions),
+                            "note": "No transcript content or independent subject match was inspected."},
+            "memory": {"status": "not-configured" if memory is None else memory["status"], "items": []},
+            "crmSync": {"status": "not-configured" if sync is None else sync["status"], "items": [], "unattributed": 0},
+        }
+        if memory is not None and memory["status"] == "indexed":
+            for key, entry in memory["entries"].items():
+                if (not isinstance(entry, dict) or entry.get("id") != key or entry.get("tenant") != self.tenant
+                        or not re.fullmatch(r"m-[0-9a-f]{12}", key)
+                        or (entry.get("conversationDigest") is not None and
+                            (not isinstance(entry["conversationDigest"], str) or
+                             not re.fullmatch(r"[0-9a-f]{64}", entry["conversationDigest"])))):
+                    raise SubjectAccessError("memory provenance is untrusted; no export was issued")
+                by_owner = entry.get("owner") == subject
+                by_conversation = entry.get("conversationDigest") in digests
+                if by_owner or by_conversation:
+                    result["memory"]["items"].append({
+                        "memoryId": key, "sourceStore": "tier0:memory",
+                        "linkage": "asserted-owner" if by_owner else "linked-conversation",
+                        "reviewRequired": True,
+                    })
+            result["memory"]["items"].sort(key=lambda row: row["memoryId"])
+        if sync is not None and sync["status"] == "indexed":
+            for key, entry in sync["entries"].items():
+                if (not isinstance(entry, dict) or entry.get("key") != key or entry.get("tenant") != self.tenant
+                        or not re.fullmatch(r"[0-9a-f]{64}", key)
+                        or entry.get("state") not in ("pending", "synced", "failed", "blocked", "reconciled")
+                        or (entry.get("conversationId") is not None and
+                            (not isinstance(entry["conversationId"], str) or
+                             not re.fullmatch(r"cv-[0-9a-f]{20}", entry["conversationId"])))):
+                    raise SubjectAccessError("CRM sync provenance is untrusted; no export was issued")
+                conversation = entry.get("conversationId")
+                if conversation in links:
+                    result["crmSync"]["items"].append({
+                        "keyDigest": hashlib.sha256(key.encode("utf-8")).hexdigest(),
+                        "sourceStore": "tier0:crm-sync", "state": entry["state"],
+                        "linkage": "linked-conversation", "reviewRequired": True,
+                    })
+                elif conversation is None:
+                    result["crmSync"]["unattributed"] += 1
+            result["crmSync"]["items"].sort(key=lambda row: row["keyDigest"])
+        return result
+
     def export(self, out_dir: str | os.PathLike[str], *, verified_by: str, approved_by: str, method: str, reason: str, now: int,
                contact_id: str | None = None, email: str | None = None, phone: str | None = None) -> dict[str, Any]:
         verified, approved, method, reason = self._check_people(verified_by, approved_by, method, reason)
@@ -261,6 +350,7 @@ class SubjectAccess:
         request_id = "sa-" + hashlib.sha256(f"{self.tenant}|{subject}|{verified}|{approved}|{reason}".encode("utf-8")).hexdigest()[:12]
         record = self.contacts.export_subject(subject)
         linked = self.conversations.customer_timeline(subject) if self.conversations is not None else []
+        provenance = self._provenance(subject, linked, [self._safe_interaction(item) for item in record["interactions"]])
         bundle = {
             "schemaVersion": SCHEMA_VERSION, "kind": "subject-access-export", "tenant": self.tenant, "requestId": request_id,
             "generatedAt": int(now), "expiresAt": int(now) + BUNDLE_DAYS * 86_400, "verifiedBy": verified, "approvedBy": approved,
@@ -268,9 +358,10 @@ class SubjectAccess:
             "subject": {"id": subject, "sourceStore": "tier0:contacts", "fields": {key: _masked(value) if key == "notes" else value for key, value in record["fields"].items()},
                         "identityEvidence": record["identityEvidence"], "createdAt": record["createdAt"]},
             "interactions": [self._safe_interaction(item) for item in record["interactions"]],
+            "provenance": provenance,
             "conversations": [{"conversationId": row["conversationId"], "sourceStore": "tier0:conversations", "channel": _masked(row["channel"]), "at": row.get("at"), "kind": row.get("kind")}
                               for row in linked],
-            "exclusions": ["call and message transcripts", "agent memory", "tickets and uploaded files", "external CRM and messaging-provider data",
+            "exclusions": ["call and message transcript contents", "agent memory contents and unverified subject links", "tickets and uploaded files", "external CRM and messaging-provider data",
                            "free-text email addresses, links, identifiers and phone-like numbers in notes are masked"],
         }
         document = json.dumps(bundle, indent=2, sort_keys=True) + "\n"

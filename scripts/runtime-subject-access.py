@@ -41,6 +41,8 @@ def _load(name: str, path: pathlib.Path):
 SUBJECT = _load("runtime_subject_access_store", ROOT / "platform" / "core" / "subject_access.py")
 CONTACTS = _load("runtime_subject_access_contacts", ROOT / "platform" / "core" / "contacts.py")
 CONVERSATIONS = _load("runtime_subject_access_conversations", ROOT / "platform" / "core" / "conversations.py")
+MEMORY = _load("runtime_subject_access_memory", ROOT / "platform" / "core" / "memory.py")
+SYNC = _load("runtime_subject_access_sync", ROOT / "platform" / "core" / "crm_sync.py")
 GOVERN = _load("runtime_subject_access_govern", ROOT / "scripts" / "govern-action.py")
 
 
@@ -91,7 +93,9 @@ def main(argv: list[str] | None = None, *, now: int | None = None) -> int:
         audit = lambda action, by, details: GOVERN.record_operator_action(args.audit_path, action, by, details)  # noqa: E731
         service = SUBJECT.SubjectAccess(
             args.root / "subject-access", tenant=tenant, contacts=CONTACTS.ContactStore(args.root / "contacts"),
-            conversations=CONVERSATIONS.ConversationStore(args.root / "conversations", tenant=tenant), audit=audit)
+            conversations=CONVERSATIONS.ConversationStore(args.root / "conversations", tenant=tenant),
+            memory=MEMORY.MemoryStore(args.root / "memory", tenant=tenant),
+            sync=SYNC.SyncLedger(args.root / "crm-sync", tenant=tenant), audit=audit)
     except (OSError, ValueError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2

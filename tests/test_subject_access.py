@@ -153,6 +153,77 @@ class ExportTests(Case):
 
 
 
+class CrossStoreProvenanceTests(Case):
+    """Only exact, reviewable links enter a subject index; never raw memory or CRM payloads."""
+
+    def _stores(self):
+        memory = paused._load("memory_for_subject_access", "platform/core/memory.py")
+        sync = paused._load("sync_for_subject_access", "platform/core/crm_sync.py")
+        self.memory = memory.MemoryStore(self.root / "memory", tenant="acme")
+        self.sync = sync.SyncLedger(self.root / "crm-sync", tenant="acme")
+        self.service.memory, self.service.sync = self.memory, self.sync
+
+    def test_absent_stores_are_explicit_and_do_not_get_created(self):
+        self._stores()
+        bundle = json.loads(pathlib.Path(self.export()["path"]).read_text())
+        self.assertEqual(bundle["provenance"]["memory"]["status"], "missing")
+        self.assertEqual(bundle["provenance"]["crmSync"]["status"], "missing")
+        self.assertEqual(bundle["provenance"]["transcripts"]["status"], "references-only")
+        self.assertEqual(bundle["provenance"]["snapshotConsistency"], "sequential-review-required")
+        self.assertFalse((self.root / "memory").exists())
+        self.assertFalse((self.root / "crm-sync").exists())
+
+    def test_exact_linked_memory_and_crm_are_indexed_without_contents_or_unlinked_records(self):
+        self._stores()
+        other = self.contacts.create_contact({"name": "Other"})["objectId"]
+        linked = self.conversations.list_conversations()[0]["id"]
+        unrelated = self.conversations.open("email", "foreign-thread", agent="receptionist", now=NOW)["id"]
+        self.conversations.link(unrelated, other, by="operator", now=NOW)
+        self.memory.remember("client", "PRIVATE memory for Alex", agent="receptionist", owner=self.alex, now=NOW)
+        self.memory.remember("client", "PRIVATE memory for Other", agent="receptionist", owner=other, now=NOW)
+        self.memory.remember("conversation:" + linked, "PRIVATE conversation note", agent="receptionist", now=NOW)
+        self.sync.enqueue(channel="chat", external_id="linked", interaction_type="chat", now=NOW, conversation_id=linked)
+        self.sync.enqueue(channel="email", external_id="foreign", interaction_type="email", now=NOW, conversation_id=unrelated)
+        self.sync.enqueue(channel="email", external_id="unlinked", interaction_type="email", now=NOW)
+        bundle = json.loads(pathlib.Path(self.export()["path"]).read_text())
+        memory = bundle["provenance"]["memory"]
+        crm = bundle["provenance"]["crmSync"]
+        self.assertEqual((memory["status"], len(memory["items"])), ("indexed", 2))
+        self.assertTrue(all(row["reviewRequired"] for row in memory["items"]))
+        self.assertEqual((crm["status"], len(crm["items"]), crm["unattributed"]), ("indexed", 1, 1))
+        self.assertEqual(crm["items"][0]["state"], "pending")
+        for secret in ("PRIVATE", "foreign-thread", "unlinked", "Other", "providerRef"):
+            self.assertNotIn(secret, json.dumps(bundle["provenance"]))
+        self.assertEqual(len([event for event in self.events if event[0] == "subject-access.exported"]), 1)
+
+    def test_foreign_tenant_and_corrupt_store_fail_before_bundle_or_audit(self):
+        self._stores()
+        self.memory.tenant = "another-client"
+        with self.assertRaisesRegex(subject.SubjectAccessError, "tenant"):
+            self.export()
+        self.assertFalse(self.bundles.exists())
+        self.memory.tenant = "acme"
+        self.memory.root.mkdir(mode=0o700)
+        self.memory.path.write_text("not json")
+        with self.assertRaises(subject.SubjectAccessError):
+            self.export()
+        self.assertFalse(self.bundles.exists())
+        self.assertFalse(self.events)
+
+    def test_provenance_changes_require_new_approval_and_erasure_never_exports(self):
+        self._stores()
+        self.memory.remember("client", "one", agent="receptionist", owner=self.alex, now=NOW)
+        first = self.export()
+        self.assertTrue(self.export()["repeat"])
+        self.memory.remember("client", "two", agent="receptionist", owner=self.alex, now=NOW + 1)
+        with self.assertRaisesRegex(subject.SubjectAccessError, "changed|new approval"):
+            self.export()
+        self.assertTrue(pathlib.Path(first["path"]).exists())
+        self.contacts.erase_contact(self.alex)
+        with self.assertRaisesRegex(subject.SubjectAccessError, "no contact matches"):
+            self.export()
+
+
 class ExportIntegrityTests(Case):
     """Access bundles are sensitive; a retry must not rewrite an already-approved snapshot."""
 
