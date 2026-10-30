@@ -121,6 +121,7 @@ class CommandTests(unittest.TestCase):
                                                          "kb": {"provider": "text-knowledge", "tier": 0},
                                                          "calendar": {"provider": "google", "tier": 1, "token_ref": "secret://g/dev"}}}
         desired = compiler.compile_workspace(ROOT / "examples" / "workspace", "receptionist", environment_binding=binding)[0]
+        desired["source"]["client"] = "acme"
         (self.root / "desired.json").write_text(json.dumps(desired), encoding="utf-8")
         manifest = runtime_module.CAPABILITIES.build_manifest(desired, binding)
         (self.root / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
