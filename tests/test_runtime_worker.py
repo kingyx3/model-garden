@@ -100,7 +100,7 @@ class Case(unittest.TestCase):
         self.data.mkdir()
         self.clock = [T0]
 
-    def make(self, config=None, *, schedules=None, coworker=None, senders=None, tickets=False, crm=False):
+    def make(self, config=None, *, schedules=None, coworker=None, senders=None, tickets=False, crm=False, client=None):
         import os
         os.environ["MODEL_GARDEN_CAPABILITY_MANIFEST"] = str(manifest(self.root, tickets=tickets, crm=crm))
         self.addCleanup(os.environ.pop, "MODEL_GARDEN_CAPABILITY_MANIFEST", None)
