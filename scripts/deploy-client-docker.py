@@ -140,6 +140,7 @@ RUNTIME_SOURCE_PATHS = (
     pathlib.Path("scripts/runtime-mailbox.py"),
     pathlib.Path("scripts/runtime-contacts.py"),
     pathlib.Path("scripts/runtime-file-calls.py"),
+    pathlib.Path("scripts/runtime-call-view.py"),
     pathlib.Path("scripts/studio-changes.py"),
     pathlib.Path("scripts/runtime-inbox.py"),
     pathlib.Path("scripts/runtime-memory.py"),
