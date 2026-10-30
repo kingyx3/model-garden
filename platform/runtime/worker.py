@@ -1485,12 +1485,43 @@ class Worker:
         reported as a recovery. With nobody to tell, the state is still kept.
         """
         path = self.data / "worker" / "alerts.json"
+        marker = path.with_name("alerts.initialized")
+        heartbeat = _module("heartbeat")
         try:
-            known = {item for item in json.loads(path.read_text(encoding="utf-8")).get("persistent", []) if isinstance(item, str)}
-        except (OSError, ValueError, TypeError, AttributeError):
-            known = set()
+            marker.lstat()  # do not mistake a dangling symlink for an absent marker
+        except FileNotFoundError:
+            initialized = False
+        else:
+            try:
+                if heartbeat._read_pinned(marker) != {"schemaVersion": 1}:
+                    raise ValueError("invalid witness")
+            except (OSError, ValueError, TypeError, UnicodeError):
+                raise WorkerConfigError("worker alert history witness is untrusted") from None
+            initialized = True
+
+        try:
+            path.lstat()
+        except FileNotFoundError:
+            if initialized:
+                raise WorkerConfigError("worker alert history is missing after initialization")
+            known: set[str] = set()
+        else:
+            try:
+                document = heartbeat._read_pinned(path)
+                allowed = set(DEFAULT_INTERVALS) | {"schedules", "alerts"}
+                if (not isinstance(document, dict) or set(document) != {"persistent"} or
+                        not isinstance(document["persistent"], list) or
+                        len(document["persistent"]) > len(allowed) or
+                        any(not isinstance(name, str) or name not in allowed
+                            for name in document["persistent"]) or
+                        len(set(document["persistent"])) != len(document["persistent"])):
+                    raise ValueError("invalid alert history")
+                known = set(document["persistent"])
+            except (OSError, ValueError, TypeError, UnicodeError):
+                raise WorkerConfigError("worker alert history is unreadable or untrusted") from None
+
         current = (known - ran) | set(persistent)
-        if current == known:
+        if current == known and initialized:
             return
         to = self.config["escalateTo"] or (self.config["mailbox"] or {}).get("owner")
         if to:
@@ -1499,10 +1530,12 @@ class Worker:
                                "runtime (the ledger shows `worker.job-failed`).", reference=f"{job}:{now}"[:40])
             for job in sorted(known - current):
                 self.queue.add("worker-recovered", to, f"The worker job {job} is working again.", reference=f"{job}:{now}"[:40])
-        path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-        temporary = path.with_suffix(".tmp")
-        temporary.write_text(json.dumps({"persistent": sorted(current)}) + "\n", encoding="utf-8")
-        os.replace(temporary, path)
+        # The initialized witness makes a deleted history an observable alert
+        # subsystem failure, never a silent reset to healthy. Publish it first:
+        # a crash between the two writes fails closed on the next pass.
+        if not initialized:
+            heartbeat._write_pinned(marker, {"schemaVersion": 1})
+        heartbeat._write_pinned(path, {"persistent": sorted(current)})
 
     def run_forever(self, stop: threading.Event, *, pause: int = MIN_INTERVAL) -> None:
         while not stop.is_set():

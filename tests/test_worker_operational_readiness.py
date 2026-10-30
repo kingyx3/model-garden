@@ -197,5 +197,80 @@ class WorkerOperationalReadinessTests(unittest.TestCase):
             self.restarted()
 
 
+
+    def test_alert_history_is_private_and_cannot_truncate_hardlinked_temp_victim(self):
+        runtime = self.restarted()
+        runtime.config["escalateTo"] = "owner@client.example"
+        sent = []
+        class Queue:
+            def add(self, *args, **kwargs):
+                sent.append((args, kwargs))
+        runtime.queue = Queue()
+        alert = self.path.with_name("alerts.json")
+        alert.parent.mkdir(parents=True, exist_ok=True)
+        victim = alert.with_name("private-victim")
+        victim.write_text("keep this unrelated private content")
+        alert.with_suffix(".tmp").hardlink_to(victim)
+        runtime._failure_alerts(T0, ["scheduler"], ran=set())
+        self.assertEqual(victim.read_text(), "keep this unrelated private content")
+        self.assertEqual(alert.stat().st_mode & 0o777, 0o600)
+        self.assertEqual(alert.with_name("alerts.initialized").stat().st_mode & 0o777, 0o600)
+        self.assertEqual(len(sent), 1)
+        runtime._failure_alerts(T0 + 1, ["scheduler"], ran=set())
+        self.assertEqual(len(sent), 1, "persistent incident must not enqueue duplicates")
+        runtime._failure_alerts(T0 + 2, [], ran={"scheduler"})
+        self.assertEqual(len(sent), 2, "successful job must enqueue recovery once")
+        runtime._failure_alerts(T0 + 3, [], ran={"scheduler"})
+        self.assertEqual(len(sent), 2)
+
+    def test_deleted_or_corrupt_initialized_alert_history_fails_closed(self):
+        runtime = self.restarted()
+        runtime.config["escalateTo"] = "owner@client.example"
+        sent = []
+        class Queue:
+            def add(self, *args, **kwargs):
+                sent.append((args, kwargs))
+        runtime.queue = Queue()
+        runtime._failure_alerts(T0, ["scheduler"], ran=set())
+        self.assertEqual(len(sent), 1)
+        alert = self.path.with_name("alerts.json")
+        for attack in ("deleted", "corrupt", "symlink", "hardlink", "permissive"):
+            with self.subTest(attack=attack):
+                if alert.exists() or alert.is_symlink():
+                    alert.unlink()
+                if attack == "corrupt":
+                    alert.write_text("{bad json")
+                elif attack == "symlink":
+                    alert.symlink_to(self.path.with_name("alerts.initialized"))
+                elif attack == "hardlink":
+                    alert.hardlink_to(self.path.with_name("alerts.initialized"))
+                elif attack == "permissive":
+                    alert.write_text('{"persistent":["scheduler"]}')
+                    alert.chmod(0o666)
+                with self.assertRaises(worker.WorkerConfigError):
+                    runtime._failure_alerts(T0 + 1, [], ran={"scheduler"})
+                self.assertEqual(len(sent), 1, "untrusted history must not report recovery")
+        # The worker health path must report the alert-system failure, not healthy.
+        runtime._beat(T0 + 2, {"scheduler": {"failed": "RuntimeError"}})
+        self.assertIn("alerts", json.loads(self.path.read_text())["failed"])
+
+    def test_legacy_alert_state_migrates_without_duplicate_failure_notice(self):
+        runtime = self.restarted()
+        runtime.config["escalateTo"] = "owner@client.example"
+        sent = []
+        class Queue:
+            def add(self, *args, **kwargs):
+                sent.append((args, kwargs))
+        runtime.queue = Queue()
+        alert = self.path.with_name("alerts.json")
+        alert.parent.mkdir(parents=True, exist_ok=True)
+        alert.write_text('{"persistent":["scheduler"]}')
+        runtime._failure_alerts(T0, ["scheduler"], ran=set())
+        self.assertEqual(sent, [], "existing alert must not be announced again")
+        self.assertTrue(alert.with_name("alerts.initialized").is_file())
+        self.assertEqual(alert.stat().st_mode & 0o777, 0o600)
+        runtime._failure_alerts(T0 + 1, [], ran={"scheduler"})
+        self.assertEqual(len(sent), 1)
+
 if __name__ == "__main__":
     unittest.main()
