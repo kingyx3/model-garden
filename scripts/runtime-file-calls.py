@@ -104,7 +104,7 @@ def _summarizer(args):
             client = None
     return module.CallSummarizer(
         client, cache_path=args.conversations_root.with_name("call-summaries.json"),
-        completion_path=args.conversations_root / "call-summary-completions.jsonl")
+        completion_path=args.conversations_root.with_name("summary-completions") / "call-summary-completions.jsonl")
 
 
 def main(argv: list[str] | None = None) -> int:
