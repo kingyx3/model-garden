@@ -501,5 +501,36 @@ def runtime_govern():
     return filing_tests.runtime_module.GOVERN
 
 
+
+class SourceTranscriptEvidenceTests(unittest.TestCase):
+    def test_source_digest_binds_original_speech_disclosure_and_outcome_not_later_ledger_enrichment(self):
+        original = record(summary="An extractive index.", summarySource="extractive",
+                          disclosure={"configured": True, "played": True})
+        fingerprint = summary.source_transcript_digest(original)
+        enriched = {**original, "requestIds": ["f" * 64], "tenant": "client-a",
+                    "environment": "dev"}
+        self.assertEqual(summary.source_transcript_digest(enriched), fingerprint)
+        for changed in (
+            {**original, "turns": [{**original["turns"][0], "text": "tampered"}, original["turns"][1]]},
+            {**original, "disclosure": {"configured": True, "played": False}},
+            {**original, "outcome": "transferred"},
+            {**original, "summary": "tampered extractive index"},
+        ):
+            self.assertNotEqual(summary.source_transcript_digest(changed), fingerprint)
+
+    def test_new_private_completion_receipt_has_verifiable_source_digest_and_retry_refuses_tampering(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = pathlib.Path(tmp) / "private" / "call-summary-completions.jsonl"
+            summarizer = summary.CallSummarizer(FakeCoworker().client, completion_path=path)
+            call = record()
+            summarizer(call)
+            (receipt,) = [json.loads(line) for line in path.read_text().splitlines()]
+            self.assertEqual(receipt["sourceTranscriptDigest"], summary.source_transcript_digest(call))
+            receipt["sourceTranscriptDigest"] = "0" * 64
+            path.write_text(json.dumps(receipt) + "\n")
+            with self.assertRaises(summary.SummaryCompletionError):
+                summary.CallSummarizer(FakeCoworker().client, completion_path=path)(call)
+
+
 if __name__ == "__main__":
     unittest.main()
