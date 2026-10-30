@@ -102,3 +102,33 @@ notification delivery. A stopped sampler produces missing telemetry rather
 than a successful health report; Cloud Monitoring may require an initialized
 series to alert on missing data. Unit rendering and offline tests do **not**
 satisfy the live #231 acceptance drill.
+
+
+## Optional private voice timer in the reviewed bundle (v0.8.237; #231)
+
+For a client whose **voice Compose service is actually provisioned**, add
+`--include-voice` to the reviewed `render-runtime-health-units.py` invocation
+above. The same explicitly confirmed client/environment, Compose project,
+GCP project and dedicated monitor user produce a **second** oneshot service
+and 60-second timer. It invokes the existing
+`scripts/voice-health-metric.py`, which samples the LiveKit container's
+recent native Docker healthcheck and publishes a boolean
+`custom.googleapis.com/model_garden/voice_ready` through the VM's existing
+GCE metricWriter identity. The gateway/worker timer remains unchanged.
+Without the flag the bundle emits only gateway and worker units, so a
+client with no voice overlay never reports a missing voice container as an
+incident. Neither timer is installed or enabled by rendering.
+
+A named operator must review **both** services, Docker root-equivalent
+access, script provenance, systemd verification and the approved host
+change before enabling either timer. First confirm real healthy and failed
+voice samples and the exact client/environment/instance labels. Only then
+review and apply `voice_private_alert_enabled=true` with the existing
+client-authorized `gateway_uptime_notification_channels`. Keep the alert
+disabled for clients without voice. Its configured OPENED incident is not
+proof of actual recipient delivery; recovery needs a separately verified
+healthy sample and operator acknowledgement. A healthy native LiveKit
+worker is **not** proof of SIP connectivity, interrupted calls or transfer
+success. Record an authorized voice failure/recovery and recipient drill
+before closing #231. On retirement, disable the Terraform alert before
+removing the host timer.
