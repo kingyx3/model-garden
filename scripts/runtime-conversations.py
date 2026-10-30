@@ -46,13 +46,11 @@ CONVERSATIONS = _load("runtime_conversations_store", ROOT / "platform" / "core" 
 GOVERN = _load("runtime_conversations_govern", ROOT / "scripts" / "govern-action.py")
 
 
+TENANT = _load("runtime_conversations_tenant", ROOT / "platform" / "core" / "tenant_identity.py")
+
+
 def default_tenant(desired_state: pathlib.Path) -> str:
-    """The client-environment slug the worker and the other runtime commands use for this deployment."""
-    try:
-        client = json.loads(desired_state.read_text(encoding="utf-8")).get("source", {}).get("client")
-    except (OSError, ValueError, AttributeError):
-        client = None
-    return re.sub(r"[^a-z0-9-]+", "-", str(client or "").lower()).strip("-")[:63] or "default"
+    return TENANT.tenant_of(desired_state)
 
 
 def ledger_for(timeline: list[dict], audit_path: pathlib.Path) -> dict:
@@ -109,7 +107,7 @@ def main(argv: list[str] | None = None, *, now: int | None = None) -> int:
     args = parser.parse_args(argv)
     clock = int(time.time()) if now is None else now
     try:
-        tenant = args.tenant or default_tenant(args.desired_state)
+        tenant = (args.tenant if args.tenant is not None else default_tenant(args.desired_state))
         store = CONVERSATIONS.ConversationStore(
             args.root, tenant=tenant,
             audit=lambda action, by, details: GOVERN.record_operator_action(args.audit_path, action, by, details),

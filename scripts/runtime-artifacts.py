@@ -37,13 +37,11 @@ GOVERN = _load("runtime_artifacts_govern", ROOT / "scripts" / "govern-action.py"
 ARTIFACTS = _load("runtime_artifacts_store", ROOT / "platform" / "core" / "artifacts.py")
 
 
+TENANT = _load("runtime_artifacts_tenant", ROOT / "platform" / "core" / "tenant_identity.py")
+
+
 def default_tenant(desired_state: pathlib.Path) -> str:
-    try:
-        client = json.loads(desired_state.read_text(encoding="utf-8")).get("source", {}).get("client")
-    except (OSError, json.JSONDecodeError, AttributeError):
-        client = None
-    slug = re.sub(r"[^a-z0-9-]+", "-", str(client or "").lower()).strip("-")[:63]
-    return slug or "default"
+    return TENANT.tenant_of(desired_state)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -63,7 +61,7 @@ def main(argv: list[str] | None = None) -> int:
     audit_path = args.audit_path or args.store.parent / "audit.jsonl"
     try:
         store = ARTIFACTS.ArtifactStore(
-            args.store, tenant=args.tenant or default_tenant(DEFAULT_DESIRED_STATE), retention_days=args.retention_days,
+            args.store, tenant=(args.tenant if args.tenant is not None else default_tenant(DEFAULT_DESIRED_STATE)), retention_days=args.retention_days,
             audit=lambda action, by, details: GOVERN.record_operator_action(audit_path, action, by, details),
         )
         if args.command == "list":

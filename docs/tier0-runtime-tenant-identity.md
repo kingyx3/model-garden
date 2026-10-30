@@ -1,0 +1,7 @@
+# Tier 0 runtime operator tenant identity (v0.8.231)
+
+The local operator commands for artifacts, memory, unanswered questions, notification preferences, CRM synchronization, conversations and subject-access exports must use the **exact** compiled `source.client` slug or an explicitly supplied, trusted `--tenant`. They never normalize an arbitrary name or silently route missing/corrupt identity into a shared `default` namespace. The customer mailbox ingress already follows this fail-closed rule.
+
+Before upgrading, check that `MODEL_GARDEN_DESIRED_STATE` points to the correct compiled client workspace and contains a lowercase slug (letters, digits, hyphens; maximum 63 characters). An absent, unreadable, invalid JSON or malformed identity stops the command before store initialization or mutation. For operator-approved offline recovery, pass `--tenant <exact-client-slug>` after independently confirming the mounted volume and deployment identity; do **not** use a guessed slug to work around a broken mount. Never point two clients at one data volume. Existing legacy `default` data is **not migrated or renamed automatically**: isolate, inventory and reconcile it with client ownership before any transfer.
+
+These CLIs are not public Agent Tools. Explicit tenant selection does not authenticate a client owner or requester, does not enforce provider-side identity and is not live tenant proof. Retain original live access, retention, audit and consent gates on #77, #109, #115 and #241.

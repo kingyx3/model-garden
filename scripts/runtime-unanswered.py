@@ -39,12 +39,11 @@ GOVERN = _load("runtime_unanswered_govern", ROOT / "scripts" / "govern-action.py
 STATUS_FOR = {"dismiss": "dismissed", "answered": "answered", "reopen": "open"}
 
 
+TENANT = _load("runtime_unanswered_tenant", ROOT / "platform" / "core" / "tenant_identity.py")
+
+
 def default_tenant(desired_state: pathlib.Path) -> str:
-    try:
-        client = json.loads(desired_state.read_text(encoding="utf-8")).get("source", {}).get("client")
-    except (OSError, ValueError, AttributeError):
-        client = None
-    return re.sub(r"[^a-z0-9-]+", "-", str(client or "").lower()).strip("-")[:63] or "default"
+    return TENANT.tenant_of(desired_state)
 
 
 def main(argv: list[str] | None = None, *, now: int | None = None) -> int:
@@ -63,9 +62,13 @@ def main(argv: list[str] | None = None, *, now: int | None = None) -> int:
         changing.add_argument("group")
         changing.add_argument("--by", required=True)
     args = parser.parse_args(argv)
-    store = UNANSWERED.UnansweredStore(
-        args.root, tenant=args.tenant or default_tenant(args.desired_state),
-        audit=lambda action, by, details: GOVERN.record_operator_action(args.audit_path, action, by, details))
+    try:
+        store = UNANSWERED.UnansweredStore(
+            args.root, tenant=(args.tenant if args.tenant is not None else default_tenant(args.desired_state)),
+            audit=lambda action, by, details: GOVERN.record_operator_action(args.audit_path, action, by, details))
+    except (OSError, ValueError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
     try:
         if args.command == "list":
             for group in store.list(status=args.status):

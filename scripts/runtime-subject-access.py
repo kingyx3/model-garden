@@ -44,12 +44,11 @@ CONVERSATIONS = _load("runtime_subject_access_conversations", ROOT / "platform" 
 GOVERN = _load("runtime_subject_access_govern", ROOT / "scripts" / "govern-action.py")
 
 
+TENANT = _load("runtime_subject_access_tenant", ROOT / "platform" / "core" / "tenant_identity.py")
+
+
 def default_tenant(desired_state: pathlib.Path) -> str:
-    try:
-        client = json.loads(desired_state.read_text(encoding="utf-8")).get("source", {}).get("client")
-    except (OSError, ValueError, AttributeError):
-        client = None
-    return re.sub(r"[^a-z0-9-]+", "-", str(client or "").lower()).strip("-")[:63] or "default"
+    return TENANT.tenant_of(desired_state)
 
 
 def main(argv: list[str] | None = None, *, now: int | None = None) -> int:
@@ -87,12 +86,16 @@ def main(argv: list[str] | None = None, *, now: int | None = None) -> int:
     listing.add_argument("--status", choices=SUBJECT.STATUSES)
     args = parser.parse_args(argv)
 
-    tenant = args.tenant or default_tenant(args.desired_state)
+    try:
+        tenant = args.tenant if args.tenant is not None else default_tenant(args.desired_state)
+        audit = lambda action, by, details: GOVERN.record_operator_action(args.audit_path, action, by, details)  # noqa: E731
+        service = SUBJECT.SubjectAccess(
+            args.root / "subject-access", tenant=tenant, contacts=CONTACTS.ContactStore(args.root / "contacts"),
+            conversations=CONVERSATIONS.ConversationStore(args.root / "conversations", tenant=tenant), audit=audit)
+    except (OSError, ValueError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
     moment = int(time.time()) if now is None else now
-    audit = lambda action, by, details: GOVERN.record_operator_action(args.audit_path, action, by, details)  # noqa: E731
-    service = SUBJECT.SubjectAccess(
-        args.root / "subject-access", tenant=tenant, contacts=CONTACTS.ContactStore(args.root / "contacts"),
-        conversations=CONVERSATIONS.ConversationStore(args.root / "conversations", tenant=tenant), audit=audit)
     bundles = args.root / "subject-access" / "bundles"
     try:
         if args.command == "export":
