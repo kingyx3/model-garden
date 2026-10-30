@@ -23,7 +23,7 @@ class UnitError(ValueError):
 
 def render_units(*, client: str, environment: str, compose_project: str,
                  confirm_compose_project: str, project_id: str,
-                 confirm_project_id: str, service_user: str) -> dict:
+                 confirm_project_id: str, service_user: str, include_voice: bool = False) -> dict:
     """Produce static, single-tenant unit text without filesystem or cloud effects."""
     if (not isinstance(client, str) or not CLIENT.fullmatch(client) or
             environment not in ("dev", "prod") or
@@ -38,6 +38,8 @@ def render_units(*, client: str, environment: str, compose_project: str,
     if (not isinstance(service_user, str) or not USER.fullmatch(service_user) or
             service_user in ("root", "nobody")):
         raise UnitError("dedicated host sampler user required")
+    if type(include_voice) is not bool:
+        raise UnitError("optional voice monitoring must be a boolean")
 
     name = "model-garden-runtime-health-" + compose_project
     command = " ".join([
@@ -94,6 +96,22 @@ def render_units(*, client: str, environment: str, compose_project: str,
         "WantedBy=timers.target",
         "",
     ])
+    units = {name + ".service": service, name + ".timer": timer}
+    if include_voice:
+        # The already-shipped voice sampler reads the native Docker health
+        # probe, not call traffic. Keep voice optional: absent voice is not an
+        # outage for a client that did not deploy it.
+        voice_name = "model-garden-voice-health-" + compose_project
+        voice_service = (service
+            .replace("Private Model Garden runtime readiness sampler",
+                     "Private Model Garden voice readiness sampler")
+            .replace("runtime-health-metric.py", "voice-health-metric.py"))
+        voice_timer = (timer
+            .replace("Poll private Model Garden gateway and worker readiness",
+                     "Poll private Model Garden voice readiness")
+            .replace(name + ".service", voice_name + ".service"))
+        units[voice_name + ".service"] = voice_service
+        units[voice_name + ".timer"] = voice_timer
     return {
         "schemaVersion": 1,
         "clientProject": compose_project,
@@ -102,7 +120,7 @@ def render_units(*, client: str, environment: str, compose_project: str,
         "notificationsDelivered": False,
         "requiresOperatorReview": True,
         "dockerAccessIsRootEquivalent": True,
-        "units": {name + ".service": service, name + ".timer": timer},
+        "units": units,
     }
 
 
@@ -112,6 +130,8 @@ def main(argv: list[str] | None = None) -> int:
                  "confirm-compose-project", "project-id",
                  "confirm-project-id", "service-user"):
         parser.add_argument("--" + flag, required=True)
+    parser.add_argument("--include-voice", action="store_true",
+                        help="also render a separate opt-in native LiveKit voice health timer")
     args = parser.parse_args(argv)
     try:
         bundle = render_units(**vars(args))
