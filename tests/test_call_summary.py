@@ -11,6 +11,7 @@ import pathlib
 import stat
 import sys
 import tempfile
+import time
 import unittest
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -263,7 +264,7 @@ class CompletedCallViewTests(unittest.TestCase):
         self.addCleanup(self.tmp.cleanup)
         self.root = pathlib.Path(self.tmp.name)
         self.journal_path = self.root / "summary-completions" / "call-summary-completions.jsonl"
-        self.now = 1_790_000_100
+        self.now = int(time.time())
 
     def source(self):
         return record(
