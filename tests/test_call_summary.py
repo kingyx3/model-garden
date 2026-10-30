@@ -2,6 +2,9 @@
 from __future__ import annotations
 
 import importlib.util
+import copy
+import contextlib
+import io
 import json
 import os
 import pathlib
@@ -249,6 +252,120 @@ class SummaryCompletionJournalTests(unittest.TestCase):
             self.assertEqual(store.review_queue()["unmatchedInteractions"], [])
         finally:
             runtime.doCleanups()
+
+
+
+class CompletedCallViewTests(unittest.TestCase):
+    """A local operator view must not relabel original voice evidence or leak speech by default."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = pathlib.Path(self.tmp.name)
+        self.journal_path = self.root / "summary-completions" / "call-summary-completions.jsonl"
+        self.now = 1_790_000_100
+
+    def source(self):
+        return record(
+            "a" * 64, summary="Original extractive index.", summarySource="extractive",
+            disclosure={"configured": True, "played": True}, droppedTurns=0,
+        )
+
+    def journal(self):
+        return summary.SummaryCompletionJournal(self.journal_path, clock=lambda: self.now)
+
+    def write_completion(self, source=None, *, model=True):
+        original = source or self.source()
+        summary.CallSummarizer(
+            FakeCoworker(answer="Model-written follow-up note.").client if model else None,
+            completion_path=self.journal_path, clock=lambda: self.now,
+        )(original)
+        return original
+
+    def test_strict_composed_view_keeps_original_immutable_and_private_by_default(self):
+        original = self.write_completion()
+        before = copy.deepcopy(original)
+        view = summary.completed_call_view(original, self.journal())
+        self.assertEqual((view["type"], view["summarySource"], view["originalSummarySource"]),
+                         ("CompletedCallView", "model", "extractive"))
+        self.assertEqual(view["turnCount"], 2)
+        self.assertEqual(len(view["summaryDigest"]), 64)
+        self.assertNotIn("turns", view)
+        self.assertNotIn("summary", view)
+        self.assertNotIn("boiler", json.dumps(view))
+        private = summary.completed_call_view(original, self.journal(), include_private_text=True)
+        self.assertEqual(private["summary"], "Model-written follow-up note.")
+        self.assertEqual(private["turns"], original["turns"])
+        self.assertEqual(original, before)
+
+    def test_changed_original_speech_disclosure_outcome_or_identity_is_refused(self):
+        original = self.write_completion()
+        for changed in (
+            {"turns": [{**original["turns"][0], "text": "Altered"}] + original["turns"][1:]},
+            {"disclosure": {"configured": True, "played": False}},
+            {"outcome": "transferred"},
+            {"summary": "Forged original index"},
+            {"agent": "another"},
+        ):
+            candidate = {**original, **changed}
+            with self.subTest(changed=tuple(changed)):
+                with self.assertRaises(summary.SummaryCompletionError):
+                    summary.completed_call_view(candidate, self.journal())
+
+    def test_missing_legacy_or_fallback_completion_is_never_called_model(self):
+        original = self.source()
+        with self.assertRaises(summary.SummaryCompletionError):
+            summary.completed_call_view(original, self.journal())
+        self.write_completion(original)
+        row = json.loads(self.journal_path.read_text())
+        row.pop("sourceTranscriptDigest")
+        self.journal_path.write_text(json.dumps(row) + "\n")
+        with self.assertRaises(summary.SummaryCompletionError):
+            summary.completed_call_view(original, self.journal())
+        self.journal_path.unlink()
+        self.write_completion(original, model=False)
+        with self.assertRaises(summary.SummaryCompletionError):
+            summary.completed_call_view(original, self.journal())
+
+    def test_duplicate_cross_tenant_and_expired_receipts_fail_closed(self):
+        original = self.write_completion()
+        row = json.loads(self.journal_path.read_text())
+        row["tenant"] = "other-client"
+        self.journal_path.write_text(json.dumps(row) + "\n")
+        with self.assertRaises(summary.SummaryCompletionError):
+            summary.completed_call_view(original, self.journal())
+        row["tenant"] = None
+        self.journal_path.write_text(json.dumps(row) + "\n" + json.dumps(row) + "\n")
+        with self.assertRaises(summary.SummaryCompletionError):
+            summary.completed_call_view(original, self.journal())
+        self.journal_path.write_text(json.dumps(row) + "\n")
+        expired = summary.SummaryCompletionJournal(self.journal_path, clock=lambda: self.now + 8 * 86400)
+        with self.assertRaises(summary.SummaryCompletionError):
+            summary.completed_call_view(original, expired)
+
+    def test_operator_command_returns_no_speech_by_default_and_rejects_wrong_agent(self):
+        cli = _load("runtime_call_view_under_test", "scripts/runtime-call-view.py")
+        original = self.write_completion()
+        transcripts = self.root / "transcripts.jsonl"
+        transcripts.write_text(json.dumps(original) + "\n")
+        desired = self.root / "desired.json"
+        desired.write_text(json.dumps({"source": {"client": "acme"}, "agent": {"metadata": {"name": "receptionist"}}}))
+        args = ["--transcripts", str(transcripts), "--completion-path", str(self.journal_path),
+                "--desired-state", str(desired), "--call-hash", original["callHash"]]
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            self.assertEqual(cli.main(args), 0)
+        view = json.loads(output.getvalue())
+        self.assertNotIn("turns", view)
+        self.assertNotIn("summary", view)
+        self.assertNotIn("boiler", output.getvalue())
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            self.assertEqual(cli.main(args + ["--include-private-text"]), 0)
+        self.assertIn("Model-written follow-up note.", output.getvalue())
+        desired.write_text(json.dumps({"source": {"client": "acme"}, "agent": {"metadata": {"name": "other"}}}))
+        with contextlib.redirect_stderr(io.StringIO()), contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(cli.main(args), 1)
 
 
 class FilingWithSummaryTests(filing_tests.FilingCase):
