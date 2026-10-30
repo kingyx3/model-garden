@@ -67,7 +67,7 @@ class ScenarioA(W.Case):
         self.worker = self.make(
             {"mailbox": {"addresses": [W.MAILBOX], "trustedAuthservId": W.MX, "owner": OWNER},
              "people": {OWNER: {"channel": "slack", "address": "D0OWNER"}}},
-            coworker=self.fake, senders={"slack": lambda address, text: self.sent.append((address, text))})
+            coworker=self.fake, senders={"slack": lambda address, text: self.sent.append((address, text))}, client="acme")
         (self.root / "manifest.json").write_text(json.dumps(TIER_ZERO))  # no connector other than the built-in ones
         self.contacts = self.worker._sidecar().crm_store()
         self.customer = self.contacts.create_contact({"name": "Alex", "email": ALEX}, now=W.T0 - 1000)["objectId"]

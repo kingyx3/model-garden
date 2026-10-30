@@ -29,7 +29,6 @@ import importlib.util
 import json
 import os
 import pathlib
-import re
 import sys
 import tempfile
 
@@ -44,6 +43,9 @@ def _load(name: str, path: pathlib.Path):
     sys.modules[name] = module
     spec.loader.exec_module(module)
     return module
+
+
+TENANT = _load("runtime_file_calls_tenant", ROOT / "platform" / "core" / "tenant_identity.py")
 
 
 class _CountingRecorder:
@@ -71,8 +73,7 @@ class _CountingRecorder:
 
 def _recorder(runtime_module, runtime, crm_store, args) -> _CountingRecorder:
     module = _load("runtime_file_calls_recorder", ROOT / "platform" / "channels" / "conversation_recorder.py")
-    client = runtime.desired_state.get("source", {}).get("client")
-    tenant = re.sub(r"[^a-z0-9-]+", "-", str(client or "").lower()).strip("-")[:63] or "default"  # as the worker names it
+    tenant = TENANT.tenant_from_compiled(runtime.desired_state)
     agent = runtime.desired_state.get("agent", {}).get("metadata", {}).get("name")
     try:
         store = module._conversations().ConversationStore(
@@ -136,6 +137,9 @@ def main(argv: list[str] | None = None) -> int:
             args.desired_state, args.audit_path, args.approval_root,
             environ={**os.environ, "MODEL_GARDEN_INITIATING_IDENTITY": FILING_IDENTITY},
         )
+        # Validate the in-memory compiled identity before opening any Tier 0 CRM
+        # store, recording a timeline or requesting a model summary.
+        TENANT.tenant_from_compiled(runtime.desired_state)
         store = runtime.crm_store()
         recorder = _recorder(runtime_module, runtime, store, args)
         if args.transcripts == "-":

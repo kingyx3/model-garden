@@ -100,11 +100,11 @@ class Case(unittest.TestCase):
         self.data.mkdir()
         self.clock = [T0]
 
-    def make(self, config=None, *, schedules=None, coworker=None, senders=None, tickets=False, crm=False):
+    def make(self, config=None, *, schedules=None, coworker=None, senders=None, tickets=False, crm=False, client=None):
         import os
         os.environ["MODEL_GARDEN_CAPABILITY_MANIFEST"] = str(manifest(self.root, tickets=tickets, crm=crm))
         self.addCleanup(os.environ.pop, "MODEL_GARDEN_CAPABILITY_MANIFEST", None)
-        return worker.Worker(compiled(self.root, schedules=schedules, client="acme" if tickets else None), self.data, config or {}, coworker=coworker,
+        return worker.Worker(compiled(self.root, schedules=schedules, client=client if client is not None else ("acme" if tickets else None)), self.data, config or {}, coworker=coworker,
                              senders=senders, clock=lambda: self.clock[0])
 
     def events(self):
