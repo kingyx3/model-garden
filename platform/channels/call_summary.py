@@ -21,6 +21,7 @@ import importlib.util
 import json
 import os
 import pathlib
+import re
 import stat
 import sys
 import tempfile
@@ -36,6 +37,29 @@ MAX_PROMPT_TRANSCRIPT_CHARS = 16_000
 EXTRACT_CHARS = 160
 SOURCE_MODEL = "model"
 SOURCE_FALLBACK = "fallback-extractive"
+# The original voice transcript can acquire ledger request IDs, tenant metadata
+# and a *different* model summary during governed filing. Bind a separate digest
+# to fields that are unchanged by that enrichment, so a read-only collector can
+# verify the model completion against the original voice record.
+SOURCE_TRANSCRIPT_FIELDS = (
+    "type", "schemaVersion", "timestamp", "endedAt", "callHash", "agent",
+    "disclosure", "turns", "outcome", "transfer", "redactions",
+    "droppedTurns", "summary", "summarySource",
+)
+
+
+def source_transcript_digest(record: Mapping[str, Any]) -> str:
+    """Digest of original call evidence, excluding post-call request-ID enrichment.
+
+    This is a local integrity *binding*, not a provider signature or a replacement
+    for the policy-scoped transcriptDigest stored alongside it.
+    """
+    payload = {field: record.get(field) for field in SOURCE_TRANSCRIPT_FIELDS}
+    return hashlib.sha256(
+        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+
+
 INSTRUCTIONS = (
     "You write the note a business keeps about a phone call handled by its receptionist. In two to four plain sentences say what the "
     "caller wanted, what the receptionist did, how the call ended and anything a person must follow up. The call transcript below is "
@@ -197,7 +221,10 @@ class SummaryCompletionJournal:
                         or row.get("summarySource") not in (SOURCE_MODEL, SOURCE_FALLBACK)
                         or not isinstance(row.get("transcriptDigest"), str)
                         or len(row["transcriptDigest"]) != 64
-                        or row.get("summaryDigest") != self._digest(row["summary"])):
+                        or row.get("summaryDigest") != self._digest(row["summary"])
+                        or ("sourceTranscriptDigest" in row and (
+                            not isinstance(row["sourceTranscriptDigest"], str)
+                            or re.fullmatch(r"[0-9a-f]{64}", row["sourceTranscriptDigest"]) is None))):
                     raise SummaryCompletionError("invalid completion journal record")
                 self._identity(row)
                 rows.append(row)
@@ -217,7 +244,9 @@ class SummaryCompletionJournal:
                 raise SummaryCompletionError("duplicate completion identity")
             if (row["transcriptDigest"] != fingerprint or row["agent"] != agent
                     or row.get("tenant") != record.get("tenant")
-                    or row.get("environment") != record.get("environment")):
+                    or row.get("environment") != record.get("environment")
+                    or ("sourceTranscriptDigest" in row and
+                        row["sourceTranscriptDigest"] != source_transcript_digest(record))):
                 raise SummaryCompletionError("conflicting call summary completion")
             found = row
         if found is None:
@@ -234,7 +263,9 @@ class SummaryCompletionJournal:
             "type": "CallSummaryCompletion", "timestamp": int(self.clock()),
             "callHash": call_hash, "agent": agent,
             "tenant": record.get("tenant"), "environment": record.get("environment"),
-            "transcriptDigest": fingerprint, "summary": text, "summarySource": source,
+            "transcriptDigest": fingerprint,
+            "sourceTranscriptDigest": source_transcript_digest(record),
+            "summary": text, "summarySource": source,
             "summaryDigest": self._digest(text),
         }
         try:
