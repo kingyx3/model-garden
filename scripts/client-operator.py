@@ -666,6 +666,28 @@ def runtime_file_calls(project_name: str) -> int:
     return 0
 
 
+def runtime_completed_call(project_name: str, call_hash: str, *, include_private_text: bool = False) -> int:
+    """Read one locally verified model completion; speech stays private unless explicitly requested."""
+    if not re.fullmatch(r"[0-9a-f]{64}", call_hash):
+        raise ValueError("--call-hash must be an exact 64-character digest")
+    voice = _service_container(project_name, "voice", "voice worker")
+    container = _governed_tool_container(project_name)
+    stored = _run(["docker", "exec", voice, *_voice_snapshot_command(VOICE_TRANSCRIPTS, VOICE_MESSAGES)])
+    if stored.returncode != 0:
+        raise ValueError("cannot read complete private voice evidence snapshot; reconcile on client host")
+    command = ["docker", "exec", "-i", container, "python",
+               "/opt/model-garden-platform/scripts/runtime-call-view.py",
+               "--transcripts", "-", "--call-hash", call_hash]
+    if include_private_text:
+        command.append("--include-private-text")
+    result = _run(command, input_text=stored.stdout)
+    if result.returncode != 0:
+        raise ValueError("completed-call view unavailable; reconcile private call evidence on client host")
+    if result.stdout:
+        print(result.stdout.strip())
+    return 0
+
+
 CRM_SYNC_COMMANDS = {"list", "retry"}
 SYNC_KEY = re.compile(r"^[0-9a-f]{8,64}$")
 
@@ -1094,6 +1116,13 @@ def main() -> int:
         "file-calls", help="file the voice worker's stored call transcripts into the bound CRM (unmatched queue; run on the client host)"
     )
     file_calls.add_argument("--project-name", required=True)
+    completed = sub.add_parser(
+        "completed-call", help="verify one original voice transcript against its private model summary (digests only by default)"
+    )
+    completed.add_argument("--project-name", required=True)
+    completed.add_argument("--call-hash", required=True)
+    completed.add_argument("--include-private-text", action="store_true",
+                           help="show policy-redacted speech and model note locally; sensitive client data")
     contacts = sub.add_parser("contacts", help="review or erase the Tier 0 contact log (personal data; run on the client host)")
     contacts.add_argument("action", choices=sorted(CONTACT_COMMANDS))
     contacts.add_argument("ids", nargs="*", help="record IDs the action applies to")
@@ -1312,6 +1341,8 @@ def main() -> int:
             return runtime_inbox(args.project_name, as_json=args.json)
         if args.command == "file-calls":
             return runtime_file_calls(args.project_name)
+        if args.command == "completed-call":
+            return runtime_completed_call(args.project_name, args.call_hash, include_private_text=args.include_private_text)
         if args.command == "contacts":
             return runtime_contacts(args.project_name, args.action, tuple(args.ids), by=args.by)
         if args.command == "handoffs":
