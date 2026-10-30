@@ -240,3 +240,35 @@ provider receipts and approvals, then follow an owner-authorized recovery
 procedure. This is a host-local filesystem safety prerequisite; it does not
 prove real SMTP/DMARC ingress, delivered replies, approved recipients or
 client acceptance for #84/#109/#117.
+
+
+### Private completed-call operator view (v0.8.241; #107)
+
+On an isolated client host, after the worker has filed a completed voice call and
+persisted its model-labelled summary completion, use:
+
+```sh
+python scripts/client-operator.py completed-call --project-name CLIENT-DEV --call-hash CALL_SHA256
+# Only for a specifically authorized local review of sensitive client speech:
+python scripts/client-operator.py completed-call --project-name CLIENT-DEV --call-hash CALL_SHA256 --include-private-text
+```
+
+The default response contains only call metadata, counts and SHA-256 digests; it
+does **not** print the original transcript turns or the model note. The explicit
+private-text option displays the policy-redacted turns and model note on the
+operator's client host; do not pipe it into shared CI, support tickets, chat,
+external telemetry or unapproved logs. Host access is the operator authorization
+boundary; a supplied call hash or `--include-private-text` is **not** proof of
+independent customer identity, consent or client-owner approval.
+
+The command validates the complete voice snapshot and private completion journal,
+the compiled tenant/Agent and exact call identity, disclosure, both-sided ordered
+speech, source-transcript digest, model label, uniqueness and retention. Missing,
+legacy (no source digest), fallback-only, expired or conflicting completions
+fail closed. The original voice JSONL is never changed; this is a **read-only
+composed view**, not a replacement or rewrite of the original transcript's
+extractive summary. Legacy original records do not independently attest tenant
+identity; isolation still depends on the deployed per-client volume and host
+permissions. Neither a local digest nor a `model` label proves real SIP audio,
+provider model execution, human transfer, CRM receipt or live client acceptance.
+Keep #107/#117 open pending those independently verified events.
