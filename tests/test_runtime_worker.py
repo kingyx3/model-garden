@@ -39,13 +39,11 @@ def compiled(root: pathlib.Path, *, schedules=None, client=None) -> pathlib.Path
     path = root / "desired-state.json"
     subprocess.run([sys.executable, str(ROOT / "scripts" / "compile-workspace.py"), str(ROOT / "examples" / "workspace"),
                     "--agent", "receptionist", "--output", str(path)], check=True, capture_output=True)
-    if schedules is not None or client is not None:
-        state = json.loads(path.read_text())
-        if schedules is not None:
-            state["schedules"] = schedules
-        if client is not None:
-            state["source"]["client"] = client
-        path.write_text(json.dumps(state))
+    state = json.loads(path.read_text())
+    if schedules is not None:
+        state["schedules"] = schedules
+    state["source"]["client"] = client if client is not None else "acme"
+    path.write_text(json.dumps(state))
     return path
 
 

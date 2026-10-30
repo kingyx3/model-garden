@@ -93,6 +93,7 @@ def _load(name: str, relative: str):
 
 
 MODULES = {
+    "tenant": "platform/core/tenant_identity.py",
     "unanswered": "platform/core/unanswered.py",
     "inbox": "platform/core/inbox.py",
     "task_inbox": "platform/core/task_inbox.py",
@@ -139,8 +140,8 @@ class WorkerConfigError(ValueError):
 
 
 def tenant_of(desired_state: Mapping[str, Any]) -> str:
-    client = desired_state.get("source", {}).get("client") if isinstance(desired_state.get("source"), Mapping) else None
-    return re.sub(r"[^a-z0-9-]+", "-", str(client or "").lower()).strip("-")[:63] or "default"
+    """Require the exact compiled tenant before any autonomous job or store."""
+    return _module("tenant").tenant_from_compiled(desired_state)
 
 
 def _person(value: Any, label: str) -> str:

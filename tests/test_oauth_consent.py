@@ -546,6 +546,9 @@ def compiled(root: pathlib.Path) -> pathlib.Path:
     path = root / "desired-state.json"
     subprocess.run([sys.executable, str(ROOT / "scripts" / "compile-workspace.py"), str(ROOT / "examples" / "workspace"),
                     "--agent", "receptionist", "--output", str(path)], check=True, capture_output=True)
+    document = json.loads(path.read_text(encoding="utf-8"))
+    document["source"]["client"] = "acme"
+    path.write_text(json.dumps(document), encoding="utf-8")
     return path
 
 

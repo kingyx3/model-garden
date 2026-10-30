@@ -171,6 +171,7 @@ class WorkerTests(unittest.TestCase):
                         "--agent", "receptionist", "--output", str(state)], check=True, capture_output=True)
         document = json.loads(state.read_text())
         document["schedules"] = [SCHEDULE]
+        document["source"]["client"] = "acme"
         state.write_text(json.dumps(document))
         self.state = state
         self.clock = [T0]
