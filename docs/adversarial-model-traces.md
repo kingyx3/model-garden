@@ -8,6 +8,12 @@ credential-free checker `scripts/eval-adversarial-trace.py` scores separately
 captured model/Tool outcomes; it **does not run a model**, connect to a provider,
 authenticate the recorder or prove a live receptionist is safe.
 
+## Retrieved knowledge is untrusted model input (v0.8.239)
+
+The support-mailbox answer path now keeps approved knowledge excerpts and the customer's question in a single structured **user-role JSON data message**, separate from fixed system instructions. Previously, retrieved text was appended directly to the Hermes system message, giving a malicious FAQ excerpt a higher-priority instruction position. Regression tests inspect the actual API request roles and verify that forged system/developer labels and JSON delimiters remain data. Existing citation allow-listing and the governed Tool/approval boundary are unchanged.
+
+This is **prompt-role separation, not proof that a model resists injection**. A malicious excerpt can still influence a model's answer; citation validation alone cannot prove factual correctness or absence of leaked data. #235 still requires approved model-executed retrieved-content and multi-turn trials with independently reconciled Tool/ledger outcomes, and actual voice/mail evidence. Do not interpret these credential-free tests as a live safety verdict.
+
 ## Capture contract
 
 Run the attacks against a separately approved Hermes/provider test environment
