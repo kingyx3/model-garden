@@ -240,6 +240,20 @@ class SubjectAccess:
             raise SubjectAccessError("a reason is required")
         return verified, approved, method, " ".join(reason.split())[:200]
 
+    @staticmethod
+    def _safe_interaction(item: dict[str, Any]) -> dict[str, Any]:
+        """Index Tier 0 interaction provenance without disclosing raw external transcript locators."""
+        row = dict(item)
+        for field in ("summary", "outcome", "channel"):
+            if field in row:
+                row[field] = _masked(row[field])
+        if "transcriptRef" in row:
+            # External reference strings can embed phone numbers or third-party IDs.
+            # Retain a stable reconciliation handle, not the unreviewed locator.
+            row["transcriptRefDigest"] = hashlib.sha256(str(row.pop("transcriptRef")).encode("utf-8")).hexdigest()
+        row["sourceStore"] = "tier0:contacts/interactions"
+        return row
+
     def export(self, out_dir: str | os.PathLike[str], *, verified_by: str, approved_by: str, method: str, reason: str, now: int,
                contact_id: str | None = None, email: str | None = None, phone: str | None = None) -> dict[str, Any]:
         verified, approved, method, reason = self._check_people(verified_by, approved_by, method, reason)
@@ -251,10 +265,10 @@ class SubjectAccess:
             "schemaVersion": SCHEMA_VERSION, "kind": "subject-access-export", "tenant": self.tenant, "requestId": request_id,
             "generatedAt": int(now), "expiresAt": int(now) + BUNDLE_DAYS * 86_400, "verifiedBy": verified, "approvedBy": approved,
             "verificationMethod": method,
-            "subject": {"id": subject, "fields": {key: _masked(value) if key == "notes" else value for key, value in record["fields"].items()},
+            "subject": {"id": subject, "sourceStore": "tier0:contacts", "fields": {key: _masked(value) if key == "notes" else value for key, value in record["fields"].items()},
                         "identityEvidence": record["identityEvidence"], "createdAt": record["createdAt"]},
-            "interactions": [{**item, "summary": _masked(item.get("summary"))} for item in record["interactions"]],
-            "conversations": [{"conversationId": row["conversationId"], "channel": row["channel"], "at": row.get("at"), "kind": row.get("kind")}
+            "interactions": [self._safe_interaction(item) for item in record["interactions"]],
+            "conversations": [{"conversationId": row["conversationId"], "sourceStore": "tier0:conversations", "channel": _masked(row["channel"]), "at": row.get("at"), "kind": row.get("kind")}
                               for row in linked],
             "exclusions": ["call and message transcripts", "agent memory", "tickets and uploaded files", "external CRM and messaging-provider data",
                            "free-text email addresses, links, identifiers and phone-like numbers in notes are masked"],
@@ -344,6 +358,15 @@ class SubjectAccess:
         with self._locked() as state:
             existing = state["corrections"].get(request_id)
             if existing is not None:
+                # The stable ID predates verification-method binding. A changed method
+                # or corrupted registry must never be treated as an approved retry.
+                expected = {"requestId": request_id, "contact": subject, "field": field,
+                            "verifiedBy": verified, "approvedBy": approved, "method": method, "reason": reason}
+                if (not isinstance(existing, dict)
+                        or any(existing.get(key) != value for key, value in expected.items())
+                        or existing.get("status") not in STATUSES
+                        or type(existing.get("requestedAt")) is not int):
+                    raise SubjectAccessError("correction verification or approval changed; obtain a new approved request")
                 return {**existing, "repeat": True}
             entry = {"requestId": request_id, "contact": subject, "field": field, "status": "open", "verifiedBy": verified, "approvedBy": approved,
                      "method": method, "reason": reason, "requestedAt": int(now)}
