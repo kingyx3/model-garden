@@ -242,7 +242,7 @@ class CommandTests(Case):
         self.assertEqual(code, 1)
         with tempfile.TemporaryDirectory() as tmp:
             desired = pathlib.Path(tmp) / "d.json"
-            desired.write_text(json.dumps({"source": {"client": "Acme Dental"}}))
+            desired.write_text(json.dumps({"source": {"client": "acme-dental"}}))
             self.assertEqual(cli.default_tenant(desired), "acme-dental")
             with self.assertRaisesRegex(ValueError, "tenant identity unavailable"):
                 cli.default_tenant(pathlib.Path(tmp) / "missing.json")
