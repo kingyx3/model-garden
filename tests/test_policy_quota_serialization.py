@@ -212,5 +212,42 @@ class PolicyQuotaSerializationTests(unittest.TestCase):
         self.assertEqual(result["status"], "pending-approval")
 
 
+    def test_first_conditional_write_initializes_private_ledger_witness(self):
+        result = govern.execute_action(
+            state(), "mail.send", {}, lambda _: {"ok": True}, audit_path=self.path,
+        )
+        self.assertEqual(result["status"], "executed")
+        lock = self.path.with_name(self.path.name + ".quota.lock")
+        self.assertEqual(lock.read_text(encoding="utf-8"), "initialized\n")
+        self.assertEqual(lock.stat().st_mode & 0o777, 0o600)
+        self.assertEqual(self.path.stat().st_mode & 0o777, 0o600)
+
+    def test_deleted_ledger_cannot_reset_a_spent_daily_allowance(self):
+        self.assertEqual(govern.execute_action(
+            state(), "mail.send", {}, lambda _: {"ok": True}, audit_path=self.path,
+        )["status"], "executed")
+        self.path.unlink()
+        self.assertIsNone(govern.count_executions_today(self.path, "mail.send", agent="receptionist"))
+        called = []
+        with self.assertRaises(PermissionError):
+            govern.execute_action(
+                state(), "mail.send", {"category": "second"},
+                lambda _: called.append(True), audit_path=self.path,
+            )
+        self.assertEqual(called, [])
+        self.assertFalse(self.path.exists())
+
+    def test_existing_legacy_quota_lock_without_ledger_fails_closed(self):
+        lock = self.path.with_name(self.path.name + ".quota.lock")
+        lock.write_text("", encoding="utf-8")
+        lock.chmod(0o600)
+        self.assertIsNone(govern.count_executions_today(self.path, "mail.send", agent="receptionist"))
+        called = []
+        with self.assertRaises(PermissionError):
+            govern.execute_action(state(), "mail.send", {}, lambda _: called.append(True), audit_path=self.path)
+        self.assertEqual(called, [])
+        self.assertFalse(self.path.exists())
+
+
 if __name__ == "__main__":
     unittest.main()
