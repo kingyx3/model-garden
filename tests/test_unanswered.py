@@ -92,7 +92,7 @@ class BoundaryTests(unittest.TestCase):
     events = paused.BoundaryTests.events
 
     def store(self):
-        return unanswered.UnansweredStore(self.root / "unanswered", tenant="default")
+        return unanswered.UnansweredStore(self.root / "unanswered", tenant="acme")
 
     def test_a_search_with_no_approved_answer_is_noted_and_one_with_an_answer_is_not(self):
         self.assertEqual(self.runtime.kb_search(query="opening hours")["status"], "executed")
