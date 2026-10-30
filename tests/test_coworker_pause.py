@@ -577,6 +577,8 @@ class BoundaryTests(unittest.TestCase):
         self.addCleanup(self._tmp.cleanup)
         self.root = pathlib.Path(self._tmp.name)
         desired = compiler.compile_workspace(ROOT / "examples/workspace", "receptionist")[0]
+        # Governed autonomous notes require an exact compiled client identity.
+        desired["source"]["client"] = "acme"
         (self.root / "desired.json").write_text(json.dumps(desired), encoding="utf-8")
         binding = {"connectors": {"kb": {"provider": "text-knowledge", "tier": 0}, "crm": {"provider": "built-in-crm", "tier": 0}}}
         (self.root / "manifest.json").write_text(json.dumps(runtime_module.CAPABILITIES.build_manifest(desired, binding)))
