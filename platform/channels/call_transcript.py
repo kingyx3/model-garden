@@ -427,6 +427,26 @@ def _append_call_record(rows: list[dict[str, Any]], record: dict[str, Any]) -> b
     Fallback/lifecycle records keep their normal append semantics. Existing duplicate
     transcript identities are corruption, not a reason to silently choose a winner.
     """
+    if record.get("type") == "CallSummaryCompletion":
+        identity = record.get("callHash")
+        if not isinstance(identity, str) or not 0 < len(identity) <= 200:
+            raise ValueError("invalid new summary completion identity")
+        seen_completions: set[str] = set()
+        identical_completion = False
+        for row in rows:
+            if row.get("type") != "CallSummaryCompletion":
+                continue
+            existing = row.get("callHash")
+            if not isinstance(existing, str) or not 0 < len(existing) <= 200:
+                raise ValueError("invalid existing summary completion identity")
+            if existing in seen_completions:
+                raise ValueError("duplicate existing summary completion identity")
+            seen_completions.add(existing)
+            if existing == identity:
+                if row != record:
+                    raise ValueError("conflicting call summary completion identity")
+                identical_completion = True
+        return not identical_completion
     is_transcript = record.get("type") == "CallTranscript"
     call_hash = record.get("callHash") if is_transcript else None
     if is_transcript and (not isinstance(call_hash, str) or not call_hash or len(call_hash) > 200):
