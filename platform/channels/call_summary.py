@@ -180,7 +180,7 @@ class SummaryCompletionJournal:
                         or info.st_size > self.MAX_BYTES):
                     raise SummaryCompletionError("unsafe completion journal")
                 data = handle.read(self.MAX_BYTES + 1)
-            if len(data) > self.MAX_BYTES or (data and not data.endswith(b"\\n")):
+            if len(data) > self.MAX_BYTES or (data and not data.endswith(b"\n")):
                 raise SummaryCompletionError("incomplete completion journal")
             rows = []
             for raw in data.splitlines():
@@ -342,6 +342,11 @@ class CallSummarizer:
         if self._journal is not None:
             prior = self._journal.find(record, fingerprint)
             if prior is not None:
+                # A local journal is not externally immutable: refuse a changed
+                # summary that would now violate the client's redaction policy.
+                safe, _ = _redactor()(prior["summary"], self._patterns)
+                if safe != prior["summary"]:
+                    raise SummaryCompletionError("completion summary violates redaction policy")
                 self.counts["cached"] += 1
                 return {**record, **prior}
         cache = self._load_cache() if call_hash else {}
