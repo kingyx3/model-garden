@@ -55,6 +55,7 @@ GOVERN = _load_module("model_garden_govern_action", ROOT / "scripts" / "govern-a
 CAPABILITIES = _load_module("model_garden_runtime_capabilities", ROOT / "platform" / "core" / "capabilities.py")
 TEXT_CHANNEL = _load_module("model_garden_text_channel", ROOT / "platform" / "channels" / "text_channel.py")
 UNANSWERED = _load_module("model_garden_runtime_unanswered", ROOT / "platform" / "core" / "unanswered.py")
+TENANT = _load_module("model_garden_runtime_tenant_identity", ROOT / "platform" / "core" / "tenant_identity.py")
 PAUSE = _load_module("model_garden_runtime_pause", ROOT / "platform" / "core" / "pause.py")
 HANDOFF = _load_module("model_garden_runtime_handoff", ROOT / "platform" / "core" / "handoff.py")
 KNOWLEDGE = _load_module("model_garden_runtime_knowledge", ROOT / "platform" / "core" / "knowledge.py")
@@ -651,7 +652,7 @@ class GovernedToolRuntime:
         """Keep a bounded, masked sample of a question no approved source answered, for the owner's feedback loop (#237); never blocks the answer."""
         try:
             principal = self.principal_resolver() if self.principal_resolver is not None else None
-            tenant = re.sub(r"[^a-z0-9-]+", "-", str(self.desired_state.get("source", {}).get("client") or "").lower()).strip("-")[:63] or "default"
+            tenant = TENANT.tenant_from_compiled(self.desired_state)
             UNANSWERED.UnansweredStore(self.governance_root / "unanswered", tenant=tenant).record(
                 query, channel=getattr(principal, "channel", None), reason=str(reason or "no-match"), now=int(self.clock()),
                 agent=str(self.desired_state.get("source", {}).get("name") or ""))
