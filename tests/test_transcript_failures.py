@@ -191,8 +191,8 @@ class CommandTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = pathlib.Path(tmp)
             transcripts, lifecycle = root / "transcripts.jsonl", root / "messages.jsonl"
-            transcripts.write_text('{"type":"CallTranscript"}\\n', encoding="utf-8")
-            lifecycle.write_text('{"type":"TranscriptWriteFailed"}\\n', encoding="utf-8")
+            transcripts.write_text('{"type":"CallTranscript"}\n', encoding="utf-8")
+            lifecycle.write_text('{"type":"TranscriptWriteFailed"}\n', encoding="utf-8")
             command = operator._voice_snapshot_command(str(transcripts), str(lifecycle))
             self.assertEqual(command[:2], ["sh", "-c"])
             self.assertNotIn(str(transcripts), command[2])  # no interpolated shell paths
@@ -204,7 +204,7 @@ class CommandTests(unittest.TestCase):
             transcripts.unlink()
             self.assertNotEqual(run().returncode, 0)
             self.assertEqual(run().stdout, "")
-            transcripts.write_text('{"type":"CallTranscript"}\\n', encoding="utf-8")
+            transcripts.write_text('{"type":"CallTranscript"}\n', encoding="utf-8")
             lifecycle.symlink_to(transcripts)
             self.assertNotEqual(run().returncode, 0)
             self.assertEqual(run().stdout, "")  # preflight rejects before emitting call data
@@ -222,7 +222,7 @@ class CommandTests(unittest.TestCase):
         def fake_run(command, **kwargs):
             calls.append(command)
             if command[:2] == ["docker", "ps"]:
-                return mock.Mock(returncode=0, stdout="x1\\n", stderr="")
+                return mock.Mock(returncode=0, stdout="x1\n", stderr="")
             if command[:3] == ["docker", "exec", "x1"] and "sh" in command:
                 return mock.Mock(returncode=21, stdout="", stderr="private customer path")
             return mock.Mock(returncode=0, stdout="{}", stderr="")
