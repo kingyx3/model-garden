@@ -88,6 +88,7 @@ def _load(name: str, relative: str):
 def _module(key: str):
     paths = {
         "govern": "scripts/govern-action.py", "approval": "scripts/runtime-approval.py",
+        "tenant": "platform/core/tenant_identity.py",
         "text": "platform/channels/text_channel.py", "ingress": "platform/channels/ingress.py",
         "slack": "platform/channels/slack_channel.py", "teams": "platform/channels/teams_channel.py",
         "web": "platform/channels/web_chat.py", "email": "platform/channels/email_channel.py",
@@ -109,8 +110,8 @@ class GatewayConfigError(ValueError):
 
 
 def tenant_of(desired_state: Mapping[str, Any]) -> str:
-    client = desired_state.get("source", {}).get("client") if isinstance(desired_state.get("source"), Mapping) else None
-    return re.sub(r"[^a-z0-9-]+", "-", str(client or "").lower()).strip("-")[:63] or "default"
+    """Require the exact compiled tenant before accepting inbound channel work."""
+    return _module("tenant").tenant_from_compiled(desired_state)
 
 
 def load_config(document: Mapping[str, Any]) -> dict[str, Any]:
