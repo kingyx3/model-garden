@@ -373,6 +373,7 @@ def _model_completion_summary(
 def _single_call_scenario_count(
     voice_rows: list[dict[str, Any]], audit_rows: list[dict[str, Any]],
     transcript_rows: list[dict[str, Any]],
+    completion_rows: list[dict[str, Any]] = (), *, require_model_summary: bool = False,
 ) -> int:
     """Structural intersection of disclosure, two-sided speech, action and fallback on ONE call.
 
@@ -407,6 +408,9 @@ def _single_call_scenario_count(
         if _voice_summary(scoped)["completedCallFallbackEvidence"] != 1:
             continue
         if _transcript_summary(scoped, transcript_rows)["completeTwoWayCalls"] != 1:
+            continue
+        if (require_model_summary and _model_completion_summary(
+                scoped, transcript_rows, list(completion_rows))["matchedModelCalls"] != 1):
             continue
         # Check the entire audit log, not a prefiltered subset: another call
         # reusing the same request ID must still veto authorization proof.
@@ -447,7 +451,10 @@ def collect(project: str, *, read_transcripts: bool = False, read_model_summary_
         "modelSummaryCompletions": _model_completion_summary(
             voice_rows, transcript_rows, completion_rows,
         ) if read_model_summary_completions else {"records": 0, "matchedModelCalls": 0},
-        "referenceScenario": {"completeCalls": _single_call_scenario_count(voice_rows, audit_rows, transcript_rows) if read_transcripts else 0},
+        "referenceScenario": {"completeCalls": _single_call_scenario_count(
+            voice_rows, audit_rows, transcript_rows, completion_rows,
+            require_model_summary=read_model_summary_completions,
+        ) if (read_transcripts or read_model_summary_completions) else 0},
         "generatedAt": dt.datetime.now(dt.timezone.utc).isoformat(),
         "project": project,
         "services": service_summary,
@@ -489,7 +496,7 @@ def evaluate(evidence: dict[str, Any], *, require_voice_call: bool, require_fall
         failures.append("no successful governed business-action execution receipt exists")
     if require_governed_action and require_voice_call and evidence["governance"].get("completedCallActions", 0) < 1:
         failures.append("no authorized successful Tool request is explicitly correlated to a completed call")
-    if (require_two_way_transcript and require_fallback and require_governed_action
+    if (needs_transcript and require_fallback and require_governed_action
             and evidence.get("referenceScenario", {}).get("completeCalls", 0) < 1):
         failures.append("no same completed call has a disclosed two-way transcript, authorized Tool action and human fallback")
     return {"passed": not failures, "failures": failures}
