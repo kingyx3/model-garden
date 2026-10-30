@@ -15,12 +15,15 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+import hashlib
+import importlib.util
 import json
 import math
 import pathlib
 import re
 import subprocess
 import sys
+from functools import lru_cache
 from collections import Counter
 from typing import Any
 
@@ -298,9 +301,79 @@ def _transcript_summary(voice_rows: list[dict[str, Any]], transcript_rows: list[
 
 
 
+@lru_cache(maxsize=1)
+def _summary_contract():
+    """Use the SAME canonical digest contract as the post-call worker."""
+    path = pathlib.Path(__file__).resolve().parents[1] / "platform" / "channels" / "call_summary.py"
+    spec = importlib.util.spec_from_file_location("reference_proof_summary_contract", path)
+    if spec is None or spec.loader is None:
+        raise ValueError("model summary contract is unavailable")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _source_transcript_digest(record: dict[str, Any]) -> str:
+    return _summary_contract().source_transcript_digest(record)
+
+
+def _model_completion_summary(
+    voice_rows: list[dict[str, Any]], transcript_rows: list[dict[str, Any]],
+    completion_rows: list[dict[str, Any]],
+) -> dict[str, int]:
+    """Count model-labelled completions bound to the SAME original disclosed call.
+
+    No summary, speech, identity, source digest or raw receipt leaves this
+    function. A local model label/digest is not authenticated model execution,
+    provider provenance or a client-approved transcript archive.
+    """
+    transcript_by_room: dict[str, list[dict[str, Any]]] = {}
+    for row in transcript_rows:
+        if row.get("type") == "CallTranscript" and isinstance(row.get("callHash"), str):
+            transcript_by_room.setdefault(row["callHash"], []).append(row)
+    completion_by_room: dict[str, list[dict[str, Any]]] = {}
+    for row in completion_rows:
+        if row.get("type") == "CallSummaryCompletion" and isinstance(row.get("callHash"), str):
+            completion_by_room.setdefault(row["callHash"], []).append(row)
+    room_agents: dict[str, set[str | None]] = {}
+    for row in voice_rows:
+        if row.get("type") not in ("CallStarted", "CallEnded"):
+            continue
+        room = row.get("roomHash")
+        if isinstance(room, str):
+            agent = row.get("agent")
+            room_agents.setdefault(room, set()).add(agent if isinstance(agent, str) and agent else None)
+
+    matched = 0
+    for room, receipts in completion_by_room.items():
+        calls = transcript_by_room.get(room, [])
+        if (len(receipts) != 1 or len(calls) != 1
+                or len(room_agents.get(room, ())) != 1 or None in room_agents[room]):
+            continue
+        receipt, call = receipts[0], calls[0]
+        if (_transcript_summary(voice_rows, [call])["completeTwoWayCalls"] != 1
+                or receipt.get("agent") != call.get("agent")
+                or receipt.get("summarySource") != "model"
+                or not isinstance(receipt.get("summary"), str)
+                or not 0 < len(receipt["summary"]) <= 1200
+                or type(receipt.get("timestamp")) is not int
+                or receipt["timestamp"] < call["endedAt"]):
+            continue
+        if (not isinstance(receipt.get("transcriptDigest"), str)
+                or re.fullmatch(r"[0-9a-f]{64}", receipt["transcriptDigest"]) is None
+                or not isinstance(receipt.get("sourceTranscriptDigest"), str)
+                or re.fullmatch(r"[0-9a-f]{64}", receipt["sourceTranscriptDigest"]) is None
+                or receipt["sourceTranscriptDigest"] != _source_transcript_digest(call)
+                or receipt.get("summaryDigest") != hashlib.sha256(receipt["summary"].encode("utf-8")).hexdigest()):
+            continue
+        matched += 1
+    return {"records": len(completion_rows), "matchedModelCalls": matched}
+
+
 def _single_call_scenario_count(
     voice_rows: list[dict[str, Any]], audit_rows: list[dict[str, Any]],
     transcript_rows: list[dict[str, Any]],
+    completion_rows: list[dict[str, Any]] = (), *, require_model_summary: bool = False,
 ) -> int:
     """Structural intersection of disclosure, two-sided speech, action and fallback on ONE call.
 
@@ -336,6 +409,9 @@ def _single_call_scenario_count(
             continue
         if _transcript_summary(scoped, transcript_rows)["completeTwoWayCalls"] != 1:
             continue
+        if (require_model_summary and _model_completion_summary(
+                scoped, transcript_rows, list(completion_rows))["matchedModelCalls"] != 1):
+            continue
         # Check the entire audit log, not a prefiltered subset: another call
         # reusing the same request ID must still veto authorization proof.
         if _completed_call_actions(scoped, audit_rows) < 1:
@@ -344,7 +420,7 @@ def _single_call_scenario_count(
     return complete
 
 
-def collect(project: str, *, read_transcripts: bool = False) -> dict[str, Any]:
+def collect(project: str, *, read_transcripts: bool = False, read_model_summary_completions: bool = False) -> dict[str, Any]:
     if not PROJECT.fullmatch(project):
         raise ValueError("project name must use lowercase letters, numbers, and internal hyphens")
     services = _containers(project)
@@ -359,13 +435,26 @@ def collect(project: str, *, read_transcripts: bool = False) -> dict[str, Any]:
     if "voice" in services:
         voice_rows = _jsonl(services["voice"]["container"], "/opt/data/messages.jsonl")
     transcript_rows: list[dict[str, Any]] = []
-    if read_transcripts and "voice" in services:
+    if (read_transcripts or read_model_summary_completions) and "voice" in services:
         # The fixed private default path is never supplied by a model or caller.
         transcript_rows = _jsonl(services["voice"]["container"], "/opt/data/transcripts.jsonl")
+    completion_rows: list[dict[str, Any]] = []
+    if read_model_summary_completions and "governed-worker" in services:
+        # Fixed private worker journal; no caller-supplied path or output payload.
+        completion_rows = _jsonl(
+            services["governed-worker"]["container"],
+            "/opt/data/.modelgarden/summary-completions/call-summary-completions.jsonl",
+        )
     return {
         "schemaVersion": 1,
         "transcripts": _transcript_summary(voice_rows, transcript_rows),
-        "referenceScenario": {"completeCalls": _single_call_scenario_count(voice_rows, audit_rows, transcript_rows) if read_transcripts else 0},
+        "modelSummaryCompletions": _model_completion_summary(
+            voice_rows, transcript_rows, completion_rows,
+        ) if read_model_summary_completions else {"records": 0, "matchedModelCalls": 0},
+        "referenceScenario": {"completeCalls": _single_call_scenario_count(
+            voice_rows, audit_rows, transcript_rows, completion_rows,
+            require_model_summary=read_model_summary_completions,
+        ) if (read_transcripts or read_model_summary_completions) else 0},
         "generatedAt": dt.datetime.now(dt.timezone.utc).isoformat(),
         "project": project,
         "services": service_summary,
@@ -375,9 +464,10 @@ def collect(project: str, *, read_transcripts: bool = False) -> dict[str, Any]:
     }
 
 
-def evaluate(evidence: dict[str, Any], *, require_voice_call: bool, require_fallback: bool, require_governed_action: bool, require_two_way_transcript: bool = False) -> dict[str, Any]:
+def evaluate(evidence: dict[str, Any], *, require_voice_call: bool, require_fallback: bool, require_governed_action: bool, require_two_way_transcript: bool = False, require_model_summary_completion: bool = False) -> dict[str, Any]:
     failures: list[str] = []
     services = evidence["services"]
+    needs_transcript = require_two_way_transcript or require_model_summary_completion
     if not services.get("hermes", {}).get("running"):
         failures.append("Hermes is not running")
     if "governed-tools" in services and not services["governed-tools"].get("running"):
@@ -388,21 +478,25 @@ def evaluate(evidence: dict[str, Any], *, require_voice_call: bool, require_fall
         failures.append("required voice runtime is absent or stopped")
     if require_governed_action and not services.get("governed-tools", {}).get("running"):
         failures.append("required governed Tool runtime is absent or stopped")
-    if (require_voice_call or require_two_way_transcript) and evidence["voice"].get("completedCalls", 0) < 1:
+    if (require_voice_call or needs_transcript) and evidence["voice"].get("completedCalls", 0) < 1:
         failures.append("no completed voice call lifecycle pair exists")
-    if (require_voice_call or require_two_way_transcript) and evidence["voice"].get("transcriptWriteFailures", 0):
+    if (require_voice_call or needs_transcript) and evidence["voice"].get("transcriptWriteFailures", 0):
         failures.append("voice transcript write failures require investigation")
-    if require_two_way_transcript and not services.get("voice", {}).get("running"):
+    if needs_transcript and not services.get("voice", {}).get("running"):
         failures.append("required voice runtime for two-way transcript is absent or stopped")
-    if require_two_way_transcript and evidence.get("transcripts", {}).get("completeTwoWayCalls", 0) < 1:
+    if needs_transcript and evidence.get("transcripts", {}).get("completeTwoWayCalls", 0) < 1:
         failures.append("no complete disclosed two-way transcript is paired to a completed call")
+    if require_model_summary_completion and not services.get("governed-worker", {}).get("running"):
+        failures.append("required governed worker for model summary completion is absent or stopped")
+    if require_model_summary_completion and evidence.get("modelSummaryCompletions", {}).get("matchedModelCalls", 0) < 1:
+        failures.append("no model summary completion is bound to a disclosed two-way call")
     if require_fallback and evidence["voice"].get("completedCallFallbackEvidence", 0) < 1:
         failures.append("no human-transfer or message fallback correlated to a completed call")
     if require_governed_action and evidence["governance"].get("successfulActions", 0) < 1:
         failures.append("no successful governed business-action execution receipt exists")
     if require_governed_action and require_voice_call and evidence["governance"].get("completedCallActions", 0) < 1:
         failures.append("no authorized successful Tool request is explicitly correlated to a completed call")
-    if (require_two_way_transcript and require_fallback and require_governed_action
+    if (needs_transcript and require_fallback and require_governed_action
             and evidence.get("referenceScenario", {}).get("completeCalls", 0) < 1):
         failures.append("no same completed call has a disclosed two-way transcript, authorized Tool action and human fallback")
     return {"passed": not failures, "failures": failures}
@@ -436,6 +530,7 @@ def _markdown(evidence: dict[str, Any], result: dict[str, Any]) -> str:
         f"- Transcript write failures: {evidence['voice']['transcriptWriteFailures']}",
         f"- Private transcript records inspected: {evidence.get('transcripts', {}).get('records', 0)}",
         f"- Complete disclosed two-way transcripts paired to a call: {evidence.get('transcripts', {}).get('completeTwoWayCalls', 0)}",
+        f"- Model-labelled completions bound to a disclosed call: {evidence.get('modelSummaryCompletions', {}).get('matchedModelCalls', 0)}",
         f"- Same-call transcript, governed action and human fallback: {evidence.get('referenceScenario', {}).get('completeCalls', 0)}",
         f"- Human transfer evidence: {evidence['voice']['humanTransferEvidence']}",
         f"- Message fallback evidence: {evidence['voice']['messageFallbackEvidence']}",
@@ -453,17 +548,21 @@ def main() -> int:
     parser.add_argument("--require-voice-call", action="store_true")
     parser.add_argument("--require-two-way-transcript", action="store_true",
                         help="read the voice worker's private default transcript file and require a disclosed two-sided call")
+    parser.add_argument("--require-model-summary-completion", action="store_true",
+                        help="require a private worker model-labelled completion bound to an original disclosed call")
     parser.add_argument("--require-fallback", action="store_true")
     parser.add_argument("--require-governed-action", action="store_true")
     args = parser.parse_args()
     try:
-        evidence = collect(args.project_name, read_transcripts=args.require_two_way_transcript)
+        evidence = collect(args.project_name, read_transcripts=args.require_two_way_transcript,
+                           read_model_summary_completions=args.require_model_summary_completion)
         result = evaluate(
             evidence,
             require_voice_call=args.require_voice_call,
             require_fallback=args.require_fallback,
             require_governed_action=args.require_governed_action,
             require_two_way_transcript=args.require_two_way_transcript,
+            require_model_summary_completion=args.require_model_summary_completion,
         )
         args.output_dir.mkdir(parents=True, exist_ok=True)
         payload = {**evidence, "acceptance": result}
