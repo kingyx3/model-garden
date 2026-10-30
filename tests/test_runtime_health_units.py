@@ -114,5 +114,50 @@ class RuntimeHealthUnitTests(unittest.TestCase):
         self.assertNotIn("SECRET_TOKEN", completed.stderr + completed.stdout)
 
 
+    def test_optional_voice_is_review_only_and_uses_native_private_sampler(self):
+        result = self.render(include_voice=True)
+        self.assertFalse(result["installed"])
+        self.assertFalse(result["monitoringProven"])
+        self.assertFalse(result["notificationsDelivered"])
+        runtime = "model-garden-runtime-health-acme-dev"
+        voice = "model-garden-voice-health-acme-dev"
+        self.assertEqual(set(result["units"]), {
+            runtime + ".service", runtime + ".timer",
+            voice + ".service", voice + ".timer",
+        })
+        service = result["units"][voice + ".service"]
+        timer = result["units"][voice + ".timer"]
+        self.assertIn("ExecStart=/usr/bin/python3 /opt/model-garden/scripts/voice-health-metric.py", service)
+        self.assertIn("--project-id sample-project-123 --client acme --environment dev --compose-project acme-dev", service)
+        for required in ("User=mg-monitor", "SupplementaryGroups=docker",
+                         "NoNewPrivileges=yes", "ProtectSystem=strict", "UMask=0077"):
+            self.assertIn(required, service)
+        self.assertIn("Unit=" + voice + ".service", timer)
+        self.assertIn("OnUnitInactiveSec=60s", timer)
+        self.assertNotIn("/bin/sh", service)
+        self.assertNotIn("EnvironmentFile=", service)
+        self.assertNotIn("token", json.dumps(result).lower())
+
+    def test_voice_opt_in_refuses_non_boolean_and_cross_tenant_targets(self):
+        for flag in ("true", "false", 1, None, ["voice"]):
+            with self.subTest(flag=flag), self.assertRaises(UNITS.UnitError):
+                self.render(include_voice=flag)
+        with self.assertRaises(UNITS.UnitError):
+            self.render(include_voice=True, confirm_project_id="other-project-123")
+        self.assertEqual(len(self.render(include_voice=False)["units"]), 2)
+
+    def test_cli_voice_opt_in_adds_only_two_reviewable_units(self):
+        args = [sys.executable, str(ROOT / "scripts" / "render-runtime-health-units.py")]
+        for key, value in self.options.items():
+            args += ["--" + key.replace("_", "-"), value]
+        completed = subprocess.run(args + ["--include-voice"], capture_output=True, text=True, timeout=5)
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        result = json.loads(completed.stdout)
+        self.assertEqual(len(result["units"]), 4)
+        self.assertFalse(result["installed"])
+        self.assertFalse(result["notificationsDelivered"])
+        self.assertNotIn("voice-health-metric.py", json.dumps(self.render()))
+
+
 if __name__ == "__main__":
     unittest.main()
