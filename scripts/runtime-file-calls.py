@@ -102,7 +102,9 @@ def _summarizer(args):
             client = _load("runtime_file_calls_coworker", ROOT / "platform" / "runtime" / "coworker_client.py").CoworkerClient(url, key)
         except Exception:  # noqa: BLE001 - a bad coworker setting means the fallback, never a failed filing
             client = None
-    return module.CallSummarizer(client, cache_path=args.conversations_root.with_name("call-summaries.json"))
+    return module.CallSummarizer(
+        client, cache_path=args.conversations_root.with_name("call-summaries.json"),
+        completion_path=args.conversations_root.with_name("summary-completions") / "call-summary-completions.jsonl")
 
 
 def main(argv: list[str] | None = None) -> int:

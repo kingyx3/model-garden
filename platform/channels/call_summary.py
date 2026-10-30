@@ -44,7 +44,7 @@ INSTRUCTIONS = (
 )
 
 
-def _redactor():
+def _transcript_module():
     name = "model_garden_call_summary_transcript"
     if name not in sys.modules:
         spec = importlib.util.spec_from_file_location(name, pathlib.Path(__file__).with_name("call_transcript.py"))
@@ -52,7 +52,11 @@ def _redactor():
         assert spec.loader is not None
         sys.modules[name] = module
         spec.loader.exec_module(module)
-    return sys.modules[name].redact
+    return sys.modules[name]
+
+
+def _redactor():
+    return _transcript_module().redact
 
 
 def _ordered_turns(record: Mapping[str, Any]) -> list[Mapping[str, Any]]:
@@ -120,6 +124,126 @@ def summarize(record: Mapping[str, Any], client: Any | None = None, *, patterns:
     return {"text": extractive_summary(record), "source": SOURCE_FALLBACK, "usage": {}}
 
 
+
+class SummaryCompletionError(RuntimeError):
+    """A private call-summary completion cannot be safely read or published."""
+
+
+class SummaryCompletionJournal:
+    """Private, retention-bounded completion records separate from immutable voice transcripts.
+
+    The governed worker mounts the voice store read-only. Never mutate an original
+    CallTranscript or claim its extractive summary was produced by a model. A
+    completion binds the exact redacted source fingerprint to one chosen summary.
+    """
+
+    MAX_BYTES = 8_000_000
+    MAX_ROWS = 5000
+
+    def __init__(self, path: pathlib.Path, *, clock: Callable[[], float], retention_seconds: int = 7 * 86400):
+        self.path, self.clock, self.retention_seconds = path, clock, retention_seconds
+        if not (0 < retention_seconds <= 365 * 86400):
+            raise SummaryCompletionError("invalid summary completion retention")
+
+    @staticmethod
+    def _digest(value: str) -> str:
+        return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+    @staticmethod
+    def _identity(record: Mapping[str, Any]) -> tuple[str, str]:
+        call_hash, agent = record.get("callHash"), record.get("agent")
+        if (not isinstance(call_hash, str) or not 0 < len(call_hash) <= 200
+                or not isinstance(agent, str) or not 0 < len(agent) <= 200):
+            raise SummaryCompletionError("missing or invalid call completion identity")
+        return call_hash, agent
+
+    def _rows(self) -> list[dict[str, Any]]:
+        parent = self.path.parent
+        if not parent.exists():
+            return []
+        try:
+            info = parent.lstat()
+            if (not stat.S_ISDIR(info.st_mode) or info.st_uid != os.geteuid()
+                    or stat.S_IMODE(info.st_mode) & 0o077
+                    or parent.resolve() != parent.absolute()):
+                raise SummaryCompletionError("unsafe completion directory")
+            fd = os.open(self.path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+        except FileNotFoundError:
+            return []
+        except OSError as exc:
+            raise SummaryCompletionError("unsafe completion journal") from exc
+        try:
+            with os.fdopen(fd, "rb", closefd=False) as handle:
+                info = os.fstat(fd)
+                if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid()
+                        or info.st_nlink != 1 or stat.S_IMODE(info.st_mode) & 0o077
+                        or info.st_size > self.MAX_BYTES):
+                    raise SummaryCompletionError("unsafe completion journal")
+                data = handle.read(self.MAX_BYTES + 1)
+            if len(data) > self.MAX_BYTES or (data and not data.endswith(b"\n")):
+                raise SummaryCompletionError("incomplete completion journal")
+            rows = []
+            for raw in data.splitlines():
+                if len(rows) >= self.MAX_ROWS:
+                    raise SummaryCompletionError("completion journal row limit")
+                try:
+                    row = json.loads(raw)
+                except (ValueError, UnicodeDecodeError) as exc:
+                    raise SummaryCompletionError("corrupt completion journal") from exc
+                if (not isinstance(row, dict) or row.get("type") != "CallSummaryCompletion"
+                        or type(row.get("timestamp")) is not int
+                        or not isinstance(row.get("summary"), str)
+                        or not 0 < len(row["summary"]) <= MAX_SUMMARY_CHARS
+                        or row.get("summarySource") not in (SOURCE_MODEL, SOURCE_FALLBACK)
+                        or not isinstance(row.get("transcriptDigest"), str)
+                        or len(row["transcriptDigest"]) != 64
+                        or row.get("summaryDigest") != self._digest(row["summary"])):
+                    raise SummaryCompletionError("invalid completion journal record")
+                self._identity(row)
+                rows.append(row)
+            return rows
+        except (OSError, UnicodeDecodeError) as exc:
+            raise SummaryCompletionError("unreadable completion journal") from exc
+        finally:
+            os.close(fd)
+
+    def find(self, record: Mapping[str, Any], fingerprint: str) -> dict[str, str] | None:
+        call_hash, agent = self._identity(record)
+        found = None
+        for row in self._rows():
+            if row["callHash"] != call_hash:
+                continue
+            if found is not None:
+                raise SummaryCompletionError("duplicate completion identity")
+            if (row["transcriptDigest"] != fingerprint or row["agent"] != agent
+                    or row.get("tenant") != record.get("tenant")
+                    or row.get("environment") != record.get("environment")):
+                raise SummaryCompletionError("conflicting call summary completion")
+            found = row
+        if found is None:
+            return None
+        if found["timestamp"] < int(self.clock()) - self.retention_seconds:
+            return None
+        return {"summary": found["summary"], "summarySource": found["summarySource"]}
+
+    def append(self, record: Mapping[str, Any], fingerprint: str, text: str, source: str) -> None:
+        call_hash, agent = self._identity(record)
+        if source not in (SOURCE_MODEL, SOURCE_FALLBACK) or not text or len(text) > MAX_SUMMARY_CHARS:
+            raise SummaryCompletionError("invalid summary completion")
+        row = {
+            "type": "CallSummaryCompletion", "timestamp": int(self.clock()),
+            "callHash": call_hash, "agent": agent,
+            "tenant": record.get("tenant"), "environment": record.get("environment"),
+            "transcriptDigest": fingerprint, "summary": text, "summarySource": source,
+            "summaryDigest": self._digest(text),
+        }
+        try:
+            _transcript_module().store_private_jsonl(
+                self.path, row, retention_seconds=self.retention_seconds, now=int(self.clock()))
+        except (OSError, ValueError) as exc:
+            raise SummaryCompletionError("completion journal write refused") from exc
+
+
 class CallSummarizer:
     """``record -> record`` with the summary attached; counts what it produced so a command can report it.
 
@@ -128,8 +252,10 @@ class CallSummarizer:
     """
 
     def __init__(self, client: Any | None = None, *, patterns: Iterable[Any] = (), cache_path: pathlib.Path | None = None,
-                 clock: Callable[[], float] = time.time) -> None:
+                 completion_path: pathlib.Path | None = None, clock: Callable[[], float] = time.time) -> None:
         self._client, self._patterns, self._cache_path, self._clock = client, tuple(patterns), cache_path, clock
+        self.requires_completion = completion_path is not None
+        self._journal = SummaryCompletionJournal(completion_path, clock=clock) if completion_path is not None else None
         self.counts = {"model": 0, "fallback": 0, "cached": 0}
         self.tokens = 0
 
@@ -213,16 +339,30 @@ class CallSummarizer:
     def __call__(self, record: Mapping[str, Any]) -> dict[str, Any]:
         call_hash = record.get("callHash") if isinstance(record.get("callHash"), str) else ""
         fingerprint = self._fingerprint(record)
+        if self._journal is not None:
+            prior = self._journal.find(record, fingerprint)
+            if prior is not None:
+                # A local journal is not externally immutable: refuse a changed
+                # summary that would now violate the client's redaction policy.
+                safe, _ = _redactor()(prior["summary"], self._patterns)
+                if safe != prior["summary"]:
+                    raise SummaryCompletionError("completion summary violates redaction policy")
+                self.counts["cached"] += 1
+                return {**record, **prior}
         cache = self._load_cache() if call_hash else {}
         hit = cache.get(call_hash)
         if (hit and hit.get("fingerprint") == fingerprint and isinstance(hit.get("text"), str)
                 and hit.get("source") in (SOURCE_MODEL, SOURCE_FALLBACK)):
+            if self._journal is not None:
+                self._journal.append(record, fingerprint, hit["text"], hit["source"])
             self.counts["cached"] += 1
             return {**record, "summary": hit["text"], "summarySource": hit["source"]}
         result = summarize(record, self._client, patterns=self._patterns)
         self.counts["model" if result["source"] == SOURCE_MODEL else "fallback"] += 1
         tokens = result["usage"].get("tokens")
         self.tokens += tokens if isinstance(tokens, int) else 0
+        if self._journal is not None:
+            self._journal.append(record, fingerprint, result["text"], result["source"])
         if call_hash:
             cache[call_hash] = {"text": result["text"], "source": result["source"],
                                 "fingerprint": fingerprint, "at": int(self._clock())}

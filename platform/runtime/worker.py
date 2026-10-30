@@ -733,7 +733,9 @@ class Worker:
                 records = _module("call_requests").attach_request_ids(records, _module("audit_query").read_ledger(self.audit_path))
             except ValueError:  # an unreadable ledger only means the calls are filed without request ids
                 pass
-            summarizer = _module("call_summary").CallSummarizer(self.coworker, cache_path=self.data / "call-summaries.json")
+            summarizer = _module("call_summary").CallSummarizer(
+                self.coworker, cache_path=self.data / "call-summaries.json",
+                completion_path=self.data / "summary-completions" / "call-summary-completions.jsonl")
             totals = filing.file_call_transcripts(sidecar, store, records, recorder=self._conversation_recorder(), summarizer=summarizer)
             ledgered = filing.ledger_transcript_failures(_module("govern"), self.audit_path, write_failures, performed_by=CALL_FILING_IDENTITY)
             totals["notFiled"] = totals.pop("failed")  # a "failed" key would read as the job itself failing
