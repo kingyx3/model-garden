@@ -626,14 +626,35 @@ def runtime_contacts(
 VOICE_TRANSCRIPTS = "/opt/data/transcripts.jsonl"
 VOICE_MESSAGES = "/opt/data/messages.jsonl"  # lifecycle events, including TranscriptWriteFailed
 
+# The transcript is mandatory: suppressing a failed cat used to report zero calls
+# as success, losing the opportunity to reconcile an unreadable voice volume.
+# The lifecycle file is optional on a fresh runtime, but when present must be a
+# regular, readable file. Preflight *both* before emitting any customer data.
+# Positional shell arguments avoid interpolating paths into a command string.
+_VOICE_SNAPSHOT_SCRIPT = """set -eu
+transcripts=$1
+lifecycle=$2
+[ -f "$transcripts" ] && [ ! -L "$transcripts" ] && [ -r "$transcripts" ] || exit 21
+if [ -e "$lifecycle" ] || [ -L "$lifecycle" ]; then
+    [ -f "$lifecycle" ] && [ ! -L "$lifecycle" ] && [ -r "$lifecycle" ] || exit 22
+fi
+cat "$transcripts"
+if [ -f "$lifecycle" ]; then cat "$lifecycle"; fi
+"""
+
+
+def _voice_snapshot_command(transcripts: str, lifecycle: str) -> list[str]:
+    return ["sh", "-c", _VOICE_SNAPSHOT_SCRIPT, "voice-evidence", transcripts, lifecycle]
+
 
 def runtime_file_calls(project_name: str) -> int:
     """File the voice worker's stored call transcripts into the bound CRM (ledgered, idempotent)."""
     voice = _service_container(project_name, "voice", "voice worker")
     container = _governed_tool_container(project_name)
-    stored = _run(["docker", "exec", voice, "sh", "-c", f"cat {VOICE_TRANSCRIPTS} {VOICE_MESSAGES} 2>/dev/null || true"])
+    stored = _run(["docker", "exec", voice, *_voice_snapshot_command(VOICE_TRANSCRIPTS, VOICE_MESSAGES)])
     if stored.returncode != 0:
-        raise ValueError(stored.stderr.strip() or "cannot read the voice worker's transcripts")
+        # Never echo shell/Docker stderr: it can contain private paths or data.
+        raise ValueError("cannot read complete private voice evidence snapshot; check transcript and lifecycle files")
     result = _run(
         ["docker", "exec", "-i", container, "python", "/opt/model-garden-platform/scripts/runtime-file-calls.py", "--transcripts", "-"],
         input_text=stored.stdout,

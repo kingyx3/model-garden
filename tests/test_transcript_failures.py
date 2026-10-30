@@ -7,6 +7,7 @@ import io
 import json
 import os
 import pathlib
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -183,6 +184,53 @@ class CommandTests(unittest.TestCase):
         read = next(c for c in calls if c[:3] == ["docker", "exec", "x1"] and "cat" in " ".join(c))
         self.assertIn("/opt/data/transcripts.jsonl", " ".join(read))
         self.assertIn("/opt/data/messages.jsonl", " ".join(read))
+
+
+    def test_operator_snapshot_requires_transcript_and_refuses_unsafe_lifecycle(self):
+        """Missing/unreadable evidence must never turn a filing run into an empty success."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            transcripts, lifecycle = root / "transcripts.jsonl", root / "messages.jsonl"
+            transcripts.write_text('{"type":"CallTranscript"}\n', encoding="utf-8")
+            lifecycle.write_text('{"type":"TranscriptWriteFailed"}\n', encoding="utf-8")
+            command = operator._voice_snapshot_command(str(transcripts), str(lifecycle))
+            self.assertEqual(command[:2], ["sh", "-c"])
+            self.assertNotIn(str(transcripts), command[2])  # no interpolated shell paths
+            def run():
+                return subprocess.run(command, capture_output=True, text=True, check=False)
+            self.assertEqual(run().stdout, transcripts.read_text() + lifecycle.read_text())
+            lifecycle.unlink()
+            self.assertEqual((run().returncode, run().stdout), (0, transcripts.read_text()))
+            transcripts.unlink()
+            self.assertNotEqual(run().returncode, 0)
+            self.assertEqual(run().stdout, "")
+            transcripts.write_text('{"type":"CallTranscript"}\n', encoding="utf-8")
+            lifecycle.symlink_to(transcripts)
+            self.assertNotEqual(run().returncode, 0)
+            self.assertEqual(run().stdout, "")  # preflight rejects before emitting call data
+            lifecycle.unlink()
+            lifecycle.mkdir()
+            self.assertNotEqual(run().returncode, 0)
+            self.assertEqual(run().stdout, "")
+            lifecycle.rmdir()
+            transcripts.unlink()
+            transcripts.symlink_to(root / "missing")
+            self.assertNotEqual(run().returncode, 0)
+
+    def test_operator_does_not_file_on_failed_snapshot_or_echo_container_stderr(self):
+        calls = []
+        def fake_run(command, **kwargs):
+            calls.append(command)
+            if command[:2] == ["docker", "ps"]:
+                return mock.Mock(returncode=0, stdout="x1\n", stderr="")
+            if command[:3] == ["docker", "exec", "x1"] and "sh" in command:
+                return mock.Mock(returncode=21, stdout="", stderr="private customer path")
+            return mock.Mock(returncode=0, stdout="{}", stderr="")
+        with mock.patch.object(operator, "_run", fake_run), mock.patch.object(operator, "_require_command"):
+            with self.assertRaisesRegex(ValueError, "voice evidence snapshot") as failure:
+                operator.runtime_file_calls("acme-dev")
+        self.assertNotIn("private customer path", str(failure.exception))
+        self.assertFalse(any("runtime-file-calls.py" in " ".join(c) for c in calls))
 
 
 if __name__ == "__main__":
