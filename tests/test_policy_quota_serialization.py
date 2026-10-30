@@ -218,7 +218,7 @@ class PolicyQuotaSerializationTests(unittest.TestCase):
         )
         self.assertEqual(result["status"], "executed")
         lock = self.path.with_name(self.path.name + ".quota.lock")
-        self.assertEqual(lock.read_text(encoding="utf-8"), "initialized\\n".replace("\\n", "\n"))
+        self.assertEqual(lock.read_text(encoding="utf-8"), "initialized\n")
         self.assertEqual(lock.stat().st_mode & 0o777, 0o600)
         self.assertEqual(self.path.stat().st_mode & 0o777, 0o600)
 
