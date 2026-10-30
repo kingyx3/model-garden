@@ -399,6 +399,7 @@ class ModelSummaryCompletionEvidenceTests(unittest.TestCase):
         data = evidence(lifecycle)
         data["transcripts"] = proof._transcript_summary(lifecycle, [call])
         data["modelSummaryCompletions"] = result
+        data["services"]["governed-worker"] = {"running": True}
         self.assertTrue(proof.evaluate(
             data, require_voice_call=True, require_fallback=False,
             require_governed_action=False, require_model_summary_completion=True,
