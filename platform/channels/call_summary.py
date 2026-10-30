@@ -19,6 +19,7 @@ from __future__ import annotations
 import hashlib
 import importlib.util
 import json
+import math
 import os
 import pathlib
 import re
@@ -273,6 +274,79 @@ class SummaryCompletionJournal:
                 self.path, row, retention_seconds=self.retention_seconds, now=int(self.clock()))
         except (OSError, ValueError) as exc:
             raise SummaryCompletionError("completion journal write refused") from exc
+
+
+def completed_call_view(
+    original: Mapping[str, Any], journal: SummaryCompletionJournal, *, include_private_text: bool = False,
+) -> dict[str, Any]:
+    """Compose one private completed-call view without changing the original transcript.
+
+    This is an operator-local *read*, not a new transcript, provider attestation,
+    consent receipt or model signature. Missing/legacy/ambiguous completions fail
+    closed; never promote an extractive fallback to a model-written summary.
+    Only the explicit private-text option returns customer speech or summary text.
+    """
+    call_hash, agent = journal._identity(original)
+    started, ended = original.get("timestamp"), original.get("endedAt")
+    turns = original.get("turns")
+    disclosure = original.get("disclosure")
+    if (original.get("type") != "CallTranscript" or original.get("schemaVersion") != 1
+            or type(started) is not int or type(ended) is not int or ended < started
+            or original.get("summarySource") not in ("extractive", "provided")
+            or not isinstance(original.get("summary"), str) or not original["summary"].strip()
+            or not isinstance(disclosure, dict) or disclosure.get("configured") is not True
+            or disclosure.get("played") is not True
+            or original.get("droppedTurns", 0) != 0
+            or not isinstance(turns, list) or not turns):
+        raise SummaryCompletionError("incomplete original call evidence")
+    speakers: set[str] = set()
+    last_offset = -1.0
+    for index, turn in enumerate(turns):
+        if not isinstance(turn, Mapping):
+            raise SummaryCompletionError("invalid original call turns")
+        offset = turn.get("offsetSeconds")
+        if (type(turn.get("index")) is not int or turn["index"] != index
+                or type(offset) not in (int, float) or not math.isfinite(offset)
+                or offset < last_offset or offset < 0 or offset > ended - started + 1
+                or turn.get("speaker") not in ("caller", "agent", "human")
+                or not isinstance(turn.get("text"), str) or not turn["text"].strip()):
+            raise SummaryCompletionError("invalid original call turns")
+        speakers.add(turn["speaker"])
+        last_offset = offset
+    if not {"caller", "agent"} <= speakers:
+        raise SummaryCompletionError("original call lacks both speakers")
+
+    # Validate the entire private journal before selecting a call. In particular,
+    # never accept a positive row while ignoring a duplicate or corrupt row.
+    rows = [row for row in journal._rows() if row["callHash"] == call_hash]
+    if len(rows) != 1:
+        raise SummaryCompletionError("missing or ambiguous call completion")
+    completion = rows[0]
+    now = int(journal.clock())
+    if (completion["agent"] != agent or completion["summarySource"] != SOURCE_MODEL
+            or completion.get("tenant") != original.get("tenant")
+            or completion.get("environment") != original.get("environment")
+            or completion.get("sourceTranscriptDigest") != source_transcript_digest(original)
+            or completion["timestamp"] < now - journal.retention_seconds
+            or completion["timestamp"] > now + 60):
+        raise SummaryCompletionError("unverified model summary completion")
+
+    view: dict[str, Any] = {
+        "type": "CompletedCallView", "schemaVersion": 1,
+        "callHash": call_hash, "agent": agent,
+        "timestamp": started, "endedAt": ended,
+        "turnCount": len(turns), "summarySource": SOURCE_MODEL,
+        "originalSummarySource": original["summarySource"],
+        "summaryDigest": completion["summaryDigest"],
+        "sourceTranscriptDigest": completion["sourceTranscriptDigest"],
+    }
+    if include_private_text:
+        # Call text is already policy-redacted at capture. This view is only
+        # for a trusted operator on the isolated client host; never publish it
+        # to CI, evidence packs, chat or external logging.
+        view["turns"] = [dict(turn) for turn in turns]
+        view["summary"] = completion["summary"]
+    return view
 
 
 class CallSummarizer:
