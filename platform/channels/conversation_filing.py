@@ -278,9 +278,12 @@ def file_call_transcripts(
             try:
                 record = summarizer(record)
                 arguments = interaction_from_call(record) or arguments
-            except Exception as exc:  # noqa: BLE001 - the plain outcome-and-size line is still filed
+            except Exception as exc:  # noqa: BLE001 - optional summaries degrade, required completion evidence fails closed
                 if log is not None:
                     log(f"{arguments['transcriptRef']}: summary {type(exc).__name__}")
+                if getattr(summarizer, "requires_completion", False):
+                    totals["failed"] += 1
+                    continue  # no CRM/timeline action without the required completion receipt
         try:
             outcome = file_interaction(runtime, store, arguments)["status"]
         except Exception as exc:  # one bad record must not stop the others; report the type only
