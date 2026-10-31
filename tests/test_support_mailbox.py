@@ -340,6 +340,46 @@ class Case(unittest.TestCase):
         self.assertEqual((recovered["status"], recovered["reason"]), ("ignored", "spam"))
         self.assertTrue(mailbox._handled.seen("<c1@customer.example>"))
 
+    # -- durable deduplication after initialization --------------------------------------------------
+
+    def test_deleted_initialized_message_history_blocks_redelivery_before_draft_or_send(self):
+        mailbox = self.build()
+        self.assertEqual(mailbox.handle(raw(), now=T0)["status"], "drafted")
+        history = self.root / "handled" / "support-mailbox-handled.json"
+        self.assertTrue((history.parent / ".support-mailbox.lock").is_file())
+        history.unlink()
+        with self.assertRaisesRegex(ValueError, "history missing"):
+            self.build().handle(raw(message_id="<c2@customer.example>"), now=T0 + 60)
+        self.assertEqual(len(self.transport.drafts), 1)
+        self.assertEqual(len(self.filed), 1)
+        with self.assertRaisesRegex(ValueError, "history missing"):
+            support.MessageLog(history.parent).mark("<c3@customer.example>")
+
+    def test_orphaned_initialized_lock_fails_closed_instead_of_creating_empty_history(self):
+        root = self.root / "orphaned"
+        root.mkdir(mode=0o700)
+        (root / ".support-mailbox.lock").touch(mode=0o600)
+        log = support.MessageLog(root)
+        with self.assertRaisesRegex(ValueError, "history missing"):
+            log.seen("<c1@customer.example>")
+        with self.assertRaisesRegex(ValueError, "history missing"):
+            log.mark("<c1@customer.example>")
+        self.assertFalse(log.path.exists())
+
+    def test_legacy_history_without_lock_migrates_on_next_mark(self):
+        root = self.root / "legacy"
+        log = support.MessageLog(root)
+        self.assertFalse(log.seen("<first@customer.example>"))
+        log.mark("<first@customer.example>")
+        (root / ".support-mailbox.lock").unlink()  # valid legacy state with no persistent lock
+        self.assertTrue(log.seen("<first@customer.example>"))
+        log.mark("<second@customer.example>")
+        self.assertTrue((root / ".support-mailbox.lock").exists())
+        self.assertTrue(log.seen("<second@customer.example>"))
+        log.path.unlink()
+        with self.assertRaisesRegex(ValueError, "history missing"):
+            log.seen("<third@customer.example>")
+
     # -- filing ------------------------------------------------------------------------------------------
 
     def test_each_thread_is_filed_once_through_the_sync_ledger_with_no_message_text(self):
