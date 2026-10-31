@@ -89,6 +89,37 @@ class HandledMessageIntegrityTests(unittest.TestCase):
             self.log.mark("<synthetic-2@example.invalid>")
         self.assertEqual(outside.read_text(), "unchanged")
 
+    def test_unsafe_initialized_lock_blocks_new_mail_before_any_draft(self):
+        self.log.mark("<synthetic-1@example.invalid>")
+        lock = self.root / ".support-mailbox.lock"
+        lock.unlink()
+        outside = self.base / "outside"
+        outside.write_text("not a lock")
+        lock.symlink_to(outside)
+        email = support._email()
+        drafts = []
+        mailbox = support.SupportMailbox(
+            email.EmailChannelAdapter(
+                "mx.client.example", own_addresses=("support@client.example",),
+                reply_limiter=email.ReplyLimiter(self.base / "limits", 2),
+            ),
+            email.TEXT.PrincipalDirectory(),
+            {"mail.draft": lambda args: drafts.append(args) or {"draftId": "d-1"}},
+            classify=lambda message: "enquiry",
+            answer=lambda message, category: {"text": "Open weekdays.", "sources": ["kb:hours"]},
+            handled=self.log,
+        )
+        message = (
+            b"Authentication-Results: mx.client.example; dmarc=pass header.from=example.invalid\\r\\n"
+            b"From: customer@example.invalid\\r\\nTo: support@client.example\\r\\n"
+            b"Message-ID: <synthetic-2@example.invalid>\\r\\n"
+            b"Subject: Hours\\r\\nContent-Type: text/plain\\r\\n\\r\\nWhen are you open?\\r\\n"
+        )
+        with self.assertRaises((OSError, ValueError)):
+            mailbox.handle(message, now=1800000000)
+        self.assertEqual(drafts, [])
+        self.assertEqual(outside.read_text(), "not a lock")
+
     def test_predictable_temporary_hardlink_cannot_clobber_outside_file(self):
         self.log.mark("<synthetic-1@example.invalid>")
         outside = self.base / "outside"
