@@ -47,7 +47,11 @@ def inventory(compose_path: pathlib.Path) -> list[str]:
     doc = yaml.safe_load(compose_path.read_text(encoding="utf-8"))
     if not isinstance(doc, dict) or not isinstance(doc.get("services"), dict):
         raise SnapshotError("Compose file must contain a services mapping")
-    # The static manifest must describe the *resolved* storage graph. Compose\n    # includes and service inheritance can import mounts that are absent here.\n    if "include" in doc:\n        raise SnapshotError("unresolved Compose include cannot prove backup inventory")\n    declared = doc.get("volumes")
+    # The static manifest must describe the *resolved* storage graph. Compose
+    # includes and service inheritance can import mounts that are absent here.
+    if "include" in doc:
+        raise SnapshotError("unresolved Compose include cannot prove backup inventory")
+    declared = doc.get("volumes")
     if not isinstance(declared, dict) or not declared:
         raise SnapshotError("no named volumes declared; cannot prove Tier 0 coverage")
     for name, spec in declared.items():
@@ -59,7 +63,9 @@ def inventory(compose_path: pathlib.Path) -> list[str]:
     for service, cfg in doc["services"].items():
         if not isinstance(cfg, dict):
             raise SnapshotError(f"invalid service {service}")
-        if "volumes_from" in cfg or "extends" in cfg:\n            raise SnapshotError(f"unresolved Compose inherited volumes in service {service}")\n        for mount in cfg.get("volumes", []):
+        if "volumes_from" in cfg or "extends" in cfg:
+            raise SnapshotError(f"unresolved Compose inherited volumes in service {service}")
+        for mount in cfg.get("volumes", []):
             if isinstance(mount, str):
                 source, sep, remaining = mount.partition(":")
                 if not sep:
