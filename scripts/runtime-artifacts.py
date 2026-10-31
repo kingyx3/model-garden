@@ -8,7 +8,7 @@
 `list` prints names, requesters, sources and expiry, never file contents (client data, so run it on the client host).
 Every delete and expiry is a chained ledger event with identifiers and a digest. The actor is as asserted on the
 command line, like approvals; the platform does not verify it. Records are for one tenant: pass --tenant or it is
-read from the compiled desired state (`source.client`); the retention period is --retention-days (default 365).
+read from the compiled desired state (`source.client`); the retention period follows the reviewed MODEL_GARDEN_ARTIFACT_RETENTION_DAYS setting (default 365); an explicit\n--retention-days may shorten but never lengthen that policy.
 """
 from __future__ import annotations
 
@@ -49,7 +49,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("store", type=pathlib.Path, help="artifact store root")
     parser.add_argument("--tenant", help="client-environment slug (default: from the compiled desired state)")
     parser.add_argument("--audit-path", type=pathlib.Path, help="ledger path (default: <store>/../audit.jsonl)")
-    parser.add_argument("--retention-days", type=int, default=ARTIFACTS.DEFAULT_RETENTION_DAYS)
+    parser.add_argument("--retention-days", type=int, help="optional stricter retention; cannot exceed reviewed client policy")
     sub = parser.add_subparsers(dest="command", required=True)
     listing = sub.add_parser("list", help="print stored deliverables (metadata only)")
     listing.add_argument("--requested-by", help="only what this person asked for")
@@ -60,8 +60,12 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     audit_path = args.audit_path or args.store.parent / "audit.jsonl"
     try:
+        reviewed_days = ARTIFACTS.retention_from_environ(os.environ)
+        if args.retention_days is not None and args.retention_days > reviewed_days:
+            raise ARTIFACTS.ArtifactError("--retention-days cannot exceed reviewed client retention")
+        effective_days = reviewed_days if args.retention_days is None else args.retention_days
         store = ARTIFACTS.ArtifactStore(
-            args.store, tenant=(args.tenant if args.tenant is not None else default_tenant(DEFAULT_DESIRED_STATE)), retention_days=args.retention_days,
+            args.store, tenant=(args.tenant if args.tenant is not None else default_tenant(DEFAULT_DESIRED_STATE)), retention_days=effective_days,
             audit=lambda action, by, details: GOVERN.record_operator_action(audit_path, action, by, details),
         )
         if args.command == "list":
