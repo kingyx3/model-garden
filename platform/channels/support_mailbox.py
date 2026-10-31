@@ -93,9 +93,10 @@ def _iso(seconds: int) -> str:
 class MessageLog:
     """Private, durable digest witness for inbound Message-ID deduplication.
 
-    A missing witness is a new mailbox. An existing corrupt, linked, exposed or
-    foreign-owned witness is *not* an empty mailbox: processing must stop so the
-    spool retries/quarantines rather than drafting or sending a duplicate.
+    An absent history with no initialized lock is a new mailbox. The durable
+    private lock is also the initialization witness: if history disappears after
+    initialization, processing must stop instead of resetting deduplication.
+    Corrupt, linked, exposed or foreign-owned state also fails closed.
     """
 
     MAX_ENTRIES = 20000
@@ -127,13 +128,31 @@ class MessageLog:
             raise ValueError("unsafe support-mailbox state directory; operator repair required")
         return True
 
-    def _read(self) -> list[str]:
+    def _read(self, *, new_lock: bool = False) -> list[str]:
         if not self._private_root():
             return []
+        initialized = new_lock
+        if not new_lock:
+            # Check the persistent initialization witness before *any* customer
+            # side effect, even when history still exists. An unsafe lock must
+            # not allow drafting before mark() later discovers it is unusable.
+            try:
+                witness = os.open(
+                    self.root / ".support-mailbox.lock",
+                    os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+                )
+            except FileNotFoundError:
+                pass  # fresh mailbox or valid pre-lock legacy history
+            else:
+                with os.fdopen(witness, "rb") as stream:
+                    self._private_regular(os.fstat(stream.fileno()))
+                initialized = True
         try:
             descriptor = os.open(self.path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
         except FileNotFoundError:
-            return []
+            if initialized and not new_lock:
+                raise ValueError("initialized support-mailbox history missing; operator repair required")
+            return []  # first mark with new lock, or fresh pre-lock mailbox
         with os.fdopen(descriptor, "rb") as stream:
             self._private_regular(os.fstat(stream.fileno()))
             raw = stream.read(self.MAX_BYTES + 1)
@@ -155,13 +174,18 @@ class MessageLog:
     def mark(self, message_id: str) -> None:
         self._private_root(create=True)
         lock = self.root / ".support-mailbox.lock"
-        descriptor = os.open(
-            lock, os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0), 0o600
-        )
+        try:
+            descriptor = os.open(
+                lock, os.O_RDWR | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600
+            )
+            new_lock = True
+        except FileExistsError:
+            descriptor = os.open(lock, os.O_RDWR | getattr(os, "O_NOFOLLOW", 0))
+            new_lock = False
         try:
             self._private_regular(os.fstat(descriptor))
             fcntl.flock(descriptor, fcntl.LOCK_EX)
-            handled = self._read()
+            handled = self._read(new_lock=new_lock)
             digest = self._digest(message_id)
             if digest in handled:
                 return
