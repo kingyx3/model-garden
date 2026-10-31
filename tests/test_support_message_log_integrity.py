@@ -1,7 +1,8 @@
 """Adversarial durability tests for the built-in customer mailbox's handled-message witness.
 
-A missing witness means no messages have been processed. A corrupt, linked or exposed
-existing witness must *never* be treated as empty: that would redraft/redeliver mail.
+An absent history and absent initialized lock means a fresh mailbox. After the
+first handled message, a missing, corrupt, linked or exposed history must *never*
+be treated as empty: that could redraft or redeliver customer mail.
 All messages, addresses and paths here are synthetic.
 """
 from __future__ import annotations
