@@ -94,6 +94,18 @@ class RequestIdTests(unittest.TestCase):
         self.assertEqual((result["requestIds"], result["requestIdsSource"]),
                          (["actual"], "ledger-correlation"))
 
+    def test_reconciliation_is_idempotent_and_rejects_stale_ledger_claims(self):
+        record = call(START, START + 30)
+        tag = "call:" + record["callHash"]
+        ledger = [event(START + 5, "real", correlation=tag)]
+        (first,) = requests.attach_request_ids([record], ledger)
+        (again,) = requests.attach_request_ids([first], ledger)
+        self.assertEqual(first, again)
+        (stale,) = requests.attach_request_ids([again], [])
+        self.assertNotIn("requestIds", stale)
+        self.assertNotIn("requestIdsSource", stale)
+        self.assertEqual(first["requestIds"], ["real"])
+
     def test_a_call_without_a_usable_window_or_without_requests_is_left_alone(self):
         (empty,) = requests.attach_request_ids([call(START, START + 30)], [])
         self.assertNotIn("requestIds", empty)
@@ -143,7 +155,7 @@ class RequestIdTests(unittest.TestCase):
         records = requests.attach_request_ids([record], [forged, malformed, naive])
         self.assertNotIn("requestIds", records[0])
 
-    def test_explicit_attribution_preserves_existing_ids_and_deduplicates_authorizations(self):
+    def test_explicit_attribution_revalidates_existing_ids_and_deduplicates_authorizations(self):
         record = call(START, START + 10)
         tagged = event(START + 5, "a", correlation="call:" + record["callHash"])
         (result,) = requests.attach_request_ids([record], [tagged, tagged, event(START + 6, "b", correlation=tagged["governance"]["correlationId"])])
