@@ -9,6 +9,7 @@ import os
 import pathlib
 import sys
 import tempfile
+import time
 import unittest
 import xml.etree.ElementTree as ET
 import zipfile
@@ -434,6 +435,38 @@ class OperatorCase(unittest.TestCase):
         self.assertEqual([event["action"] for event in events], ["artifact.delete"])
         self.assertEqual(events[0]["performedBy"], ADMIN)
         self.assertTrue(govern.verify_audit_chain(self.root.parent / "audit.jsonl")["valid"])
+
+    def test_operator_cli_honors_reviewed_retention_for_listing_and_purge(self):
+        now = int(time.time())
+        store = artifacts.ArtifactStore(self.root, tenant="acme-prod", retention_days=365)
+        old = store.put(name="old.txt", content=b"old", media_type="text/plain", agent="receptionist",
+                        requested_by=ALICE, now=now - 3 * 86400)
+        recent = store.put(name="recent.txt", content=b"recent", media_type="text/plain", agent="receptionist",
+                           requested_by=ALICE, now=now - 3600)
+        with mock.patch.dict(os.environ, {"MODEL_GARDEN_ARTIFACT_RETENTION_DAYS": "1"}):
+            code, output, error = self.run_cli("list")
+            self.assertEqual((code, error), (0, ""))
+            self.assertEqual([item["id"] for item in json.loads(output)], [recent["id"]])
+            code, output, error = self.run_cli("purge-expired")
+            self.assertEqual((code, json.loads(output), error), (0, {"expired": 1}, ""))
+        self.assertFalse((self.root / "acme-prod" / old["id"]).exists())
+        self.assertTrue((self.root / "acme-prod" / recent["id"]).exists())
+        events = [json.loads(line) for line in (self.root.parent / "audit.jsonl").read_text().splitlines()]
+        self.assertEqual([(event["action"], event["details"]["artifactId"]) for event in events],
+                         [("artifact.expire", old["id"])])
+        self.assertTrue(govern.verify_audit_chain(self.root.parent / "audit.jsonl")["valid"])
+
+    def test_operator_cli_cannot_override_reviewed_retention_or_ignore_invalid_policy(self):
+        with mock.patch.dict(os.environ, {"MODEL_GARDEN_ARTIFACT_RETENTION_DAYS": "2"}):
+            code, _, error = self.run_cli("--retention-days", "365", "purge-expired")
+            self.assertEqual(code, 1)
+            self.assertIn("cannot exceed", error)
+            code, _, error = self.run_cli("--retention-days", "1", "list")
+            self.assertEqual((code, error), (0, ""))
+        with mock.patch.dict(os.environ, {"MODEL_GARDEN_ARTIFACT_RETENTION_DAYS": "not-a-number"}):
+            code, _, error = self.run_cli("--retention-days", "1", "list")
+            self.assertEqual(code, 1)
+            self.assertIn("MODEL_GARDEN_ARTIFACT_RETENTION_DAYS", error)
 
     def test_failures_are_clean_and_the_tenant_defaults_from_the_desired_state(self):
         code, _, err = self.run_cli("delete", "a-000000000000", "--by", ADMIN)
