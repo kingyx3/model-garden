@@ -127,13 +127,27 @@ class MessageLog:
             raise ValueError("unsafe support-mailbox state directory; operator repair required")
         return True
 
-    def _read(self) -> list[str]:
+    def _read(self, *, new_lock: bool = False) -> list[str]:
         if not self._private_root():
             return []
         try:
             descriptor = os.open(self.path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
         except FileNotFoundError:
-            return []
+            if not new_lock:
+                # The persistent lock is also the initialization witness. Once a
+                # message has been handled, deleting its history must never reset
+                # deduplication and cause another draft or governed send.
+                try:
+                    witness = os.open(
+                        self.root / ".support-mailbox.lock",
+                        os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+                    )
+                except FileNotFoundError:
+                    return []  # fresh mailbox or pre-lock legacy state
+                with os.fdopen(witness, "rb") as stream:
+                    self._private_regular(os.fstat(stream.fileno()))
+                raise ValueError("initialized support-mailbox history missing; operator repair required")
+            return []  # only the holder of a newly created exclusive lock
         with os.fdopen(descriptor, "rb") as stream:
             self._private_regular(os.fstat(stream.fileno()))
             raw = stream.read(self.MAX_BYTES + 1)
@@ -155,13 +169,18 @@ class MessageLog:
     def mark(self, message_id: str) -> None:
         self._private_root(create=True)
         lock = self.root / ".support-mailbox.lock"
-        descriptor = os.open(
-            lock, os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0), 0o600
-        )
+        try:
+            descriptor = os.open(
+                lock, os.O_RDWR | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600
+            )
+            new_lock = True
+        except FileExistsError:
+            descriptor = os.open(lock, os.O_RDWR | getattr(os, "O_NOFOLLOW", 0))
+            new_lock = False
         try:
             self._private_regular(os.fstat(descriptor))
             fcntl.flock(descriptor, fcntl.LOCK_EX)
-            handled = self._read()
+            handled = self._read(new_lock=new_lock)
             digest = self._digest(message_id)
             if digest in handled:
                 return
