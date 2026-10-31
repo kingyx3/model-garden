@@ -121,5 +121,24 @@ class CallIdentityTests(unittest.TestCase):
         self.assertEqual(proof._transcript_summary(rows, [transcript(ROOM, 100)])["completeTwoWayCalls"], 1)
 
 
+    def test_write_failure_dedupe_uses_invocation_not_reused_room(self):
+        filing_spec = importlib.util.spec_from_file_location(
+            "filing_call_identity", ROOT / "platform" / "channels" / "conversation_filing.py"
+        )
+        filing = importlib.util.module_from_spec(filing_spec)
+        assert filing_spec.loader is not None
+        sys.modules[filing_spec.name] = filing
+        filing_spec.loader.exec_module(filing)
+        base = {"type": "TranscriptWriteFailed", "timestamp": 100, "roomHash": ROOM, "errorType": "OSError"}
+        self.assertNotEqual(
+            filing._failure_fingerprint({**base, "callHash": CALL_A}),
+            filing._failure_fingerprint({**base, "callHash": CALL_B}),
+        )
+        self.assertEqual(filing._failure_identity(base), ROOM)
+        with self.assertRaises(ValueError):
+            filing._failure_fingerprint({**base, "callHash": "spoofed"})
+
+
+
 if __name__ == "__main__":
     unittest.main()
