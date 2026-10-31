@@ -160,6 +160,9 @@ def _validate_plaintext_tar(archive: pathlib.Path, identity: pathlib.Path) -> No
         raise RestoreError("age decryptor is not installed or cannot start") from exc
     members = 0
     total = 0
+    seen_paths: set[str] = set()
+    regular_files: set[str] = set()
+    paths_with_children: set[str] = set()
     try:
         assert process.stdout is not None
         with process.stdout:
@@ -169,6 +172,20 @@ def _validate_plaintext_tar(archive: pathlib.Path, identity: pathlib.Path) -> No
                     total += member.size
                     if not _safe_tar_member(member) or member.size < 0 or total > MAX_TAR_BYTES or members > MAX_MEMBERS:
                         raise RestoreError("unsafe tar member or archive exceeds limits")
+                    # TAR permits repeated names and aliases (./x vs x), so
+                    # validating members individually does not prove a unique
+                    # extraction tree. Reject overwrites and file/child conflicts
+                    # before any Docker volume is touched.
+                    path = pathlib.PurePosixPath(member.name)
+                    name = path.as_posix()
+                    if (name in seen_paths or (name == "." and not member.isdir())
+                            or any(parent.as_posix() in regular_files for parent in path.parents)
+                            or (member.isfile() and name in paths_with_children)):
+                        raise RestoreError("unsafe duplicate or conflicting tar member path")
+                    seen_paths.add(name)
+                    if member.isfile():
+                        regular_files.add(name)
+                    paths_with_children.update(parent.as_posix() for parent in path.parents)
         if process.wait(timeout=900) != 0:
             raise RestoreError("age authentication/decryption failed")
     except (tarfile.TarError, EOFError, OSError, subprocess.TimeoutExpired) as exc:
