@@ -131,24 +131,28 @@ class MessageLog:
     def _read(self, *, new_lock: bool = False) -> list[str]:
         if not self._private_root():
             return []
+        initialized = new_lock
+        if not new_lock:
+            # Check the persistent initialization witness before *any* customer
+            # side effect, even when history still exists. An unsafe lock must
+            # not allow drafting before mark() later discovers it is unusable.
+            try:
+                witness = os.open(
+                    self.root / ".support-mailbox.lock",
+                    os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+                )
+            except FileNotFoundError:
+                pass  # fresh mailbox or valid pre-lock legacy history
+            else:
+                with os.fdopen(witness, "rb") as stream:
+                    self._private_regular(os.fstat(stream.fileno()))
+                initialized = True
         try:
             descriptor = os.open(self.path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
         except FileNotFoundError:
-            if not new_lock:
-                # The persistent lock is also the initialization witness. Once a
-                # message has been handled, deleting its history must never reset
-                # deduplication and cause another draft or governed send.
-                try:
-                    witness = os.open(
-                        self.root / ".support-mailbox.lock",
-                        os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
-                    )
-                except FileNotFoundError:
-                    return []  # fresh mailbox or pre-lock legacy state
-                with os.fdopen(witness, "rb") as stream:
-                    self._private_regular(os.fstat(stream.fileno()))
+            if initialized and not new_lock:
                 raise ValueError("initialized support-mailbox history missing; operator repair required")
-            return []  # only the holder of a newly created exclusive lock
+            return []  # first mark with new lock, or fresh pre-lock mailbox
         with os.fdopen(descriptor, "rb") as stream:
             self._private_regular(os.fstat(stream.fileno()))
             raw = stream.read(self.MAX_BYTES + 1)
