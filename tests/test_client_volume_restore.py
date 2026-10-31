@@ -106,6 +106,48 @@ class ClientVolumeRestoreTests(unittest.TestCase):
                 with self.assertRaisesRegex(RESTORE.RestoreError, "unsafe"):
                     RESTORE.verify(self.compose, "acme-dev", self.archive, self.identity)
 
+    def test_snapshot_style_root_and_nested_files_remain_verifiable(self):
+        # The real snapshot command archives "." from /source.
+        data = io.BytesIO()
+        with tarfile.open(fileobj=data, mode="w") as out:
+            for name in (".", "./nested"):
+                member = tarfile.TarInfo(name)
+                member.type = tarfile.DIRTYPE
+                out.addfile(member)
+            member = tarfile.TarInfo("./nested/record.json")
+            member.size = 2
+            out.addfile(member, io.BytesIO(b"{}"))
+        self.write_backup(data.getvalue())
+        self.assertEqual(RESTORE.verify(self.compose, "acme-dev", self.archive, self.identity), ["hermes-data"])
+
+    def test_rejects_duplicate_and_conflicting_tar_member_paths_before_restore(self):
+        # A syntactically valid tar can contain multiple entries for one path
+        # or a regular file that is also an ancestor of another entry. Do not
+        # accept an archive whose extraction outcome depends on member order.
+        cases = [
+            [("record", "file"), ("record", "file")],
+            [("./record", "file"), ("record", "file")],
+            [("parent", "file"), ("parent/child", "file")],
+            [("parent/child", "file"), ("parent", "file")],
+            [("parent/child", "file"), ("parent", "dir")],
+            [("folder", "dir"), ("./folder", "dir")],
+        ]
+        for entries in cases:
+            with self.subTest(entries=entries):
+                data = io.BytesIO()
+                with tarfile.open(fileobj=data, mode="w") as out:
+                    for name, kind in entries:
+                        member = tarfile.TarInfo(name)
+                        if kind == "dir":
+                            member.type = tarfile.DIRTYPE
+                            out.addfile(member)
+                        else:
+                            member.size = 1
+                            out.addfile(member, io.BytesIO(b"x"))
+                self.write_backup(data.getvalue())
+                with self.assertRaisesRegex(RESTORE.RestoreError, "unsafe"):
+                    RESTORE.verify(self.compose, "acme-dev", self.archive, self.identity)
+
     def test_refuses_unsafe_identity_or_archive_symlinks(self):
         self.identity.chmod(0o644)
         with self.assertRaisesRegex(RESTORE.RestoreError, "identity"):
