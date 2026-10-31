@@ -106,6 +106,37 @@ class ProvisionHermesProfileTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "ordered-fallback"):
             adapter.build_profile_files(desired)
 
+    def test_model_profile_rejects_classification_above_authorized_ceiling(self) -> None:
+        desired = copy.deepcopy(self.receptionist_desired_state())
+        desired["modelProfile"]["spec"]["constraints"]["maxDataClassification"] = "internal"
+        with self.assertRaisesRegex(ValueError, "exceeds model profile"):
+            adapter.build_profile_files(desired)
+
+    def test_model_profile_allows_classification_within_ceiling(self) -> None:
+        desired = copy.deepcopy(self.receptionist_desired_state())
+        desired["agent"]["spec"]["security"]["dataClassification"] = "internal"
+        config = yaml.safe_load(adapter.build_profile_files(desired)[pathlib.Path("config.yaml")])
+        self.assertEqual(config["model"]["provider"], "openai")
+
+    def test_model_profile_requires_explicit_classification_when_constrained(self) -> None:
+        desired = copy.deepcopy(self.receptionist_desired_state())
+        desired["agent"]["spec"].pop("security", None)
+        with self.assertRaisesRegex(ValueError, "dataClassification"):
+            adapter.build_profile_files(desired)
+
+    def test_model_profile_refuses_unenforceable_region_constraint(self) -> None:
+        desired = copy.deepcopy(self.receptionist_desired_state())
+        desired["modelProfile"]["spec"]["constraints"]["regions"] = ["eu-west-1"]
+        with self.assertRaisesRegex(ValueError, "region"):
+            adapter.build_profile_files(desired)
+
+    def test_single_candidate_rejects_unsupported_routing_strategy(self) -> None:
+        desired = copy.deepcopy(self.receptionist_desired_state())
+        desired["modelProfile"]["spec"]["candidates"] = desired["modelProfile"]["spec"]["candidates"][:1]
+        desired["modelProfile"]["spec"]["routing"] = {"strategy": "cost-first"}
+        with self.assertRaisesRegex(ValueError, "routing.strategy"):
+            adapter.build_profile_files(desired)
+
     def test_profile_without_tools_has_no_mcp_server(self) -> None:
         desired_state = self.receptionist_desired_state()
         desired_state["tools"] = []
