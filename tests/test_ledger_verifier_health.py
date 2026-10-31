@@ -23,7 +23,8 @@ class FakeMonitor:
         self.root, self.name = root, name
         self.failure = None
         self.evaluated = []
-        self.report = {"ok": True, "problems": []}
+        self.report = {"ok": True, "problems": [], "localChainedEvents": 2,
+                       "exportedRecords": 2, "exportedHeadSequence": 2}
         self.notices = []
 
     def check(self, *args, **kwargs):
@@ -69,6 +70,31 @@ class VerifierTests(unittest.TestCase):
         self.assertFalse(result["notificationsDelivered"])
         self.assertTrue(self.payload()["independentVerificationPassed"])
         self.assertIn("--severity=INFO", self.sent[0])
+
+    def test_empty_or_unsubstantiated_export_never_reports_healthy(self):
+        # A brand-new or missing ledger and empty bucket must not be
+        # independently certified as healthy merely because both agree.
+        for report in (
+            {"ok": True, "problems": [], "localChainedEvents": 0,
+             "exportedRecords": 0, "exportedHeadSequence": 0},
+            {"ok": True, "problems": []},
+            {"ok": True, "problems": [], "localChainedEvents": 1,
+             "exportedRecords": 0, "exportedHeadSequence": 0},
+            {"ok": True, "problems": [], "localChainedEvents": 1,
+             "exportedRecords": True, "exportedHeadSequence": 1},
+            {"ok": True, "problems": [], "localChainedEvents": 1,
+             "exportedRecords": 1, "exportedHeadSequence": 0},
+        ):
+            with self.subTest(report=report):
+                self.sent.clear()
+                self.monitor.evaluated.clear()
+                self.monitor.report = report
+                result = cli.check_and_publish(**self.kwargs)
+                self.assertEqual(result["health"], "UNHEALTHY")
+                self.assertFalse(result["independentVerificationPassed"])
+                self.assertEqual(self.payload()["conditions"], ["export-failure"])
+                self.assertEqual(self.monitor.evaluated[0][0]["ok"], False)
+                self.assertIn("--severity=ERROR", self.sent[0])
 
     def test_corrupt_export_is_unhealthy_and_redacted(self):
         self.monitor.report = {"ok": False, "problems": ["secret credential and customer content"]}
