@@ -132,26 +132,37 @@ def _audit_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
+def _voice_call_id(row: dict[str, Any]) -> str | None:
+    """Prefer explicit per-invocation callHash; never downgrade malformed IDs.
+
+    Old voice receipts had only roomHash. New receipts retain that stable room
+    digest for provider-side reconciliation but use callHash for local pairing.
+    Neither digest is independent SIP/provider attestation.
+    """
+    value = row.get("callHash") if "callHash" in row else (row.get("roomHash") or row.get("room"))
+    return value if isinstance(value, str) and re.fullmatch(r"[0-9a-f]{64}", value) else None
+
+
 def _voice_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
     types = Counter(row.get("type") for row in rows if isinstance(row.get("type"), str))
     call_ids = {
-        row.get("roomHash") or row.get("room")
+        _voice_call_id(row)
         for row in rows
-        if row.get("type") == "CallStarted" and isinstance(row.get("roomHash") or row.get("room"), str)
+        if row.get("type") == "CallStarted" and isinstance(_voice_call_id(row), str)
     }
     # A start alone is not a completed call. Match lifecycle events to the
     # same room AND Agent with ordered integer timestamps; repeated records
     # must not inflate the count. These receipts are still not SIP attestation.
     started: dict[tuple[str, str], int] = {}
     for row in rows:
-        room, agent, timestamp = row.get("roomHash"), row.get("agent"), row.get("timestamp")
+        room, agent, timestamp = _voice_call_id(row), row.get("agent"), row.get("timestamp")
         if (row.get("type") == "CallStarted" and isinstance(room, str) and room
                 and isinstance(agent, str) and agent and type(timestamp) is int):
             key = (room, agent)
             started[key] = min(timestamp, started.get(key, timestamp))
     completed: dict[str, tuple[int, int, str]] = {}
     for row in rows:
-        room, agent, timestamp = row.get("roomHash"), row.get("agent"), row.get("timestamp")
+        room, agent, timestamp = _voice_call_id(row), row.get("agent"), row.get("timestamp")
         if (row.get("type") == "CallEnded" and isinstance(room, str)
                 and isinstance(agent, str) and type(timestamp) is int
                 and (room, agent) in started and timestamp >= started[(room, agent)]):
@@ -159,14 +170,14 @@ def _voice_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
             if room not in completed:
                 completed[room] = (beginning, timestamp, agent)
     fallback_rooms = {
-        row["roomHash"]
+        _voice_call_id(row)
         for row in rows
         if row.get("type") in ("HumanTransfer", "FallbackMessage")
-        and isinstance(row.get("roomHash"), str)
-        and row["roomHash"] in completed
-        and row.get("agent") == completed[row["roomHash"]][2]
+        and isinstance(_voice_call_id(row), str)
+        and _voice_call_id(row) in completed
+        and row.get("agent") == completed[_voice_call_id(row)][2]
         and type(row.get("timestamp")) is int
-        and completed[row["roomHash"]][0] <= row["timestamp"] <= completed[row["roomHash"]][1]
+        and completed[_voice_call_id(row)][0] <= row["timestamp"] <= completed[_voice_call_id(row)][1]
     }
     return {
         "records": len(rows),
@@ -190,7 +201,7 @@ def _completed_call_actions(voice_rows: list[dict[str, Any]], audit_rows: list[d
     """
     started: dict[tuple[str, str], int] = {}
     for row in voice_rows:
-        room, agent, at = row.get("roomHash"), row.get("agent"), row.get("timestamp")
+        room, agent, at = _voice_call_id(row), row.get("agent"), row.get("timestamp")
         if (row.get("type") == "CallStarted" and isinstance(room, str)
                 and re.fullmatch(r"[0-9a-f]{64}", room) and isinstance(agent, str) and agent
                 and type(at) is int):
@@ -198,7 +209,7 @@ def _completed_call_actions(voice_rows: list[dict[str, Any]], audit_rows: list[d
             started[key] = min(at, started.get(key, at))
     completed: set[tuple[str, str]] = set()
     for row in voice_rows:
-        room, agent, at = row.get("roomHash"), row.get("agent"), row.get("timestamp")
+        room, agent, at = _voice_call_id(row), row.get("agent"), row.get("timestamp")
         if (row.get("type") == "CallEnded" and type(at) is int
                 and isinstance(room, str) and isinstance(agent, str)
                 and (room, agent) in started and at >= started[(room, agent)]):
@@ -257,7 +268,7 @@ def _transcript_summary(voice_rows: list[dict[str, Any]], transcript_rows: list[
     """
     started: dict[tuple[str, str], int] = {}
     for row in voice_rows:
-        room, agent, at = row.get("roomHash"), row.get("agent"), row.get("timestamp")
+        room, agent, at = _voice_call_id(row), row.get("agent"), row.get("timestamp")
         if (row.get("type") == "CallStarted" and isinstance(room, str)
                 and re.fullmatch(r"[0-9a-f]{64}", room) and isinstance(agent, str) and agent
                 and type(at) is int):
@@ -265,7 +276,7 @@ def _transcript_summary(voice_rows: list[dict[str, Any]], transcript_rows: list[
             started[key] = min(at, started.get(key, at))
     completed: dict[tuple[str, str], int] = {}
     for row in voice_rows:
-        room, agent, at = row.get("roomHash"), row.get("agent"), row.get("timestamp")
+        room, agent, at = _voice_call_id(row), row.get("agent"), row.get("timestamp")
         key = (room, agent)
         if (row.get("type") == "CallEnded" and type(at) is int
                 and key in started and at >= started[key]):

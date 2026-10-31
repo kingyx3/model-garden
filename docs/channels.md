@@ -274,3 +274,24 @@ identity; isolation still depends on the deployed per-client volume and host
 permissions. Neither a local digest nor a `model` label proves real SIP audio,
 provider model execution, human transfer, CRM receipt or live client acceptance.
 Keep #107/#117 open pending those independently verified events.
+
+### Per-invocation voice evidence identity (v0.8.254; #107)
+
+A LiveKit room name is **not** a unique call identifier: a room may be reused for
+separate calls. The voice worker now generates a fresh unpredictable SHA-256
+`callHash` for **each worker invocation** and records it on call start/end,
+transfer, fallback-message and transcript-write-failure receipts, as well as the
+transcript. The existing `roomHash` (digest of the provider room name) remains
+available to a client-authorized operator for external reconciliation. The
+reference-proof collector prefers an explicit valid `callHash`, refuses to
+downgrade malformed explicit values to `roomHash`, and reads older room-only
+receipts for migration. Calls in a reused room cannot borrow each other's
+completion, transcript, fallback or explicitly tagged Tool action.
+
+The new identifier is **local structural correlation only**. It is not an
+authenticated SIP identity, a signed provider receipt or an authenticated
+Hermes-to-MCP invocation context. Existing stored call hashes are not rewritten;
+a mixed old/new evidence set must be reconciled by the authorized operator.
+No automatic claim of complete real voice or ledger request-ID causation follows
+from this change. #107 and #117 retain their real-call, consent, provider and
+client-acceptance gates.

@@ -181,11 +181,22 @@ _ERROR_TYPE = re.compile(r"^[A-Za-z][A-Za-z0-9_]{0,63}$")
 FAILURE_ACTION = "transcript.write-failed"
 
 
+def _failure_identity(failure: Mapping[str, Any]) -> str:
+    """New callHash is authoritative; malformed explicit IDs cannot fall back to a reused room."""
+    if "callHash" in failure:
+        value = failure["callHash"]
+        if not isinstance(value, str) or not re.fullmatch(r"[0-9a-f]{64}", value):
+            raise ValueError("invalid transcript failure call identity")
+        return value
+    room = failure.get("roomHash", "")
+    return room if isinstance(room, str) else ""
+
+
 def transcript_failures(records: Iterable[Mapping[str, Any]]) -> list[dict[str, Any]]:
     """Select failure receipts from the same validated voice snapshot."""
     return sorted(
         (dict(row) for row in records if row.get("type") == "TranscriptWriteFailed"),
-        key=lambda item: (item["timestamp"], str(item.get("roomHash", ""))),
+        key=lambda item: (item["timestamp"], _failure_identity(item)),
     )
 
 
@@ -195,7 +206,7 @@ def read_transcript_failures(path: pathlib.Path) -> list[dict[str, Any]]:
 
 
 def _failure_fingerprint(failure: Mapping[str, Any]) -> str:
-    material = f"{failure['timestamp']}\0{failure.get('roomHash', '')}\0{failure.get('errorType', '')}"
+    material = f"{failure['timestamp']}\0{_failure_identity(failure)}\0{failure.get('errorType', '')}"
     return hashlib.sha256(material.encode("utf-8")).hexdigest()[:24]
 
 
@@ -247,8 +258,9 @@ def ledger_transcript_failures(
             "fingerprint": fingerprint, "at": failure["timestamp"],
             "errorType": error_type if isinstance(error_type, str) and _ERROR_TYPE.match(error_type) else "Unknown",
         }
-        if isinstance(failure.get("roomHash"), str) and re.fullmatch(r"[0-9a-f]{64}", failure["roomHash"]):
-            details["callHash"] = failure["roomHash"]
+        identity = _failure_identity(failure)
+        if re.fullmatch(r"[0-9a-f]{64}", identity):
+            details["callHash"] = identity
         govern.record_operator_action(audit_path, FAILURE_ACTION, performed_by, details)
         known.add(fingerprint)
         totals["ledgered"] += 1
