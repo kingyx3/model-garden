@@ -52,14 +52,21 @@ delivery and a real client scenario remain open on #101/#91.
 Reuse an approved upstream MCP/provider integration rather than
 introducing bespoke SaaS connectors.
 
-## Tier 0 artifact retention and retry provenance (v0.8.217)
+## Tier 0 artifact retention and retry provenance (v0.8.251)
 
 The private artifact index is not a durable public catalog. `files.search` and the
 operator's metadata listing exclude expired entries immediately, even before
 `runtime-artifacts.py purge-expired` physically deletes the payload. A shorter
 reviewed retention policy takes effect on previously created files; increasing
-retention does not revive artifacts past their original expiry. Operators must
-still schedule and verify the purge job and its audit receipts for actual erasure.
+retention does not revive artifacts past their original expiry. The governed worker's `retention` job runs physical expiry cleanup on its
+configured interval; operators must verify the job's health and ledger receipts
+for actual erasure. The host-local `runtime-artifacts.py` operator CLI now uses
+the same reviewed `MODEL_GARDEN_ARTIFACT_RETENTION_DAYS` (default 365) for
+`list` and `purge-expired` instead of silently reverting to 365 days. An explicit
+`--retention-days` can only tighten this policy; invalid configured retention
+fails closed even when an override is supplied. This prevents an operator's
+metadata view or manual purge from treating shortened client retention as a
+longer default. Existing artifacts retain their original maximum expiry.
 
 A repeated write returns an existing artifact only when **content digest, name,
 requester, producing Agent, media type, classification and source references**
