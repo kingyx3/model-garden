@@ -39,6 +39,50 @@ def check(data, *, call=True, fallback=False, action=False):
                           require_fallback=fallback, require_governed_action=action)
 
 
+class ReferenceAuditChainTests(unittest.TestCase):
+    """Strict reference acceptance must not count forged or broken ledger rows."""
+
+    @staticmethod
+    def chained_rows():
+        import json
+        import tempfile
+        with tempfile.TemporaryDirectory() as directory:
+            path = pathlib.Path(directory) / "audit.jsonl"
+            govern = proof._audit_contract()
+            for outcome in ("allow", "succeeded"):
+                govern.append_audit_event(path, {
+                    "schemaVersion": 3, "event": "authorization" if outcome == "allow" else "execution",
+                    "outcome": outcome, "tool": "calendar.book",
+                    "requestId": "c" * 64,
+                })
+            return [json.loads(line) for line in path.read_text().splitlines()]
+
+    def test_strict_reference_audit_rejects_tamper_gaps_and_legacy_only_rows(self):
+        rows = self.chained_rows()
+        self.assertEqual(proof._verify_collected_audit(rows)["events"], 2)
+        altered = [dict(row) for row in rows]
+        altered[0]["outcome"] = "deny"
+        for invalid in (altered, rows[1:], [rows[0], rows[0]],
+                        [{"event": "execution", "outcome": "succeeded"}], []):
+            with self.subTest(invalid=invalid):
+                with self.assertRaisesRegex(ValueError, "reference audit evidence"):
+                    proof._verify_collected_audit(invalid)
+
+    def test_strict_collection_verifies_audit_before_reporting_success(self):
+        from unittest import mock
+        rows = self.chained_rows()
+        services = {"governed-tools": {"container": "g", "status": "Up 1m"}}
+        with mock.patch.object(proof, "_containers", return_value=services), \
+                mock.patch.object(proof, "_jsonl", return_value=rows):
+            self.assertEqual(proof.collect("acme-dev", verify_ledger=True)["governance"]["records"], 2)
+        forged = [dict(row) for row in rows]
+        forged[-1]["outcome"] = "failed"
+        with mock.patch.object(proof, "_containers", return_value=services), \
+                mock.patch.object(proof, "_jsonl", return_value=forged):
+            with self.assertRaisesRegex(ValueError, "reference audit evidence"):
+                proof.collect("acme-dev", verify_ledger=True)
+
+
 class ReferenceProofTests(unittest.TestCase):
     def test_orphan_start_is_not_a_completed_call(self):
         data = evidence([voice("CallStarted")])
