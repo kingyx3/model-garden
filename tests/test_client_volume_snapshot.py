@@ -1,6 +1,7 @@
 """Credential-free regression coverage for stopped client-volume snapshots (#230)."""
 from __future__ import annotations
 
+import copy
 import hashlib
 import importlib.util
 import json
@@ -73,6 +74,27 @@ class ClientSnapshotTests(unittest.TestCase):
                 self.write()
                 with self.assertRaises(SNAP.SnapshotError):
                     SNAP.inventory(self.compose)
+
+    def test_compose_imports_and_inherited_volumes_cannot_claim_complete_backup(self):
+        # Compose can acquire mutable state from files/services that this
+        # static inventory never reads. Do not publish a complete manifest.
+        cases = (
+            ("volumes-from", lambda doc: doc["services"]["hermes"].update(
+                {"volumes_from": ["foreign-service"]})),
+            ("extends", lambda doc: doc["services"]["hermes"].update(
+                {"extends": {"file": "other-compose.yaml", "service": "hermes"}})),
+            ("include", lambda doc: doc.update({"include": ["other-compose.yaml"]})),
+        )
+        for label, mutate in cases:
+            with self.subTest(label=label):
+                document = copy.deepcopy(self.document)
+                mutate(document)
+                self.compose.write_text(yaml.safe_dump(document), encoding="utf-8")
+                with self.assertRaisesRegex(SNAP.SnapshotError, "unresolved Compose"):
+                    SNAP.inventory(self.compose)
+        self.write()
+        self.assertEqual(SNAP.inventory(self.compose),
+                         ["coworker-data", "governance-data", "hermes-data"])
 
     def test_stopped_project_and_correct_docker_labels_required(self):
         with mock.patch.object(SNAP, "_docker", return_value="some-container"):
