@@ -91,6 +91,17 @@ def check_and_publish(*, ledger: pathlib.Path, state_dir: pathlib.Path, bucket: 
         if type(report.get("ok")) is not bool or not isinstance(report.get("problems"), list):
             raise VerifierError("invalid verification report")
         healthy = report["ok"] and not report["problems"]
+        if healthy:
+            # verify_export intentionally permits an empty local ledger and
+            # empty export as a structurally consistent pair. An independent
+            # health signal must NOT promote that absence of evidence to
+            # successful verification or a green go-live/alert heartbeat.
+            # The chained-event count differs from sequence when legacy v1
+            # records precede the chain, so do not compare the two directly.
+            evidence = ("localChainedEvents", "exportedRecords", "exportedHeadSequence")
+            if any(type(report.get(field)) is not int or report[field] <= 0
+                   for field in evidence):
+                raise VerifierError("independent ledger verification has no substantive chain evidence")
         kinds = sorted({n["kind"] for n in result["notices"] if n.get("kind") != "export-recovered"})
     except Exception:  # noqa: BLE001 - failure to verify MUST be an unhealthy signal
         healthy = False
