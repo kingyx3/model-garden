@@ -1,4 +1,4 @@
-# Support-mailbox handled-message witness (v0.8.201)
+# Support-mailbox handled-message witness (v0.8.246)
 
 The built-in support mailbox records SHA-256-derived Message-ID digests under its
 private client data volume in support-mailbox-handled.json. The witness is
@@ -10,11 +10,16 @@ malformed, oversized, linked, foreign-owned or group/world-accessible. The
 witness directory and advisory lock must also be private and unlinked. Updates
 use a unique exclusive temporary file, fsync the new content, atomically replace
 the witness and fsync its directory. A preplanted predictable .tmp path is
-never opened or overwritten. A missing witness in a new client data volume is
-still interpreted as an empty history; protect the complete volume and its
-backups against deletion. Host-local advisory locking does **not** protect
-against privileged writers, cross-host races or a deleted witness and does not
-provide exactly-once provider delivery.
+never opened or overwritten. After the first successful handled-message
+write, the existing persistent `.support-mailbox.lock` also witnesses
+initialization. Missing history with an initialized lock now fails closed
+before classification, drafting or sending; an orphaned lock after a crash
+also requires operator reconciliation. A genuinely new volume with neither
+file is initially empty. Valid legacy history without the lock remains
+readable and acquires the lock on the next mark. Host-local advisory locking
+does **not** protect against privileged writers deleting both files,
+cross-host races, or the existing crash window between a provider effect and
+its handled marker. This is not exactly-once provider delivery.
 
 **Operator recovery:** A failure must leave the inbound spool item retryable
 or quarantined, not silently start a fresh dedupe history. Stop the affected
