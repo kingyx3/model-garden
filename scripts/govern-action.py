@@ -29,6 +29,7 @@ import datetime as dt
 import fcntl
 import hashlib
 import importlib.util
+import io
 import json
 import os
 import pathlib
@@ -646,6 +647,19 @@ def _verify_audit_chain_handle(handle: Any) -> dict[str, Any]:
         previous_hash = stored_hash
         expected_sequence += 1
     return {"valid": True, "events": events, "headHash": previous_hash}
+
+
+def verify_audit_records(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    """Verify a read-only JSONL snapshot with the same chain contract as a local file.
+
+    Used when an operator collector reads the ledger from a container rather
+    than opening the original file descriptor. This proves local hash-chain
+    consistency, not completeness against an independently retained head.
+    """
+    if not isinstance(rows, list) or any(not isinstance(row, dict) for row in rows):
+        raise ValueError("Audit chain invalid: expected object records")
+    snapshot = io.StringIO("".join(_canonical_json(row) + "\\n" for row in rows))
+    return _verify_audit_chain_handle(snapshot)
 
 
 def verify_audit_chain(path: pathlib.Path) -> dict[str, Any]:
