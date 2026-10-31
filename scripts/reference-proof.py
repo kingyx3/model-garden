@@ -72,6 +72,35 @@ def _jsonl(container: str, path: str) -> list[dict[str, Any]]:
     return rows
 
 
+@lru_cache(maxsize=1)
+def _audit_contract():
+    path = pathlib.Path(__file__).resolve().parent / "govern-action.py"
+    spec = importlib.util.spec_from_file_location("reference_proof_governance_contract", path)
+    if spec is None or spec.loader is None:
+        raise ValueError("reference audit evidence verifier unavailable")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _verify_collected_audit(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    """Require a coherent v2/v3 chained ledger before strict action acceptance.
+
+    An internally consistent chain cannot establish external immutability or
+    detect removal of its final suffix without a separately retained head.
+    """
+    if not any(type(row.get("schemaVersion")) is int and row["schemaVersion"] in (2, 3)
+               for row in rows):
+        raise ValueError("reference audit evidence has no chained receipts")
+    try:
+        result = _audit_contract().verify_audit_records(rows)
+    except (ValueError, TypeError, OverflowError):
+        raise ValueError("reference audit evidence failed chain verification") from None
+    if result.get("valid") is not True or result.get("events") != len(rows):
+        raise ValueError("reference audit evidence failed chain verification")
+    return result
+
+
 def _audit_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
     statuses: Counter[str] = Counter()
     tools: Counter[str] = Counter()
@@ -420,7 +449,7 @@ def _single_call_scenario_count(
     return complete
 
 
-def collect(project: str, *, read_transcripts: bool = False, read_model_summary_completions: bool = False) -> dict[str, Any]:
+def collect(project: str, *, read_transcripts: bool = False, read_model_summary_completions: bool = False, verify_ledger: bool = False) -> dict[str, Any]:
     if not PROJECT.fullmatch(project):
         raise ValueError("project name must use lowercase letters, numbers, and internal hyphens")
     services = _containers(project)
@@ -431,6 +460,10 @@ def collect(project: str, *, read_transcripts: bool = False, read_model_summary_
     audit_rows: list[dict[str, Any]] = []
     if "governed-tools" in services:
         audit_rows = _jsonl(services["governed-tools"]["container"], "/opt/data/.modelgarden/audit.jsonl")
+        if verify_ledger:
+            _verify_collected_audit(audit_rows)
+    if verify_ledger and "governed-tools" not in services:
+        raise ValueError("reference audit evidence runtime unavailable")
     voice_rows: list[dict[str, Any]] = []
     if "voice" in services:
         voice_rows = _jsonl(services["voice"]["container"], "/opt/data/messages.jsonl")
@@ -555,7 +588,8 @@ def main() -> int:
     args = parser.parse_args()
     try:
         evidence = collect(args.project_name, read_transcripts=args.require_two_way_transcript,
-                           read_model_summary_completions=args.require_model_summary_completion)
+                           read_model_summary_completions=args.require_model_summary_completion,
+                           verify_ledger=args.require_governed_action)
         result = evaluate(
             evidence,
             require_voice_call=args.require_voice_call,
