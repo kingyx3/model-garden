@@ -23,6 +23,7 @@ import hashlib
 import logging
 import os
 import pathlib
+import secrets
 import time
 from typing import Any
 
@@ -65,6 +66,11 @@ def _safe_digest(value: str | None) -> str | None:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
 
+def _call_hash(room_name: str) -> str:
+    """Per-invocation opaque identity; the separate room digest is not a call ID."""
+    return hashlib.sha256(secrets.token_bytes(32) + room_name.encode("utf-8")).hexdigest()
+
+
 def _append_message(payload: dict[str, Any]) -> bool:
     """Store private fallback/lifecycle records; report whether retention allowed saving."""
     retention = _retention_seconds()
@@ -80,9 +86,10 @@ def _sip_participant(ctx: JobContext):
 
 
 class ReceptionistVoiceAgent(Agent):
-    def __init__(self, instructions: str, transcript: CallTranscript | None = None) -> None:
+    def __init__(self, instructions: str, transcript: CallTranscript | None = None, *, call_hash: str | None = None) -> None:
         super().__init__(instructions=instructions)
         self._transcript = transcript
+        self._call_hash = call_hash
 
     async def on_enter(self) -> None:
         notice = self._transcript.disclosure_text if self._transcript is not None else None
@@ -127,6 +134,7 @@ class ReceptionistVoiceAgent(Agent):
                     "timestamp": int(time.time()),
                     "agent": AGENT_NAME,
                     "roomHash": _safe_digest(job_ctx.room.name),
+                    "callHash": self._call_hash,
                     "participantHash": _safe_digest(participant.identity),
                     "targetHash": _safe_digest(target),
                     "status": "requested",
@@ -159,6 +167,7 @@ class ReceptionistVoiceAgent(Agent):
                     "timestamp": int(time.time()),
                     "agent": AGENT_NAME,
                     "roomHash": _safe_digest(job_ctx.room.name),
+                    "callHash": self._call_hash,
                     "caller_name": caller_name.strip() or None,
                     "caller_number": caller_number,
                     "message": message,
@@ -205,10 +214,12 @@ server = AgentServer(host="127.0.0.1", port=8081)
 
 @server.rtc_session(agent_name=AGENT_NAME)
 async def receptionist(ctx: JobContext) -> None:
-    ctx.log_context_fields = {"room_hash": _safe_digest(ctx.room.name), "agent": AGENT_NAME}
+    room_hash = _safe_digest(ctx.room.name)
+    call_hash = _call_hash(ctx.room.name)
+    ctx.log_context_fields = {"room_hash": room_hash, "call_hash": call_hash, "agent": AGENT_NAME}
     started = int(time.time())
     try:
-        _append_message({"type": "CallStarted", "timestamp": started, "roomHash": _safe_digest(ctx.room.name), "agent": AGENT_NAME})
+        _append_message({"type": "CallStarted", "timestamp": started, "roomHash": room_hash, "callHash": call_hash, "agent": AGENT_NAME})
     except Exception as exc:
         LOGGER.error("call start receipt not stored: %s", type(exc).__name__)
 
@@ -218,7 +229,8 @@ async def receptionist(ctx: JobContext) -> None:
                 {
                     "type": "CallEnded",
                     "timestamp": int(time.time()),
-                    "roomHash": _safe_digest(ctx.room.name),
+                    "roomHash": room_hash,
+                    "callHash": call_hash,
                     "agent": AGENT_NAME,
                     "started": started,
                 }
@@ -226,7 +238,7 @@ async def receptionist(ctx: JobContext) -> None:
         except Exception as exc:
             LOGGER.error("call end receipt not stored: %s", type(exc).__name__)
 
-    transcript = CallTranscript(_safe_digest(ctx.room.name) or "", AGENT_NAME, TRANSCRIPT_CONFIG, started=started)
+    transcript = CallTranscript(call_hash, AGENT_NAME, TRANSCRIPT_CONFIG, started=started)
 
     def record_turn(event: Any) -> None:
         # Never let a transcript problem reach the call: log the type only and carry on.
@@ -250,7 +262,8 @@ async def receptionist(ctx: JobContext) -> None:
                 {
                     "type": "TranscriptWriteFailed",
                     "timestamp": int(time.time()),
-                    "roomHash": _safe_digest(ctx.room.name),
+                    "roomHash": room_hash,
+                    "callHash": call_hash,
                     "agent": AGENT_NAME,
                     "errorType": error_type,
                 }
@@ -262,7 +275,7 @@ async def receptionist(ctx: JobContext) -> None:
     ctx.add_shutdown_callback(on_transcript_shutdown)
     session = build_session()
     session.on("conversation_item_added", record_turn)
-    await session.start(agent=ReceptionistVoiceAgent(_instructions(), transcript), room=ctx.room)
+    await session.start(agent=ReceptionistVoiceAgent(_instructions(), transcript, call_hash=call_hash), room=ctx.room)
     await ctx.connect()
 
 
