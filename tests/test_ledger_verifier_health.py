@@ -71,6 +71,21 @@ class VerifierTests(unittest.TestCase):
         self.assertTrue(self.payload()["independentVerificationPassed"])
         self.assertIn("--severity=INFO", self.sent[0])
 
+    def test_real_empty_ledger_export_report_is_not_healthy(self):
+        export = cli._load("test_empty_verifier_ledger_export", "platform/core/ledger_export.py")
+        report = export.verify_export(
+            self.kwargs["ledger"],
+            export.DirectorySink(pathlib.Path(self.tmp.name) / "empty-remote-export"),
+        )
+        # The generic chain verifier is intentionally a consistency checker;
+        # the independent HEALTHY signal has the stronger nonempty-evidence gate.
+        self.assertTrue(report["ok"])
+        self.assertEqual(report["exportedRecords"], 0)
+        self.monitor.report = report
+        result = cli.check_and_publish(**self.kwargs)
+        self.assertEqual(result["health"], "UNHEALTHY")
+        self.assertEqual(self.payload()["conditions"], ["export-failure"])
+
     def test_empty_or_unsubstantiated_export_never_reports_healthy(self):
         # A brand-new or missing ledger and empty bucket must not be
         # independently certified as healthy merely because both agree.
