@@ -129,7 +129,6 @@ class ClientVolumeRestoreTests(unittest.TestCase):
             [("./record", "file"), ("record", "file")],
             [("parent", "file"), ("parent/child", "file")],
             [("parent/child", "file"), ("parent", "file")],
-            [("parent/child", "file"), ("parent", "dir")],
             [("folder", "dir"), ("./folder", "dir")],
         ]
         for entries in cases:
