@@ -90,8 +90,41 @@ def _model_config(desired_state: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(candidates, list) or not candidates:
         raise ValueError("Hermes provisioning failed: modelProfile has no candidates")
 
+    # A model profile's policy ceiling is an authorization boundary, not
+    # descriptive metadata. Hermes cannot enforce these Model Garden fields.
+    constraints = _require_mapping(spec.get("constraints", {}), "modelProfile.spec.constraints")
+    maximum = constraints.get("maxDataClassification")
+    if maximum is not None:
+        levels = ("public", "internal", "confidential", "restricted")
+        if maximum not in levels:
+            raise ValueError("Hermes provisioning failed: invalid model profile classification ceiling")
+        agent = _require_mapping(desired_state.get("agent"), "agent")
+        agent_spec = _require_mapping(agent.get("spec"), "agent.spec")
+        security = _require_mapping(agent_spec.get("security", {}), "agent.spec.security")
+        classification = security.get("dataClassification")
+        if classification not in levels:
+            raise ValueError(
+                "Hermes provisioning failed: agent security.dataClassification is required "
+                "for a constrained model profile"
+            )
+        if levels.index(classification) > levels.index(maximum):
+            raise ValueError(
+                "Hermes provisioning failed: agent data classification exceeds model profile "
+                "maxDataClassification"
+            )
+    if constraints.get("regions"):
+        raise ValueError(
+            "Hermes provisioning failed: model profile region restrictions require an "
+            "attested runtime/provider region binding; not supported by this adapter"
+        )
+
     routing = _require_mapping(spec.get("routing", {}), "modelProfile.spec.routing")
     strategy = routing.get("strategy")
+    if strategy not in (None, "ordered-fallback"):
+        raise ValueError(
+            "Hermes provisioning failed: unsupported model routing.strategy; "
+            "only ordered-fallback is implemented"
+        )
     if len(candidates) > 1 and strategy != "ordered-fallback":
         raise ValueError(
             "Hermes provisioning failed: multiple model candidates require routing.strategy "
