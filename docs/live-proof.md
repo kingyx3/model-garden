@@ -220,3 +220,10 @@ cannot establish completeness, even if its room hash and disclosure match.
 These are **structural** checks on locally collected evidence, not SIP/provider
 attestation, verified human delivery, owner consent or a client go-live signoff.
 Retain independent provider receipts and real operator acceptance for #117.
+
+
+## Strict reference Tool evidence ledger integrity (v0.8.248; #117/#80)
+
+When `reference-proof.py --require-governed-action` is requested, the collector now verifies the **entire** collected Action Ledger snapshot against the same v1-prefix/v2/v3 SHA-256 chaining and sequence contract used by the governed runtime, before reporting action evidence. It requires at least one chained record; missing governed runtime, malformed links, changed events, missing middle records, reordered or duplicate records stop the collector without writing a misleading successful manifest. Non-strict service inventory remains available without the additional ledger requirement. The verifier operates on a private in-memory snapshot; it does not export speech or Tool arguments.
+
+**Assurance boundary:** A self-consistent local chain is still not an independently anchored or immutable ledger. A privileged actor who truncates the *tail* and retains a valid prefix cannot be detected without an independently held trusted head. This change does not authenticate SIP/LiveKit, provider execution, human delivery, customer consent or live client acceptance. For #80 and #117, independently verify exported head hashes, external provider receipts and client-approved retained evidence before closure.
