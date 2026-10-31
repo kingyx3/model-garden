@@ -715,6 +715,32 @@ class CallFilingTests(Case):
         self.assertEqual(coworker.calls, [])
         self.assertEqual(self.interactions(runtime), [])
 
+    def test_corrupt_audit_chain_blocks_voice_model_summary_and_crm_filing(self):
+        coworker = FakeCoworker()
+        runtime = self.runtime([call_record()], coworker=coworker)
+        runtime.audit("voice.test", OWNER, {"source": "synthetic"})
+        ledger = self.data / "audit.jsonl"
+        rows = [json.loads(line) for line in ledger.read_text().splitlines()]
+        rows[-1]["details"] = {"source": "tampered-after-hash"}
+        ledger.write_text("".join(json.dumps(row) + "\n" for row in rows))
+        with self.assertRaisesRegex(ValueError, "Audit chain invalid; operator reconciliation required"):
+            runtime.run_calls(T0)
+        self.assertEqual(coworker.calls, [])
+        self.assertEqual(self.interactions(runtime), [])
+        self.assertFalse(any(row.get("tool") == "crm.log-interaction" for row in rows))
+
+    def test_malformed_late_audit_event_blocks_whole_voice_batch(self):
+        coworker = FakeCoworker()
+        runtime = self.runtime([call_record()], coworker=coworker)
+        runtime.audit("voice.test", OWNER, {"source": "synthetic"})
+        ledger = self.data / "audit.jsonl"
+        with ledger.open("a", encoding="utf-8") as handle:
+            handle.write("not-json\n")
+        with self.assertRaisesRegex(ValueError, "Audit chain invalid; operator reconciliation required"):
+            runtime.run_calls(T0)
+        self.assertEqual(coworker.calls, [])
+        self.assertEqual(self.interactions(runtime), [])
+
     def test_inflight_transcript_filing_cannot_race_a_confirmed_owner_pause(self):
         runtime = self.runtime([call_record()])
         store = worker._module("pause").PauseStore(self.data)

@@ -730,10 +730,20 @@ class Worker:
                     raise ValueError("voice record agent mismatch; operator reconciliation required")
             records = filing.call_transcripts(snapshot)
             write_failures = filing.transcript_failures(snapshot)
+            # Filing invokes a model, writes a CRM interaction and appends to the
+            # customer timeline. A damaged ledger cannot be treated as an empty
+            # correlation source: that would turn an unverified call into a
+            # seemingly successful, unattributed customer action. Validate the
+            # chain before any of those effects, as the operator file-calls path
+            # already does. A fresh workspace may have no audit file yet.
             try:
-                records = _module("call_requests").attach_request_ids(records, _module("audit_query").read_ledger(self.audit_path))
-            except ValueError:  # an unreadable ledger only means the calls are filed without request ids
-                pass
+                verdict = _module("govern").verify_audit_chain(self.audit_path)
+                if verdict.get("valid") is not True:
+                    raise ValueError("invalid chain")
+                events = _module("audit_query").read_ledger(self.audit_path) if self.audit_path.exists() else []
+            except (ValueError, OSError):
+                raise ValueError("Audit chain invalid; operator reconciliation required") from None
+            records = _module("call_requests").attach_request_ids(records, events)
             summarizer = _module("call_summary").CallSummarizer(
                 self.coworker, cache_path=self.data / "call-summaries.json",
                 completion_path=self.data / "summary-completions" / "call-summary-completions.jsonl")
