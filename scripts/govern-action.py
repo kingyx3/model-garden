@@ -658,7 +658,7 @@ def verify_audit_records(rows: list[dict[str, Any]]) -> dict[str, Any]:
     """
     if not isinstance(rows, list) or any(not isinstance(row, dict) for row in rows):
         raise ValueError("Audit chain invalid: expected object records")
-    snapshot = io.StringIO("".join(_canonical_json(row) + "\\n" for row in rows))
+    snapshot = io.StringIO("".join(_canonical_json(row) + "\n" for row in rows))
     return _verify_audit_chain_handle(snapshot)
 
 
