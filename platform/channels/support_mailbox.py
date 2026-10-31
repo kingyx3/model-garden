@@ -93,9 +93,10 @@ def _iso(seconds: int) -> str:
 class MessageLog:
     """Private, durable digest witness for inbound Message-ID deduplication.
 
-    A missing witness is a new mailbox. An existing corrupt, linked, exposed or
-    foreign-owned witness is *not* an empty mailbox: processing must stop so the
-    spool retries/quarantines rather than drafting or sending a duplicate.
+    An absent history with no initialized lock is a new mailbox. The durable
+    private lock is also the initialization witness: if history disappears after
+    initialization, processing must stop instead of resetting deduplication.
+    Corrupt, linked, exposed or foreign-owned state also fails closed.
     """
 
     MAX_ENTRIES = 20000
