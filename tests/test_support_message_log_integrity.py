@@ -110,10 +110,10 @@ class HandledMessageIntegrityTests(unittest.TestCase):
             handled=self.log,
         )
         message = (
-            b"Authentication-Results: mx.client.example; dmarc=pass header.from=example.invalid\\r\\n"
-            b"From: customer@example.invalid\\r\\nTo: support@client.example\\r\\n"
-            b"Message-ID: <synthetic-2@example.invalid>\\r\\n"
-            b"Subject: Hours\\r\\nContent-Type: text/plain\\r\\n\\r\\nWhen are you open?\\r\\n"
+            b"Authentication-Results: mx.client.example; dmarc=pass header.from=example.invalid\r\n"
+            b"From: customer@example.invalid\r\nTo: support@client.example\r\n"
+            b"Message-ID: <synthetic-2@example.invalid>\r\n"
+            b"Subject: Hours\r\nContent-Type: text/plain\r\n\r\nWhen are you open?\r\n"
         )
         with self.assertRaises((OSError, ValueError)):
             mailbox.handle(message, now=1800000000)
