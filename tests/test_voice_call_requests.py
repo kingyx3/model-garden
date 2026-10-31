@@ -55,13 +55,56 @@ class RequestIdTests(unittest.TestCase):
                                               [event(START + 40, "x"), event(START + 1010, "y")])
         self.assertEqual([item.get("requestIds") for item in records], [None, None, ["y"]])
 
-    def test_ids_a_record_already_carries_are_kept_and_inputs_are_not_changed(self):
-        original = call(START, START + 30, requestIds=["kept"])
+    def test_unverified_stored_ids_cannot_override_ledger_and_inputs_are_not_changed(self):
+        original = call(START, START + 30, requestIds=["forged"], requestIdsSource="ledger-correlation")
         plain = call(START + 500, START + 530)
-        records = requests.attach_request_ids([original, plain], [event(START + 5, "r1")])
-        self.assertEqual(records[0]["requestIds"], ["kept"])
-        self.assertNotIn("requestIdsSource", records[0])
+        records = requests.attach_request_ids([original, plain], [event(START + 5, "real")])
+        self.assertEqual((records[0]["requestIds"], records[0]["requestIdsSource"]),
+                         (["real"], "ledger-time-window"))
+        self.assertEqual(original["requestIds"], ["forged"])
+        self.assertEqual(original["requestIdsSource"], "ledger-correlation")
         self.assertNotIn("requestIds", plain)
+
+    def test_stored_request_ids_are_not_proof_without_current_ledger_authorizations(self):
+        record = call(START, START + 30, requestIds=["forged"], requestIdsSource="ledger-correlation")
+        (result,) = requests.attach_request_ids([record], [])
+        self.assertNotIn("requestIds", result)
+        self.assertNotIn("requestIdsSource", result)
+        self.assertEqual(record["requestIds"], ["forged"])
+
+    def test_stored_request_ids_cannot_bypass_conflicting_or_task_scoped_ledger(self):
+        record = call(START, START + 30, requestIds=["shared"], requestIdsSource="ledger-correlation")
+        tag = "call:" + record["callHash"]
+        for ledger in (
+            [event(START + 5, "shared", correlation=tag),
+             event(START + 6, "shared", correlation="task:other")],
+            [event(START + 5, "shared", correlation="task:other")],
+            [event(START + 5, "shared", correlation=tag),
+             event(START + 6, "shared", user="runtime:mailbox", correlation=tag)],
+        ):
+            with self.subTest(ledger=ledger):
+                (result,) = requests.attach_request_ids([record], ledger)
+                self.assertNotIn("requestIds", result)
+                self.assertNotIn("requestIdsSource", result)
+
+    def test_stored_request_ids_are_recomputed_from_exact_ledger_evidence(self):
+        record = call(START, START + 30, requestIds=["fake"], requestIdsSource="ledger-time-window")
+        tag = "call:" + record["callHash"]
+        (result,) = requests.attach_request_ids([record], [event(START + 5, "actual", correlation=tag)])
+        self.assertEqual((result["requestIds"], result["requestIdsSource"]),
+                         (["actual"], "ledger-correlation"))
+
+    def test_reconciliation_is_idempotent_and_rejects_stale_ledger_claims(self):
+        record = call(START, START + 30)
+        tag = "call:" + record["callHash"]
+        ledger = [event(START + 5, "real", correlation=tag)]
+        (first,) = requests.attach_request_ids([record], ledger)
+        (again,) = requests.attach_request_ids([first], ledger)
+        self.assertEqual(first, again)
+        (stale,) = requests.attach_request_ids([again], [])
+        self.assertNotIn("requestIds", stale)
+        self.assertNotIn("requestIdsSource", stale)
+        self.assertEqual(first["requestIds"], ["real"])
 
     def test_a_call_without_a_usable_window_or_without_requests_is_left_alone(self):
         (empty,) = requests.attach_request_ids([call(START, START + 30)], [])
@@ -112,14 +155,15 @@ class RequestIdTests(unittest.TestCase):
         records = requests.attach_request_ids([record], [forged, malformed, naive])
         self.assertNotIn("requestIds", records[0])
 
-    def test_explicit_attribution_preserves_existing_ids_and_deduplicates_authorizations(self):
+    def test_explicit_attribution_revalidates_existing_ids_and_deduplicates_authorizations(self):
         record = call(START, START + 10)
         tagged = event(START + 5, "a", correlation="call:" + record["callHash"])
         (result,) = requests.attach_request_ids([record], [tagged, tagged, event(START + 6, "b", correlation=tagged["governance"]["correlationId"])])
         self.assertEqual(result["requestIds"], ["a", "b"])
         self.assertEqual(result["requestIdsSource"], "ledger-correlation")
-        (preserved,) = requests.attach_request_ids([dict(record, requestIds=["already"])], [tagged])
-        self.assertEqual(preserved["requestIds"], ["already"])
+        (recomputed,) = requests.attach_request_ids([dict(record, requestIds=["unverified"])], [tagged])
+        self.assertEqual(recomputed["requestIds"], ["a"])
+        self.assertEqual(recomputed["requestIdsSource"], "ledger-correlation")
         self.assertNotIn("requestIds", record)
 
 

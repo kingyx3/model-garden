@@ -70,7 +70,7 @@ def _event_correlation(event: Mapping[str, Any]) -> str | None | bool:
 def attach_request_ids(
     records: Iterable[Mapping[str, Any]], events: Iterable[Mapping[str, Any]], *, identity: str = RUNTIME_IDENTITY
 ) -> list[dict[str, Any]]:
-    """Attach exact call-correlated ids first; conservatively infer older untagged requests."""
+    """Recompute IDs from ledger authorizations, preferring exact call tags over legacy time inference."""
     calls = [dict(record) for record in records]
     windows = [_window(call) for call in calls]
     exact_by_call: dict[str, list[tuple[float, str, str]]] = {}
@@ -106,8 +106,12 @@ def attach_request_ids(
         events_for_call.sort()
     untagged.sort()
     for index, call in enumerate(calls):
-        if call.get("requestIds"):
-            continue
+        # The voice JSONL is an input to reconciliation, not an authority for
+        # governed actions. Never let prefilled request IDs or a claimed source
+        # bypass the current ledger's actor/correlation conflict checks.
+        # A previously enriched snapshot is safe to reconcile repeatedly.
+        call.pop("requestIds", None)
+        call.pop("requestIdsSource", None)
         call_hash = call.get("callHash")
         if isinstance(call_hash, str) and _CALL_HASH.fullmatch(call_hash):
             tag = "call:" + call_hash
