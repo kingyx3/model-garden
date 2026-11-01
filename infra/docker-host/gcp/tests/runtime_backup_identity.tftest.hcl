@@ -5,8 +5,8 @@ mock_provider "google" {
   override_resource {
     target = google_service_account.backup_writer
     values = {
-      email = "mg-bkp-${substr(md5("acme-dev-mg"), 0, 8)}@sample-project-123.iam.gserviceaccount.com"
-      name  = "projects/sample-project-123/serviceAccounts/mg-bkp-${substr(md5("acme-dev-mg"), 0, 8)}@sample-project-123.iam.gserviceaccount.com"
+      email = "mg-bkp-fd1301a5@sample-project-123.iam.gserviceaccount.com"
+      name  = "projects/sample-project-123/serviceAccounts/mg-bkp-fd1301a5@sample-project-123.iam.gserviceaccount.com"
     }
   }
 }
