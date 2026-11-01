@@ -452,10 +452,9 @@ class Worker:
         self.voice_agent = os.environ.get("MODEL_GARDEN_VOICE_AGENT_NAME", self._agent())
         self.voice_project = os.environ.get("MODEL_GARDEN_VOICE_PROJECT")
         # A regenerated voice overlay must carry the same exact project in both
-        # containers. Legacy overlays with an explicit voice Agent but no project
-        # cannot safely file calls until the operator regenerates the overlay.
-        if (self.voice_transcripts is not None and
-                "MODEL_GARDEN_VOICE_AGENT_NAME" in os.environ and not self.voice_project):
+        # containers. Legacy overlays without a project marker cannot safely file calls
+        # until the operator regenerates the overlay.
+        if self.voice_transcripts is not None and not self.voice_project:
             raise WorkerConfigError("MODEL_GARDEN_VOICE_PROJECT is required for scoped voice filing")
         if (self.voice_project is not None and
                 re.fullmatch(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?", self.voice_project) is None):
