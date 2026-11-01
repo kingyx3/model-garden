@@ -523,7 +523,7 @@ class OperatorCase(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertEqual(json.loads(out), {"expired": 0})  # nothing is a day old yet
         events = [json.loads(line) for line in (self.root.parent / "audit.jsonl").read_text().splitlines()]
-        self.assertEqual([event["action"] for event in events], ["artifact.delete"])
+        self.assertEqual([event["action"] for event in events], ["artifact.delete.prepare", "artifact.delete"])
         self.assertEqual(events[0]["performedBy"], ADMIN)
         self.assertTrue(govern.verify_audit_chain(self.root.parent / "audit.jsonl")["valid"])
 
