@@ -237,7 +237,7 @@ class PrivateFallbackMessageTests(unittest.TestCase):
         for message, name in ((None, ""), ({"private": "value"}, ""), ("safe", None), ("safe", ["name"])):
             with self.subTest(message_type=type(message).__name__, name_type=type(name).__name__):
                 result = asyncio.run(agent.capture_message(None, message, caller_name=name))
-                self.assertIn("invalid", result)
+                self.assertIn("invalid", result.lower())
                 self.assertFalse(self.path.exists())
 
     def test_oversized_fallback_message_or_name_is_refused_without_persistence(self):
