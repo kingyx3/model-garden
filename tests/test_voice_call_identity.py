@@ -7,6 +7,9 @@ The call hash is a local correlation token, NOT provider/SIP attestation.
 from __future__ import annotations
 
 import ast
+import asyncio
+import os
+import time
 import hashlib
 import importlib.util
 import pathlib
@@ -110,7 +113,8 @@ class CallIdentityTests(unittest.TestCase):
         self.assertIsNone(select(room(observer)))
         for participants in ((alice, bob), (bob, alice), (observer, alice, bob)):
             with self.subTest(participants=participants):
-                self.assertIsNone(select(room(*participants)))
+                with self.assertRaisesRegex(ValueError, "ambiguous SIP"):
+                    select(room(*participants))
 
         # Both SIP transfer and callback-number capture must use this same
         # fail-closed selector rather than independently choosing a participant.
@@ -120,6 +124,60 @@ class CallIdentityTests(unittest.TestCase):
             implementation = next(node for node in agent.body
                                   if isinstance(node, ast.AsyncFunctionDef) and node.name == method)
             self.assertIn("_sip_participant(job_ctx)", ast.unparse(implementation))
+
+    def test_multi_sip_room_refuses_transfer_and_message_before_any_effect(self):
+        # The real worker methods run with only transport fakes. No provider
+        # identity, phone number, message or SIP transfer may be guessed.
+        tree = ast.parse(WORKER.read_text(encoding="utf-8"))
+        helper = next(node for node in tree.body
+                      if isinstance(node, ast.FunctionDef) and node.name == "_sip_participant")
+        agent_node = next(node for node in tree.body
+                          if isinstance(node, ast.ClassDef) and node.name == "ReceptionistVoiceAgent")
+        alice = SimpleNamespace(kind="sip", identity="alice")
+        bob = SimpleNamespace(kind="sip", identity="bob")
+        transfers, writes = [], []
+
+        async def transfer(request):
+            transfers.append(request)
+
+        async def active():
+            return False
+
+        job = SimpleNamespace(
+            room=SimpleNamespace(name="room", remote_participants={"a": alice, "b": bob}),
+            api=SimpleNamespace(sip=SimpleNamespace(transfer_sip_participant=transfer)),
+        )
+        class BaseAgent:
+            def __init__(self, *, instructions):
+                pass
+
+        scope = {
+            "JobContext": object,
+            "rtc": SimpleNamespace(ParticipantKind=SimpleNamespace(SIP="sip")),
+            "Agent": BaseAgent,
+            "function_tool": lambda: (lambda fn: fn),
+            "get_job_context": lambda: job,
+            "voice_paused": active,
+            "HOLDING": "paused",
+            "os": os,
+            "time": time,
+            "api": SimpleNamespace(TransferSIPParticipantRequest=lambda **kw: kw),
+            "AGENT_NAME": "receptionist",
+            "_safe_digest": lambda value: "digest",
+            "_append_message": lambda payload: writes.append(payload),
+        }
+        module = ast.Module(body=[
+            ast.ImportFrom(module="__future__", names=[ast.alias(name="annotations")], level=0),
+            helper, agent_node,
+        ], type_ignores=[])
+        ast.fix_missing_locations(module)
+        exec(compile(module, str(WORKER), "exec"), scope)
+        agent = scope["ReceptionistVoiceAgent"]("receptionist", call_hash="a" * 64)
+        with mock.patch.dict(os.environ, {"MODEL_GARDEN_HUMAN_TRANSFER_TARGET": "tel:+1234567"}):
+            self.assertIn("multiple SIP", asyncio.run(agent.transfer_to_human(None)))
+            self.assertIn("multiple SIP", asyncio.run(agent.capture_message(None, "private message")))
+        self.assertEqual(transfers, [])
+        self.assertEqual(writes, [])
 
     def test_worker_uses_invocation_identity_for_transcript_and_lifecycle(self):
         tree = ast.parse(WORKER.read_text(encoding="utf-8"))
