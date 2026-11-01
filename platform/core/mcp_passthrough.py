@@ -38,7 +38,9 @@ import json
 import os
 import pathlib
 import re
+import stat
 import sys
+import tempfile
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from typing import Any
 from urllib.parse import urlsplit
@@ -191,32 +193,101 @@ class SchemaApprovals:
         self.path = self.root / f"{tenant}.mcp-approvals.json"
         self._audit = audit
 
+    @staticmethod
+    def _private_file(path: pathlib.Path, *, missing: bool = False) -> os.stat_result | None:
+        """Reject aliases and exposed approval/lock files instead of following them."""
+        try:
+            info = path.lstat()
+        except FileNotFoundError:
+            if missing:
+                return None
+            raise McpDeclarationError("unsafe MCP schema approval state is missing") from None
+        if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid()
+                or info.st_mode & 0o077 or info.st_nlink != 1):
+            raise McpDeclarationError("unsafe MCP schema approval state path (type, owner, permissions or links)")
+        return info
+
+    @staticmethod
+    def _checked_open(fd: int, expected: os.stat_result) -> os.stat_result:
+        actual = os.fstat(fd)
+        if (not stat.S_ISREG(actual.st_mode) or actual.st_uid != os.geteuid()
+                or actual.st_mode & 0o077 or actual.st_nlink != 1
+                or (actual.st_dev, actual.st_ino) != (expected.st_dev, expected.st_ino)):
+            raise McpDeclarationError("unsafe MCP schema approval state changed during open")
+        return actual
+
     @contextlib.contextmanager
     def _locked(self) -> Iterator[dict[str, Any]]:
         self.root.mkdir(parents=True, exist_ok=True, mode=0o700)
+        root_info = self.root.lstat()
+        if (not stat.S_ISDIR(root_info.st_mode) or root_info.st_uid != os.geteuid()
+                or root_info.st_mode & 0o077):
+            raise McpDeclarationError("unsafe MCP schema approval root (type, owner or permissions)")
+        lock_path = self.root / f".{self.tenant}.mcp-approvals.lock"
         try:
-            os.chmod(self.root, 0o700)
-        except OSError:
-            pass
-        descriptor = os.open(self.root / f".{self.tenant}.mcp-approvals.lock", os.O_RDWR | os.O_CREAT, 0o600)
+            descriptor = os.open(lock_path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600)
+        except OSError as exc:
+            raise McpDeclarationError("unsafe MCP schema approval lock could not be opened") from exc
         try:
+            self._checked_open(descriptor, self._private_file(lock_path))
             fcntl.flock(descriptor, fcntl.LOCK_EX)
+            self._checked_open(descriptor, self._private_file(lock_path))
             state: dict[str, Any] = {"schemaVersion": SCHEMA_VERSION, "tenant": self.tenant, "approved": {}}
-            if self.path.is_file():
-                loaded = json.loads(self.path.read_text(encoding="utf-8"))
-                if not isinstance(loaded, dict) or loaded.get("schemaVersion") != SCHEMA_VERSION or loaded.get("tenant") != self.tenant:
+            original = self._private_file(self.path, missing=True)
+            if original is not None:
+                try:
+                    fd = os.open(self.path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+                except OSError as exc:
+                    raise McpDeclarationError("unsafe MCP schema approval index could not be opened") from exc
+                with os.fdopen(fd, "rb") as stream:
+                    observed = self._checked_open(stream.fileno(), original)
+                    if observed.st_size > 4 * 1024 * 1024:
+                        raise McpDeclarationError("MCP schema approval index exceeds its size limit")
+                    raw = stream.read(4 * 1024 * 1024 + 1)
+                    if len(raw) > 4 * 1024 * 1024:
+                        raise McpDeclarationError("MCP schema approval index exceeds its size limit")
+                try:
+                    loaded = json.loads(raw.decode("utf-8"))
+                except (UnicodeError, json.JSONDecodeError) as exc:
+                    raise McpDeclarationError("invalid MCP schema approval index") from exc
+                if (not isinstance(loaded, dict) or loaded.get("schemaVersion") != SCHEMA_VERSION
+                        or loaded.get("tenant") != self.tenant):
                     raise McpDeclarationError("approval store has an unsupported format or belongs to another tenant")
+                approved = loaded.get("approved")
+                if not isinstance(approved, dict) or any(
+                    not isinstance(key, str) or not re.fullmatch(r"[a-z][a-z0-9-]{0,31}/[A-Za-z0-9][A-Za-z0-9_.-]{0,63}", key)
+                    or not isinstance(value, dict) or set(value) != {"fingerprint", "approvedBy", "approvedAt"}
+                    or not isinstance(value["fingerprint"], str) or not re.fullmatch(r"[0-9a-f]{64}", value["fingerprint"])
+                    or not isinstance(value["approvedBy"], str) or not _PERSON.fullmatch(value["approvedBy"])
+                    or not isinstance(value["approvedAt"], int) or isinstance(value["approvedAt"], bool)
+                    or value["approvedAt"] < 0
+                    for key, value in approved.items()
+                ):
+                    raise McpDeclarationError("invalid MCP schema approval index entries")
                 state = loaded
             before = json.dumps(state, sort_keys=True)
             yield state
             if json.dumps(state, sort_keys=True) != before:
-                temporary = self.path.with_suffix(".tmp")
-                handle = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-                with os.fdopen(handle, "w", encoding="utf-8") as stream:
-                    stream.write(json.dumps(state, sort_keys=True) + "\n")
-                    stream.flush()
-                    os.fsync(stream.fileno())
-                os.replace(temporary, self.path)
+                current = self._private_file(self.path, missing=True)
+                if (current is None) != (original is None) or (
+                    current is not None and original is not None
+                    and (current.st_dev, current.st_ino) != (original.st_dev, original.st_ino)
+                ):
+                    raise McpDeclarationError("unsafe MCP schema approval index changed during update")
+                self._checked_open(descriptor, self._private_file(lock_path))
+                encoded = (json.dumps(state, sort_keys=True) + "\n").encode("utf-8")
+                if len(encoded) > 4 * 1024 * 1024:
+                    raise McpDeclarationError("MCP schema approval index exceeds its size limit")
+                handle, temporary = tempfile.mkstemp(prefix=f".{self.tenant}.mcp-approval-", dir=self.root)
+                try:
+                    with os.fdopen(handle, "wb") as stream:
+                        stream.write(encoded)
+                        stream.flush()
+                        os.fsync(stream.fileno())
+                    os.replace(temporary, self.path)
+                finally:
+                    with contextlib.suppress(FileNotFoundError):
+                        os.unlink(temporary)
         finally:
             fcntl.flock(descriptor, fcntl.LOCK_UN)
             os.close(descriptor)
