@@ -12,10 +12,18 @@ unusable (dropping is deliberate: refusing would bounce a message to whoever for
 server retries) when the spool is full or cannot be written. Nothing here listens on a network port, sets up DNS or MX, reads
 a mailbox on its own or answers anyone; the support mailbox handler drains the spool (`platform/channels/mail_spool.py`). Records and the
 ledger hold identifiers, sizes and states only. Pass --tenant or it is read from the compiled desired state (`source.client`).
+
+At the pipe boundary, every untrusted Authentication-Results header is stripped. Only a trusted local MTA hook that has
+independently verified aligned DMARC may supply both --verified-sender (the exact authenticated From) and
+--mta-authserv-id (its fixed receiver ID). Never derive these from message headers or sender-supplied parameters.
+Without both, the message is retained as unverified/public; a partial or mismatched attestation tempfails.
 """
 from __future__ import annotations
 
 import argparse
+import email
+import email.policy
+import email.utils
 import importlib.util
 import json
 import os
@@ -58,6 +66,49 @@ def tenant_of(desired_state: pathlib.Path) -> str:
     return client
 
 
+# Authentication-Results in an RFC 5322 message is untrusted input at a
+# generic pipe boundary. Only an independently verified MTA result, supplied
+# by the local delivery program rather than copied from the message, can
+# establish the sender for the downstream public-principal policy.
+_AUTH_SERVER = re.compile(r"[a-z0-9](?:[a-z0-9.-]{0,251}[a-z0-9])?\Z")
+
+
+def prepare_mta_message(raw: bytes, *, verified_sender: str | None = None,
+                        authserv_id: str | None = None) -> bytes:
+    """Strip untrusted auth headers; optionally add one MTA-attested DMARC result.
+
+    Both optional values must come from a trusted local delivery-agent config
+    and its independent authentication result. Neither may be extracted from
+    the incoming message's headers, body, SMTP HELO or caller-controlled args.
+    """
+    if (verified_sender is None) != (authserv_id is None):
+        raise ValueError("MTA sender attestation needs both verified sender and authserv id")
+    message = email.message_from_bytes(raw, policy=email.policy.SMTP)
+    # Delete every occurrence, including an attacker-supplied header that
+    # happens to use the receiver's own authserv-id.
+    has_untrusted_results = bool(message.get_all("Authentication-Results"))
+    if has_untrusted_results:
+        del message["Authentication-Results"]
+    if not has_untrusted_results and verified_sender is None:
+        return raw  # preserve the original RFC 5322 bytes when no rewrite is needed
+    if verified_sender is not None:
+        trusted = authserv_id.strip().lower()
+        address = verified_sender.strip().lower()
+        from_headers = message.get_all("From") or []
+        parsed = email.utils.getaddresses([str(value) for value in from_headers])
+        if (not _AUTH_SERVER.fullmatch(trusted)
+                or not SPOOL._ADDRESS.fullmatch(address)
+                or len(from_headers) != 1 or len(parsed) != 1
+                or parsed[0][1].strip().lower() != address):
+            raise ValueError("MTA attestation does not match a single valid sender")
+        domain = address.rpartition("@")[2]
+        message["Authentication-Results"] = f"{trusted}; dmarc=pass header.from={domain}"
+    prepared = message.as_bytes(policy=email.policy.SMTP)
+    if len(prepared) > SPOOL.MAX_MESSAGE_BYTES and len(raw) <= SPOOL.MAX_MESSAGE_BYTES:
+        raise ValueError("MTA authentication envelope exceeds spool limit")
+    return prepared
+
+
 def main(argv: list[str] | None = None, stdin=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("store", type=pathlib.Path, help="mail spool root")
@@ -65,6 +116,8 @@ def main(argv: list[str] | None = None, stdin=None) -> int:
     parser.add_argument("--tenant", help="client-environment slug (default: from the compiled desired state)")
     parser.add_argument("--audit-path", type=pathlib.Path, help="ledger path (default: <store>/../audit.jsonl)")
     parser.add_argument("--retention-days", type=int, default=SPOOL.DEFAULT_RETENTION_DAYS)
+    parser.add_argument("--verified-sender", help="MTA-verified RFC 5322 From address (trusted local delivery only)")
+    parser.add_argument("--mta-authserv-id", help="authserv-id of the MTA that independently verified DMARC")
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("ingest", help="store one raw message read from standard input")
     sub.add_parser("stats", help="print counts by state and quarantined ids (no contents)")
@@ -88,6 +141,7 @@ def main(argv: list[str] | None = None, stdin=None) -> int:
         if args.command == "ingest":
             try:
                 raw = (stdin or sys.stdin.buffer).read(SPOOL.MAX_MESSAGE_BYTES + 1)
+                raw = prepare_mta_message(raw, verified_sender=args.verified_sender, authserv_id=args.mta_authserv_id)
                 print(json.dumps(spool.ingest(raw), sort_keys=True))
             except Exception as exc:  # noqa: BLE001 - ledger or storage failures must tell the MTA to retry
                 print(f"Runtime mailbox deferred: {type(exc).__name__}", file=sys.stderr)
