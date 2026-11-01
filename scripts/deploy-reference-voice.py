@@ -294,18 +294,20 @@ def _apply_selected_voice(binding: dict[str, Any], voice: dict[str, Any], bundle
                 "restart": "unless-stopped",
                 "healthcheck": voice_healthcheck(),
                 "environment": voice_environment,
-                # Read-only owner pause state; no governance write access.
-                "volumes": ["voice-data:/opt/data", "governance-data:/opt/governance:ro"],
-                "depends_on": {"hermes": {"condition": "service_healthy"}},
+                # Voice queries the existing governed sidecar's private pause
+                # status route; never mount its audit/approval/secret volume.
+                "volumes": ["voice-data:/opt/data"],
+                "depends_on": {"hermes": {"condition": "service_healthy"},
+                               "governed-tools": {"condition": "service_healthy"}},
             },
         },
-        "volumes": {"voice-data": {}, "governance-data": {}},
+        "volumes": {"voice-data": {}},
     }
     base_document = yaml.safe_load(base.read_text(encoding="utf-8"))
     if (not isinstance(base_document, dict)
             or not isinstance(base_document.get("services"), dict)
             or "governed-tools" not in base_document["services"]):
-        raise ValueError("voice pause requires the shared governed-tools service and governance volume")
+        raise ValueError("voice pause requires the shared governed-tools service")
     shared = worker_overlay(base_document, agent_name=agent_name.strip())
     if shared is not None:
         document["services"]["governed-worker"] = shared
