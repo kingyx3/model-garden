@@ -27,6 +27,11 @@ def lifecycle(call_hash: str, at: int = 100, *, ended: bool = True):
     return rows
 
 
+def transfer(call_hash: str, at: int = 105):
+    return {"type": "HumanTransfer", "callHash": call_hash, "agent": AGENT,
+            "timestamp": at, "status": "requested"}
+
+
 def transcript(call_hash: str, at: int = 100, **extra):
     record = {
         "type": "CallTranscript", "callHash": call_hash, "agent": AGENT,
@@ -75,7 +80,7 @@ class FullCallCoverageTests(unittest.TestCase):
                 self.assertFalse(acceptance(rows, records)["passed"])
 
     def test_cold_transfer_is_two_way_but_not_complete_through_human_leg(self):
-        rows = lifecycle(A)
+        rows = lifecycle(A) + [transfer(A)]
         record = transcript(A, outcome="transferred", transfer={
             "offsetSeconds": 4, "turnsAfter": 0, "captured": False,
         })
@@ -85,7 +90,7 @@ class FullCallCoverageTests(unittest.TestCase):
         self.assertFalse(acceptance(rows, [record])["passed"])
 
     def test_forged_transfer_capture_without_a_human_turn_cannot_pass(self):
-        rows = lifecycle(A)
+        rows = lifecycle(A) + [transfer(A)]
         base = transcript(A, outcome="transferred")
         for changed in (
             {"transfer": {"offsetSeconds": 4, "turnsAfter": 1, "captured": True}},
@@ -97,8 +102,19 @@ class FullCallCoverageTests(unittest.TestCase):
             with self.subTest(changed=changed):
                 self.assertFalse(acceptance(rows, [{**base, **changed}])["passed"])
 
+    def test_transfer_lifecycle_and_transcript_must_agree(self):
+        complete = transcript(A, outcome="transferred",
+                              transfer={"offsetSeconds": 4, "turnsAfter": 1, "captured": True},
+                              turns=transcript(A)["turns"] + [
+                                  {"index": 2, "speaker": "human", "offsetSeconds": 5,
+                                   "text": "Hello", "afterTransfer": True},
+                              ])
+        self.assertFalse(acceptance(lifecycle(A), [complete])["passed"])
+        self.assertFalse(acceptance(lifecycle(A) + [transfer(A)], [transcript(A)])["passed"])
+        self.assertFalse(acceptance(lifecycle(A), [transcript(A, outcome="unknown")])["passed"])
+
     def test_valid_human_turn_after_transfer_passes_structural_gate_only(self):
-        rows = lifecycle(A)
+        rows = lifecycle(A) + [transfer(A)]
         record = transcript(A, outcome="transferred",
                             transfer={"offsetSeconds": 4, "turnsAfter": 1, "captured": True},
                             turns=transcript(A)["turns"] + [
