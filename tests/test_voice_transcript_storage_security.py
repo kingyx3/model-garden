@@ -43,8 +43,13 @@ class PrivateTranscriptStorageTests(unittest.TestCase):
         self.assertEqual(len(errors), 1)
         self.assertNotIn("Synthetic private request", " ".join(logs.output + errors))
 
+    def seed(self, text: str) -> None:
+        """Fixture simulates an existing owner-private evidence file."""
+        self.path.write_text(text)
+        self.path.chmod(0o600)
+
     def test_existing_symlink_cannot_redirect_transcript_to_another_file(self):
-        self.path.parent.mkdir()
+        self.path.parent.mkdir(mode=0o700)
         target = self.root / "other-client.jsonl"
         target.write_text("unchanged\n")
         self.path.symlink_to(target)
@@ -52,7 +57,7 @@ class PrivateTranscriptStorageTests(unittest.TestCase):
         self.assertEqual(target.read_text(), "unchanged\n")
 
     def test_hardlinked_file_is_rejected_without_chmod_or_truncating_the_other_link(self):
-        self.path.parent.mkdir()
+        self.path.parent.mkdir(mode=0o700)
         target = self.root / "other-client.jsonl"
         target.write_text("unchanged\n")
         before_mode = stat.S_IMODE(target.stat().st_mode)
@@ -70,14 +75,14 @@ class PrivateTranscriptStorageTests(unittest.TestCase):
         self.assertEqual(stat.S_IMODE(outside.stat().st_mode), 0o755)
 
     def test_nonregular_fifo_is_rejected_without_writing_or_hanging(self):
-        self.path.parent.mkdir()
+        self.path.parent.mkdir(mode=0o700)
         os.mkfifo(self.path)
         self.assert_rejected()
         self.assertTrue(stat.S_ISFIFO(self.path.stat().st_mode))
 
     def test_replacement_after_lock_acquisition_is_rejected_before_truncate(self):
-        self.path.parent.mkdir()
-        self.path.write_text("original\n")
+        self.path.parent.mkdir(mode=0o700)
+        self.seed("original\n")
         target = self.root / "other-client.jsonl"
         target.write_text("unchanged\n")
         original_flock = T.fcntl.flock
@@ -98,8 +103,8 @@ class PrivateTranscriptStorageTests(unittest.TestCase):
         self.assertEqual(target.read_text(), "unchanged\n")
 
     def test_directory_replacement_while_waiting_for_lock_fails_closed(self):
-        self.path.parent.mkdir()
-        self.path.write_text("original\n")
+        self.path.parent.mkdir(mode=0o700)
+        self.seed("original\n")
         original_flock = T.fcntl.flock
         replaced = False
 
@@ -109,7 +114,7 @@ class PrivateTranscriptStorageTests(unittest.TestCase):
             if operation == T.fcntl.LOCK_EX and not replaced:
                 replaced = True
                 self.path.parent.rename(self.root / "detached")
-                self.path.parent.mkdir()
+                self.path.parent.mkdir(mode=0o700)
             return result
 
         with mock.patch.object(T.fcntl, "flock", side_effect=replace_directory):
@@ -119,8 +124,8 @@ class PrivateTranscriptStorageTests(unittest.TestCase):
         self.assertFalse(self.path.exists())
 
     def test_owned_existing_regular_file_still_supports_retention_and_private_mode(self):
-        self.path.parent.mkdir()
-        self.path.write_text('{"timestamp":1,"callHash":"expired"}\n')
+        self.path.parent.mkdir(mode=0o700)
+        self.seed('{"timestamp":1,"callHash":"expired"}\n')
         self.assertIsNotNone(T.finalize(self.transcript()))
         self.assertEqual(stat.S_IMODE(self.path.stat().st_mode), 0o600)
         self.assertEqual(stat.S_IMODE(self.path.parent.stat().st_mode), 0o700)
