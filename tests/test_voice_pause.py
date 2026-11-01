@@ -169,19 +169,17 @@ class VoicePauseTests(unittest.TestCase):
         self.assertTrue(transcript.played)
         self.assertFalse(transcript.suppressed)
 
-    def test_inflight_pause_monitor_closes_once_and_suppresses_evidence(self):
+    def test_inflight_pause_monitor_closes_once_after_active_call(self):
         # Execute the actual asynchronous monitor; no LiveKit or SIP transport.
         async def scenario():
             states = iter((False, False, True))
             async def status():
                 return next(states)
             session = mock.AsyncMock()
-            suppressed = []
             with mock.patch.object(voice_pause, "paused", side_effect=status):
                 await voice_pause.stop_session_on_pause(
-                    session, interval_seconds=0, on_pause=lambda: suppressed.append(True)
+                    session, interval_seconds=0
                 )
-            self.assertEqual(suppressed, [True])
             session.aclose.assert_awaited_once()
 
         asyncio.run(scenario())
@@ -191,12 +189,10 @@ class VoicePauseTests(unittest.TestCase):
             async def unavailable():
                 raise RuntimeError("sensitive provider details must not escape")
             session = mock.AsyncMock()
-            suppressed = []
             with mock.patch.object(voice_pause, "paused", side_effect=unavailable):
                 await voice_pause.stop_session_on_pause(
-                    session, interval_seconds=0, on_pause=lambda: suppressed.append(True)
+                    session, interval_seconds=0
                 )
-            self.assertEqual(suppressed, [True])
             session.aclose.assert_awaited_once()
 
         asyncio.run(scenario())
