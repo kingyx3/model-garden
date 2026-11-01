@@ -385,3 +385,20 @@ The MCP execution seam now treats a protocol `isError: true` result as a failed 
 The host/gateway and Agent processes share `<governance-root>/inbox.json` and its `inbox.lock` on **one trusted local governance volume**. Task assignment, claiming and reporting acquire the same advisory lock; only an `assigned` task may be claimed, so a second worker cannot silently claim a `working` task. The store rejects linked, nonregular, foreign-owned, exposed, malformed or oversized state/lock files, and publishes changed state through a private, unpredictable, exclusive temporary file with file and directory fsync. A predictable legacy `inbox.tmp` hardlink cannot be truncated by the new writer. Do not change or delete these files while the runtime is running; recover damaged state through an authorized backup procedure, not by resetting it.
 
 This protects the **local durable queue and its cross-process claim**, not execution of assigned goals. It does not launch an Agent when a task arrives, deliver a report to the assigning chat, authenticate a remote worker, or coordinate separate hosts/volumes. Those are still outstanding #229 acceptance criteria. Do not interpret an offline inbox regression as a live chat-to-Agent-to-report run.
+
+## MCP schema-approval local state trust (v0.8.257)
+
+The tenant-scoped approved upstream Tool fingerprints are **local authorization state**, not
+just a cache. Before reading or updating them, the schema approval store now refuses
+symlinked, hardlinked, nonregular, foreign-owned or group/world-accessible index and
+lock files, and an untrusted approval directory. It bounds the JSON index to 4 MiB,
+validates each approved fingerprint/reviewer/timestamp record, verifies the opened
+file's inode under the tenant lock, and atomically publishes a private replacement.
+A permissive existing directory is **not** silently repaired with `chmod`;
+operators must investigate and restore the intended tenant-private ownership and
+permissions before retrying. No upstream Tools become approved on a failed read.
+
+This is an offline, same-host filesystem integrity prerequisite for #159/#87. It
+does **not** authenticate the human reviewer, protect against a privileged host
+administrator changing both state and trust roots, or prove customer-owned MCP
+connection, provider-side identity, consent, OAuth, revocation or live action receipts.
