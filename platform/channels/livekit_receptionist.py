@@ -19,6 +19,7 @@ Optional:
 """
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import logging
 import os
@@ -257,6 +258,51 @@ def _instructions() -> str:
     )
 
 
+def _register_sip_disconnect_flush(ctx: JobContext, session: AgentSession) -> None:
+    """Best-effort partial-turn flush when the last SIP caller hangs up.
+
+    A room may stay connected because of observers even after its SIP caller
+    leaves. Closing the AgentSession gives LiveKit an opportunity to commit
+    interrupted TTS text before the job's transcript shutdown callback.
+    This is not proof of what the caller actually heard; a process crash or
+    provider failure can still lose a partial turn.
+    """
+    closing = False
+
+    @ctx.room.on("participant_disconnected")
+    def _on_sip_disconnect(participant: rtc.RemoteParticipant) -> None:
+        nonlocal closing
+        if closing or getattr(participant, "kind", None) != rtc.ParticipantKind.SIP:
+            return
+        identity = getattr(participant, "identity", None)
+        if not isinstance(identity, str) or not identity:
+            LOGGER.error("SIP disconnect identity unavailable; transcript completeness unverified")
+            return
+        try:
+            # Ignore the departing caller even if the SDK has not yet removed
+            # it from the room map. Never terminate a remaining SIP caller.
+            if any(
+                getattr(other, "kind", None) == rtc.ParticipantKind.SIP
+                and getattr(other, "identity", None) != identity
+                for other in ctx.room.remote_participants.values()
+            ):
+                return
+        except (AttributeError, TypeError):
+            LOGGER.error("SIP disconnect room state unavailable; transcript completeness unverified")
+            return
+        closing = True
+
+        async def _flush() -> None:
+            try:
+                await session.aclose()
+            except Exception as exc:
+                # Do not log provider exceptions: they may contain caller data.
+                LOGGER.error("voice session close failed (%s); transcript completeness unverified",
+                             type(exc).__name__)
+
+        asyncio.create_task(_flush())
+
+
 def build_session() -> AgentSession:
     voice_key = _required("OPENAI_API_KEY")
     hermes_url = _required("MODEL_GARDEN_HERMES_API_URL")
@@ -342,6 +388,7 @@ async def receptionist(ctx: JobContext) -> None:
     ctx.add_shutdown_callback(on_shutdown)
     ctx.add_shutdown_callback(on_transcript_shutdown)
     session = build_session()
+    _register_sip_disconnect_flush(ctx, session)
     session.on("conversation_item_added", record_turn)
     await session.start(agent=ReceptionistVoiceAgent(_instructions(), transcript, call_hash=call_hash, project=project), room=ctx.room)
     await ctx.connect()
