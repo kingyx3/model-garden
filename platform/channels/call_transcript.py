@@ -486,7 +486,13 @@ def _open_private_parent(path: pathlib.Path) -> int:
             try:
                 child = os.open(component, flags, dir_fd=directory)
             except FileNotFoundError:
-                os.mkdir(component, mode=0o700, dir_fd=directory)
+                # Another writer may have created the same private directory.
+                # Open it through the pinned parent and revalidate below; a
+                # racing symlink/non-directory must still fail closed.
+                try:
+                    os.mkdir(component, mode=0o700, dir_fd=directory)
+                except FileExistsError:
+                    pass
                 child = os.open(component, flags, dir_fd=directory)
             os.close(directory)
             directory = child
