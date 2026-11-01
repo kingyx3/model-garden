@@ -67,6 +67,14 @@ class FakeCoworker:
 
 
 class SummarizeTests(unittest.TestCase):
+    def test_project_marker_binds_both_original_transcript_and_summary_cache(self):
+        first = record(project="acme-dev")
+        foreign = record(project="another-client-dev")
+        self.assertNotEqual(summary.source_transcript_digest(first), summary.source_transcript_digest(foreign))
+        summarizer = summary.CallSummarizer()
+        self.assertNotEqual(summarizer._fingerprint(first), summarizer._fingerprint(foreign))
+        self.assertNotEqual(summary.source_transcript_digest(first), summary.source_transcript_digest(record()))
+
     def test_the_coworker_writes_the_summary_and_it_is_labelled_a_model_summary(self):
         fake = FakeCoworker()
         result = summary.summarize(record(), fake.client)
