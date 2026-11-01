@@ -27,6 +27,8 @@ import json
 import os
 import pathlib
 import re
+import secrets
+import stat
 import time
 import urllib.error
 import urllib.parse
@@ -365,20 +367,90 @@ class GcsSink:
         return self._read("heads")
 
 
+def _state_directory_fd(path: pathlib.Path) -> int:
+    """Pin a private cursor directory; never follow a substituted directory symlink."""
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        fd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    except OSError as exc:
+        raise LedgerExportError("export state directory is unsafe or inaccessible") from exc
+    info = os.fstat(fd)
+    if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.geteuid() or info.st_mode & 0o077:
+        os.close(fd)
+        raise LedgerExportError("export state directory must be private and owned by the exporter")
+    return fd
+
+
+def _checked_state_fd(directory_fd: int, name: str) -> int | None:
+    try:
+        fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory_fd)
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        raise LedgerExportError("export state file is unsafe or inaccessible") from exc
+    info = os.fstat(fd)
+    if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1
+            or info.st_uid != os.geteuid() or info.st_mode & 0o077):
+        os.close(fd)
+        raise LedgerExportError("export state file must be a private, singly linked regular file")
+    return fd
+
+
 def _load_state(path: pathlib.Path) -> dict[str, Any]:
-    if not path.is_file():
-        return {"sequence": 0, "hash": None}
-    state = json.loads(path.read_text(encoding="utf-8"))
-    if not isinstance(state, dict) or not isinstance(state.get("sequence"), int):
-        raise LedgerExportError("export state file is invalid")
+    directory_fd = _state_directory_fd(path)
+    try:
+        fd = _checked_state_fd(directory_fd, path.name)
+        if fd is None:
+            return {"sequence": 0, "hash": None}
+        with os.fdopen(fd, "r", encoding="utf-8") as handle:
+            try:
+                raw = handle.read(65537)
+            except UnicodeError as exc:
+                raise LedgerExportError("export state file is invalid") from exc
+    finally:
+        os.close(directory_fd)
+    if len(raw) > 65536:
+        raise LedgerExportError("export state file is oversized")
+    try:
+        state = json.loads(raw)
+    except (ValueError, TypeError) as exc:
+        raise LedgerExportError("export state file is invalid") from exc
+    if (not isinstance(state, dict) or set(state) != {"sequence", "hash"}
+            or type(state["sequence"]) is not int or state["sequence"] < 0
+            or (state["sequence"] == 0 and state["hash"] is not None)
+            or (state["sequence"] > 0 and
+                (not isinstance(state["hash"], str) or not re.fullmatch(r"[0-9a-f]{64}", state["hash"])))):
+        raise LedgerExportError("export state file has invalid cursor fields")
     return state
 
 
 def _save_state(path: pathlib.Path, state: Mapping[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    temporary = path.with_suffix(".tmp")
-    temporary.write_text(_canonical(state) + "\n", encoding="utf-8")
-    os.replace(temporary, path)
+    """Publish a private, fsynced cursor without following a predictable .tmp path."""
+    directory_fd = _state_directory_fd(path)
+    temporary = f".export-state-{secrets.token_hex(12)}.tmp"
+    created = False
+    try:
+        old_fd = _checked_state_fd(directory_fd, path.name)
+        if old_fd is not None:
+            os.close(old_fd)
+        fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                     0o600, dir_fd=directory_fd)
+        created = True
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(_canonical(state) + "\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        current = os.stat(path.parent, follow_symlinks=False)
+        pinned = os.fstat(directory_fd)
+        if not stat.S_ISDIR(current.st_mode) or (current.st_dev, current.st_ino) != (pinned.st_dev, pinned.st_ino):
+            raise LedgerExportError("export state directory changed during publication")
+        os.replace(temporary, path.name, src_dir_fd=directory_fd, dst_dir_fd=directory_fd)
+        created = False
+        os.fsync(directory_fd)
+    finally:
+        if created:
+            os.unlink(temporary, dir_fd=directory_fd)
+        os.close(directory_fd)
 
 
 def export_ledger(

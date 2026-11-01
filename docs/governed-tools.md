@@ -315,6 +315,9 @@ The bounded context intentionally rejects arbitrary fields so prompts, raw crede
 
 ### Ledger export and verification
 
+**Export cursor integrity (v0.8.260, #80).** The incremental export cursor now requires a private, exporter-owned state directory and a singly linked regular state file (both inaccessible to group/other users). A symlinked parent/file, hardlinked cursor, loose permissions, malformed or oversized cursor fails closed before another batch is acknowledged. Updates use a random exclusive mode-0600 temporary file, fsync and atomic replacement through a pinned directory descriptor; a predictable adjacent `.tmp` symlink is never opened. **Upgrade:** on an existing deployment, review the legitimate cursor against the retained append-only export and ledger, then set its directory to `0700` and file to `0600` under the exporter identity before restarting. Do not delete/reinitialize a cursor to bypass an integrity failure: reconcile the last exported record/head first. This protects host-local cursor files, not a malicious host administrator, concurrent exporter ownership, GCS retention lock, or live independent verification.
+
+
 `scripts/ledger-export.py` (library: `platform/core/ledger_export.py`) copies the chained records and head manifests to a sink that the runtime identity should not be able to rewrite:
 
 ```bash
