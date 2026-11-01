@@ -23,6 +23,7 @@ import hashlib
 import logging
 import os
 import pathlib
+import re
 import secrets
 import time
 from typing import Any
@@ -277,6 +278,8 @@ server = AgentServer(host="127.0.0.1", port=8081)
 async def receptionist(ctx: JobContext) -> None:
     # A voice volume must not be reused as another client deployment's evidence.
     project = _required("MODEL_GARDEN_VOICE_PROJECT")
+    if re.fullmatch(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?", project) is None:
+        raise RuntimeError("MODEL_GARDEN_VOICE_PROJECT must be a valid Compose project")
     room_hash = _safe_digest(ctx.room.name)
     call_hash = _call_hash(ctx.room.name)
     ctx.log_context_fields = {"room_hash": room_hash, "call_hash": call_hash, "agent": AGENT_NAME}
