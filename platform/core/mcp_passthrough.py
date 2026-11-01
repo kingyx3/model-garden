@@ -296,6 +296,10 @@ class SchemaApprovals:
         """Pin the tool's current definition; approving a changed definition replaces the old pin."""
         if not isinstance(by, str) or not _PERSON.match(by):
             raise McpDeclarationError("approval names the person who reviewed the tool")
+        if not isinstance(server, str) or not _NAME.fullmatch(server):
+            raise McpDeclarationError("approval needs a valid server name")
+        if not isinstance(now, int) or isinstance(now, bool) or now < 0:
+            raise McpDeclarationError("approval needs a nonnegative integer timestamp")
         if not isinstance(tool.get("name"), str) or not _UPSTREAM.match(tool["name"]):
             raise McpDeclarationError("the upstream tool needs a plain name")
         unsafe = _review().blocking_codes(_review().review(tool))
