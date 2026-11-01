@@ -368,6 +368,78 @@ class TamperDetectionTests(unittest.TestCase):
         self.assertEqual(list(export.iter_gap_sequences([])), [])
 
 
+
+
+class ExportCursorSecurityTests(unittest.TestCase):
+    """The export cursor must not become an untrusted filesystem write primitive."""
+
+    def test_symlinked_cursor_and_parent_are_refused_without_touching_target(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ws = Workspace(tmp)
+            write_ledger(ws.ledger, 1)
+            outside = ws.root / "outside.json"
+            outside.write_text('{"sequence":0,"hash":null}\\n', encoding="utf-8")
+            ws.state.parent.mkdir(mode=0o700)
+            ws.state.symlink_to(outside)
+            with self.assertRaisesRegex(export.LedgerExportError, "state"):
+                ws.export()
+            self.assertEqual(outside.read_text(encoding="utf-8"), '{"sequence":0,"hash":null}\\n')
+            ws.state.unlink()
+            ws.state.parent.rmdir()
+            ws.state.parent.symlink_to(ws.root)
+            with self.assertRaisesRegex(export.LedgerExportError, "state"):
+                ws.export()
+            self.assertFalse((ws.root / "export.json").exists())
+
+    def test_cursor_hardlink_and_readable_permissions_fail_closed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ws = Workspace(tmp)
+            write_ledger(ws.ledger, 1)
+            ws.export()
+            self.assertEqual(stat.S_IMODE(ws.state.stat().st_mode), 0o600)
+            duplicate = ws.root / "linked-state.json"
+            os.link(ws.state, duplicate)
+            with self.assertRaisesRegex(export.LedgerExportError, "state"):
+                ws.export()
+            duplicate.unlink()
+            ws.state.chmod(0o644)
+            with self.assertRaisesRegex(export.LedgerExportError, "state"):
+                ws.export()
+
+    def test_cursor_rejects_invalid_and_oversized_records(self):
+        for payload in (
+            '{"sequence":true,"hash":null}',
+            '{"sequence":-1,"hash":null}',
+            '{"sequence":1,"hash":null}',
+            '{"sequence":0,"hash":"not-a-digest"}',
+            " " * 70000,
+        ):
+            with self.subTest(payload=payload[:30]), tempfile.TemporaryDirectory() as tmp:
+                ws = Workspace(tmp)
+                write_ledger(ws.ledger, 1)
+                ws.state.parent.mkdir(mode=0o700)
+                ws.state.write_text(payload, encoding="utf-8")
+                ws.state.chmod(0o600)
+                with self.assertRaisesRegex(export.LedgerExportError, "state"):
+                    ws.export()
+
+    def test_cursor_update_is_private_atomic_and_ignores_predictable_tmp_symlink(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ws = Workspace(tmp)
+            write_ledger(ws.ledger, 1)
+            ws.state.parent.mkdir(mode=0o700)
+            outside = ws.root / "sentinel.txt"
+            outside.write_text("unchanged", encoding="utf-8")
+            ws.state.with_suffix(".tmp").symlink_to(outside)
+            ws.export()
+            self.assertEqual(outside.read_text(encoding="utf-8"), "unchanged")
+            self.assertEqual(stat.S_IMODE(ws.state.stat().st_mode), 0o600)
+            write_ledger(ws.ledger, 1, start=2)
+            ws.export()
+            self.assertEqual(json.loads(ws.state.read_text())["sequence"], 2)
+            self.assertEqual(outside.read_text(encoding="utf-8"), "unchanged")
+
+
 class WebhookSinkTests(unittest.TestCase):
     def test_https_is_required(self):
         with self.assertRaises(ValueError):
