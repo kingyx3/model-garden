@@ -282,6 +282,17 @@ def _transcript_summary(voice_rows: list[dict[str, Any]], transcript_rows: list[
                 and key in started and at >= started[key]):
             completed[key] = max(at, completed.get(key, at))
 
+    # A separate worker lifecycle receipt witnesses an actual transfer request.
+    # A transcript that calls that same invocation "resolved" must not mask
+    # an uncaptured human leg in the strict coverage gate.
+    transfer_receipts: set[tuple[str, str]] = set()
+    for row in voice_rows:
+        key = (_voice_call_id(row), row.get("agent"))
+        at = row.get("timestamp")
+        if (row.get("type") == "HumanTransfer" and key in completed
+                and type(at) is int and started[key] <= at <= completed[key]):
+            transfer_receipts.add(key)
+
     by_call: dict[tuple[str, str], list[dict[str, Any]]] = {}
     for row in transcript_rows:
         if row.get("type") != "CallTranscript":
@@ -343,6 +354,8 @@ def _transcript_summary(voice_rows: list[dict[str, Any]], transcript_rows: list[
             # opt-in coverage gate requires an actual labelled human turn
             # after a coherent transfer marker, never just a claimed flag.
             if record.get("outcome") == "transferred":
+                if key not in transfer_receipts:
+                    continue
                 transfer = record.get("transfer")
                 if not isinstance(transfer, dict):
                     continue
@@ -359,7 +372,9 @@ def _transcript_summary(voice_rows: list[dict[str, Any]], transcript_rows: list[
                         or any(turn.get("offsetSeconds", -1) < transfer_at for turn in after)):
                     continue
                 complete_through_transfer += 1
-            elif "transfer" not in record:
+            elif (key not in transfer_receipts and "transfer" not in record
+                  and record.get("outcome") in ("resolved", "booked", "message-taken", "abandoned")
+                  and not any(turn.get("afterTransfer") is True for turn in turns)):
                 complete_through_transfer += 1
     return {"records": len(transcript_rows), "completeTwoWayCalls": complete,
             "completeThroughTransferCalls": complete_through_transfer}
