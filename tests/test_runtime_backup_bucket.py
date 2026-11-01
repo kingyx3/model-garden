@@ -35,6 +35,10 @@ class RuntimeBackupBucketContractTests(unittest.TestCase):
             'resource "google_service_account_iam_member" "runtime_impersonates_backup_writer"',
             'role               = "roles/iam.serviceAccountTokenCreator"',
             'member             = "serviceAccount:${var.runtime_service_account}"',
+            'resource "google_service_account" "backup_reader"',
+            'resource "google_storage_bucket_iam_member" "backup_reader_view"',
+            'role   = "roles/storage.objectViewer"',
+            'member = "serviceAccount:${google_service_account.backup_reader[0].email}"',
         ):
             with self.subTest(declaration=declaration):
                 self.assertIn(declaration, source)
@@ -42,7 +46,11 @@ class RuntimeBackupBucketContractTests(unittest.TestCase):
         self.assertNotIn("var.runtime_service_account", bucket_writer, "runtime must not have direct bucket permission")
         self.assertNotIn("roles/storage.objectAdmin", source)
         self.assertNotIn("roles/storage.admin", source)
-        self.assertNotIn("roles/storage.objectViewer", source)
+        reader = source.split('resource "google_storage_bucket_iam_member" "backup_reader_view" {', 1)[1].split("\n}", 1)[0]
+        self.assertNotIn("var.runtime_service_account", reader)
+        self.assertIn("google_storage_bucket.runtime_backups[0].name", reader)
+        self.assertNotIn('resource "google_service_account_iam_member" "runtime_impersonates_backup_reader"', source)
+        self.assertIn('output "runtime_backup_reader_service_account"', source)
 
 
 if __name__ == "__main__":
