@@ -21,12 +21,12 @@ assert SPEC.loader is not None
 SPEC.loader.exec_module(VOICE)
 
 PROBE = (
-    "import urllib.request; "
+    "import sys, urllib.request; "
     "opener=urllib.request.build_opener(urllib.request.ProxyHandler({}), "
     "type('NoRedirect',(urllib.request.HTTPRedirectHandler,),"
     "{'redirect_request':lambda self,*args,**kwargs:None})()); "
     "r=opener.open('http://127.0.0.1:8080/health/{component}', timeout=3); "
-    "assert r.status == 200"
+    "sys.exit(0 if r.status == 200 else 1)"
 )
 METRICS = {"gateway": "custom.googleapis.com/model_garden/gateway_ready",
            "worker": "custom.googleapis.com/model_garden/worker_ready"}
