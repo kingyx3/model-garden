@@ -869,8 +869,12 @@ class CallFilingTests(Case):
 
     def test_the_transcript_path_comes_from_the_environment(self):
         args = type("Args", (), {"config": None, "desired_state": compiled(self.root), "data_root": self.data})()
-        self.assertEqual(worker.build(args, {"MODEL_GARDEN_VOICE_TRANSCRIPTS": "/opt/voice/transcripts.jsonl"}).voice_transcripts,
-                         pathlib.Path("/opt/voice/transcripts.jsonl"))
+        scoped = worker.build(args, {"MODEL_GARDEN_VOICE_TRANSCRIPTS": "/opt/voice/transcripts.jsonl",
+                                     "MODEL_GARDEN_VOICE_PROJECT": "acme-dev"})
+        self.assertEqual(scoped.voice_transcripts, pathlib.Path("/opt/voice/transcripts.jsonl"))
+        self.assertEqual(scoped.voice_project, "acme-dev")
+        with self.assertRaisesRegex(worker.WorkerConfigError, "MODEL_GARDEN_VOICE_PROJECT is required"):
+            worker.build(args, {"MODEL_GARDEN_VOICE_TRANSCRIPTS": "/opt/voice/transcripts.jsonl"})
         self.assertIsNone(worker.build(args, {}).voice_transcripts)
 
 
