@@ -197,6 +197,50 @@ class VoicePauseTests(unittest.TestCase):
 
         asyncio.run(scenario())
 
+    def test_inflight_pause_close_retries_transient_sdk_failure_without_resuming(self):
+        # A failed SDK close must not silently terminate the safety watcher.
+        # A later active response cannot retract the already observed pause.
+        async def scenario():
+            session = mock.AsyncMock()
+            session.aclose.side_effect = [RuntimeError("private caller data"), None]
+            with mock.patch.object(voice_pause, "paused", side_effect=[True, False]) as status, \
+                 mock.patch.object(voice_pause.LOGGER, "error") as logged:
+                await voice_pause.stop_session_on_pause(session, interval_seconds=0)
+            self.assertEqual(session.aclose.await_count, 2)
+            self.assertEqual(status.await_count, 1)
+            self.assertEqual(logged.call_count, 1)
+            self.assertNotIn("private caller data", str(logged.call_args))
+
+        asyncio.run(scenario())
+
+    def test_inflight_pause_close_keeps_retrying_until_shutdown_cancellation(self):
+        # A persistent close failure is not a successful emergency stop.
+        async def scenario():
+            attempts = 0
+            enough = asyncio.Event()
+
+            async def cannot_close():
+                nonlocal attempts
+                attempts += 1
+                if attempts >= 3:
+                    enough.set()
+                raise RuntimeError("sensitive voice data")
+
+            session = mock.AsyncMock()
+            session.aclose.side_effect = cannot_close
+            with mock.patch.object(voice_pause, "paused", return_value=True) as status, \
+                 mock.patch.object(voice_pause.LOGGER, "error") as logged:
+                task = asyncio.create_task(voice_pause.stop_session_on_pause(session, interval_seconds=0))
+                await asyncio.wait_for(enough.wait(), timeout=1)
+                task.cancel()
+                with self.assertRaises(asyncio.CancelledError):
+                    await task
+            self.assertGreaterEqual(attempts, 3)
+            self.assertEqual(status.await_count, 1)
+            self.assertNotIn("sensitive voice data", str(logged.call_args_list))
+
+        asyncio.run(scenario())
+
     def test_inflight_pause_monitor_cancellation_does_not_close_active_session(self):
         async def scenario():
             entered = asyncio.Event()
