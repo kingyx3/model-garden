@@ -59,7 +59,7 @@ async def stop_session_on_pause(session, *, interval_seconds: float = 1.0,
                 try:
                     on_pause()
                 except Exception as exc:
-                    LOGGER.error("voice pause evidence suppression failed (%s)", type(exc).__name__)
+                    LOGGER.error("voice pause callback failed (%s)", type(exc).__name__)
             try:
                 await session.aclose()
             except Exception as exc:
