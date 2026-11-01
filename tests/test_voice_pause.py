@@ -7,6 +7,7 @@ call-start and provider-side-effect paths. These are NOT live cancellation proof
 from __future__ import annotations
 
 import ast
+import asyncio
 import importlib.util
 import pathlib
 import sys
@@ -81,6 +82,84 @@ class VoicePauseTests(unittest.TestCase):
         self.assertIn("pause.py", source)
         self.assertIn("governed-tools", source)
 
+
+    def test_paused_agent_speaks_holding_without_model_or_fallback_effects(self):
+        # Execute the real worker class with transport stubs; no LiveKit import,
+        # provider, SIP call, model or cloud credential is involved.
+        tree = ast.parse((ROOT / "platform/channels/livekit_receptionist.py").read_text())
+        agent_node = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == "ReceptionistVoiceAgent")
+
+        class Session:
+            def __init__(self):
+                self.spoken = []
+                self.generated = []
+
+            async def say(self, text, **kwargs):
+                self.spoken.append(text)
+
+            def generate_reply(self, **kwargs):
+                self.generated.append(kwargs)
+
+        class BaseAgent:
+            def __init__(self, *, instructions):
+                self.session = Session()
+
+        class Transcript:
+            disclosure_text = "This call is transcribed."
+
+            def __init__(self):
+                self.suppressed = False
+                self.played = False
+
+            def suppress(self):
+                self.suppressed = True
+
+            def mark_disclosure_played(self):
+                self.played = True
+
+        namespace = {
+            "Agent": BaseAgent, "function_tool": lambda: (lambda fn: fn),
+            "HOLDING": voice_pause.HOLDING, "voice_paused": lambda: True,
+        }
+        module = ast.Module(body=[
+            ast.ImportFrom(module="__future__", names=[ast.alias(name="annotations")], level=0),
+            agent_node,
+        ], type_ignores=[])
+        ast.fix_missing_locations(module)
+        exec(compile(module, "<voice-worker-agent>", "exec"), namespace)
+        cls = namespace["ReceptionistVoiceAgent"]
+
+        transcript = Transcript()
+        agent = cls("receptionist", transcript, call_hash="a" * 64)
+        asyncio.run(agent.on_enter())
+        self.assertEqual(agent.session.spoken, [voice_pause.HOLDING])
+        self.assertEqual(agent.session.generated, [])
+        self.assertTrue(transcript.suppressed)
+        self.assertFalse(transcript.played)
+        # Neither provider nor fallback store is available in this test:
+        # reaching either would raise, rather than returning the holding text.
+        self.assertEqual(asyncio.run(agent.transfer_to_human(None)), voice_pause.HOLDING)
+        self.assertEqual(asyncio.run(agent.capture_message(None, "private caller message")), voice_pause.HOLDING)
+
+        # Pause committed while disclosure was being spoken also blocks
+        # model generation; the unpaused path still generates normally.
+        states = iter([False, True])
+        namespace["voice_paused"] = lambda: next(states)
+        transcript = Transcript()
+        agent = cls("receptionist", transcript)
+        asyncio.run(agent.on_enter())
+        self.assertEqual(agent.session.spoken, [transcript.disclosure_text, voice_pause.HOLDING])
+        self.assertEqual(agent.session.generated, [])
+        self.assertTrue(transcript.suppressed)
+
+        namespace["voice_paused"] = lambda: False
+        transcript = Transcript()
+        agent = cls("receptionist", transcript)
+        asyncio.run(agent.on_enter())
+        self.assertEqual(agent.session.spoken, [transcript.disclosure_text])
+        self.assertEqual(len(agent.session.generated), 1)
+        self.assertTrue(transcript.played)
+        self.assertFalse(transcript.suppressed)
 
 if __name__ == "__main__":
     unittest.main()
