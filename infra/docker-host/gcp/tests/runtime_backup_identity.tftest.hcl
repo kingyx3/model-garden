@@ -1,6 +1,15 @@
 # Provider-mocked least-privilege backup identity contract (#230).
 # No cloud resource is provisioned by this test.
-mock_provider "google" {}
+mock_provider "google" {
+  # Mocked computed name must satisfy the provider's IAM resource validator.
+  override_resource {
+    target = google_service_account.backup_writer
+    values = {
+      email = "mg-bkp-${substr(md5("acme-dev-mg"), 0, 8)}@sample-project-123.iam.gserviceaccount.com"
+      name  = "projects/sample-project-123/serviceAccounts/mg-bkp-${substr(md5("acme-dev-mg"), 0, 8)}@sample-project-123.iam.gserviceaccount.com"
+    }
+  }
+}
 
 variables {
   project_id              = "sample-project-123"
