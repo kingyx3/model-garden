@@ -7,6 +7,7 @@ fails closed. This is admission checking, NOT distributed effect cancellation.
 """
 from __future__ import annotations
 
+import asyncio
 import http.client
 
 from pause import HOLDING
@@ -17,7 +18,7 @@ PATH = "/internal/voice-pause"
 TIMEOUT_SECONDS = 2
 
 
-def paused() -> bool:
+def _check() -> bool:
     """Only an explicit HTTP 200 from the private sidecar permits voice work."""
     connection = http.client.HTTPConnection(HOST, PORT, timeout=TIMEOUT_SECONDS)
     try:
@@ -28,3 +29,8 @@ def paused() -> bool:
         return True
     finally:
         connection.close()
+
+
+async def paused() -> bool:
+    """Bounded private check without blocking LiveKit's media event loop."""
+    return await asyncio.to_thread(_check)
