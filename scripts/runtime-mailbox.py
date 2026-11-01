@@ -12,6 +12,11 @@ unusable (dropping is deliberate: refusing would bounce a message to whoever for
 server retries) when the spool is full or cannot be written. Nothing here listens on a network port, sets up DNS or MX, reads
 a mailbox on its own or answers anyone; the support mailbox handler drains the spool (`platform/channels/mail_spool.py`). Records and the
 ledger hold identifiers, sizes and states only. Pass --tenant or it is read from the compiled desired state (`source.client`).
+
+At the pipe boundary, every untrusted Authentication-Results header is stripped. Only a trusted local MTA hook that has
+independently verified aligned DMARC may supply both --verified-sender (the exact authenticated From) and
+--mta-authserv-id (its fixed receiver ID). Never derive these from message headers or sender-supplied parameters.
+Without both, the message is retained as unverified/public; a partial or mismatched attestation tempfails.
 """
 from __future__ import annotations
 
