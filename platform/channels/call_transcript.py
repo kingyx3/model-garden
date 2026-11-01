@@ -469,24 +469,63 @@ def _append_call_record(rows: list[dict[str, Any]], record: dict[str, Any]) -> b
     return not identical
 
 
+def _open_private_parent(path: pathlib.Path) -> int:
+    """Open/create the voice store directory through pinned no-follow descriptors.
+
+    Do not let an ancestor symlink redirect private voice records into another
+    directory. Existing private directories must already be owned and mode 0700:
+    silently chmodding a pre-existing shared directory could expose earlier data
+    or mutate a path belonging to another workload. The caller closes the fd.
+    """
+    if not path.is_absolute() or ".." in path.parts:
+        raise OSError("voice record path must be absolute and normalized")
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+    directory = os.open("/", flags)
+    try:
+        for component in path.parent.parts[1:]:
+            try:
+                child = os.open(component, flags, dir_fd=directory)
+            except FileNotFoundError:
+                # Another writer may have created the same private directory.
+                # Open it through the pinned parent and revalidate below; a
+                # racing symlink/non-directory must still fail closed.
+                try:
+                    os.mkdir(component, mode=0o700, dir_fd=directory)
+                except FileExistsError:
+                    pass
+                child = os.open(component, flags, dir_fd=directory)
+            os.close(directory)
+            directory = child
+        info = os.fstat(directory)
+        if (not stat.S_ISDIR(info.st_mode) or info.st_uid != os.geteuid()
+                or stat.S_IMODE(info.st_mode) != 0o700):
+            raise OSError("voice record directory must already be owner-private")
+        return directory
+    except BaseException:
+        os.close(directory)
+        raise
+
+
 def store_private_jsonl(path: pathlib.Path, record: dict[str, Any], *, retention_seconds: int, now: int | None = None) -> None:
     """Crash-consistent private voice records, serialized by a persistent sidecar lock.
 
-    Never truncate an existing transcript/lifecycle file in place: a crash during
-    retention rewriting must leave the previous complete file available. The lock
+    Refuse symlinked ancestor directories and pre-existing shared-permission
+    directories/files/locks rather than repairing them. Never truncate an existing
+    transcript/lifecycle file in place: a crash during retention rewriting must
+    leave the previous complete file available. The lock
     belongs to the *path*, not the replaced inode, so concurrent writers cannot
     lose one another's updates after atomic publication. All paths stay within the
     pinned owner-private directory and refuse symlink/hardlink redirection.
     """
     if retention_seconds < 0 or retention_seconds > MAX_RETENTION_SECONDS:
         raise ValueError("invalid voice record retention")
-    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    directory = _open_private_parent(path)
     try:
         parent_stat = os.fstat(directory)
         if not stat.S_ISDIR(parent_stat.st_mode) or parent_stat.st_uid != os.geteuid():
             raise OSError("transcript directory is not owned by this worker")
-        os.fchmod(directory, 0o700)
+        if stat.S_IMODE(parent_stat.st_mode) != 0o700:
+            raise OSError("voice record directory permissions changed")
 
         def assert_directory() -> None:
             current = os.stat(path.parent, follow_symlinks=False)
@@ -505,9 +544,8 @@ def store_private_jsonl(path: pathlib.Path, record: dict[str, Any], *, retention
         try:
             lock_stat = os.fstat(lock_fd)
             if (not stat.S_ISREG(lock_stat.st_mode) or lock_stat.st_uid != os.geteuid()
-                    or lock_stat.st_nlink != 1):
-                raise OSError("transcript lock must be a singly linked owned regular file")
-            os.fchmod(lock_fd, 0o600)
+                    or lock_stat.st_nlink != 1 or stat.S_IMODE(lock_stat.st_mode) != 0o600):
+                raise OSError("transcript lock must be a private singly linked owned regular file")
             fcntl.flock(lock_fd, fcntl.LOCK_EX)
             try:
                 def assert_lock() -> None:
@@ -527,9 +565,8 @@ def store_private_jsonl(path: pathlib.Path, record: dict[str, Any], *, retention
                 try:
                     target_stat = os.fstat(target_fd)
                     if (not stat.S_ISREG(target_stat.st_mode) or target_stat.st_uid != os.geteuid()
-                            or target_stat.st_nlink != 1):
-                        raise OSError("transcript target must be a singly linked owned regular file")
-                    os.fchmod(target_fd, 0o600)
+                            or target_stat.st_nlink != 1 or stat.S_IMODE(target_stat.st_mode) != 0o600):
+                        raise OSError("transcript target must be a private singly linked owned regular file")
 
                     def assert_target() -> None:
                         current = os.stat(path.name, dir_fd=directory, follow_symlinks=False)

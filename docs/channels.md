@@ -307,3 +307,9 @@ a mixed old/new evidence set must be reconciled by the authorized operator.
 No automatic claim of complete real voice or ledger request-ID causation follows
 from this change. #107 and #117 retain their real-call, consent, provider and
 client-acceptance gates.
+
+### Private voice evidence store filesystem boundary (v0.8.265; #107)
+
+The shared LiveKit transcript/fallback writer and post-call summary-completion journal now walk the configured **absolute, normalized** evidence path through pinned directory descriptors with no-follow opens. A symlink in any ancestor is refused, even if the final leaf is an ordinary directory. Newly created evidence directories are owner-private (0700). An **existing** leaf directory must already be owned by the worker and mode 0700; existing transcript/message files and lock files must already be owned, singly linked and mode 0600. The worker no longer chmods unsafe existing directories, locks or payloads into apparent compliance. A refusal is a failed local evidence write, **not** proof that a voice call or provider transaction failed.
+
+**Operator migration:** Before upgrading a deployment with legacy voice evidence, stop the affected writer, inspect the complete mounted path and ownership for unexpected links/foreign files, preserve an authorized backup and independent audit evidence, then explicitly correct only the approved tenant's existing evidence directory to 0700 and its regular evidence/lock files to 0600. Restart and verify that a synthetic call's transcript and fallback receipt are retained without exposing customer text. Never automatically chmod a symlink target or shared mount, silently discard evidence, or infer live call completeness from CI. Relative paths and paths containing `..` are unsupported for these private stores. This host-local boundary does not protect against privileged host tampering or substitute for #107's live SIP/STT/TTS/CRM and client-consent acceptance.

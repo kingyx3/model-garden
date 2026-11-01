@@ -71,8 +71,13 @@ class PrivateFallbackMessageTests(unittest.TestCase):
         return namespace["_append_message"]({"type": "FallbackMessage", "timestamp": 1_800_000_000,
                                        "message": "synthetic private message"})
 
+    def seed(self, text: str) -> None:
+        """Fixture simulates an existing owner-private evidence file."""
+        self.path.write_text(text)
+        self.path.chmod(0o600)
+
     def test_symlink_target_is_never_modified(self):
-        self.path.parent.mkdir()
+        self.path.parent.mkdir(mode=0o700)
         target = self.root / "other-client.jsonl"
         target.write_text("untouched\n")
         self.path.symlink_to(target)
@@ -81,7 +86,7 @@ class PrivateFallbackMessageTests(unittest.TestCase):
         self.assertEqual(target.read_text(), "untouched\n")
 
     def test_hardlink_is_rejected_before_chmod_or_truncate(self):
-        self.path.parent.mkdir()
+        self.path.parent.mkdir(mode=0o700)
         target = self.root / "other-client.jsonl"
         target.write_text("untouched\n")
         mode = stat.S_IMODE(target.stat().st_mode)
@@ -101,14 +106,14 @@ class PrivateFallbackMessageTests(unittest.TestCase):
         self.assertEqual(stat.S_IMODE(target.stat().st_mode), 0o755)
 
     def test_fifo_fails_without_blocking(self):
-        self.path.parent.mkdir()
+        self.path.parent.mkdir(mode=0o700)
         os.mkfifo(self.path)
         with self.assertRaises(OSError):
             self.append()
 
     def test_file_replacement_while_waiting_for_lock_fails_closed(self):
-        self.path.parent.mkdir()
-        self.path.write_text("original\n")
+        self.path.parent.mkdir(mode=0o700)
+        self.seed("original\n")
         target = self.root / "other-client.jsonl"
         target.write_text("untouched\n")
         flock = T.fcntl.flock
@@ -130,8 +135,8 @@ class PrivateFallbackMessageTests(unittest.TestCase):
         self.assertEqual(target.read_text(), "untouched\n")
 
     def test_parent_directory_replacement_while_locked_fails_closed(self):
-        self.path.parent.mkdir()
-        self.path.write_text("original\n")
+        self.path.parent.mkdir(mode=0o700)
+        self.seed("original\n")
         flock = T.fcntl.flock
         replaced = False
 
@@ -141,7 +146,7 @@ class PrivateFallbackMessageTests(unittest.TestCase):
             if op == T.fcntl.LOCK_EX and not replaced:
                 replaced = True
                 self.path.parent.rename(self.root / "detached")
-                self.path.parent.mkdir()
+                self.path.parent.mkdir(mode=0o700)
             return result
 
         with mock.patch.object(T.fcntl, "flock", side_effect=replace):
@@ -152,8 +157,8 @@ class PrivateFallbackMessageTests(unittest.TestCase):
         self.assertFalse(self.path.exists())
 
     def test_retention_zero_clears_existing_messages_and_does_not_store_new_ones(self):
-        self.path.parent.mkdir()
-        self.path.write_text('{"timestamp":1800000000,"message":"old"}\n')
+        self.path.parent.mkdir(mode=0o700)
+        self.seed('{"timestamp":1800000000,"message":"old"}\n')
         with mock.patch.dict(os.environ, {"MODEL_GARDEN_MESSAGE_RETENTION_SECONDS": "0"}):
             self.assertFalse(self.append())
         self.assertEqual(self.path.read_text(), "")
@@ -182,7 +187,7 @@ class PrivateFallbackMessageTests(unittest.TestCase):
     def test_message_capture_does_not_claim_success_when_private_store_is_unsafe(self):
         target = self.root / "other-client.jsonl"
         target.write_text("untouched\\n")
-        self.path.parent.mkdir()
+        self.path.parent.mkdir(mode=0o700)
         self.path.symlink_to(target)
         agent = namespace["ReceptionistVoiceAgent"]("test")
         with self.assertLogs("voice-fallback-test", level="ERROR") as logs:
@@ -192,8 +197,8 @@ class PrivateFallbackMessageTests(unittest.TestCase):
         self.assertNotIn("synthetic private request", str(logs.output))
 
     def test_existing_owned_regular_file_keeps_bounded_retention_and_private_modes(self):
-        self.path.parent.mkdir()
-        self.path.write_text('{"timestamp":1,"message":"expired"}\n')
+        self.path.parent.mkdir(mode=0o700)
+        self.seed('{"timestamp":1,"message":"expired"}\n')
         with mock.patch.object(T.time, "time", return_value=1_800_000_001):
             self.assertTrue(self.append())
         self.assertNotIn("expired", self.path.read_text())
