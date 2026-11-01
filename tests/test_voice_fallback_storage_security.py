@@ -214,7 +214,7 @@ class PrivateFallbackMessageTests(unittest.TestCase):
         # transcript must not turn off the configured privacy redaction.
         previous = namespace["TRANSCRIPT_CONFIG"]
         namespace["TRANSCRIPT_CONFIG"] = T.TranscriptConfig(
-            enabled=False, patterns=(re.compile(r"\\bVIP-\\d{4}\\b"),)
+            enabled=False, patterns=(re.compile(r"\bVIP-\d{4}\b"),)
         )
         try:
             agent = namespace["ReceptionistVoiceAgent"]("test")
