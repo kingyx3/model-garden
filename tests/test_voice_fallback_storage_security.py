@@ -275,7 +275,7 @@ class PrivateFallbackMessageTests(unittest.TestCase):
             attributes={"sip.phoneNumber": "+14155550123"}
         )
         namespace["TRANSCRIPT_CONFIG"] = T.TranscriptConfig(
-            enabled=False, patterns=(re.compile(r"\\+14155550123"),)
+            enabled=False, patterns=(re.compile(r"\+14155550123"),)
         )
         try:
             agent = namespace["ReceptionistVoiceAgent"]("test")
