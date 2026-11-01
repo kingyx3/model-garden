@@ -415,6 +415,52 @@ class CommandTests(Case):
         path = self.root / "gov" / "audit.jsonl"
         return [json.loads(line) for line in path.read_text().splitlines()] if path.exists() else []
 
+    def test_cli_ingest_strips_untrusted_authentication_results_before_spooling(self):
+        # A customer can write an Authentication-Results header. The local pipe
+        # must not promote that header to a verified sender by default.
+        import email
+        import email.policy
+        forged = raw(extra=f"Authentication-Results: {MX}; dmarc=pass header.from=customer.example\\r\\n")
+        code, result, _ = self.run_command("ingest", stdin=forged)
+        self.assertEqual((code, result["status"]), (0, "accepted"))
+        saved = next((self.root / "gov" / "mail" / "acme-prod" / "messages").glob("*.eml")).read_bytes()
+        parsed = email.message_from_bytes(saved, policy=email.policy.default)
+        self.assertEqual(parsed.get_all("Authentication-Results"), None)
+        self.assertIsNone(email_channel.verified_sender(parsed, MX))
+        drafts = []
+        mailbox = SupportMailboxTests.mailbox(self, drafts)
+        outcome = mailbox.handle(saved, now=T0)
+        self.assertEqual((outcome["status"], outcome["reason"]), ("needs-person", "sender-unverified"))
+        self.assertEqual(drafts, [])
+
+    def test_trusted_mta_metadata_replaces_all_untrusted_auth_headers(self):
+        import email
+        import email.policy
+        forged = raw(message_id="<trusted@customer.example>",
+                     extra="Authentication-Results: evil.example; dmarc=pass header.from=customer.example\\r\\n")
+        code, result, _ = self.run_command("--verified-sender", "alex@customer.example",
+                                            "--mta-authserv-id", MX, "ingest", stdin=forged)
+        self.assertEqual((code, result["status"]), (0, "accepted"))
+        saved = next((self.root / "gov" / "mail" / "acme-prod" / "messages").glob("*.eml")).read_bytes()
+        parsed = email.message_from_bytes(saved, policy=email.policy.default)
+        self.assertEqual(len(parsed.get_all("Authentication-Results") or []), 1)
+        self.assertEqual(email_channel.verified_sender(parsed, MX), "alex@customer.example")
+        self.assertNotIn("evil.example", str(parsed.get_all("Authentication-Results")))
+
+    def test_mta_attestation_requires_both_trusted_inputs_and_matching_from(self):
+        for flags in (
+            ("--verified-sender", "alex@customer.example"),
+            ("--mta-authserv-id", MX),
+            ("--verified-sender", "other@customer.example", "--mta-authserv-id", MX),
+            ("--verified-sender", "alex@customer.example", "--mta-authserv-id", "bad; dmarc=pass"),
+        ):
+            with self.subTest(flags=flags):
+                code, result, error = self.run_command(*flags, "ingest", stdin=raw())
+                self.assertEqual((code, result), (runtime.TEMPFAIL, None))
+                self.assertIn("deferred", error)
+                self.assertNotIn(SECRET_BODY, error)
+        self.assertFalse((self.root / "gov" / "mail" / "acme-prod" / "messages").exists())
+
     def test_ingest_reads_one_message_from_standard_input(self):
         code, result, _ = self.run_command("ingest", stdin=raw())
         self.assertEqual((code, result["status"]), (0, "accepted"))
