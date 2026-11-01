@@ -158,6 +158,36 @@ class StoreCase(unittest.TestCase):
         record, data = self.store().get(entry["id"], requested_by=ALICE, now=T0 + 1)
         self.assertEqual((data, record["sha256"]), (b"PK-content", entry["sha256"]))
 
+    def test_failed_creation_audit_never_publishes_an_unledgered_artifact(self):
+        def unavailable(*_event):
+            raise RuntimeError("audit unavailable")
+
+        broken = artifacts.ArtifactStore(self.root, tenant="acme-prod", audit=unavailable)
+        with self.assertRaisesRegex(RuntimeError, "audit unavailable"):
+            self.put(broken)
+        self.assertEqual(self.store().list(now=T0), [])
+        self.assertEqual(list((self.root / "acme-prod").glob("a-*")), [])
+        self.assertEqual(self.events, [])
+
+        # Once the audit sink is restored, the identical request is a new
+        # accounted creation, not a duplicate of an unledgered file.
+        recovered = self.put()
+        self.assertFalse(recovered["duplicate"])
+        self.assertEqual(len(self.store().list(now=T0)), 1)
+        self.assertEqual([event[0] for event in self.events], ["artifact.create"])
+
+    def test_failed_creation_audit_preserves_existing_ledgered_artifacts(self):
+        original = self.put()
+        def unavailable(*_event):
+            raise RuntimeError("audit unavailable")
+
+        broken = artifacts.ArtifactStore(self.root, tenant="acme-prod", audit=unavailable)
+        with self.assertRaisesRegex(RuntimeError, "audit unavailable"):
+            self.put(broken, name="second.txt", content=b"new bytes")
+        self.assertEqual([entry["id"] for entry in self.store().list(now=T0)], [original["id"]])
+        self.assertEqual(self.store().get(original["id"], requested_by=ALICE, now=T0)[1], b"PK-content")
+        self.assertEqual(len(list((self.root / "acme-prod").glob("a-*"))), 1)
+
     def test_the_same_file_for_the_same_requester_is_not_duplicated(self):
         first, again = self.put(), self.put(now=T0 + 5)
         self.assertEqual((first["duplicate"], again["duplicate"], again["id"]), (False, True, first["id"]))
