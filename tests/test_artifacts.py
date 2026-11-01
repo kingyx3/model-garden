@@ -188,6 +188,67 @@ class StoreCase(unittest.TestCase):
         self.assertEqual(self.store().get(original["id"], requested_by=ALICE, now=T0)[1], b"PK-content")
         self.assertEqual(len(list((self.root / "acme-prod").glob("a-*"))), 1)
 
+    def test_delete_requires_accepted_audit_intent_before_removing_payload(self):
+        entry = self.put()
+        events = []
+        def refuse_intent(action, by, details):
+            events.append(action)
+            if action == "artifact.delete.prepare":
+                raise RuntimeError("audit unavailable")
+        store = artifacts.ArtifactStore(self.root, tenant="acme-prod", audit=refuse_intent)
+        with self.assertRaisesRegex(RuntimeError, "audit unavailable"):
+            store.delete(entry["id"], requested_by=ALICE)
+        self.assertEqual(events, ["artifact.delete.prepare"])
+        self.assertEqual(self.store().get(entry["id"], requested_by=ALICE, now=T0)[1], b"PK-content")
+        self.assertEqual([x["id"] for x in self.store().list(now=T0)], [entry["id"]])
+
+    def test_purge_prepares_every_expiry_before_any_file_is_removed(self):
+        store = self.store(retention_days=1)
+        first = self.put(store, name="first.txt", content=b"first")
+        second = self.put(store, name="second.txt", content=b"second")
+        intents = []
+        def refuse_second(action, by, details):
+            if action == "artifact.expire.prepare":
+                intents.append(details["artifactId"])
+                if len(intents) == 2:
+                    raise RuntimeError("audit unavailable")
+        broken = artifacts.ArtifactStore(self.root, tenant="acme-prod", retention_days=1, audit=refuse_second)
+        with self.assertRaisesRegex(RuntimeError, "audit unavailable"):
+            broken.purge_expired(now=T0 + 86400)
+        self.assertEqual(len(intents), 2)
+        self.assertEqual({x["id"] for x in self.store().list(now=T0)}, {first["id"], second["id"]})
+        self.assertEqual((self.root / "acme-prod" / first["id"]).read_bytes(), b"first")
+        self.assertEqual((self.root / "acme-prod" / second["id"]).read_bytes(), b"second")
+
+    def test_purge_checks_all_expired_files_before_deleting_any(self):
+        store = self.store(retention_days=1)
+        first = self.put(store, name="first.txt", content=b"first")
+        second = self.put(store, name="second.txt", content=b"second")
+        path = self.root / "acme-prod" / second["id"]
+        path.unlink()
+        outside = pathlib.Path(self._tmp.name) / "outside"
+        outside.write_bytes(b"outside")
+        path.symlink_to(outside)
+        before = len(self.events)
+        with self.assertRaisesRegex(Error, "unsafe"):
+            store.purge_expired(now=T0 + 86400)
+        self.assertEqual(len(self.events), before)
+        self.assertEqual((self.root / "acme-prod" / first["id"]).read_bytes(), b"first")
+        self.assertEqual(outside.read_bytes(), b"outside")
+        self.assertEqual({x["id"] for x in store.list(now=T0)}, {first["id"], second["id"]})
+
+    def test_successful_delete_and_purge_have_intent_and_completion_receipts(self):
+        store = self.store(retention_days=1)
+        removed = self.put(store, name="manual.txt")
+        expired = self.put(store, name="expired.txt", content=b"expired")
+        store.delete(removed["id"], requested_by=ALICE)
+        self.assertEqual(store.purge_expired(now=T0 + 86400), {"expired": 1})
+        self.assertEqual([event[0] for event in self.events],
+                         ["artifact.create", "artifact.create", "artifact.delete.prepare",
+                          "artifact.delete", "artifact.expire.prepare", "artifact.expire"])
+        self.assertEqual([event[2]["artifactId"] for event in self.events[-4:]],
+                         [removed["id"], removed["id"], expired["id"], expired["id"]])
+
     def test_the_same_file_for_the_same_requester_is_not_duplicated(self):
         first, again = self.put(), self.put(now=T0 + 5)
         self.assertEqual((first["duplicate"], again["duplicate"], again["id"]), (False, True, first["id"]))
@@ -386,7 +447,7 @@ class StoreCase(unittest.TestCase):
         entry = self.put(store, name=f"{SECRET_TEXT}.txt", content=SECRET_TEXT.encode())
         store.get(entry["id"], requested_by=ALICE, now=T0)
         store.delete(entry["id"], requested_by=ALICE)
-        self.assertEqual([event[0] for event in self.events], ["artifact.create", "artifact.read", "artifact.delete"])
+        self.assertEqual([event[0] for event in self.events], ["artifact.create", "artifact.read", "artifact.delete.prepare", "artifact.delete"])
         self.assertEqual(self.events[0][1], "agent:receptionist")
         self.assertEqual(self.events[0][2]["sources"], SOURCES)
         self.assertEqual(self.events[0][2]["location"], entry["location"])
@@ -462,7 +523,7 @@ class OperatorCase(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertEqual(json.loads(out), {"expired": 0})  # nothing is a day old yet
         events = [json.loads(line) for line in (self.root.parent / "audit.jsonl").read_text().splitlines()]
-        self.assertEqual([event["action"] for event in events], ["artifact.delete"])
+        self.assertEqual([event["action"] for event in events], ["artifact.delete.prepare", "artifact.delete"])
         self.assertEqual(events[0]["performedBy"], ADMIN)
         self.assertTrue(govern.verify_audit_chain(self.root.parent / "audit.jsonl")["valid"])
 
@@ -483,7 +544,7 @@ class OperatorCase(unittest.TestCase):
         self.assertTrue((self.root / "acme-prod" / recent["id"]).exists())
         events = [json.loads(line) for line in (self.root.parent / "audit.jsonl").read_text().splitlines()]
         self.assertEqual([(event["action"], event["details"]["artifactId"]) for event in events],
-                         [("artifact.expire", old["id"])])
+                         [("artifact.expire.prepare", old["id"]), ("artifact.expire", old["id"])])
         self.assertTrue(govern.verify_audit_chain(self.root.parent / "audit.jsonl")["valid"])
 
     def test_operator_cli_cannot_override_reviewed_retention_or_ignore_invalid_policy(self):

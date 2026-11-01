@@ -338,24 +338,42 @@ class ArtifactStore:
 
     def delete(self, artifact_id: str, *, requested_by: str, admin: bool = False) -> dict[str, Any]:
         who = _principal(requested_by, "requested_by")
-        self._file(artifact_id)
+        path = self._file(artifact_id)
         with self._locked() as state:
             entry = state["artifacts"].get(artifact_id)
             if entry is None:
                 raise ArtifactError("no such artifact")
             if not admin and entry["requestedBy"] != who:
                 raise ArtifactError("only the person who asked for an artifact or an administrator may delete it")
+            # An unavailable audit sink must never remove an accounted file.
+            # The intent also witnesses a crash between unlink and completion.
+            self._private_path(path, missing=True)
+            details = {"artifactId": artifact_id, "sha256": entry["sha256"], "admin": bool(admin)}
+            self._record("artifact.delete.prepare", who, details)
             self._remove(state, artifact_id)
-        self._record("artifact.delete", who, {"artifactId": artifact_id, "sha256": entry["sha256"], "admin": bool(admin)})
+            self._record("artifact.delete", who, details)
         return {"deleted": artifact_id}
 
     def purge_expired(self, *, now: int | None = None) -> dict[str, int]:
-        """Delete every artifact past its retention period; each removal is recorded."""
+        """Preflight the entire expiry batch, then remove it with intent/completion receipts."""
         stamp = int(dt.datetime.now(dt.timezone.utc).timestamp()) if now is None else now
         with self._locked() as state:
-            expired = [self._remove(state, key) for key in [key for key, entry in state["artifacts"].items() if self._expires_at(entry) <= stamp]]
-        for entry in expired:
-            self._record("artifact.expire", "runtime:retention", {"artifactId": entry["id"], "sha256": entry["sha256"], "expiresAt": entry["expiresAt"]})
+            expired = [entry for entry in state["artifacts"].values() if self._expires_at(entry) <= stamp]
+            # Reject any unsafe payload in the batch before removing a single
+            # valid file. A later unsafe entry must not cause silent partial loss.
+            for entry in expired:
+                self._private_path(self._file(entry["id"]), missing=True)
+            # An audit outage on any intent leaves the index and every payload
+            # intact. A crash after accepted intent requires ledger reconciliation.
+            for entry in expired:
+                self._record("artifact.expire.prepare", "runtime:retention", {
+                    "artifactId": entry["id"], "sha256": entry["sha256"], "expiresAt": self._expires_at(entry),
+                })
+            for entry in expired:
+                self._remove(state, entry["id"])
+                self._record("artifact.expire", "runtime:retention", {
+                    "artifactId": entry["id"], "sha256": entry["sha256"], "expiresAt": self._expires_at(entry),
+                })
         return {"expired": len(expired)}
 
 
