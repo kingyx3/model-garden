@@ -278,7 +278,22 @@ class ArtifactStore:
                 "location": f"tier0:{self.tenant}/{artifact_id}", "createdAt": stamp, "expiresAt": stamp + self._retention_seconds,
             }
             artifacts[artifact_id] = entry
-        self._record("artifact.create", f"agent:{agent}", {**self._details(entry), "requestedBy": who, "classification": classification})
+            # Keep the artifact private and unindexed until its creation
+            # receipt is accepted. A failed audit must not leave an
+            # unledgered artifact visible to a later idempotent retry.
+            # The tenant lock also prevents readers from seeing this
+            # uncommitted entry while the audit hook is running.
+            try:
+                self._record("artifact.create", f"agent:{agent}", {
+                    **self._details(entry), "requestedBy": who, "classification": classification,
+                })
+            except BaseException:
+                # _locked skips the index commit on exception. Remove the
+                # newly written payload as well, without touching any
+                # previously committed artifact or its audit history.
+                with contextlib.suppress(OSError):
+                    self._file(artifact_id).unlink()
+                raise
         return {**entry, "duplicate": False}
 
     # -- reads --------------------------------------------------------------------------
