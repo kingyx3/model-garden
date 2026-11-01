@@ -10,7 +10,6 @@ from __future__ import annotations
 import asyncio
 import http.client
 import logging
-from collections.abc import Callable
 
 from pause import HOLDING
 
@@ -39,8 +38,7 @@ async def paused() -> bool:
     return await asyncio.to_thread(_check)
 
 
-async def stop_session_on_pause(session, *, interval_seconds: float = 1.0,
-                                on_pause: Callable[[], None] | None = None) -> None:
+async def stop_session_on_pause(session, *, interval_seconds: float = 1.0) -> None:
     """Close an already admitted voice session when owner pause becomes visible.
 
     This is a best-effort local fence, not synchronous cancellation of audio,
@@ -55,11 +53,6 @@ async def stop_session_on_pause(session, *, interval_seconds: float = 1.0,
             LOGGER.error("voice pause check failed (%s); closing session", type(exc).__name__)
             should_stop = True
         if should_stop:
-            if on_pause is not None:
-                try:
-                    on_pause()
-                except Exception as exc:
-                    LOGGER.error("voice pause callback failed (%s)", type(exc).__name__)
             try:
                 await session.aclose()
             except Exception as exc:
