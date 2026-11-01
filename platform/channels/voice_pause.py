@@ -1,19 +1,30 @@
-"""Read the owner emergency pause from the shared governance volume in LiveKit.
+"""Read owner emergency pause through the private governed MCP service.
 
-The voice worker mounts the same per-client governance volume read-only. It
-cannot change owner state or audit receipts. An absent/untrusted mount fails
-closed; only a genuine first-boot empty governance directory is unpaused.
-This is an admission/side-effect check, NOT a distributed cancellation fence.
+The voice worker must not mount the governance volume: it contains audit,
+approval and connection state. The existing sidecar is the sole trusted reader.
+A timeout, unavailable sidecar, unexpected HTTP status or malformed response
+fails closed. This is admission checking, NOT distributed effect cancellation.
 """
 from __future__ import annotations
 
-import pathlib
+import http.client
 
-from pause import HOLDING, PauseStore
+from pause import HOLDING
 
-PAUSE_ROOT = pathlib.Path("/opt/governance/.modelgarden")
+HOST = "governed-tools"
+PORT = 9120
+PATH = "/internal/voice-pause"
+TIMEOUT_SECONDS = 2
 
 
 def paused() -> bool:
-    """Read current owner state for voice admission and fallback actions."""
-    return PauseStore(PAUSE_ROOT).is_paused()
+    """Only an explicit HTTP 200 from the private sidecar permits voice work."""
+    connection = http.client.HTTPConnection(HOST, PORT, timeout=TIMEOUT_SECONDS)
+    try:
+        connection.request("GET", PATH)
+        response = connection.getresponse()
+        return response.status != 200
+    except (OSError, TimeoutError, http.client.HTTPException):
+        return True
+    finally:
+        connection.close()
