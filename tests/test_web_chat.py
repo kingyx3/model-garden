@@ -65,8 +65,11 @@ class SignInTests(Case):
             auth.exchange(link)
         self.now[0] -= chat.DEFAULT_LOGIN_TTL_SECONDS + 1
         payload, _, signature = link.partition(".")
+        # Flip a signed byte deterministically: replacing a suffix with "AA"
+        # could leave an already-"AA" signature unchanged and flake in CI.
+        bad_signature = ("A" if signature[0] != "A" else "B") + signature[1:]
         with self.assertRaises(text.ChannelVerificationError):
-            auth.exchange(f"{payload}.{signature[:-2]}AA")
+            auth.exchange(f"{payload}.{bad_signature}")
         self.assertTrue(auth.exchange(link))
 
     def test_a_link_and_a_session_are_not_interchangeable(self):
