@@ -657,5 +657,94 @@ class IndependentlyAnchoredExportTests(unittest.TestCase):
                                  "--expected-head-sequence", "2", "--expected-head-hash", "0" * 64])
             self.assertEqual(code, 2)
 
+
+class LocalExportVerifierAdversarialTests(unittest.TestCase):
+    """A readable export is still untrusted input to the local parity verifier."""
+
+    def test_rejects_export_record_schema_downgrade_and_bool(self):
+        for schema in (True, 2, "1"):
+            with self.subTest(schema=schema), tempfile.TemporaryDirectory() as tmp:
+                ws = Workspace(tmp)
+                write_ledger(ws.ledger, 1)
+                ws.export(exported_at=100)
+                path = next((ws.sink.root / "records").glob("*.json"))
+                record = json.loads(path.read_text())
+                record["exportSchema"] = schema
+                path.write_text(json.dumps(record))
+                report = export.verify_export(ws.ledger, ws.sink)
+                self.assertFalse(report["ok"])
+                self.assertTrue(any("invalid schema" in p for p in report["problems"]))
+
+    def test_rejects_record_event_shape_and_sequence_disagreement(self):
+        for change in (
+            lambda r: r.update(event=[]),
+            lambda r: r.update(sequence=True),
+            lambda r: r["event"].update(sequence=99),
+        ):
+            with tempfile.TemporaryDirectory() as tmp:
+                ws = Workspace(tmp)
+                write_ledger(ws.ledger, 1)
+                ws.export(exported_at=100)
+                path = next((ws.sink.root / "records").glob("*.json"))
+                record = json.loads(path.read_text())
+                change(record)
+                path.write_text(json.dumps(record))
+                report = export.verify_export(ws.ledger, ws.sink)
+                self.assertFalse(report["ok"])
+                self.assertTrue(report["problems"])
+
+    def test_refuses_unexpected_export_prefix_before_legacy_chain(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ws = Workspace(tmp)
+            ws.ledger.write_text(json.dumps({"event": "legacy"}) + "\n")
+            write_ledger(ws.ledger, 2)
+            ws.export(exported_at=100)
+            record = ws.sink.records()[0]
+            forged_event = {**record["event"], "sequence": 1, "previousEventHash": None}
+            forged_event["eventHash"] = export.event_hash(forged_event)
+            ws.sink.put_records([{**record, "sequence": 1,
+                                  "recordId": forged_event["eventHash"], "event": forged_event}])
+            report = export.verify_export(ws.ledger, ws.sink)
+            self.assertFalse(report["ok"])
+            self.assertTrue(any("unexpected sequence" in p for p in report["problems"]))
+
+    def test_enormous_adversarial_sequence_gap_is_bounded(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ws = Workspace(tmp)
+            write_ledger(ws.ledger, 1)
+            ws.export(exported_at=100)
+            path = next((ws.sink.root / "records").glob("*.json"))
+            record = json.loads(path.read_text())
+            record["sequence"] = 10**12
+            path.write_text(json.dumps(record))
+            report = export.verify_export(ws.ledger, ws.sink)
+            self.assertFalse(report["ok"])
+            self.assertLessEqual(len(report["gaps"]), 21)
+            self.assertTrue(any("export gap" in p for p in report["problems"]))
+
+    def test_rejects_boolean_head_schema_without_promoting_health(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ws = Workspace(tmp)
+            write_ledger(ws.ledger, 1)
+            ws.export(exported_at=100)
+            path = next((ws.sink.root / "heads").glob("*.json"))
+            head = json.loads(path.read_text())
+            head["exportSchema"] = True
+            path.write_text(json.dumps(head))
+            report = export.verify_export(ws.ledger, ws.sink)
+            self.assertFalse(report["ok"])
+            self.assertTrue(any("head manifest" in p for p in report["problems"]))
+
+    def test_valid_legacy_prefix_and_schema_upgrade_still_verify(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ws = Workspace(tmp)
+            ws.ledger.write_text(json.dumps({"event": "legacy"}) + "\n")
+            write_ledger(ws.ledger, 2)
+            ws.export(exported_at=100)
+            report = export.verify_export(ws.ledger, ws.sink)
+            self.assertTrue(report["ok"], report["problems"])
+
+
+
 if __name__ == "__main__":
     unittest.main()
