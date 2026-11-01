@@ -385,6 +385,21 @@ async def receptionist(ctx: JobContext) -> None:
 
         finalize_transcript(transcript, on_failure=failed, auto_summary=True)
 
+    # Cancel the watcher before normal transcript finalization on job shutdown.
+    # The watcher may itself trigger shutdown while closing a paused session;
+    # never cancel or await the current task in that case.
+    monitor_task: asyncio.Task[None] | None = None
+
+    async def stop_pause_monitor() -> None:
+        if monitor_task is None or monitor_task is asyncio.current_task():
+            return
+        monitor_task.cancel()
+        try:
+            await monitor_task
+        except asyncio.CancelledError:
+            pass
+
+    ctx.add_shutdown_callback(stop_pause_monitor)
     ctx.add_shutdown_callback(on_shutdown)
     ctx.add_shutdown_callback(on_transcript_shutdown)
     session = build_session()
@@ -395,16 +410,7 @@ async def receptionist(ctx: JobContext) -> None:
     # Admission-only checks do not stop an already active conversation after
     # owner pause. Poll the private sidecar and close this session on pause or
     # loss of the trusted status route. No new model or provider credentials.
-    monitor_task = asyncio.create_task(stop_session_on_pause(session, on_pause=transcript.suppress))
-
-    async def stop_pause_monitor() -> None:
-        monitor_task.cancel()
-        try:
-            await monitor_task
-        except asyncio.CancelledError:
-            pass
-
-    ctx.add_shutdown_callback(stop_pause_monitor)
+    monitor_task = asyncio.create_task(stop_session_on_pause(session))
 
 
 if __name__ == "__main__":
