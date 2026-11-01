@@ -81,8 +81,11 @@ def prepare_mta_message(raw: bytes, *, verified_sender: str | None = None,
     message = email.message_from_bytes(raw, policy=email.policy.SMTP)
     # Delete every occurrence, including an attacker-supplied header that
     # happens to use the receiver's own authserv-id.
-    if message.get_all("Authentication-Results"):
+    has_untrusted_results = bool(message.get_all("Authentication-Results"))
+    if has_untrusted_results:
         del message["Authentication-Results"]
+    if not has_untrusted_results and verified_sender is None:
+        return raw  # preserve the original RFC 5322 bytes when no rewrite is needed
     if verified_sender is not None:
         trusted = authserv_id.strip().lower()
         address = verified_sender.strip().lower()
@@ -95,7 +98,10 @@ def prepare_mta_message(raw: bytes, *, verified_sender: str | None = None,
             raise ValueError("MTA attestation does not match a single valid sender")
         domain = address.rpartition("@")[2]
         message["Authentication-Results"] = f"{trusted}; dmarc=pass header.from={domain}"
-    return message.as_bytes(policy=email.policy.SMTP)
+    prepared = message.as_bytes(policy=email.policy.SMTP)
+    if len(prepared) > SPOOL.MAX_MESSAGE_BYTES and len(raw) <= SPOOL.MAX_MESSAGE_BYTES:
+        raise ValueError("MTA authentication envelope exceeds spool limit")
+    return prepared
 
 
 def main(argv: list[str] | None = None, stdin=None) -> int:
