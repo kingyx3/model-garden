@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 import pathlib
 import sys
 import tempfile
@@ -195,6 +196,7 @@ class Case(unittest.TestCase):
         other = mcp.SchemaApprovals(pathlib.Path(self._tmp.name), tenant="globex-prod")
         self.assertEqual(other.status("zoho", upstream()[0]), "unapproved")
         (pathlib.Path(self._tmp.name) / "globex-prod.mcp-approvals.json").write_text(path.read_text())
+        (pathlib.Path(self._tmp.name) / "globex-prod.mcp-approvals.json").chmod(0o600)
         with self.assertRaisesRegex(DError, "another tenant"):
             other.status("zoho", upstream()[0])
         for kwargs in ({"by": ""}, {"by": "a b"}):
@@ -204,6 +206,65 @@ class Case(unittest.TestCase):
             self.approvals.approve("zoho", {"name": "bad name!"}, by=REVIEWER, now=T0)
         with self.assertRaises(DError):
             mcp.SchemaApprovals(pathlib.Path(self._tmp.name), tenant="Bad Tenant")
+
+
+    def test_approval_index_symlink_hardlink_and_public_permissions_fail_closed(self):
+        self.approve_all([upstream()[0]])
+        path = pathlib.Path(self._tmp.name) / "acme-prod.mcp-approvals.json"
+        outside = pathlib.Path(self._tmp.name) / "outside-approval"
+        outside.write_bytes(path.read_bytes())
+        outside.chmod(0o600)
+        original = outside.read_bytes()
+        path.unlink()
+        path.symlink_to(outside)
+        with self.assertRaisesRegex(DError, "unsafe"):
+            self.approvals.status("zoho", upstream()[0])
+        with self.assertRaisesRegex(DError, "unsafe"):
+            self.approvals.approve("zoho", upstream()[0], by=REVIEWER, now=T0 + 1)
+        self.assertEqual(outside.read_bytes(), original)
+        path.unlink()
+        os.link(outside, path)
+        with self.assertRaisesRegex(DError, "unsafe"):
+            self.approvals.status("zoho", upstream()[0])
+        path.unlink()
+        path.write_bytes(original)
+        path.chmod(0o644)
+        with self.assertRaisesRegex(DError, "unsafe"):
+            self.approvals.status("zoho", upstream()[0])
+
+    def test_approval_lock_alias_and_untrusted_root_are_not_repaired_by_chmod(self):
+        self.approve_all([upstream()[0]])
+        root = pathlib.Path(self._tmp.name)
+        lock = root / ".acme-prod.mcp-approvals.lock"
+        outside = root / "unrelated-lock"
+        outside.write_text("not an approval lock")
+        outside.chmod(0o600)
+        lock.unlink()
+        lock.symlink_to(outside)
+        with self.assertRaisesRegex(DError, "unsafe"):
+            self.approvals.status("zoho", upstream()[0])
+        self.assertEqual(outside.read_text(), "not an approval lock")
+        lock.unlink()
+        os.link(outside, lock)
+        with self.assertRaisesRegex(DError, "unsafe"):
+            self.approvals.status("zoho", upstream()[0])
+        lock.unlink()
+        root.chmod(0o755)
+        with self.assertRaisesRegex(DError, "unsafe"):
+            self.approvals.status("zoho", upstream()[0])
+        self.assertEqual(root.stat().st_mode & 0o777, 0o755)
+
+    def test_malformed_or_oversized_approval_index_cannot_activate_a_tool(self):
+        self.approve_all([upstream()[0]])
+        path = pathlib.Path(self._tmp.name) / "acme-prod.mcp-approvals.json"
+        broken = {"schemaVersion": 1, "tenant": "acme-prod",
+                  "approved": {"zoho/search_contacts": {"fingerprint": "wrong", "approvedBy": REVIEWER, "approvedAt": T0}}}
+        path.write_text(json.dumps(broken))
+        with self.assertRaisesRegex(DError, "invalid"):
+            self.approvals.status("zoho", upstream()[0])
+        path.write_bytes(b"x" * (4 * 1024 * 1024 + 1))
+        with self.assertRaisesRegex(DError, "size limit"):
+            self.approvals.status("zoho", upstream()[0])
 
 
 if __name__ == "__main__":
