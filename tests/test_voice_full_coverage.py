@@ -113,6 +113,15 @@ class FullCallCoverageTests(unittest.TestCase):
         self.assertFalse(acceptance(lifecycle(A) + [transfer(A)], [transcript(A)])["passed"])
         self.assertFalse(acceptance(lifecycle(A), [transcript(A, outcome="unknown")])["passed"])
 
+    def test_malformed_transfer_actor_is_not_a_receipt_or_a_crash(self):
+        malformed = {**transfer(A), "agent": []}
+        self.assertTrue(acceptance(lifecycle(A) + [malformed], [transcript(A)])["passed"])
+        self.assertFalse(acceptance(lifecycle(A) + [malformed], [
+            transcript(A, outcome="transferred", transfer={
+                "offsetSeconds": 4, "turnsAfter": 0, "captured": False,
+            }),
+        ])["passed"])
+
     def test_valid_human_turn_after_transfer_passes_structural_gate_only(self):
         rows = lifecycle(A) + [transfer(A)]
         record = transcript(A, outcome="transferred",
