@@ -43,6 +43,13 @@ class _Agent:
     def __init__(self, instructions):
         self.instructions = instructions
 
+
+async def _unpaused_fixture():
+    # This fixture tests private storage, not the independent owner pause
+    # admission path (covered in test_voice_pause.py).
+    return False
+
+
 namespace.update({
     "Agent": _Agent, "CallTranscript": T.CallTranscript, "RunContext": object,
     "function_tool": lambda: lambda fn: fn,
@@ -50,6 +57,7 @@ namespace.update({
     "_sip_participant": lambda ctx: None, "_safe_digest": lambda value: "digest",
     "LOGGER": logging.getLogger("voice-fallback-test"),
     "AGENT_NAME": "model-garden-receptionist",
+    "voice_paused": _unpaused_fixture,
 })
 agent_node = next(node for node in tree.body if isinstance(node, ast.ClassDef)
                   and node.name == "ReceptionistVoiceAgent")

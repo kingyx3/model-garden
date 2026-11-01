@@ -37,6 +37,7 @@ import uuid
 from typing import Any, Mapping
 
 from mcp.server.mcpserver import MCPServer
+from starlette.responses import Response
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 REQUEST_ID = re.compile(r"^[0-9a-f]{64}$")
@@ -1111,6 +1112,17 @@ class GovernedToolRuntime:
 def build_server(runtime: GovernedToolRuntime) -> MCPServer:
     """Build the MCP 2 server; transport settings are supplied only when it is run."""
     mcp = MCPServer("Model Garden Governed Tools")
+
+    @mcp.custom_route("/internal/voice-pause", methods=["GET"])
+    async def voice_pause_status(_request) -> Response:
+        """Private Compose-network admission signal; never expose state or secrets.
+
+        The voice worker permits model dialogue only on HTTP 200. All other
+        responses, timeouts and unavailable sidecars mean paused. No separate
+        listener, secret or governance-volume mount is required.
+        """
+        status = 423 if PAUSE.PauseStore(runtime.governance_root).is_paused() else 200
+        return Response(status_code=status, headers={"Cache-Control": "no-store"})
 
     @mcp.tool(name="platform_capabilities")
     def platform_capabilities() -> dict[str, Any]:

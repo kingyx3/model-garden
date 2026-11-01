@@ -32,6 +32,7 @@ from livekit.agents import Agent, AgentServer, AgentSession, JobContext, RunCont
 from livekit.plugins import openai
 
 from call_transcript import CallTranscript, config_from_env as transcript_config_from_env, finalize as finalize_transcript, store_private_jsonl
+from voice_pause import HOLDING, paused as voice_paused
 
 LOGGER = logging.getLogger("model-garden.receptionist")
 # An unsafe transcript configuration (for example no disclosure and no lawful-basis owner) stops the worker at start.
@@ -92,6 +93,13 @@ class ReceptionistVoiceAgent(Agent):
         self._call_hash = call_hash
 
     async def on_enter(self) -> None:
+        # The owner pause must stop new model dialogue, not just governed Tools.
+        # A holding response is the only permitted speech while paused.
+        if await voice_paused():
+            if self._transcript is not None:
+                self._transcript.suppress()
+            await self.session.say(HOLDING, allow_interruptions=False)
+            return
         notice = self._transcript.disclosure_text if self._transcript is not None else None
         if notice:
             try:
@@ -100,6 +108,12 @@ class ReceptionistVoiceAgent(Agent):
             except Exception as exc:  # no notice, no transcript: never record a call that was not told
                 LOGGER.error("transcript disclosure could not be played (%s); transcript suppressed", type(exc).__name__)
                 self._transcript.suppress()
+        # Disclosure playback may have taken time; recheck before starting the model.
+        if await voice_paused():
+            if self._transcript is not None:
+                self._transcript.suppress()
+            await self.session.say(HOLDING, allow_interruptions=False)
+            return
         self.session.generate_reply(
             instructions="Greet the caller briefly and ask how you can help. Do not claim any external action succeeded unless its Tool reports success."
         )
@@ -107,6 +121,8 @@ class ReceptionistVoiceAgent(Agent):
     @function_tool()
     async def transfer_to_human(self, ctx: RunContext) -> str:
         """Transfer the active SIP caller to the approved human fallback."""
+        if await voice_paused():
+            return HOLDING
         target = os.environ.get("MODEL_GARDEN_HUMAN_TRANSFER_TARGET", "").strip()
         if not target:
             return "Human transfer is not configured. Offer to capture a message instead."
@@ -116,6 +132,10 @@ class ReceptionistVoiceAgent(Agent):
         participant = _sip_participant(job_ctx)
         if participant is None:
             return "No active SIP caller is available to transfer. Offer to capture a message instead."
+        # Recheck immediately before provider transport. This is not a
+        # cross-process in-flight cancellation guarantee.
+        if await voice_paused():
+            return HOLDING
         try:
             await job_ctx.api.sip.transfer_sip_participant(
                 api.TransferSIPParticipantRequest(
@@ -150,6 +170,8 @@ class ReceptionistVoiceAgent(Agent):
     @function_tool()
     async def capture_message(self, ctx: RunContext, message: str, caller_name: str = "") -> str:
         """Persist the minimum data required for a human to follow up when transfer is unavailable."""
+        if await voice_paused():
+            return HOLDING
         message = message.strip()
         if not message:
             return "No message was provided. Ask the caller what they would like the business to know."
@@ -160,6 +182,8 @@ class ReceptionistVoiceAgent(Agent):
             raw = participant.attributes.get("sip.phoneNumber")
             if isinstance(raw, str) and raw.strip():
                 caller_number = raw.strip()
+        if await voice_paused():
+            return HOLDING
         try:
             stored = _append_message(
                 {

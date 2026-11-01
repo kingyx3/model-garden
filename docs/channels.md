@@ -40,6 +40,14 @@ Channel approvals go through `decide_from_channel()`: the responder must be mapp
 
 ## Voice (LiveKit)
 
+### Emergency owner pause on voice admission (v0.8.268; #232)
+
+The reference LiveKit worker queries the **existing governed MCP sidecar** at a fixed private Compose-network route, `GET /internal/voice-pause`. The sidecar reads the same client `PauseStore` used for governed Tool denials, returning **HTTP 200 only when active**, HTTP 423 when paused, and no payload. The worker treats every other status, connection error or timeout as paused. The route has no published host port and returns no owner identity, audit data or secrets. The voice image does **not** mount the governance volume (which contains sensitive approval, audit and connection state), and the overlay refuses a base deployment without the governed-tools service.
+
+On paused admission the worker suppresses transcript retention and attempts only the fixed holding message, without starting model generation. The SIP transfer and fallback-message Tools recheck pause before their provider/local effects. If pause occurs during the initial disclosure, the worker rechecks before starting the model. An unpaused call still follows the ordinary disclosure, model and transcript path.
+
+**Operational limit:** The sidecar check is a private, per-host admission signal, **not** an atomic voice effect lease or distributed cancellation. A pause racing the final check may not stop an already accepted SIP transfer, an ongoing model/TTS turn or a remote worker. The owner must use the documented emergency isolation procedure for urgent in-flight calls, then reconcile provider receipts. Paused-call holding speech is not represented as a complete consented transcript, and offline tests are not a live pause/resume drill. The governed Tool boundary retains its own material-action lock and denial audit.
+
 ### Strict all-call transcript coverage evidence (v0.8.266; #107)
 
 `scripts/reference-proof.py --require-full-call-coverage` is an **opt-in strict pilot evidence gate** in addition to the existing one-call `--require-two-way-transcript` check. It requires every started call in the collected local lifecycle window to have a matching completed call and a unique, structurally valid, disclosed caller/agent transcript with no dropped turns. A transferred call counts as fully covered **only** when the record has a coherent transfer marker and a labelled human turn captured after the transfer. A cold SIP transfer leaves the human leg outside the LiveKit room and therefore **fails** this stricter gate, even if the pre-transfer caller/agent exchange is valid. Missing/duplicate records, unmatched starts and transcript-write failures also prevent acceptance. The collector emits only aggregate counts, never caller speech or call IDs.
