@@ -80,10 +80,19 @@ def _append_message(payload: dict[str, Any]) -> bool:
 
 
 def _sip_participant(ctx: JobContext):
+    """Select only a unique SIP caller; never guess in a multi-party room.
+
+    A room may temporarily contain multiple SIP participants during a
+    conference or reconnect. Selecting the first would risk transferring the
+    wrong caller or attaching another caller's number to a saved message.
+    """
+    selected = None
     for participant in ctx.room.remote_participants.values():
         if participant.kind == rtc.ParticipantKind.SIP:
-            return participant
-    return None
+            if selected is not None:
+                raise ValueError("ambiguous SIP participants")
+            selected = participant
+    return selected
 
 
 class ReceptionistVoiceAgent(Agent):
@@ -129,7 +138,10 @@ class ReceptionistVoiceAgent(Agent):
         if not (target.startswith("tel:") or target.startswith("sip:")):
             return "Human transfer target is invalid. Offer to capture a message instead."
         job_ctx = get_job_context()
-        participant = _sip_participant(job_ctx)
+        try:
+            participant = _sip_participant(job_ctx)
+        except ValueError:
+            return "Multiple SIP callers are present; cannot safely transfer one. Offer a separate contact route."
         if participant is None:
             return "No active SIP caller is available to transfer. Offer to capture a message instead."
         # Recheck immediately before provider transport. This is not a
@@ -176,7 +188,10 @@ class ReceptionistVoiceAgent(Agent):
         if not message:
             return "No message was provided. Ask the caller what they would like the business to know."
         job_ctx = get_job_context()
-        participant = _sip_participant(job_ctx)
+        try:
+            participant = _sip_participant(job_ctx)
+        except ValueError:
+            return "Multiple SIP callers are present; cannot safely attribute a message. Offer a separate contact route."
         caller_number = None
         if participant is not None:
             raw = participant.attributes.get("sip.phoneNumber")

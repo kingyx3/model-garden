@@ -84,6 +84,18 @@ The worker stores receipts at `<worker-data>/summary-completions/call-summary-co
 
 The worker writes a deterministic **extractive summary** (`summarySource: extractive`: the caller's first words, the agent's last reply, turn counts and the outcome, from the already-redacted turns) and the caller's speech-to-text confidence when the model reports one. It stays in the transcript store; the post-call summary below is what reaches the CRM.
 
+**Multi-party SIP safety (#107).** The LiveKit fallback worker now selects a
+SIP caller only when exactly one SIP participant is present in the room. A
+conference/reconnect with two or more SIP participants refuses both
+`transfer_to_human` and `capture_message` before contacting the SIP
+provider or writing a callback message, rather than choosing the first
+participant and risking the wrong caller's identity/number. A room with one
+SIP caller and non-SIP observers still works; an RTC room with no SIP caller
+keeps its existing message-only fallback without inventing a phone number.
+The caller must use a separately verified contact route until the ambiguity
+is resolved. This is an offline-tested guard, not authenticated SIP identity,
+provider transfer success, live transcript coverage or client acceptance.
+
 **Transfers.** When the worker transfers a call it calls `note_transfer()`: the outcome becomes `transferred` and the record carries `transfer: {offsetSeconds, turnsAfter, captured}`. Any turn still heard after the request is flagged `afterTransfer`. A LiveKit cold transfer removes the caller from the room, so normally nothing follows and `captured: false` says so; the summary states "what followed is not recorded" rather than implying a complete call. Speech between the caller and the person they were transferred to is not captured.
 
 ### Post-call summary
