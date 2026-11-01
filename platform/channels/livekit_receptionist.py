@@ -77,7 +77,7 @@ def _callback_number(value: Any) -> str | None:
     Keep only a bounded canonical E.164 number. Do not normalize arbitrary
     provider metadata or accept control characters, URIs, or free-form text.
     """
-    if not isinstance(value, str) or re.fullmatch(r"\\+[1-9][0-9]{1,14}", value) is None:
+    if not isinstance(value, str) or re.fullmatch(r"\+[1-9][0-9]{1,14}", value) is None:
         return None
     return value
 
