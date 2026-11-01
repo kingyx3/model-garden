@@ -287,10 +287,15 @@ def _transcript_summary(voice_rows: list[dict[str, Any]], transcript_rows: list[
     # an uncaptured human leg in the strict coverage gate.
     transfer_receipts: set[tuple[str, str]] = set()
     for row in voice_rows:
-        key = (_voice_call_id(row), row.get("agent"))
+        if row.get("type") != "HumanTransfer":
+            continue
+        room, agent = _voice_call_id(row), row.get("agent")
+        if not isinstance(room, str) or not isinstance(agent, str):
+            continue
+        key = (room, agent)
         at = row.get("timestamp")
-        if (row.get("type") == "HumanTransfer" and key in completed
-                and type(at) is int and started[key] <= at <= completed[key]):
+        if (key in completed and type(at) is int
+                and started[key] <= at <= completed[key]):
             transfer_receipts.add(key)
 
     by_call: dict[tuple[str, str], list[dict[str, Any]]] = {}
