@@ -223,6 +223,10 @@ class VoicePauseTests(unittest.TestCase):
         self.assertIn("stop_session_on_pause(", worker)
         self.assertIn("monitor_task.cancel()", worker)
         self.assertIn("ctx.add_shutdown_callback(stop_pause_monitor)", worker)
+        self.assertLess(worker.index("ctx.add_shutdown_callback(stop_pause_monitor)"),
+                        worker.index("ctx.add_shutdown_callback(on_transcript_shutdown)"))
+        self.assertIn("monitor_task is asyncio.current_task()", worker)
+        self.assertNotIn("on_pause=transcript.suppress", worker)
 
 
 if __name__ == "__main__":
