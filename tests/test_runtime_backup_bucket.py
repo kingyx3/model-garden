@@ -20,7 +20,7 @@ class RuntimeBackupBucketContractTests(unittest.TestCase):
         self.assertIn('substr(md5(var.project_id), 0, 10)', source)
         self.assertIn('local.name', source)
 
-    def test_private_retained_objects_have_upload_only_runtime_permission(self):
+    def test_private_retained_objects_have_scoped_create_only_writer(self):
         source = BUCKET.read_text(encoding="utf-8")
         for declaration in (
             'uniform_bucket_level_access = true',
@@ -28,11 +28,18 @@ class RuntimeBackupBucketContractTests(unittest.TestCase):
             'force_destroy               = false',
             "retention_policy {",
             "runtime_backup_retention_days * 86400",
+            'resource "google_service_account" "backup_writer"',
+            'resource "google_storage_bucket_iam_member" "backup_writer_create"',
             'role   = "roles/storage.objectCreator"',
-            'member = "serviceAccount:${var.runtime_service_account}"',
+            'member = "serviceAccount:${google_service_account.backup_writer[0].email}"',
+            'resource "google_service_account_iam_member" "runtime_impersonates_backup_writer"',
+            'role               = "roles/iam.serviceAccountTokenCreator"',
+            'member             = "serviceAccount:${var.runtime_service_account}"',
         ):
             with self.subTest(declaration=declaration):
                 self.assertIn(declaration, source)
+        bucket_writer = source.split('resource "google_storage_bucket_iam_member" "backup_writer_create" {', 1)[1].split("\n}", 1)[0]
+        self.assertNotIn("var.runtime_service_account", bucket_writer, "runtime must not have direct bucket permission")
         self.assertNotIn("roles/storage.objectAdmin", source)
         self.assertNotIn("roles/storage.admin", source)
         self.assertNotIn("roles/storage.objectViewer", source)

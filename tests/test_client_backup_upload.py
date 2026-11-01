@@ -74,17 +74,34 @@ class EncryptedBackupUploadTests(unittest.TestCase):
         self.assertEqual(result["bucket"], bucket)
         self.assertEqual(result["objects"], 2)
         self.assertEqual(len(self.calls), 2)
-        self.assertEqual(self.calls[0][0:3], ["gcloud", "storage", "cp"])
-        self.assertEqual(self.calls[0][3], str(self.encrypted))
-        self.assertEqual(self.calls[0][4], root + "hermes-data.tar.age")
-        self.assertEqual(self.calls[1][3], str(self.manifest))
-        self.assertEqual(self.calls[1][4], root + "manifest.json")
+        writer = "mg-bkp-" + hashlib.md5(b"acme-dev-mg").hexdigest()[:8] + "@sample-project-123.iam.gserviceaccount.com"
+        for call in self.calls:
+            self.assertEqual(call[:4], ["gcloud", "--impersonate-service-account=" + writer, "storage", "cp"])
+        self.assertEqual(self.calls[0][4], str(self.encrypted))
+        self.assertEqual(self.calls[0][5], root + "hermes-data.tar.age")
+        self.assertEqual(self.calls[1][4], str(self.manifest))
+        self.assertEqual(self.calls[1][5], root + "manifest.json")
         for call in self.calls:
             self.assertIn("--if-generation-match=0", call)
             self.assertIn("--quiet", call)
             self.assertNotIn("--no-clobber", call)  # avoid read permissions and TOCTOU
             self.assertNotIn("-r", call)  # no broad directory copy
         self.assertEqual(result["clientProject"], "acme-dev")
+
+    def test_backup_writer_identity_is_deterministic_and_scoped_to_exact_tenant(self):
+        expected = "mg-bkp-" + hashlib.md5(b"acme-dev-mg").hexdigest()[:8] + "@sample-project-123.iam.gserviceaccount.com"
+        self.assertEqual(UPLOAD.expected_writer_identity("sample-project-123", "acme", "dev"), expected)
+        self.assertNotEqual(UPLOAD.expected_writer_identity("sample-project-123", "acme", "prod"), expected)
+        self.assertNotEqual(UPLOAD.expected_writer_identity("sample-project-123", "other", "dev"), expected)
+        self.assertNotEqual(UPLOAD.expected_writer_identity("other-project-123", "acme", "dev"), expected)
+        for cloud, client, env in (
+            ("invalid project", "acme", "dev"),
+            ("sample-project-123", "acme;other", "dev"),
+            ("sample-project-123", "acme", "staging"),
+        ):
+            with self.subTest(cloud=cloud, client=client, env=env):
+                with self.assertRaises(UPLOAD.UploadError):
+                    UPLOAD.expected_writer_identity(cloud, client, env)
 
     def test_wrong_project_or_cloud_context_never_calls_gcloud(self):
         for kwargs in (

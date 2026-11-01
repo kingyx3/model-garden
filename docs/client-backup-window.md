@@ -27,6 +27,36 @@ Create an existing private directory (0700), and a private approval JSON file (0
 
 The recipient fingerprint is the lowercase hex SHA-256 of the ASCII public age recipient string, not the private identity. Timestamps must be UTC seconds, current, at most 3600 seconds apart and leave at least 30 seconds. This local file records an approval **claim**, not independent cryptographic authorization: enforce host RBAC and retain the real client approval in the existing change-management system.
 
+## Scoped GCS backup writer (v0.8.262)
+
+The opt-in Terraform backup bucket now grants `roles/storage.objectCreator` to a
+**separate** tenant/environment backup service account, not directly to the
+runtime service account. The runtime gets `roles/iam.serviceAccountTokenCreator`
+**only on that backup writer**. `client-backup-upload.py` derives the expected
+account from the exact GCP project and `<client>-<environment>-mg` identity,
+and always calls `gcloud --impersonate-service-account=<derived-writer> storage cp`
+with create-only generation preconditions. It cannot select an arbitrary writer
+or silently fall back to ambient gcloud credentials. The account email is not a
+secret; no access token is stored in the workspace, manifest or ledger.
+
+**Migration is fail-closed.** Existing installations using the older direct
+runtime `roles/storage.objectCreator` grant must obtain client approval for an
+IaC plan, provision the dedicated writer and scoped impersonation grant, and
+remove the old direct grant through the reviewed Terraform state before running
+this uploader version. Deploying the new uploader first causes upload failure,
+not ambient-credential fallback. Confirm the Terraform
+`runtime_backup_writer_service_account` output equals the derived account and
+that the old direct bucket binding is absent. An operator who invokes the
+uploader directly must authenticate as an identity explicitly authorized to
+impersonate this scoped writer; never grant broad storage admin rights to
+work around a failed impersonation. A distinct read-only identity and client
+authorization are still required for independent read-back and restore.
+
+This change is **IaC and credential-free contract evidence only**: no Terraform
+apply, bucket creation, real upload, remote read-back, notification delivery,
+age-key custody or replacement-host recovery was performed. Retention locking,
+operational ownership, recovery drills and measured RPO/RTO remain #230 gates.
+
 ## Host lock setup (required for backup, single-client deploy apply and voice overlay apply)
 
 On the same Docker host, pre-provision `/run/lock/model-garden` as a **0700 directory owned by the dedicated Unix operator UID** used by all three commands. The lock files are created as 0600 and never unlinked; the commands fail closed when the directory is absent, symlinked, group-accessible, or owned by another UID. Ensure both processes use the same host mount namespace and operator identity; the directory under `/run` must be recreated securely after each reboot. Do not mount separate lock directories or bypass this guard with a different deployment entrypoint. This is a cooperative safeguard only; independently stop auto-restarts and enforce the client-approved maintenance freeze before running backup or restore.
