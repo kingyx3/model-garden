@@ -40,6 +40,25 @@ Channel approvals go through `decide_from_channel()`: the responder must be mapp
 
 ## Voice (LiveKit)
 
+### Last SIP caller disconnect and interrupted speech (v0.8.273; #107)
+
+The LiveKit 1.8.9 voice worker now requests an explicit `AgentSession.aclose()`
+when the final SIP caller disconnects, even if non-SIP observers keep the room
+alive. This gives LiveKit's conversation-item flush an opportunity to commit a
+partial, interrupted assistant turn before the existing transcript shutdown
+callback. A departing non-SIP participant or one SIP participant leaving while
+another remains does **not** terminate the active caller's session. The close
+request is once-only; failures log only their exception type, never call text.
+
+This is **best-effort local lifecycle handling**, not an authenticated SIP
+receipt or proof of the exact audio heard. Process crashes, provider outages,
+unobservable human speech after cold transfer, or a failure to deliver the
+`conversation_item_added` event can still leave gaps. Keep #107 and #117
+open until a real authorized SIP hangup/interruption drill reconciles TTS,
+STT, stored turns, model summary, governed request IDs and provider receipts.
+Use the strict full-call coverage collector to refuse incomplete evidence.
+
+
 ### Emergency owner pause on voice admission (v0.8.268; #232)
 
 The reference LiveKit worker queries the **existing governed MCP sidecar** at a fixed private Compose-network route, `GET /internal/voice-pause`. The sidecar reads the same client `PauseStore` used for governed Tool denials, returning **HTTP 200 only when active**, HTTP 423 when paused, and no payload. The worker treats every other status, connection error or timeout as paused. The route has no published host port and returns no owner identity, audit data or secrets. The voice image does **not** mount the governance volume (which contains sensitive approval, audit and connection state), and the overlay refuses a base deployment without the governed-tools service.
