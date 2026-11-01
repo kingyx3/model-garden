@@ -49,6 +49,24 @@ class RuntimeMetricTests(unittest.TestCase):
                                                                      subprocess.CalledProcessError(1, ["docker", "exec"]), result()]):
             self.assertEqual(METRIC.sample("acme-dev"), {"gateway": False, "worker": True})
 
+    def test_optimized_python_never_accepts_non_200_readiness(self):
+        # Docker exec inherits the gateway's Python environment. Under -O,
+        # assert statements disappear, so a 204 must still fail closed.
+        for status, expected in ((200, 0), (204, 1)):
+            with self.subTest(status=status):
+                setup = (
+                    "import urllib.request; "
+                    "urllib.request.build_opener=lambda *args: "
+                    "type('Opener', (), {'open': lambda self,*a,**k: "
+                    f"type('Response', (), {{'status': {status}}})()}})(); "
+                )
+                completed = subprocess.run(
+                    [sys.executable, "-O", "-c",
+                     setup + METRIC.PROBE.replace("{component}", "worker")],
+                    capture_output=True, text=True, timeout=5,
+                )
+                self.assertEqual(completed.returncode, expected, completed.stderr)
+
     def test_metrics_are_exact_two_boolean_series_without_runtime_payload(self):
         at = datetime(2026, 10, 28, tzinfo=timezone.utc)
         data = METRIC.build_timeseries("sample-project-123", "123", "asia-southeast1-a", "acme", "dev",
