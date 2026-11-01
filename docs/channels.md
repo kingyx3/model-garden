@@ -84,6 +84,20 @@ The worker stores receipts at `<worker-data>/summary-completions/call-summary-co
 
 The worker writes a deterministic **extractive summary** (`summarySource: extractive`: the caller's first words, the agent's last reply, turn counts and the outcome, from the already-redacted turns) and the caller's speech-to-text confidence when the model reports one. It stays in the transcript store; the post-call summary below is what reaches the CRM.
 
+**Fallback-message privacy (#107, v0.8.270).** The receptionist redacts
+Luhn-valid payment card numbers and the client-configured
+`MODEL_GARDEN_TRANSCRIPT_REDACT_PATTERNS` in both saved message text and
+caller-provided name **before** private fallback persistence, even when
+transcription is disabled. The saved record contains only redacted text and
+aggregate card/pattern replacement counts. Caller telephone number remains
+available for authorized human follow-up under the existing retention policy.
+Messages over 4,000 characters or names over 200 characters are refused
+without a write; the caller is asked to shorten the request. Operators must
+configure additional client-specific sensitive patterns and treat historical
+pre-upgrade fallback records as potentially unredacted: this change does not
+rewrite or retroactively erase them. Local tests do not establish real SIP,
+consent, provider delivery or live retention compliance.
+
 **Multi-party SIP safety (#107).** The LiveKit fallback worker now selects a
 SIP caller only when exactly one SIP participant is present in the room. A
 conference/reconnect with two or more SIP participants refuses both
