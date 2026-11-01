@@ -375,20 +375,23 @@ def _model_completion_summary(
     for row in completion_rows:
         if row.get("type") == "CallSummaryCompletion" and isinstance(row.get("callHash"), str):
             completion_by_room.setdefault(row["callHash"], []).append(row)
-    room_agents: dict[str, set[str | None]] = {}
+    # The voice worker generates a fresh callHash per invocation; roomHash is
+    # stable across reused provider rooms. Only legacy receipts without a
+    # callHash may use the room digest as their identity.
+    call_agents: dict[str, set[str | None]] = {}
     for row in voice_rows:
         if row.get("type") not in ("CallStarted", "CallEnded"):
             continue
-        room = row.get("roomHash")
-        if isinstance(room, str):
+        call_id = _voice_call_id(row)
+        if call_id is not None:
             agent = row.get("agent")
-            room_agents.setdefault(room, set()).add(agent if isinstance(agent, str) and agent else None)
+            call_agents.setdefault(call_id, set()).add(agent if isinstance(agent, str) and agent else None)
 
     matched = 0
     for room, receipts in completion_by_room.items():
         calls = transcript_by_room.get(room, [])
         if (len(receipts) != 1 or len(calls) != 1
-                or len(room_agents.get(room, ())) != 1 or None in room_agents[room]):
+                or len(call_agents.get(room, ())) != 1 or None in call_agents[room]):
             continue
         receipt, call = receipts[0], calls[0]
         if (_transcript_summary(voice_rows, [call])["completeTwoWayCalls"] != 1
@@ -423,27 +426,27 @@ def _single_call_scenario_count(
     identity. The raw identifiers and speech never leave this function.
     A room reused by different agents is ambiguous and cannot prove acceptance.
     """
-    room_agents: dict[str, set[str | None]] = {}
+    call_agents: dict[str, set[str | None]] = {}
     for row in voice_rows:
         if row.get("type") not in ("CallStarted", "CallEnded"):
             continue
-        room = row.get("roomHash")
-        if not isinstance(room, str) or not re.fullmatch(r"[0-9a-f]{64}", room):
+        call_id = _voice_call_id(row)
+        if call_id is None:
             continue
         agent = row.get("agent")
-        room_agents.setdefault(room, set()).add(agent if isinstance(agent, str) and agent else None)
+        call_agents.setdefault(call_id, set()).add(agent if isinstance(agent, str) and agent else None)
 
     complete = 0
-    for room, agents in room_agents.items():
+    for call_id, agents in call_agents.items():
         if len(agents) != 1 or None in agents:
             continue
         agent = next(iter(agents))
+        # Scope every receipt to the invocation, not the reusable LiveKit room.
+        # In particular, another call's fallback must not satisfy this call's
+        # transcript, governed action or model-summary acceptance.
         scoped = [
-            row for row in voice_rows if row.get("roomHash") == room
-            and (row.get("agent") == agent or (
-                row.get("type") in ("HumanTransfer", "FallbackMessage")
-                and row.get("agent") == agent
-            ))
+            row for row in voice_rows
+            if _voice_call_id(row) == call_id and row.get("agent") == agent
         ]
         if _voice_summary(scoped)["completedCallFallbackEvidence"] != 1:
             continue
