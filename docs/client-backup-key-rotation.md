@@ -54,6 +54,34 @@ Run the credential-free tests with
 Issue #230 remains open until approved live cloud backup/restore, alert delivery,
 key custody and observed RPO/RTO evidence are independently retained.
 
+## Separate recovery-reader identity (v0.8.263)
+
+When the opt-in backup bucket is provisioned, Terraform also creates a
+**distinct read-only recovery service account**, exposed as
+`runtime_backup_reader_service_account`. The reader has
+`roles/storage.objectViewer` **only on that client/environment's bucket**;
+the backup writer retains create-only access. Terraform deliberately does
+**not** grant the runtime, deployer or backup host permission to impersonate
+the reader. The objectViewer role includes bucket-local listing; use a
+separately administered client account and restrict operator access.
+
+`scripts/client-backup-readback.py` now **requires** gcloud impersonation of
+the exact Terraform-derived reader identity on every cloud describe/copy.
+It does not accept an arbitrary reader flag and cannot fall back to ambient
+operator credentials. An authorized client security owner must separately
+grant a recovery operator `roles/iam.serviceAccountTokenCreator` on that
+specific reader account, with approved duration and revocation. This is
+**not** a grant to the runtime, nor permission to decrypt age ciphertext.
+Run recovery from a trusted isolated host with independent age-key custody.
+
+**Migration:** Existing opt-in installations must review/apply the Terraform
+reader addition and approve operator impersonation **before** upgrading
+readback automation. Until then, readback intentionally fails closed.
+Reconcile GCS Data Access logs, object generations, retained manifests and
+independent restore evidence; IAM provisioning or mocked gcloud tests do
+not prove a live readback, key custody, replacement-host restore or RPO/RTO.
+Do not run Terraform against a client environment without authorization.
+
 ## Restore-time manifest integrity
 
 The operator restore CLI now pins the original private manifest inode and
