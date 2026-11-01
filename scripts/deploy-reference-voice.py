@@ -188,8 +188,10 @@ def _context(root: pathlib.Path) -> pathlib.Path:
     shutil.copy2(ROOT / "requirements-voice.txt", context / "requirements-voice.txt")
     shutil.copy2(ROOT / "platform" / "channels" / "livekit_receptionist.py", context / "livekit_receptionist.py")
     shutil.copy2(ROOT / "platform" / "channels" / "call_transcript.py", context / "call_transcript.py")
+    shutil.copy2(ROOT / "platform" / "channels" / "voice_pause.py", context / "voice_pause.py")
+    shutil.copy2(ROOT / "platform" / "core" / "pause.py", context / "pause.py")
     (context / "Dockerfile").write_text(
-        """ARG BASE_IMAGE\nFROM ${BASE_IMAGE}\nCOPY requirements-voice.txt /tmp/requirements-voice.txt\nRUN python -m pip install --no-cache-dir -r /tmp/requirements-voice.txt\nCOPY livekit_receptionist.py /opt/model-garden-livekit-receptionist.py\nCOPY call_transcript.py /opt/call_transcript.py\nENTRYPOINT [\"python\", \"/opt/model-garden-livekit-receptionist.py\"]\nCMD [\"start\"]\n""",
+        """ARG BASE_IMAGE\nFROM ${BASE_IMAGE}\nCOPY requirements-voice.txt /tmp/requirements-voice.txt\nRUN python -m pip install --no-cache-dir -r /tmp/requirements-voice.txt\nCOPY livekit_receptionist.py /opt/model-garden-livekit-receptionist.py\nCOPY call_transcript.py /opt/call_transcript.py\nCOPY voice_pause.py /opt/voice_pause.py\nCOPY pause.py /opt/pause.py\nENTRYPOINT [\"python\", \"/opt/model-garden-livekit-receptionist.py\"]\nCMD [\"start\"]\n""",
         encoding="utf-8",
     )
     return context
@@ -292,13 +294,18 @@ def _apply_selected_voice(binding: dict[str, Any], voice: dict[str, Any], bundle
                 "restart": "unless-stopped",
                 "healthcheck": voice_healthcheck(),
                 "environment": voice_environment,
-                "volumes": ["voice-data:/opt/data"],
+                # Read-only owner pause state; no governance write access.
+                "volumes": ["voice-data:/opt/data", "governance-data:/opt/governance:ro"],
                 "depends_on": {"hermes": {"condition": "service_healthy"}},
             },
         },
-        "volumes": {"voice-data": {}},
+        "volumes": {"voice-data": {}, "governance-data": {}},
     }
     base_document = yaml.safe_load(base.read_text(encoding="utf-8"))
+    if (not isinstance(base_document, dict)
+            or not isinstance(base_document.get("services"), dict)
+            or "governed-tools" not in base_document["services"]):
+        raise ValueError("voice pause requires the shared governed-tools service and governance volume")
     shared = worker_overlay(base_document, agent_name=agent_name.strip())
     if shared is not None:
         document["services"]["governed-worker"] = shared
