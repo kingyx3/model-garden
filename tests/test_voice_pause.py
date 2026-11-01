@@ -25,31 +25,28 @@ spec.loader.exec_module(voice_pause)
 
 
 class VoicePauseTests(unittest.TestCase):
-    def test_new_workspace_pause_resume_and_restart_are_read_from_shared_state(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            root = pathlib.Path(tmp)
-            with mock.patch.object(voice_pause, "PAUSE_ROOT", root):
-                self.assertFalse(voice_pause.paused())
-                voice_pause.PauseStore(root).pause("owner@client.example", "incident", 1800000000)
+    def test_private_sidecar_active_pause_and_fail_closed_responses(self):
+        with mock.patch.object(voice_pause.http.client, "HTTPConnection") as connection:
+            connection.return_value.getresponse.return_value.status = 200
+            self.assertFalse(voice_pause.paused())
+            connection.assert_called_once_with("governed-tools", 9120, timeout=2)
+            connection.return_value.request.assert_called_once_with("GET", "/internal/voice-pause")
+            connection.return_value.close.assert_called_once()
+        for status in (204, 302, 401, 423, 500):
+            with self.subTest(status=status), mock.patch.object(voice_pause.http.client, "HTTPConnection") as connection:
+                connection.return_value.getresponse.return_value.status = status
                 self.assertTrue(voice_pause.paused())
-                self.assertTrue(voice_pause.paused())  # independent reader, no process cache
-                voice_pause.PauseStore(root).resume("owner@client.example", 1800000001)
-                self.assertFalse(voice_pause.paused())
+                connection.return_value.close.assert_called_once()
 
-    def test_unavailable_or_tampered_pause_mount_fails_closed(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            root = pathlib.Path(tmp)
-            with mock.patch.object(voice_pause, "PAUSE_ROOT", root / "missing"):
+    def test_sidecar_unavailable_or_malformed_http_fails_closed(self):
+        for error in (TimeoutError("timeout"), OSError("connection refused"),
+                      voice_pause.http.client.BadStatusLine("bad")):
+            with self.subTest(error=type(error).__name__), mock.patch.object(
+                voice_pause.http.client, "HTTPConnection"
+            ) as connection:
+                connection.return_value.request.side_effect = error
                 self.assertTrue(voice_pause.paused())
-            state = root / "pause.json"
-            state.write_text('{"paused": false}', encoding="utf-8")
-            state.chmod(0o644)
-            with mock.patch.object(voice_pause, "PAUSE_ROOT", root):
-                self.assertTrue(voice_pause.paused())
-            state.unlink()
-            state.symlink_to(root / "missing")
-            with mock.patch.object(voice_pause, "PAUSE_ROOT", root):
-                self.assertTrue(voice_pause.paused())
+                connection.return_value.close.assert_called_once()
 
     def test_voice_entry_holds_without_model_generation_and_suppresses_transcript(self):
         tree = ast.parse((ROOT / "platform/channels/livekit_receptionist.py").read_text())
@@ -75,12 +72,16 @@ class VoicePauseTests(unittest.TestCase):
                 self.assertIn("if voice_paused():", source)
                 self.assertLess(source.index("if voice_paused():"), source.index(side_effect))
 
-    def test_voice_overlay_mounts_shared_governance_read_only_and_bundles_pause_reader(self):
+    def test_voice_overlay_does_not_expose_governance_volume_to_model_container(self):
         source = (ROOT / "scripts/deploy-reference-voice.py").read_text()
-        self.assertIn("governance-data:/opt/governance:ro", source)
+        self.assertNotIn("governance-data:/opt/governance", source)
         self.assertIn("voice_pause.py", source)
         self.assertIn("pause.py", source)
         self.assertIn("governed-tools", source)
+        self.assertIn("governed-tools", (ROOT / "platform/channels/voice_pause.py").read_text())
+        server = (ROOT / "platform/runtime/governed_mcp.py").read_text()
+        self.assertIn('/internal/voice-pause', server)
+        self.assertIn("custom_route", server)
 
 
     def test_paused_agent_speaks_holding_without_model_or_fallback_effects(self):
