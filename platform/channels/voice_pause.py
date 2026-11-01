@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import http.client
+import logging
 
 from pause import HOLDING
 
@@ -16,6 +17,7 @@ HOST = "governed-tools"
 PORT = 9120
 PATH = "/internal/voice-pause"
 TIMEOUT_SECONDS = 2
+LOGGER = logging.getLogger("model-garden.voice-pause")
 
 
 def _check() -> bool:
@@ -34,3 +36,27 @@ def _check() -> bool:
 async def paused() -> bool:
     """Bounded private check without blocking LiveKit's media event loop."""
     return await asyncio.to_thread(_check)
+
+
+async def stop_session_on_pause(session, *, interval_seconds: float = 1.0) -> None:
+    """Close an already admitted voice session when owner pause becomes visible.
+
+    This is a best-effort local fence, not synchronous cancellation of audio,
+    remote SIP transfers or a provider request already accepted. Errors reading
+    the private sidecar are treated as paused. Cancellation on job shutdown must
+    propagate without closing a normally completed session.
+    """
+    while True:
+        try:
+            should_stop = await paused()
+        except Exception as exc:
+            LOGGER.error("voice pause check failed (%s); closing session", type(exc).__name__)
+            should_stop = True
+        if should_stop:
+            try:
+                await session.aclose()
+            except Exception as exc:
+                # A failed SDK close is not a provider-side cancellation receipt.
+                LOGGER.error("voice session pause close failed (%s)", type(exc).__name__)
+            return
+        await asyncio.sleep(interval_seconds)

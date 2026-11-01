@@ -169,5 +169,61 @@ class VoicePauseTests(unittest.TestCase):
         self.assertTrue(transcript.played)
         self.assertFalse(transcript.suppressed)
 
+    def test_inflight_pause_monitor_closes_once_after_active_call(self):
+        # Execute the actual asynchronous monitor; no LiveKit or SIP transport.
+        async def scenario():
+            states = iter((False, False, True))
+            async def status():
+                return next(states)
+            session = mock.AsyncMock()
+            with mock.patch.object(voice_pause, "paused", side_effect=status):
+                await voice_pause.stop_session_on_pause(
+                    session, interval_seconds=0
+                )
+            session.aclose.assert_awaited_once()
+
+        asyncio.run(scenario())
+
+    def test_inflight_pause_monitor_fails_closed_on_sidecar_error(self):
+        async def scenario():
+            async def unavailable():
+                raise RuntimeError("sensitive provider details must not escape")
+            session = mock.AsyncMock()
+            with mock.patch.object(voice_pause, "paused", side_effect=unavailable):
+                await voice_pause.stop_session_on_pause(
+                    session, interval_seconds=0
+                )
+            session.aclose.assert_awaited_once()
+
+        asyncio.run(scenario())
+
+    def test_inflight_pause_monitor_cancellation_does_not_close_active_session(self):
+        async def scenario():
+            entered = asyncio.Event()
+            async def active():
+                entered.set()
+                return False
+            session = mock.AsyncMock()
+            with mock.patch.object(voice_pause, "paused", side_effect=active):
+                task = asyncio.create_task(voice_pause.stop_session_on_pause(session))
+                await entered.wait()
+                task.cancel()
+                with self.assertRaises(asyncio.CancelledError):
+                    await task
+            session.aclose.assert_not_awaited()
+
+        asyncio.run(scenario())
+
+    def test_voice_worker_registers_and_cancels_one_inflight_pause_watch(self):
+        worker = (ROOT / "platform/channels/livekit_receptionist.py").read_text()
+        self.assertIn("stop_session_on_pause(", worker)
+        self.assertIn("monitor_task.cancel()", worker)
+        self.assertIn("ctx.add_shutdown_callback(stop_pause_monitor)", worker)
+        self.assertLess(worker.index("ctx.add_shutdown_callback(stop_pause_monitor)"),
+                        worker.index("ctx.add_shutdown_callback(on_transcript_shutdown)"))
+        self.assertIn("monitor_task is asyncio.current_task()", worker)
+        self.assertNotIn("on_pause=transcript.suppress", worker)
+
+
 if __name__ == "__main__":
     unittest.main()
