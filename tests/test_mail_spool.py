@@ -428,7 +428,7 @@ class CommandTests(Case):
         self.assertEqual(parsed.get_all("Authentication-Results"), None)
         self.assertIsNone(email_channel.verified_sender(parsed, MX))
         drafts = []
-        mailbox = SupportMailboxTests.mailbox(self, drafts)
+        mailbox = SupportMailboxTests.mailbox(self, drafts, ticket=lambda _item: {"ticketId": "t-review"})
         outcome = mailbox.handle(saved, now=T0)
         self.assertEqual((outcome["status"], outcome["reason"]), ("needs-person", "sender-unverified"))
         self.assertEqual(drafts, [])
