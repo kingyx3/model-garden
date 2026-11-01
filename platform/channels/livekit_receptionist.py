@@ -31,7 +31,7 @@ from livekit import api, rtc
 from livekit.agents import Agent, AgentServer, AgentSession, JobContext, RunContext, cli, function_tool, get_job_context
 from livekit.plugins import openai
 
-from call_transcript import CallTranscript, config_from_env as transcript_config_from_env, finalize as finalize_transcript, store_private_jsonl
+from call_transcript import CallTranscript, config_from_env as transcript_config_from_env, finalize as finalize_transcript, redact, store_private_jsonl
 from voice_pause import HOLDING, paused as voice_paused
 
 LOGGER = logging.getLogger("model-garden.receptionist")
@@ -41,6 +41,8 @@ TRANSCRIPT_CONFIG = transcript_config_from_env()
 MESSAGE_PATH = pathlib.Path(os.environ.get("MODEL_GARDEN_MESSAGE_PATH", "/opt/data/messages.jsonl"))
 AGENT_NAME = os.environ.get("MODEL_GARDEN_LIVEKIT_AGENT_NAME", "model-garden-receptionist").strip() or "model-garden-receptionist"
 DEFAULT_MESSAGE_RETENTION_SECONDS = 7 * 24 * 60 * 60
+MAX_FALLBACK_MESSAGE_CHARS = 4000
+MAX_FALLBACK_NAME_CHARS = 200
 
 
 def _required(name: str) -> str:
@@ -184,9 +186,24 @@ class ReceptionistVoiceAgent(Agent):
         """Persist the minimum data required for a human to follow up when transfer is unavailable."""
         if await voice_paused():
             return HOLDING
+        if not isinstance(message, str) or not isinstance(caller_name, str):
+            return "Invalid message or caller name. Ask the caller to provide a short text message."
         message = message.strip()
+        caller_name = caller_name.strip()
         if not message:
             return "No message was provided. Ask the caller what they would like the business to know."
+        # Bound untrusted Tool arguments before running client-configured regexes.
+        # Fallback storage has its own retention policy: transcript recording
+        # being disabled must never disable payment-card/client-pattern redaction.
+        if len(message) > MAX_FALLBACK_MESSAGE_CHARS or len(caller_name) > MAX_FALLBACK_NAME_CHARS:
+            return "The message or caller name is too long to save safely. Ask the caller to shorten it."
+        try:
+            safe_message, message_redactions = redact(message, TRANSCRIPT_CONFIG.patterns)
+            safe_name, name_redactions = redact(caller_name, TRANSCRIPT_CONFIG.patterns)
+        except Exception as exc:
+            LOGGER.error("fallback message redaction failed: %s", type(exc).__name__)
+            return "The message could not be saved safely. Offer the caller another contact route."
+        redactions = {key: message_redactions[key] + name_redactions[key] for key in ("card", "pattern")}
         job_ctx = get_job_context()
         try:
             participant = _sip_participant(job_ctx)
@@ -207,9 +224,10 @@ class ReceptionistVoiceAgent(Agent):
                     "agent": AGENT_NAME,
                     "roomHash": _safe_digest(job_ctx.room.name),
                     "callHash": self._call_hash,
-                    "caller_name": caller_name.strip() or None,
+                    "caller_name": safe_name or None,
                     "caller_number": caller_number,
-                    "message": message,
+                    "message": safe_message,
+                    "redactions": redactions,
                 }
             )
         except Exception as exc:

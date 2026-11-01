@@ -11,6 +11,7 @@ import logging
 import importlib.util
 import os
 import pathlib
+import re
 import stat
 import sys
 import tempfile
@@ -58,6 +59,10 @@ namespace.update({
     "LOGGER": logging.getLogger("voice-fallback-test"),
     "AGENT_NAME": "model-garden-receptionist",
     "voice_paused": _unpaused_fixture,
+    "redact": T.redact,
+    "TRANSCRIPT_CONFIG": T.TranscriptConfig(),
+    "MAX_FALLBACK_MESSAGE_CHARS": 4000,
+    "MAX_FALLBACK_NAME_CHARS": 200,
 })
 agent_node = next(node for node in tree.body if isinstance(node, ast.ClassDef)
                   and node.name == "ReceptionistVoiceAgent")
@@ -203,6 +208,45 @@ class PrivateFallbackMessageTests(unittest.TestCase):
         self.assertIn("could not be saved safely", result)
         self.assertEqual(target.read_text(), "untouched\\n")
         self.assertNotIn("synthetic private request", str(logs.output))
+
+    def test_fallback_redacts_cards_and_client_patterns_even_with_transcripts_disabled(self):
+        # Fallback messages have their own retention path; disabling the
+        # transcript must not turn off the configured privacy redaction.
+        previous = namespace["TRANSCRIPT_CONFIG"]
+        namespace["TRANSCRIPT_CONFIG"] = T.TranscriptConfig(
+            enabled=False, patterns=(re.compile(r"\bVIP-\d{4}\b"),)
+        )
+        try:
+            agent = namespace["ReceptionistVoiceAgent"]("test")
+            result = asyncio.run(agent.capture_message(
+                None, "Please call me about card 4111 1111 1111 1111 and VIP-1234",
+                caller_name="VIP-4321",
+            ))
+        finally:
+            namespace["TRANSCRIPT_CONFIG"] = previous
+        self.assertIn("captured", result)
+        (row,) = [T.json.loads(line) for line in self.path.read_text().splitlines()]
+        self.assertEqual(row["message"], "Please call me about card [REDACTED:card] and [REDACTED:pattern]")
+        self.assertEqual(row["caller_name"], "[REDACTED:pattern]")
+        self.assertEqual(row["redactions"], {"card": 1, "pattern": 2})
+        self.assertNotIn("4111", self.path.read_text())
+        self.assertNotIn("VIP-", self.path.read_text())
+
+    def test_non_string_tool_arguments_are_refused_before_any_write(self):
+        agent = namespace["ReceptionistVoiceAgent"]("test")
+        for message, name in ((None, ""), ({"private": "value"}, ""), ("safe", None), ("safe", ["name"])):
+            with self.subTest(message_type=type(message).__name__, name_type=type(name).__name__):
+                result = asyncio.run(agent.capture_message(None, message, caller_name=name))
+                self.assertIn("invalid", result.lower())
+                self.assertFalse(self.path.exists())
+
+    def test_oversized_fallback_message_or_name_is_refused_without_persistence(self):
+        agent = namespace["ReceptionistVoiceAgent"]("test")
+        for message, name in (("x" * 4001, ""), ("safe", "y" * 201)):
+            with self.subTest(message_length=len(message), name_length=len(name)):
+                result = asyncio.run(agent.capture_message(None, message, caller_name=name))
+                self.assertIn("too long", result)
+                self.assertFalse(self.path.exists(), "rejected fallback must not write a receipt or payload")
 
     def test_existing_owned_regular_file_keeps_bounded_retention_and_private_modes(self):
         self.path.parent.mkdir(mode=0o700)
