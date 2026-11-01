@@ -186,6 +186,8 @@ class ReceptionistVoiceAgent(Agent):
         """Persist the minimum data required for a human to follow up when transfer is unavailable."""
         if await voice_paused():
             return HOLDING
+        if not isinstance(message, str) or not isinstance(caller_name, str):
+            return "Invalid message or caller name. Ask the caller to provide a short text message."
         message = message.strip()
         caller_name = caller_name.strip()
         if not message:
