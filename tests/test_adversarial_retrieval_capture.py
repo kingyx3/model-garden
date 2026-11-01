@@ -120,5 +120,69 @@ class RetrievalCaptureTests(unittest.TestCase):
                 self.assertEqual(capture.main(["--output", str(target), "--api-url", "http://hermes:8642/v1"]), 1)
 
 
+    def test_model_capture_requires_nonempty_answer_not_null(self):
+        class NullModel(FakeModel):
+            def answer(self, question, sections, *, session=None):
+                self.calls.append((question, sections, session))
+                return None
+
+        with tempfile.TemporaryDirectory() as tmp:
+            model = NullModel()
+            with self.assertRaises(capture.CaptureError):
+                capture.run_retrieval_case(model, pathlib.Path(tmp))
+            self.assertEqual(len(model.calls), 1)
+
+    def test_read_receipt_must_match_exact_governed_request_and_retrieved_sections(self):
+        original = capture.RUNTIME.GovernedToolRuntime.kb_search
+
+        def change(rows, kind):
+            reads = [row for row in rows if row.get("event") == "read"]
+            self.assertEqual(len(reads), 1)
+            read = reads[0]
+            if kind == "missing-read":
+                rows.remove(read)
+            elif kind == "other-request":
+                read["requestId"] = "f" * 64
+            elif kind == "wrong-content-digest":
+                read["details"]["reads"][0]["records"][0]["contentDigest"] = "0" * 64
+            elif kind == "wrong-source":
+                read["details"]["reads"][0]["sourceId"] = "knowledge:foreign-tenant"
+            elif kind == "wrong-tool":
+                read["tool"] = "crm.read"
+            elif kind == "denied-authorization":
+                next(row for row in rows if row["event"] == "authorization")["outcome"] = "deny"
+            elif kind == "duplicate-read":
+                rows.append(dict(read))
+            elif kind == "missing-section":
+                read["details"]["reads"][0]["records"] = []
+            else:
+                self.fail(kind)
+
+        for kind in ("missing-read", "other-request", "wrong-content-digest",
+                     "wrong-source", "wrong-tool", "denied-authorization",
+                     "duplicate-read", "missing-section"):
+            with self.subTest(kind=kind), tempfile.TemporaryDirectory() as tmp:
+                model = FakeModel()
+
+                def corrupted(self, **kwargs):
+                    found = original(self, **kwargs)
+                    rows = [json.loads(line) for line in self.audit_path.read_text().splitlines()]
+                    change(rows, kind)
+                    self.audit_path.write_text(
+                        "".join(json.dumps(row) + "\\n" for row in rows), encoding="utf-8"
+                    )
+                    return found
+
+                # Isolate the independent request/receipt checks from the chain
+                # verifier: a broken hash chain must not be the ONLY reason
+                # an unrelated/forged read receipt is rejected.
+                with mock.patch.object(capture.RUNTIME.GovernedToolRuntime, "kb_search", corrupted), \\
+                     mock.patch.object(capture.RUNTIME.GOVERN, "verify_audit_chain",
+                                       return_value={"valid": True}):
+                    with self.assertRaises(capture.CaptureError):
+                        capture.run_retrieval_case(model, pathlib.Path(tmp))
+                self.assertEqual(model.calls, [], "unproven retrieval reached the model")
+
+
 if __name__ == "__main__":
     unittest.main()
