@@ -67,6 +67,24 @@ resource "google_service_account_iam_member" "runtime_impersonates_backup_writer
   member             = "serviceAccount:${var.runtime_service_account}"
 }
 
+# Recovery uses a distinct read-only service account, not the backup writer.
+# No runtime, deployer, or host principal is automatically allowed to impersonate
+# this reader. A client-authorized recovery operator must receive a separately
+# reviewed Token Creator grant on this exact identity before running readback.
+# ObjectViewer is restricted to the one client/environment backup bucket.
+resource "google_service_account" "backup_reader" {
+  count        = var.runtime_backup_enabled ? 1 : 0
+  account_id   = "mg-bkr-${substr(md5(local.name), 0, 8)}"
+  display_name = "Model Garden encrypted backup recovery reader (${local.name})"
+}
+
+resource "google_storage_bucket_iam_member" "backup_reader_view" {
+  count  = var.runtime_backup_enabled ? 1 : 0
+  bucket = google_storage_bucket.runtime_backups[0].name
+  role   = "roles/storage.objectViewer"
+  member = "serviceAccount:${google_service_account.backup_reader[0].email}"
+}
+
 output "runtime_backup_bucket" {
   description = "Client/environment backup bucket name when provisioned; no schedule or successful recovery is implied."
   value       = var.runtime_backup_enabled ? google_storage_bucket.runtime_backups[0].name : null
@@ -75,4 +93,9 @@ output "runtime_backup_bucket" {
 output "runtime_backup_writer_service_account" {
   description = "Dedicated create-only backup writer for scoped gcloud impersonation; not a recovery reader or proof of live backup."
   value       = var.runtime_backup_enabled ? google_service_account.backup_writer[0].email : null
+}
+
+output "runtime_backup_reader_service_account" {
+  description = "Dedicated bucket-scoped read-only recovery identity; client must separately authorize operator impersonation."
+  value       = var.runtime_backup_enabled ? google_service_account.backup_reader[0].email : null
 }
