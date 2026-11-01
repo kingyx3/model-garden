@@ -434,6 +434,7 @@ class Worker:
         usage_sources: Mapping[str, pathlib.Path] | None = None,
         voice_transcripts: pathlib.Path | None = None,
         voice_project: str | None = None,
+        voice_agent: str | None = None,
     ) -> None:
         self.desired_state_path = pathlib.Path(desired_state_path)
         self.desired_state = json.loads(self.desired_state_path.read_text(encoding="utf-8"))
@@ -450,7 +451,8 @@ class Worker:
         # The voice overlay pins the exact LiveKit worker identity. A missing
         # overlay setting falls back to the compiled Agent only for standalone
         # worker/fixture use; records without attribution are never trusted.
-        self.voice_agent = os.environ.get("MODEL_GARDEN_VOICE_AGENT_NAME", self._agent())
+        self.voice_agent = (voice_agent if voice_agent is not None else
+                            os.environ.get("MODEL_GARDEN_VOICE_AGENT_NAME", self._agent()))
         self.voice_project = os.environ.get("MODEL_GARDEN_VOICE_PROJECT") if voice_project is None else voice_project
         # A regenerated voice overlay must carry the same exact project in both
         # containers. Legacy overlays without a project marker cannot safely file calls
@@ -1596,7 +1598,8 @@ def build(args: argparse.Namespace, environ: Mapping[str, str]) -> Worker:
     voice = environ.get("MODEL_GARDEN_VOICE_TRANSCRIPTS", "").strip()
     return Worker(args.desired_state, args.data_root, config, coworker=coworker, senders=senders, usage_sources=usage_sources,
                   voice_transcripts=pathlib.Path(voice) if voice else None,
-                  voice_project=environ.get("MODEL_GARDEN_VOICE_PROJECT"))
+                  voice_project=environ.get("MODEL_GARDEN_VOICE_PROJECT"),
+                  voice_agent=environ.get("MODEL_GARDEN_VOICE_AGENT_NAME"))
 
 
 def main(argv: list[str] | None = None) -> int:
