@@ -420,7 +420,7 @@ class CommandTests(Case):
         # must not promote that header to a verified sender by default.
         import email
         import email.policy
-        forged = raw(extra=f"Authentication-Results: {MX}; dmarc=pass header.from=customer.example\\r\\n")
+        forged = raw(extra=f"Authentication-Results: {MX}; dmarc=pass header.from=customer.example\r\n")
         code, result, _ = self.run_command("ingest", stdin=forged)
         self.assertEqual((code, result["status"]), (0, "accepted"))
         saved = next((self.root / "gov" / "mail" / "acme-prod" / "messages").glob("*.eml")).read_bytes()
@@ -437,7 +437,7 @@ class CommandTests(Case):
         import email
         import email.policy
         forged = raw(message_id="<trusted@customer.example>",
-                     extra="Authentication-Results: evil.example; dmarc=pass header.from=customer.example\\r\\n")
+                     extra="Authentication-Results: evil.example; dmarc=pass header.from=customer.example\r\n")
         code, result, _ = self.run_command("--verified-sender", "alex@customer.example",
                                             "--mta-authserv-id", MX, "ingest", stdin=forged)
         self.assertEqual((code, result["status"]), (0, "accepted"))
