@@ -114,7 +114,8 @@ above. The same explicitly confirmed client/environment, Compose project,
 GCP project and dedicated monitor user produce a **second** oneshot service
 and 60-second timer. It invokes the existing
 `scripts/voice-health-metric.py`, which samples the LiveKit container's
-recent native Docker healthcheck and publishes a boolean
+recent **successful** native Docker healthcheck (the last probe must have
+integer exit code zero, not just cached `Status=healthy`) and publishes a boolean
 `custom.googleapis.com/model_garden/voice_ready` through the VM's existing
 GCE metricWriter identity. The gateway/worker timer remains unchanged.
 Without the flag the bundle emits only gateway and worker units, so a

@@ -22,7 +22,7 @@ def result(text):
 class VoiceMetricTests(unittest.TestCase):
     def test_only_one_exact_project_voice_container_can_report_healthy(self):
         with mock.patch.object(METRIC.subprocess, "run", side_effect=[
-            result("a1\n"), result(json.dumps({"Running": True, "Health": {"Status": "healthy", "Log": [{"End": datetime.now(timezone.utc).isoformat()}]}}))
+            result("a1\n"), result(json.dumps({"Running": True, "Health": {"Status": "healthy", "Log": [{"End": datetime.now(timezone.utc).isoformat(), "ExitCode": 0}]}}))
         ]) as run:
             self.assertTrue(METRIC.docker_voice_ready("client-dev"))
         self.assertIn("label=com.docker.compose.project=client-dev", run.call_args_list[0].args[0])
@@ -50,7 +50,7 @@ class VoiceMetricTests(unittest.TestCase):
         def observed(end, *, include_log=True):
             health = {"Status": "healthy"}
             if include_log:
-                health["Log"] = [{"End": end}]
+                health["Log"] = [{"End": end, "ExitCode": 0}]
             with mock.patch.object(METRIC.subprocess, "run", side_effect=[
                 result("a1\n"), result(json.dumps({"Running": True, "Health": health}))
             ]):
@@ -65,6 +65,27 @@ class VoiceMetricTests(unittest.TestCase):
         self.assertFalse(observed("2026-10-27T00:00:00Z", include_log=False))
         self.assertTrue(observed("2026-10-26T23:58:00Z"))  # exactly 120 seconds
         self.assertTrue(observed("2026-10-26T23:59:59Z"))
+
+    def test_recent_failed_or_unverifiable_native_probe_is_not_healthy(self):
+        # Docker keeps Status=healthy until its configured failure threshold is
+        # reached. A failed latest probe must not be reported as voice-ready.
+        now = datetime(2026, 11, 1, tzinfo=timezone.utc)
+        stamp = now.isoformat()
+
+        def observed(log):
+            state = {"Running": True, "Health": {"Status": "healthy", "Log": log}}
+            with mock.patch.object(METRIC.subprocess, "run", side_effect=[
+                result("a1\n"), result(json.dumps(state))
+            ]):
+                return METRIC.docker_voice_ready("client-dev", now=now)
+
+        previous_ok = {"End": stamp, "ExitCode": 0}
+        self.assertTrue(observed([previous_ok]))
+        for code in (1, 2, 127, None, "0", False):
+            with self.subTest(exit_code=code):
+                self.assertFalse(observed([previous_ok, {"End": stamp, "ExitCode": code}]))
+        self.assertFalse(observed([previous_ok, {"End": stamp}]))
+        self.assertFalse(observed([previous_ok, {"End": stamp, "ExitCode": {"value": 0}}]))
 
     def test_payload_is_bounded_boolean_and_contains_no_call_or_container_details(self):
         at = datetime(2026, 10, 26, tzinfo=timezone.utc)
