@@ -450,6 +450,16 @@ class Worker:
         # overlay setting falls back to the compiled Agent only for standalone
         # worker/fixture use; records without attribution are never trusted.
         self.voice_agent = os.environ.get("MODEL_GARDEN_VOICE_AGENT_NAME", self._agent())
+        self.voice_project = os.environ.get("MODEL_GARDEN_VOICE_PROJECT")
+        # A regenerated voice overlay must carry the same exact project in both
+        # containers. Legacy overlays with an explicit voice Agent but no project
+        # cannot safely file calls until the operator regenerates the overlay.
+        if (self.voice_transcripts is not None and
+                "MODEL_GARDEN_VOICE_AGENT_NAME" in os.environ and not self.voice_project):
+            raise WorkerConfigError("MODEL_GARDEN_VOICE_PROJECT is required for scoped voice filing")
+        if (self.voice_project is not None and
+                re.fullmatch(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?", self.voice_project) is None):
+            raise WorkerConfigError("MODEL_GARDEN_VOICE_PROJECT must be a valid Compose project")
         if (not isinstance(self.voice_agent, str)
                 or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}", self.voice_agent) is None):
             raise WorkerConfigError("MODEL_GARDEN_VOICE_AGENT_NAME must be a valid voice agent identity")
@@ -726,8 +736,11 @@ class Worker:
             # conversation timeline or failure receipt. Never attribute another
             # voice Agent's transcript to this coworker's tenant or ledger.
             for row in snapshot:
-                if row.get("type") in {"CallTranscript", "TranscriptWriteFailed"} and row.get("agent") != self.voice_agent:
-                    raise ValueError("voice record agent mismatch; operator reconciliation required")
+                if row.get("type") in {"CallTranscript", "TranscriptWriteFailed"}:
+                    if row.get("agent") != self.voice_agent:
+                        raise ValueError("voice record agent mismatch; operator reconciliation required")
+                    if self.voice_project is not None and row.get("project") != self.voice_project:
+                        raise ValueError("voice record project mismatch; operator reconciliation required")
             records = filing.call_transcripts(snapshot)
             write_failures = filing.transcript_failures(snapshot)
             # Filing invokes a model, writes a CRM interaction and appends to the
