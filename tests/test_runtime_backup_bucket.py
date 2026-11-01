@@ -38,7 +38,7 @@ class RuntimeBackupBucketContractTests(unittest.TestCase):
         ):
             with self.subTest(declaration=declaration):
                 self.assertIn(declaration, source)
-        bucket_writer = source.split('resource "google_storage_bucket_iam_member" "backup_writer_create" {', 1)[1].split("\\n}", 1)[0]
+        bucket_writer = source.split('resource "google_storage_bucket_iam_member" "backup_writer_create" {', 1)[1].split("\n}", 1)[0]
         self.assertNotIn("var.runtime_service_account", bucket_writer, "runtime must not have direct bucket permission")
         self.assertNotIn("roles/storage.objectAdmin", source)
         self.assertNotIn("roles/storage.admin", source)
