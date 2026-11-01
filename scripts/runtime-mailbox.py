@@ -65,7 +65,7 @@ def tenant_of(desired_state: pathlib.Path) -> str:
 # generic pipe boundary. Only an independently verified MTA result, supplied
 # by the local delivery program rather than copied from the message, can
 # establish the sender for the downstream public-principal policy.
-_AUTH_SERVER = re.compile(r"[a-z0-9](?:[a-z0-9.-]{0,251}[a-z0-9])?\\Z")
+_AUTH_SERVER = re.compile(r"[a-z0-9](?:[a-z0-9.-]{0,251}[a-z0-9])?\Z")
 
 
 def prepare_mta_message(raw: bytes, *, verified_sender: str | None = None,
