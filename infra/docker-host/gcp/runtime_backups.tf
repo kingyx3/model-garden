@@ -43,16 +43,36 @@ resource "google_storage_bucket" "runtime_backups" {
   }
 }
 
-# The runtime identity can upload NEW objects, not list, read, replace or delete
-# a stored backup. Authorized operators retain recovery-read authority separately.
-resource "google_storage_bucket_iam_member" "runtime_backup_writer" {
+# A separate writer owns the bucket's create-only permission. The runtime
+# has NO direct bucket role; it can mint short-lived tokens for this one writer.
+# Gcloud upload MUST use --impersonate-service-account for the derived account.
+# An authorized recovery reader is granted separately by the client operator.
+resource "google_service_account" "backup_writer" {
+  count        = var.runtime_backup_enabled ? 1 : 0
+  account_id   = "mg-bkp-${substr(md5(local.name), 0, 8)}"
+  display_name = "Model Garden encrypted backup writer (${local.name})"
+}
+
+resource "google_storage_bucket_iam_member" "backup_writer_create" {
   count  = var.runtime_backup_enabled ? 1 : 0
   bucket = google_storage_bucket.runtime_backups[0].name
   role   = "roles/storage.objectCreator"
-  member = "serviceAccount:${var.runtime_service_account}"
+  member = "serviceAccount:${google_service_account.backup_writer[0].email}"
+}
+
+resource "google_service_account_iam_member" "runtime_impersonates_backup_writer" {
+  count              = var.runtime_backup_enabled ? 1 : 0
+  service_account_id = google_service_account.backup_writer[0].name
+  role               = "roles/iam.serviceAccountTokenCreator"
+  member             = "serviceAccount:${var.runtime_service_account}"
 }
 
 output "runtime_backup_bucket" {
   description = "Client/environment backup bucket name when provisioned; no schedule or successful recovery is implied."
   value       = var.runtime_backup_enabled ? google_storage_bucket.runtime_backups[0].name : null
+}
+
+output "runtime_backup_writer_service_account" {
+  description = "Dedicated create-only backup writer for scoped gcloud impersonation; not a recovery reader or proof of live backup."
+  value       = var.runtime_backup_enabled ? google_service_account.backup_writer[0].email : null
 }
