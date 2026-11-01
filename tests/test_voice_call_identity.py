@@ -165,6 +165,10 @@ class CallIdentityTests(unittest.TestCase):
             "AGENT_NAME": "receptionist",
             "_safe_digest": lambda value: "digest",
             "_append_message": lambda payload: writes.append(payload),
+            "MAX_FALLBACK_MESSAGE_CHARS": 4000,
+            "MAX_FALLBACK_NAME_CHARS": 200,
+            "TRANSCRIPT_CONFIG": SimpleNamespace(patterns=()),
+            "redact": lambda value, patterns: (value, {"card": 0, "pattern": 0}),
         }
         module = ast.Module(body=[
             ast.ImportFrom(module="__future__", names=[ast.alias(name="annotations")], level=0),
