@@ -91,3 +91,23 @@ also leave an uncertain receipt. In either case, operators must reconcile the
 private ledger and artifact inventory before retrying or asserting completeness.
 It does not establish provider-live delivery, retention erasure in backups or
 client acceptance (#77/#101).
+
+## Deletion and expiry audit preflight (v0.8.267; #77)
+
+Tier 0 manual deletion and the worker's scheduled retention sweep now emit
+redacted `artifact.delete.prepare` / `artifact.expire.prepare` intents **under
+the tenant lock before unlinking**; the existing `artifact.delete` /
+`artifact.expire` events follow successful removal under that same lock.
+The expiry sweep validates **every** candidate's private payload path before
+emitting intents or removing any file. If an intent cannot reach the ledger,
+the batch aborts without deleting payloads or changing the index. The operator
+should reconcile each prepare with a matching completion, rather than counting
+an intent as evidence of physical erasure.
+
+This is still a host-local, non-transactional filesystem and ledger boundary.
+A crash, a storage failure during unlink/index publication, or a ledger sink
+that accepts an event and then raises may leave unmatched intents or a stale
+index. Such a state requires manual inventory/ledger reconciliation before
+retrying or claiming retention compliance. The sweep does **not** erase cloud
+backups, attest independent ledger storage, prove a live retention drill or
+replace the client owner's retention and erasure approvals.
