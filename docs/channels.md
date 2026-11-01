@@ -40,6 +40,29 @@ Channel approvals go through `decide_from_channel()`: the responder must be mapp
 
 ## Voice (LiveKit)
 
+### Unverified SIP callback hints and fallback-message privacy (v0.8.277; #107)
+
+The LiveKit SIP participant's `sip.phoneNumber` attribute is **not an
+authenticated customer identity**. The receptionist may retain it as an
+unverified callback hint only when it is a canonical E.164 number
+(`+<country-code><digits>`, at most 15 digits). Free-form caller-ID,
+extensions, URI strings, controls, non-string metadata and overlong numbers
+are omitted; the caller's message can still be retained without a callback
+number. A saved hint carries `callerNumberSource=unverified-sip-attribute`.
+The client-configured transcript-sensitive patterns apply to this field as
+well as the message and name; any redacted callback hint is omitted entirely
+because it is no longer a usable destination. Aggregate redaction counts
+include those matches.
+
+**Migration and proof boundary:** Legacy fallback records may contain
+unvalidated caller numbers and require authorized retention/erasure review;
+they are not rewritten automatically. Strict E.164 may omit previously
+accepted local-format numbers. Neither this check nor a provider-supplied
+caller-ID establishes identity, consent to contact or permission to merge
+CRM records. Require independent callback verification and client-approved
+live SIP evidence before relying on the number for customer attribution.
+
+
 ### Per-call Hermes conversation isolation (v0.8.276; #107)
 
 The pinned Hermes v0.21.2 Chat Completions API derives a **headerless**
