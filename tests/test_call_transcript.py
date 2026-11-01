@@ -130,6 +130,18 @@ class ClosingTests(unittest.TestCase):
             transcript.note_outcome("resolved")
             self.assertEqual(transcript.build()["outcome"], "transferred")
 
+    def test_deployed_project_marker_is_persisted_on_the_closed_call(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            transcript = T.CallTranscript("callhash", "receptionist", config(tmp),
+                                          started=1_700_000_000, project="acme-dev")
+            record = transcript.build(ended=1_700_000_030)
+            self.assertEqual(record["project"], "acme-dev")
+            legacy, _ = call(tmp)
+            self.assertNotIn("project", legacy.build())
+            for invalid in ("", "../other", "Other-dev", "a" * 64):
+                with self.subTest(project=invalid), self.assertRaisesRegex(ValueError, "project"):
+                    T.CallTranscript("callhash", "receptionist", config(tmp), project=invalid)
+
     def test_summary_is_redacted_too(self):
         with tempfile.TemporaryDirectory() as tmp:
             transcript, _ = call(tmp)
