@@ -446,6 +446,10 @@ class CommandTests(Case):
         self.assertEqual(len(parsed.get_all("Authentication-Results") or []), 1)
         self.assertEqual(email_channel.verified_sender(parsed, MX), "alex@customer.example")
         self.assertNotIn("evil.example", str(parsed.get_all("Authentication-Results")))
+        drafts = []
+        outcome = SupportMailboxTests.mailbox(self, drafts).handle(saved, now=T0)
+        self.assertEqual(outcome["status"], "drafted")
+        self.assertEqual(drafts[0]["to"], ["alex@customer.example"])
 
     def test_mta_attestation_requires_both_trusted_inputs_and_matching_from(self):
         for flags in (
