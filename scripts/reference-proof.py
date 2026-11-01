@@ -424,7 +424,8 @@ def _single_call_scenario_count(
     scenario assembled from unrelated customers' calls. Reuse the individual
     strict correlation checks, but evaluate them against each unique call
     identity. The raw identifiers and speech never leave this function.
-    A room reused by different agents is ambiguous and cannot prove acceptance.
+    Legacy room-only receipts reused by different agents are ambiguous; new
+    per-invocation call hashes remain independent even in the same provider room.
     """
     call_agents: dict[str, set[str | None]] = {}
     for row in voice_rows:
