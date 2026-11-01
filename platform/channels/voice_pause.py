@@ -46,17 +46,26 @@ async def stop_session_on_pause(session, *, interval_seconds: float = 1.0) -> No
     the private sidecar are treated as paused. Cancellation on job shutdown must
     propagate without closing a normally completed session.
     """
+    # Once a pause or untrusted status is observed, it cannot be undone by
+    # a later active response. A failed SDK close is not a successful stop:
+    # keep trying until the SDK acknowledges closure or job shutdown cancels
+    # this watcher. Never log exception bodies (which may contain call data).
+    stop_requested = False
+    close_failure_logged = False
     while True:
-        try:
-            should_stop = await paused()
-        except Exception as exc:
-            LOGGER.error("voice pause check failed (%s); closing session", type(exc).__name__)
-            should_stop = True
-        if should_stop:
+        if not stop_requested:
+            try:
+                stop_requested = await paused()
+            except Exception as exc:
+                LOGGER.error("voice pause check failed (%s); closing session", type(exc).__name__)
+                stop_requested = True
+        if stop_requested:
             try:
                 await session.aclose()
+                return
             except Exception as exc:
-                # A failed SDK close is not a provider-side cancellation receipt.
-                LOGGER.error("voice session pause close failed (%s)", type(exc).__name__)
-            return
+                if not close_failure_logged:
+                    LOGGER.error("voice session pause close failed (%s); retrying until shutdown",
+                                 type(exc).__name__)
+                    close_failure_logged = True
         await asyncio.sleep(interval_seconds)
