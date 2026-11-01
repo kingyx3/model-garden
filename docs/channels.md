@@ -40,6 +40,29 @@ Channel approvals go through `decide_from_channel()`: the responder must be mapp
 
 ## Voice (LiveKit)
 
+### Per-call Hermes conversation isolation (v0.8.276; #107)
+
+The pinned Hermes v0.21.2 Chat Completions API derives a **headerless**
+conversation ID from the system prompt and first user message. Two unrelated
+callers using the same receptionist can supply identical first speech; this
+fingerprint is not a safe client/call boundary. The pinned LiveKit Agents
+OpenAI plugin v1.8.9 supports `extra_headers`, so the voice worker now supplies
+`X-Hermes-Session-Id: voice-<random-per-invocation-call-hash>` on every model
+request. The 64-character lowercase-hex call hash is generated locally for
+each LiveKit invocation and validated before any model session is built;
+the caller, reusable room name and model never choose it. All turns of the
+same call use the same header. No session ID, caller speech or credentials
+are added to the public Tool manifest.
+
+**Evidence boundary:** This removes the known headerless first-utterance
+session-collision path in the pinned Hermes/LiveKit contract, but does **not**
+authenticate the SIP caller, propagate trusted call attribution into the MCP
+sidecar, prove actual Tool `requestId` causality or establish live transcript
+completeness. A real two-call same-greeting isolation drill and a separate
+trusted Hermes-to-governed-Tool correlation design remain necessary. No
+external provider action or production rollout is implied.
+
+
 ### Last SIP caller disconnect and interrupted speech (v0.8.273; #107)
 
 The LiveKit 1.8.9 voice worker now requests an explicit `AgentSession.aclose()`
