@@ -557,5 +557,64 @@ class ModelSummaryCompletionEvidenceTests(unittest.TestCase):
         self.assertIn("worker", " ".join(result["failures"]))
 
 
+
+class InvocationScopedReferenceEvidenceTests(unittest.TestCase):
+    """A provider room may be reused; proof must never join different invocations."""
+
+    CALL_A = "c" * 64
+    CALL_B = "d" * 64
+
+    @staticmethod
+    def lifecycle(call_hash, start, *, fallback=False):
+        rows = [
+            {**voice("CallStarted", timestamp=start), "callHash": call_hash},
+            {**voice("CallEnded", timestamp=start + 10), "callHash": call_hash},
+        ]
+        if fallback:
+            rows.append({**voice("FallbackMessage", timestamp=start + 5), "callHash": call_hash})
+        return rows
+
+    def test_model_completion_matches_new_invocation_id_not_provider_room_digest(self):
+        call = transcript(room=self.CALL_A)
+        lifecycle = self.lifecycle(self.CALL_A, 100)
+        receipt = ModelSummaryCompletionEvidenceTests.completion(call)
+        self.assertEqual(proof._transcript_summary(lifecycle, [call])["completeTwoWayCalls"], 1)
+        self.assertEqual(
+            proof._model_completion_summary(lifecycle, [call], [receipt]),
+            {"records": 1, "matchedModelCalls": 1},
+        )
+
+    def test_reused_room_cannot_launder_another_calls_fallback_into_scenario(self):
+        lifecycle = self.lifecycle(self.CALL_A, 100) + self.lifecycle(self.CALL_B, 200, fallback=True)
+        actions = SameCallScenarioTests.action_rows(self.CALL_A)
+        call = transcript(room=self.CALL_A)
+        self.assertEqual(proof._completed_call_actions(lifecycle, actions), 1)
+        self.assertEqual(proof._transcript_summary(lifecycle, [call])["completeTwoWayCalls"], 1)
+        self.assertEqual(proof._voice_summary(lifecycle)["completedCallFallbackEvidence"], 1)
+        self.assertEqual(proof._single_call_scenario_count(lifecycle, actions, [call]), 0)
+
+    def test_reused_room_can_prove_one_whole_call_without_merging_evidence(self):
+        lifecycle = self.lifecycle(self.CALL_A, 100, fallback=True) + self.lifecycle(self.CALL_B, 200, fallback=True)
+        first = transcript(room=self.CALL_A)
+        second = {**transcript(room=self.CALL_B), "timestamp": 200, "endedAt": 210}
+        completions = [
+            ModelSummaryCompletionEvidenceTests.completion(first),
+            {**ModelSummaryCompletionEvidenceTests.completion(second), "timestamp": 220},
+        ]
+        actions = SameCallScenarioTests.action_rows(self.CALL_A)
+        self.assertEqual(proof._model_completion_summary(lifecycle, [first, second], completions)["matchedModelCalls"], 2)
+        self.assertEqual(proof._single_call_scenario_count(
+            lifecycle, actions, [first, second], completions, require_model_summary=True), 1)
+
+    def test_malformed_explicit_invocation_cannot_downgrade_to_room_identity(self):
+        lifecycle = self.lifecycle(self.CALL_A, 100, fallback=True)
+        lifecycle[0]["callHash"] = "malformed"
+        call = transcript(room=self.CALL_A)
+        actions = SameCallScenarioTests.action_rows(self.CALL_A)
+        self.assertEqual(proof._model_completion_summary(
+            lifecycle, [call], [ModelSummaryCompletionEvidenceTests.completion(call)])["matchedModelCalls"], 0)
+        self.assertEqual(proof._single_call_scenario_count(lifecycle, actions, [call]), 0)
+
+
 if __name__ == "__main__":
     unittest.main()
