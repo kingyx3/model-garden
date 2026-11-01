@@ -56,6 +56,10 @@ def source_transcript_digest(record: Mapping[str, Any]) -> str:
     for the policy-scoped transcriptDigest stored alongside it.
     """
     payload = {field: record.get(field) for field in SOURCE_TRANSCRIPT_FIELDS}
+    # New deployed voice records carry an exact Compose project; include it in
+    # the completion binding without changing legacy unmarked digests.
+    if "project" in record:
+        payload["project"] = record["project"]
     return hashlib.sha256(
         json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
     ).hexdigest()
@@ -437,6 +441,8 @@ class CallSummarizer:
         fields = ("callHash", "agent", "tenant", "environment", "timestamp", "endedAt",
                   "turns", "outcome", "transfer", "requestIds", "redactions")
         payload = {key: record.get(key) for key in fields}
+        if "project" in record:
+            payload["project"] = record["project"]
         # A stricter client redaction policy must never reuse wording cached under an older policy.
         payload["redactionPatterns"] = [(pattern.pattern, pattern.flags) for pattern in self._patterns]
         return hashlib.sha256(json.dumps(payload, sort_keys=True, default=str).encode("utf-8")).hexdigest()
