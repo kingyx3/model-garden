@@ -13,6 +13,7 @@ import importlib.util
 import json
 import os
 import pathlib
+import re
 import secrets
 import shutil
 import sys
@@ -57,6 +58,68 @@ def _fixture() -> str:
         return content
     except (OSError, UnicodeError):
         raise CaptureError("synthetic retrieval fixture unavailable") from None
+
+
+
+def _verified_read_receipt(found: Mapping[str, Any], documents: list[Mapping[str, Any]],
+                           events: list[Mapping[str, Any]]) -> str:
+    """Bind the synthetic model input to exactly one successful governed read.
+
+    A valid JSONL hash chain alone does not prove that the read belongs to this
+    request, that policy allowed it, or that the returned sections were ledgered.
+    This remains local synthetic evidence, not independent provider attestation.
+    """
+    request = found.get("request")
+    if (not isinstance(request, Mapping) or request.get("tool") != "kb.search"
+            or request.get("initiatingUser") != "call:synthetic-retrieval-probe"
+            or not isinstance(request.get("requestId"), str)
+            or re.fullmatch(r"[0-9a-f]{64}", request["requestId"]) is None):
+        raise CaptureError("synthetic retrieval has no governed request identity")
+    request_id = request["requestId"]
+    expected_types = ("authorization", "execution", "read")
+    if len(events) != len(expected_types):
+        raise CaptureError("synthetic retrieval ledger is incomplete or ambiguous")
+    for event, event_type, outcome in zip(events, expected_types, ("allow", "succeeded", "recorded")):
+        if (not isinstance(event, Mapping) or event.get("event") != event_type
+                or event.get("outcome") != outcome
+                or event.get("requestId") != request_id
+                or event.get("tool") != "kb.search"
+                or event.get("agent") != request.get("agent")
+                or event.get("initiatingUser") != request["initiatingUser"]):
+            raise CaptureError("synthetic retrieval ledger does not match its governed request")
+
+    expected_records = []
+    seen = set()
+    for document in documents:
+        citation, section_id, content = document.get("citation"), document.get("id"), document.get("content")
+        if (not isinstance(citation, str) or not isinstance(section_id, str)
+                or citation != "knowledge:rules-of-engagement#" + section_id
+                or not section_id or section_id in seen or not isinstance(content, str)):
+            raise CaptureError("synthetic retrieval section identity is invalid")
+        seen.add(section_id)
+        expected_records.append({
+            "id": section_id,
+            "contentDigest": hashlib.sha256(
+                json.dumps(content, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+            ).hexdigest(),
+        })
+    read = events[2]
+    details = read.get("details")
+    entries = details.get("reads") if isinstance(details, Mapping) else None
+    if not isinstance(entries, list) or len(entries) != 1 or not isinstance(entries[0], Mapping):
+        raise CaptureError("synthetic retrieval read receipt is missing")
+    entry = entries[0]
+    expected_digest = hashlib.sha256(
+        json.dumps(expected_records, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+    ).hexdigest()
+    if (details.get("readPolicy") != "full"
+            or entry.get("sourceId") != "knowledge:rules-of-engagement"
+            or entry.get("recordCount") != len(expected_records)
+            or entry.get("records") != expected_records
+            or entry.get("recordsDigest") != expected_digest
+            or entry.get("recordsTruncated") is True):
+        raise CaptureError("synthetic retrieval receipt does not match model input")
+    return request_id
 
 
 def run_retrieval_case(client: Any, root: pathlib.Path) -> dict[str, Any]:
@@ -118,22 +181,22 @@ def run_retrieval_case(client: Any, root: pathlib.Path) -> dict[str, Any]:
             raise CaptureError("hostile source was not actually retrieved")
         audit = RUNTIME.GOVERN.verify_audit_chain(audit_path)
         events = [json.loads(line) for line in audit_path.read_text(encoding="utf-8").splitlines()]
-        if not audit.get("valid") or not any(event.get("event") == "read" for event in events):
-            raise CaptureError("retrieval read receipt is missing or invalid")
+        if not audit.get("valid"):
+            raise CaptureError("retrieval ledger chain is invalid")
+        _verified_read_receipt(found, documents, events)
         # Only now ask the private Hermes API. coworker.answer supplies its own
         # untrusted-JSON boundary; this does not test the deployed SOUL.md.
         try:
             answer = client.answer(QUESTION, sections, session="retrieval-" + secrets.token_hex(8))
         except Exception:
             raise CaptureError("private retrieval model call failed") from None
-        if answer is not None:
-            if (not isinstance(answer, Mapping) or set(answer) != {"text", "sources"}
-                    or not isinstance(answer["text"], str) or not answer["text"].strip()
-                    or len(answer["text"]) > MAX_ANSWER_CHARS
-                    or not isinstance(answer["sources"], list) or not answer["sources"]
-                    or any(source not in {item["source"] for item in sections} for source in answer["sources"])):
-                raise CaptureError("private retrieval model returned invalid citations or text")
-            answer = {"text": answer["text"], "sources": answer["sources"]}
+        if (not isinstance(answer, Mapping) or set(answer) != {"text", "sources"}
+                or not isinstance(answer["text"], str) or not answer["text"].strip()
+                or len(answer["text"]) > MAX_ANSWER_CHARS
+                or not isinstance(answer["sources"], list) or not answer["sources"]
+                or any(source not in {item["source"] for item in sections} for source in answer["sources"])):
+            raise CaptureError("private retrieval model returned no verifiable answer")
+        answer = {"text": answer["text"], "sources": answer["sources"]}
         return {
             "schemaVersion": 1,
             "source": "unverified-retrieval-model-run",
