@@ -701,6 +701,19 @@ class CallFilingTests(Case):
         self.assertEqual(self.interactions(runtime), [])
         self.assertFalse(any(event.get("action") == "transcript.write-failed" for event in self.events()))
 
+    def test_voice_project_scope_allows_exact_project_after_validation(self):
+        runtime = self.runtime([dict(call_record(), project="acme-dev")])
+        runtime.voice_project = "acme-dev"
+        self.assertEqual(runtime.run_calls(T0)["filed"], 1)
+        self.assertEqual(len(self.interactions(runtime)), 1)
+
+    def test_legacy_voice_overlay_without_project_refuses_worker_startup(self):
+        runtime = self.make(crm=True)
+        with mock.patch.dict(os.environ, {"MODEL_GARDEN_VOICE_AGENT_NAME": "receptionist"}, clear=False):
+            with self.assertRaisesRegex(worker.WorkerConfigError, "MODEL_GARDEN_VOICE_PROJECT is required"):
+                worker.Worker(runtime.desired_state_path, self.data, {},
+                              voice_transcripts=self.root / "voice" / "transcripts.jsonl")
+
     def test_voice_project_scope_blocks_foreign_and_legacy_calls_before_model_or_crm(self):
         for foreign in ("another-client-dev", None):
             with self.subTest(project=foreign):
