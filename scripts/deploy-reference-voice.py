@@ -200,7 +200,8 @@ def _context(root: pathlib.Path) -> pathlib.Path:
 VOICE_DATA_MOUNT = "/opt/voice"
 
 
-def worker_overlay(base: dict[str, Any], *, agent_name: str = "model-garden-receptionist") -> dict[str, Any] | None:
+def worker_overlay(base: dict[str, Any], *, agent_name: str = "model-garden-receptionist",
+                   project: str | None = None) -> dict[str, Any] | None:
     """The governed worker's share of the voice overlay: the voice container's data volume, read-only, and where its transcripts are.
 
     Transcripts live in the voice container's own volume, which the worker could not see. With this mount the worker files each
@@ -212,10 +213,13 @@ def worker_overlay(base: dict[str, Any], *, agent_name: str = "model-garden-rece
     services = base.get("services") if isinstance(base, dict) else None
     if not isinstance(services, dict) or "governed-worker" not in services:
         return None
+    if not isinstance(project, str) or client_operation_lock.PROJECT.fullmatch(project) is None:
+        raise ValueError("voice project must be the exact validated Compose project")
     return {
         "environment": {
             "MODEL_GARDEN_VOICE_TRANSCRIPTS": f"{VOICE_DATA_MOUNT}/transcripts.jsonl",
             "MODEL_GARDEN_VOICE_AGENT_NAME": agent_name,
+            "MODEL_GARDEN_VOICE_PROJECT": project,
         },
         "volumes": [f"voice-data:{VOICE_DATA_MOUNT}:ro"],
     }
@@ -267,6 +271,7 @@ def _apply_selected_voice(binding: dict[str, Any], voice: dict[str, Any], bundle
         "MODEL_GARDEN_HERMES_API_URL": "http://hermes:8642/v1",
         "MODEL_GARDEN_HERMES_API_KEY": "${MODEL_GARDEN_HERMES_API_KEY:?MODEL_GARDEN_HERMES_API_KEY is required}",
         "MODEL_GARDEN_LIVEKIT_AGENT_NAME": agent_name.strip(),
+        "MODEL_GARDEN_VOICE_PROJECT": project,
         "MODEL_GARDEN_MESSAGE_PATH": "/opt/data/messages.jsonl",
         "MODEL_GARDEN_TRANSCRIPT_PATH": "/opt/data/transcripts.jsonl",
     }
@@ -308,7 +313,7 @@ def _apply_selected_voice(binding: dict[str, Any], voice: dict[str, Any], bundle
             or not isinstance(base_document.get("services"), dict)
             or "governed-tools" not in base_document["services"]):
         raise ValueError("voice pause requires the shared governed-tools service")
-    shared = worker_overlay(base_document, agent_name=agent_name.strip())
+    shared = worker_overlay(base_document, agent_name=agent_name.strip(), project=project)
     if shared is not None:
         document["services"]["governed-worker"] = shared
     required_services = _required_services(base_document, document)
