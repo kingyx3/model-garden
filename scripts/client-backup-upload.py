@@ -44,6 +44,14 @@ def expected_bucket(gcp_project: str, client_slug: str, environment: str) -> str
     return f"{prefix}-{client_slug}-{environment}-mg-backups"
 
 
+def expected_writer_identity(gcp_project: str, client_slug: str, environment: str) -> str:
+    """Match the opt-in Terraform backup writer; never accept a caller-selected principal."""
+    expected_bucket(gcp_project, client_slug, environment)  # same validated tenant/cloud boundary
+    name = f"{client_slug}-{environment}-mg"
+    account_id = "mg-bkp-" + hashlib.md5(name.encode("ascii"), usedforsecurity=False).hexdigest()[:8]
+    return f"{account_id}@{gcp_project}.iam.gserviceaccount.com"
+
+
 def _private(path: pathlib.Path, *, is_dir: bool) -> None:
     if path.is_symlink() or (not path.is_dir() if is_dir else not path.is_file()):
         raise UploadError("backup input is missing or a symlink")
@@ -73,11 +81,13 @@ def _fingerprint(path: pathlib.Path) -> tuple[str, int]:
     return RESTORE.SNAPSHOT._digest(path)
 
 
-def _gcloud_copy(path: pathlib.Path, dest: str) -> None:
-    # Generation 0 is atomic create-only, unlike --no-clobber's read-before-write.
+def _gcloud_copy(path: pathlib.Path, dest: str, *, writer_identity: str) -> None:
+    # Explicit scoped impersonation prevents an ambient operator/runtime gcloud
+    # identity from performing this write. Generation 0 is atomic create-only.
     # Suppress provider output: it may contain client paths, metadata, or secrets.
     command = [
-        "gcloud", "storage", "cp", str(path), dest,
+        "gcloud", f"--impersonate-service-account={writer_identity}",
+        "storage", "cp", str(path), dest,
         "--if-generation-match=0", "--quiet",
     ]
     try:
@@ -95,6 +105,7 @@ def upload(
     gcp_project: str, client_slug: str, environment: str,
 ) -> dict[str, Any]:
     bucket = expected_bucket(gcp_project, client_slug, environment)
+    writer_identity = expected_writer_identity(gcp_project, client_slug, environment)
     if project != f"{client_slug}-{environment}":
         raise UploadError("client project does not match the intended bucket owner")
     if not RUN_ID.fullmatch(source.name) or not source.name.startswith(project + "-"):
@@ -110,7 +121,7 @@ def upload(
     for path in files:
         if _fingerprint(path) != baselines[path.name]:
             raise UploadError("backup integrity changed during upload")
-        _gcloud_copy(path, root + path.name)
+        _gcloud_copy(path, root + path.name, writer_identity=writer_identity)
         if _fingerprint(path) != baselines[path.name]:
             raise UploadError("backup integrity changed during upload")
     return {
