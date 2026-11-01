@@ -288,6 +288,18 @@ downgrade malformed explicit values to `roomHash`, and reads older room-only
 receipts for migration. Calls in a reused room cannot borrow each other's
 completion, transcript, fallback or explicitly tagged Tool action.
 
+**Reference collector reconciliation (v0.8.255).** The strict model-summary
+completion and same-call Scenario A proof checks now group lifecycle and fallback
+receipts by the same per-invocation `callHash` used for transcripts and governed
+action tags, rather than grouping by reusable `roomHash`. A fallback from call B
+cannot complete call A's transcript and Tool action even if both calls use the
+same provider room. Conversely, one fully evidenced call is not invalidated
+merely because a second call reuses that room. Legacy room-only receipts remain
+readable; malformed explicit call IDs fail closed. The prior v0.8.254 collector
+could miscount these combinations; regenerate strict proof manifests after
+upgrading. These remain structural checks, not independently authenticated
+provider or client acceptance evidence.
+
 The new identifier is **local structural correlation only**. It is not an
 authenticated SIP identity, a signed provider receipt or an authenticated
 Hermes-to-MCP invocation context. Existing stored call hashes are not rewritten;
