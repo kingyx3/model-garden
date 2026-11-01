@@ -40,6 +40,13 @@ Channel approvals go through `decide_from_channel()`: the responder must be mapp
 
 ## Voice (LiveKit)
 
+### Strict all-call transcript coverage evidence (v0.8.266; #107)
+
+`scripts/reference-proof.py --require-full-call-coverage` is an **opt-in strict pilot evidence gate** in addition to the existing one-call `--require-two-way-transcript` check. It requires every started call in the collected local lifecycle window to have a matching completed call and a unique, structurally valid, disclosed caller/agent transcript with no dropped turns. A transferred call counts as fully covered **only** when the record has a coherent transfer marker and a labelled human turn captured after the transfer. A cold SIP transfer leaves the human leg outside the LiveKit room and therefore **fails** this stricter gate, even if the pre-transfer caller/agent exchange is valid. Missing/duplicate records, unmatched starts and transcript-write failures also prevent acceptance. The collector emits only aggregate counts, never caller speech or call IDs.
+
+This gate does **not** make cold-transfer audio observable, attest actual SIP/STT/TTS delivery, prove independent disclosure consent, or establish authenticated Tool request correlation. One-sided abandoned calls may fail this intentionally stringent pilot gate; review those cases separately rather than deleting evidence or weakening the check. Use client-authorized real-call and provider-side evidence before closing #107 or #117.
+
+
 The LiveKit Receptionist follows the same semantics. A phone caller is an unverified channel user: the SIP participant identity and caller number are transport facts, not a client identity, so a caller maps to a public principal and must never be treated as a client member. Today the voice Receptionist calls governed Tools with the runtime workload identity rather than a channel principal; its only write (`calendar.book`) requires exact-action approval by a human operator, so no caller statement can authorize a write. A deployment that verifies callers (for example a mapped staff line) maps them through the same directory under the `voice` channel.
 
 ### Original-transcript model-summary binding (v0.8.238; #107)

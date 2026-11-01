@@ -282,6 +282,22 @@ def _transcript_summary(voice_rows: list[dict[str, Any]], transcript_rows: list[
                 and key in started and at >= started[key]):
             completed[key] = max(at, completed.get(key, at))
 
+    # A separate worker lifecycle receipt witnesses an actual transfer request.
+    # A transcript that calls that same invocation "resolved" must not mask
+    # an uncaptured human leg in the strict coverage gate.
+    transfer_receipts: set[tuple[str, str]] = set()
+    for row in voice_rows:
+        if row.get("type") != "HumanTransfer":
+            continue
+        room, agent = _voice_call_id(row), row.get("agent")
+        if not isinstance(room, str) or not isinstance(agent, str):
+            continue
+        key = (room, agent)
+        at = row.get("timestamp")
+        if (key in completed and type(at) is int
+                and started[key] <= at <= completed[key]):
+            transfer_receipts.add(key)
+
     by_call: dict[tuple[str, str], list[dict[str, Any]]] = {}
     for row in transcript_rows:
         if row.get("type") != "CallTranscript":
@@ -291,6 +307,7 @@ def _transcript_summary(voice_rows: list[dict[str, Any]], transcript_rows: list[
             by_call.setdefault((room, agent), []).append(row)
 
     complete = 0
+    complete_through_transfer = 0
     for key, records in by_call.items():
         # Conflicting duplicates veto proof, even if one copy looks valid.
         if len(records) != 1 or key not in completed:
@@ -337,7 +354,35 @@ def _transcript_summary(voice_rows: list[dict[str, Any]], transcript_rows: list[
             speakers.add(speaker)
         if valid and {"caller", "agent"} <= speakers:
             complete += 1
-    return {"records": len(transcript_rows), "completeTwoWayCalls": complete}
+            # A two-way conversation before a cold SIP transfer does NOT
+            # establish that the human leg was transcribed. The stricter
+            # opt-in coverage gate requires an actual labelled human turn
+            # after a coherent transfer marker, never just a claimed flag.
+            if record.get("outcome") == "transferred":
+                if key not in transfer_receipts:
+                    continue
+                transfer = record.get("transfer")
+                if not isinstance(transfer, dict):
+                    continue
+                transfer_at = transfer.get("offsetSeconds")
+                after = [turn for turn in turns if turn.get("afterTransfer") is True]
+                if (type(transfer_at) not in (int, float) or not math.isfinite(transfer_at)
+                        or not 0 <= transfer_at <= ended_at - started_at + 1
+                        or transfer.get("captured") is not True
+                        or type(transfer.get("turnsAfter")) is not int
+                        or transfer["turnsAfter"] != len(after)
+                        or not any(turn.get("speaker") == "human"
+                                   and turn.get("offsetSeconds", -1) >= transfer_at
+                                   for turn in after)
+                        or any(turn.get("offsetSeconds", -1) < transfer_at for turn in after)):
+                    continue
+                complete_through_transfer += 1
+            elif (key not in transfer_receipts and "transfer" not in record
+                  and record.get("outcome") in ("resolved", "booked", "message-taken", "abandoned")
+                  and not any(turn.get("afterTransfer") is True for turn in turns)):
+                complete_through_transfer += 1
+    return {"records": len(transcript_rows), "completeTwoWayCalls": complete,
+            "completeThroughTransferCalls": complete_through_transfer}
 
 
 
@@ -512,10 +557,10 @@ def collect(project: str, *, read_transcripts: bool = False, read_model_summary_
     }
 
 
-def evaluate(evidence: dict[str, Any], *, require_voice_call: bool, require_fallback: bool, require_governed_action: bool, require_two_way_transcript: bool = False, require_model_summary_completion: bool = False) -> dict[str, Any]:
+def evaluate(evidence: dict[str, Any], *, require_voice_call: bool, require_fallback: bool, require_governed_action: bool, require_two_way_transcript: bool = False, require_model_summary_completion: bool = False, require_full_call_coverage: bool = False) -> dict[str, Any]:
     failures: list[str] = []
     services = evidence["services"]
-    needs_transcript = require_two_way_transcript or require_model_summary_completion
+    needs_transcript = require_two_way_transcript or require_model_summary_completion or require_full_call_coverage
     if not services.get("hermes", {}).get("running"):
         failures.append("Hermes is not running")
     if "governed-tools" in services and not services["governed-tools"].get("running"):
@@ -534,6 +579,14 @@ def evaluate(evidence: dict[str, Any], *, require_voice_call: bool, require_fall
         failures.append("required voice runtime for two-way transcript is absent or stopped")
     if needs_transcript and evidence.get("transcripts", {}).get("completeTwoWayCalls", 0) < 1:
         failures.append("no complete disclosed two-way transcript is paired to a completed call")
+    if require_full_call_coverage:
+        # This is an intentionally stricter *pilot evidence* gate, not a claim
+        # that a local JSONL file attests SIP delivery or lawful consent.
+        completed = evidence["voice"].get("completedCalls", 0)
+        started = evidence["voice"].get("distinctCalls", 0)
+        full = evidence.get("transcripts", {}).get("completeThroughTransferCalls", 0)
+        if completed < 1 or started != completed or full != completed:
+            failures.append("not every started call has a completed, disclosed two-way transcript through any human transfer")
     if require_model_summary_completion and not services.get("governed-worker", {}).get("running"):
         failures.append("required governed worker for model summary completion is absent or stopped")
     if require_model_summary_completion and evidence.get("modelSummaryCompletions", {}).get("matchedModelCalls", 0) < 1:
@@ -578,6 +631,7 @@ def _markdown(evidence: dict[str, Any], result: dict[str, Any]) -> str:
         f"- Transcript write failures: {evidence['voice']['transcriptWriteFailures']}",
         f"- Private transcript records inspected: {evidence.get('transcripts', {}).get('records', 0)}",
         f"- Complete disclosed two-way transcripts paired to a call: {evidence.get('transcripts', {}).get('completeTwoWayCalls', 0)}",
+        f"- Structurally complete transcripts through any human transfer: {evidence.get('transcripts', {}).get('completeThroughTransferCalls', 0)}",
         f"- Model-labelled completions bound to a disclosed call: {evidence.get('modelSummaryCompletions', {}).get('matchedModelCalls', 0)}",
         f"- Same-call transcript, governed action and human fallback: {evidence.get('referenceScenario', {}).get('completeCalls', 0)}",
         f"- Human transfer evidence: {evidence['voice']['humanTransferEvidence']}",
@@ -596,13 +650,15 @@ def main() -> int:
     parser.add_argument("--require-voice-call", action="store_true")
     parser.add_argument("--require-two-way-transcript", action="store_true",
                         help="read the voice worker's private default transcript file and require a disclosed two-sided call")
+    parser.add_argument("--require-full-call-coverage", action="store_true",
+                        help="strict pilot gate: every started call must complete with a disclosed two-way transcript, including captured human speech after transfer")
     parser.add_argument("--require-model-summary-completion", action="store_true",
                         help="require a private worker model-labelled completion bound to an original disclosed call")
     parser.add_argument("--require-fallback", action="store_true")
     parser.add_argument("--require-governed-action", action="store_true")
     args = parser.parse_args()
     try:
-        evidence = collect(args.project_name, read_transcripts=args.require_two_way_transcript,
+        evidence = collect(args.project_name, read_transcripts=(args.require_two_way_transcript or args.require_full_call_coverage),
                            read_model_summary_completions=args.require_model_summary_completion,
                            verify_ledger=args.require_governed_action)
         result = evaluate(
@@ -612,6 +668,7 @@ def main() -> int:
             require_governed_action=args.require_governed_action,
             require_two_way_transcript=args.require_two_way_transcript,
             require_model_summary_completion=args.require_model_summary_completion,
+            require_full_call_coverage=args.require_full_call_coverage,
         )
         args.output_dir.mkdir(parents=True, exist_ok=True)
         payload = {**evidence, "acceptance": result}
