@@ -95,7 +95,7 @@ class ReceptionistVoiceAgent(Agent):
     async def on_enter(self) -> None:
         # The owner pause must stop new model dialogue, not just governed Tools.
         # A holding response is the only permitted speech while paused.
-        if voice_paused():
+        if await voice_paused():
             if self._transcript is not None:
                 self._transcript.suppress()
             await self.session.say(HOLDING, allow_interruptions=False)
@@ -109,7 +109,7 @@ class ReceptionistVoiceAgent(Agent):
                 LOGGER.error("transcript disclosure could not be played (%s); transcript suppressed", type(exc).__name__)
                 self._transcript.suppress()
         # Disclosure playback may have taken time; recheck before starting the model.
-        if voice_paused():
+        if await voice_paused():
             if self._transcript is not None:
                 self._transcript.suppress()
             await self.session.say(HOLDING, allow_interruptions=False)
@@ -121,7 +121,7 @@ class ReceptionistVoiceAgent(Agent):
     @function_tool()
     async def transfer_to_human(self, ctx: RunContext) -> str:
         """Transfer the active SIP caller to the approved human fallback."""
-        if voice_paused():
+        if await voice_paused():
             return HOLDING
         target = os.environ.get("MODEL_GARDEN_HUMAN_TRANSFER_TARGET", "").strip()
         if not target:
@@ -134,7 +134,7 @@ class ReceptionistVoiceAgent(Agent):
             return "No active SIP caller is available to transfer. Offer to capture a message instead."
         # Recheck immediately before provider transport. This is not a
         # cross-process in-flight cancellation guarantee.
-        if voice_paused():
+        if await voice_paused():
             return HOLDING
         try:
             await job_ctx.api.sip.transfer_sip_participant(
@@ -170,7 +170,7 @@ class ReceptionistVoiceAgent(Agent):
     @function_tool()
     async def capture_message(self, ctx: RunContext, message: str, caller_name: str = "") -> str:
         """Persist the minimum data required for a human to follow up when transfer is unavailable."""
-        if voice_paused():
+        if await voice_paused():
             return HOLDING
         message = message.strip()
         if not message:
@@ -182,7 +182,7 @@ class ReceptionistVoiceAgent(Agent):
             raw = participant.attributes.get("sip.phoneNumber")
             if isinstance(raw, str) and raw.strip():
                 caller_number = raw.strip()
-        if voice_paused():
+        if await voice_paused():
             return HOLDING
         try:
             stored = _append_message(
