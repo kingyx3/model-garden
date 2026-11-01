@@ -17,6 +17,8 @@ Cloud Monitoring metrics** with the VM's existing `metricWriter` identity.
 No public ingress, new IAM role, external monitoring SaaS or client payload
 is required. Docker output and metadata tokens never enter logs.
 
+The loopback sampler requires an **exact HTTP 200** from each component even when the gateway container runs Python with optimization (`-O`/`PYTHONOPTIMIZE`); any other status or probe failure publishes unhealthy rather than silently accepting a non-200 response. This is a local metric integrity check, not proof of alert delivery.
+
 The host must run a trusted approved script and have local Docker access.
 This is not SIP, provider action, client ownership or delivered alert proof;
 a compromised Docker daemon/host can forge its own signal. A broken sampler
