@@ -28,14 +28,14 @@ class VoicePauseTests(unittest.TestCase):
     def test_private_sidecar_active_pause_and_fail_closed_responses(self):
         with mock.patch.object(voice_pause.http.client, "HTTPConnection") as connection:
             connection.return_value.getresponse.return_value.status = 200
-            self.assertFalse(voice_pause.paused())
+            self.assertFalse(asyncio.run(voice_pause.paused()))
             connection.assert_called_once_with("governed-tools", 9120, timeout=2)
             connection.return_value.request.assert_called_once_with("GET", "/internal/voice-pause")
             connection.return_value.close.assert_called_once()
         for status in (204, 302, 401, 423, 500):
             with self.subTest(status=status), mock.patch.object(voice_pause.http.client, "HTTPConnection") as connection:
                 connection.return_value.getresponse.return_value.status = status
-                self.assertTrue(voice_pause.paused())
+                self.assertTrue(asyncio.run(voice_pause.paused()))
                 connection.return_value.close.assert_called_once()
 
     def test_sidecar_unavailable_or_malformed_http_fails_closed(self):
@@ -45,7 +45,7 @@ class VoicePauseTests(unittest.TestCase):
                 voice_pause.http.client, "HTTPConnection"
             ) as connection:
                 connection.return_value.request.side_effect = error
-                self.assertTrue(voice_pause.paused())
+                self.assertTrue(asyncio.run(voice_pause.paused()))
                 connection.return_value.close.assert_called_once()
 
     def test_voice_entry_holds_without_model_generation_and_suppresses_transcript(self):
@@ -53,11 +53,11 @@ class VoicePauseTests(unittest.TestCase):
         agent = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == "ReceptionistVoiceAgent")
         entry = next(n for n in agent.body if isinstance(n, ast.AsyncFunctionDef) and n.name == "on_enter")
         source = ast.unparse(entry)
-        self.assertIn("if voice_paused():", source)
+        self.assertIn("if await voice_paused():", source)
         self.assertIn("self._transcript.suppress()", source)
         self.assertIn("self.session.say(HOLDING", source)
         self.assertIn("self.session.generate_reply(", source)
-        self.assertLess(source.index("if voice_paused():"), source.index("self.session.generate_reply("))
+        self.assertLess(source.index("if await voice_paused():"), source.index("self.session.generate_reply("))
 
     def test_voice_provider_actions_check_pause_before_side_effects(self):
         tree = ast.parse((ROOT / "platform/channels/livekit_receptionist.py").read_text())
@@ -69,8 +69,8 @@ class VoicePauseTests(unittest.TestCase):
             with self.subTest(method=method):
                 node = next(n for n in agent.body if isinstance(n, ast.AsyncFunctionDef) and n.name == method)
                 source = ast.unparse(node)
-                self.assertIn("if voice_paused():", source)
-                self.assertLess(source.index("if voice_paused():"), source.index(side_effect))
+                self.assertIn("if await voice_paused():", source)
+                self.assertLess(source.index("if await voice_paused():"), source.index(side_effect))
 
     def test_voice_overlay_does_not_expose_governance_volume_to_model_container(self):
         source = (ROOT / "scripts/deploy-reference-voice.py").read_text()
@@ -118,9 +118,12 @@ class VoicePauseTests(unittest.TestCase):
             def mark_disclosure_played(self):
                 self.played = True
 
+        async def paused_true():
+            return True
+
         namespace = {
             "Agent": BaseAgent, "function_tool": lambda: (lambda fn: fn),
-            "HOLDING": voice_pause.HOLDING, "voice_paused": lambda: True,
+            "HOLDING": voice_pause.HOLDING, "voice_paused": paused_true,
         }
         module = ast.Module(body=[
             ast.ImportFrom(module="__future__", names=[ast.alias(name="annotations")], level=0),
@@ -145,7 +148,9 @@ class VoicePauseTests(unittest.TestCase):
         # Pause committed while disclosure was being spoken also blocks
         # model generation; the unpaused path still generates normally.
         states = iter([False, True])
-        namespace["voice_paused"] = lambda: next(states)
+        async def paused_during_disclosure():
+            return next(states)
+        namespace["voice_paused"] = paused_during_disclosure
         transcript = Transcript()
         agent = cls("receptionist", transcript)
         asyncio.run(agent.on_enter())
@@ -153,7 +158,9 @@ class VoicePauseTests(unittest.TestCase):
         self.assertEqual(agent.session.generated, [])
         self.assertTrue(transcript.suppressed)
 
-        namespace["voice_paused"] = lambda: False
+        async def active():
+            return False
+        namespace["voice_paused"] = active
         transcript = Transcript()
         agent = cls("receptionist", transcript)
         asyncio.run(agent.on_enter())
