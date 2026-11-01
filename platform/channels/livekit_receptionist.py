@@ -71,6 +71,17 @@ def _safe_digest(value: str | None) -> str | None:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
 
+def _callback_number(value: Any) -> str | None:
+    """A SIP caller-ID attribute is an unverified callback hint, never identity.
+
+    Keep only a bounded canonical E.164 number. Do not normalize arbitrary
+    provider metadata or accept control characters, URIs, or free-form text.
+    """
+    if not isinstance(value, str) or re.fullmatch(r"\\+[1-9][0-9]{1,14}", value) is None:
+        return None
+    return value
+
+
 def _call_hash(room_name: str) -> str:
     """Per-invocation opaque identity; the separate room digest is not a call ID."""
     return hashlib.sha256(secrets.token_bytes(32) + room_name.encode("utf-8")).hexdigest()
@@ -216,9 +227,21 @@ class ReceptionistVoiceAgent(Agent):
             return "Multiple SIP callers are present; cannot safely attribute a message. Offer a separate contact route."
         caller_number = None
         if participant is not None:
-            raw = participant.attributes.get("sip.phoneNumber")
-            if isinstance(raw, str) and raw.strip():
-                caller_number = raw.strip()
+            attributes = getattr(participant, "attributes", None)
+            raw = attributes.get("sip.phoneNumber") if isinstance(attributes, dict) else None
+            caller_number = _callback_number(raw)
+            if caller_number is not None:
+                try:
+                    # Client-defined sensitive patterns apply to all stored
+                    # caller-origin data, not only message text and names.
+                    safe_number, number_redactions = redact(caller_number, TRANSCRIPT_CONFIG.patterns)
+                except Exception as exc:
+                    LOGGER.error("callback number redaction failed: %s", type(exc).__name__)
+                    return "The message could not be saved safely. Offer the caller another contact route."
+                for key in ("card", "pattern"):
+                    redactions[key] += number_redactions[key]
+                if safe_number != caller_number or any(number_redactions.values()):
+                    caller_number = None  # A redacted number cannot be a callback destination.
         if await voice_paused():
             return HOLDING
         try:
@@ -232,6 +255,7 @@ class ReceptionistVoiceAgent(Agent):
                     "project": self._project,
                     "caller_name": safe_name or None,
                     "caller_number": caller_number,
+                    **({"callerNumberSource": "unverified-sip-attribute"} if caller_number else {}),
                     "message": safe_message,
                     "redactions": redactions,
                 }
