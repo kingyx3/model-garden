@@ -169,16 +169,16 @@ class RetrievalCaptureTests(unittest.TestCase):
                     rows = [json.loads(line) for line in self.audit_path.read_text().splitlines()]
                     change(rows, kind)
                     self.audit_path.write_text(
-                        "".join(json.dumps(row) + "\\n" for row in rows), encoding="utf-8"
+                        "".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8"
                     )
                     return found
 
                 # Isolate the independent request/receipt checks from the chain
                 # verifier: a broken hash chain must not be the ONLY reason
                 # an unrelated/forged read receipt is rejected.
-                with mock.patch.object(capture.RUNTIME.GovernedToolRuntime, "kb_search", corrupted), \\
-                     mock.patch.object(capture.RUNTIME.GOVERN, "verify_audit_chain",
-                                       return_value={"valid": True}):
+                with (mock.patch.object(capture.RUNTIME.GovernedToolRuntime, "kb_search", corrupted),
+                      mock.patch.object(capture.RUNTIME.GOVERN, "verify_audit_chain",
+                                        return_value={"valid": True})):
                     with self.assertRaises(capture.CaptureError):
                         capture.run_retrieval_case(model, pathlib.Path(tmp))
                 self.assertEqual(model.calls, [], "unproven retrieval reached the model")
