@@ -33,7 +33,7 @@ def validate_inputs(project_id: str, client: str, environment: str, compose_proj
 
 
 def docker_voice_ready(compose_project: str, *, now: datetime | None = None) -> bool:
-    """Require one running voice container with a *recent completed* native probe.
+    """Require one running voice container with a *recent successful* native probe.
 
     Docker can retain a 'healthy' state after its healthcheck stops making
     progress. A missing, stale, future or malformed probe timestamp is down,
@@ -63,6 +63,11 @@ def docker_voice_ready(compose_project: str, *, now: datetime | None = None) -> 
         # Its last completed check must be recent, not just its cached status.
         log = state["Health"].get("Log")
         if not isinstance(log, list) or not log or not isinstance(log[-1], dict):
+            return False
+        # Docker keeps Status=healthy until consecutive failures reach its
+        # configured retries threshold. The latest probe itself must pass;
+        # missing/malformed exit codes are not a successful health signal.
+        if type(log[-1].get("ExitCode")) is not int or log[-1]["ExitCode"] != 0:
             return False
         end = log[-1].get("End")
         if not isinstance(end, str):
