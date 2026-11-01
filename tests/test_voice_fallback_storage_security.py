@@ -29,10 +29,10 @@ spec.loader.exec_module(T)
 source = ROOT / "platform/channels/livekit_receptionist.py"
 tree = ast.parse(source.read_text(encoding="utf-8"), filename=str(source))
 functions = [node for node in tree.body if isinstance(node, ast.FunctionDef)
-             and node.name in {"_retention_seconds", "_append_message"}]
-assert len(functions) == 2
+             and node.name in {"_retention_seconds", "_append_message", "_callback_number"}]
+assert len(functions) == 3
 namespace = {
-    "os": os, "pathlib": pathlib, "fcntl": T.fcntl, "json": T.json,
+    "os": os, "pathlib": pathlib, "re": re, "fcntl": T.fcntl, "json": T.json,
     "time": T.time, "Any": object, "store_private_jsonl": getattr(T, "store_private_jsonl", None),
     "DEFAULT_MESSAGE_RETENTION_SECONDS": 7 * 24 * 60 * 60,
 }
@@ -231,6 +231,63 @@ class PrivateFallbackMessageTests(unittest.TestCase):
         self.assertEqual(row["redactions"], {"card": 1, "pattern": 2})
         self.assertNotIn("4111", self.path.read_text())
         self.assertNotIn("VIP-", self.path.read_text())
+
+    def test_sip_callback_metadata_is_unverified_and_strictly_e164(self):
+        # Provider SIP attributes can contain caller-controlled text. They are
+        # callback hints, never authenticated customer identity.
+        original = namespace["_sip_participant"]
+        try:
+            cases = (
+                ("+14155550123", "+14155550123"),
+                ("14155550123", None),
+                ("+012345", None),
+                ("+1234567890123456", None),
+                ("+14155550123\\nBearer synthetic-secret", None),
+                ("+1415-555-0123", None),
+                ({"forged": "number"}, None),
+                (None, None),
+            )
+            for raw, expected in cases:
+                with self.subTest(raw=repr(raw)):
+                    namespace["_sip_participant"] = lambda ctx, raw=raw: SimpleNamespace(
+                        attributes={"sip.phoneNumber": raw}
+                    )
+                    agent = namespace["ReceptionistVoiceAgent"]("test")
+                    self.assertIn("captured", asyncio.run(agent.capture_message(None, "Please call me back")))
+                    row = T.json.loads(self.path.read_text().splitlines()[-1])
+                    self.assertEqual(row["caller_number"], expected)
+                    self.assertEqual(
+                        row.get("callerNumberSource"),
+                        "unverified-sip-attribute" if expected else None,
+                    )
+                    self.assertNotIn("synthetic-secret", self.path.read_text())
+            namespace["_sip_participant"] = lambda ctx: SimpleNamespace(attributes=["not", "a", "map"])
+            agent = namespace["ReceptionistVoiceAgent"]("test")
+            self.assertIn("captured", asyncio.run(agent.capture_message(None, "Please call")))
+            self.assertIsNone(T.json.loads(self.path.read_text().splitlines()[-1])["caller_number"])
+        finally:
+            namespace["_sip_participant"] = original
+
+    def test_client_sensitive_pattern_suppresses_callback_number_not_just_message(self):
+        original_selector = namespace["_sip_participant"]
+        original_config = namespace["TRANSCRIPT_CONFIG"]
+        namespace["_sip_participant"] = lambda ctx: SimpleNamespace(
+            attributes={"sip.phoneNumber": "+14155550123"}
+        )
+        namespace["TRANSCRIPT_CONFIG"] = T.TranscriptConfig(
+            enabled=False, patterns=(re.compile(r"\\+14155550123"),)
+        )
+        try:
+            agent = namespace["ReceptionistVoiceAgent"]("test")
+            self.assertIn("captured", asyncio.run(agent.capture_message(None, "Please call me")))
+            row = T.json.loads(self.path.read_text().splitlines()[-1])
+            self.assertIsNone(row["caller_number"])
+            self.assertNotIn("callerNumberSource", row)
+            self.assertEqual(row["redactions"]["pattern"], 1)
+            self.assertNotIn("+14155550123", self.path.read_text())
+        finally:
+            namespace["_sip_participant"] = original_selector
+            namespace["TRANSCRIPT_CONFIG"] = original_config
 
     def test_non_string_tool_arguments_are_refused_before_any_write(self):
         agent = namespace["ReceptionistVoiceAgent"]("test")
