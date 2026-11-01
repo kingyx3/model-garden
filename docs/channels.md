@@ -40,6 +40,13 @@ Channel approvals go through `decide_from_channel()`: the responder must be mapp
 
 ## Voice (LiveKit)
 
+### Emergency owner pause on voice admission (v0.8.268; #232)
+
+The reference LiveKit worker now mounts the same client Compose `governance-data` volume at `/opt/governance:ro` and reads the owner pause state with the shared fail-closed `PauseStore` validator. The voice image contains only the pause reader, not the owner pause command. If the governance mount is missing, tampered with or unreadable, **new voice dialogue does not enter the model**: the worker suppresses transcript retention and attempts the fixed holding message. A paused receptionist also refuses new SIP human-transfer requests and fallback-message persistence, with a second state check just before each provider/local effect. An unpaused new call still uses the ordinary disclosure, model and transcript path. The overlay refuses a base deployment without the governed Tool service.
+
+**Operational limit:** This is a read-only, per-host admission and best-effort side-effect check, **not** an atomic shared lease for voice or distributed cancellation. A pause racing the final check may not stop an already accepted SIP transfer, an ongoing model/TTS turn or a remote worker. The owner must use the documented emergency isolation procedure for urgent in-flight calls, then reconcile provider receipts. Paused-call holding speech is not represented as a complete consented transcript, and offline tests are not a live pause/resume drill. The shared governed Tool boundary retains its own material-action lock and denial audit.
+
+
 ### Strict all-call transcript coverage evidence (v0.8.266; #107)
 
 `scripts/reference-proof.py --require-full-call-coverage` is an **opt-in strict pilot evidence gate** in addition to the existing one-call `--require-two-way-transcript` check. It requires every started call in the collected local lifecycle window to have a matching completed call and a unique, structurally valid, disclosed caller/agent transcript with no dropped turns. A transferred call counts as fully covered **only** when the record has a coherent transfer marker and a labelled human turn captured after the transfer. A cold SIP transfer leaves the human leg outside the LiveKit room and therefore **fails** this stricter gate, even if the pre-transfer caller/agent exchange is valid. Missing/duplicate records, unmatched starts and transcript-write failures also prevent acceptance. The collector emits only aggregate counts, never caller speech or call IDs.
