@@ -14,6 +14,7 @@ import re
 import secrets
 import sys
 import unittest
+from types import SimpleNamespace
 from unittest import mock
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -84,6 +85,41 @@ class CallIdentityTests(unittest.TestCase):
         self.assertRegex(second, r"^[0-9a-f]{64}$")
         self.assertNotEqual(first, second)
         self.assertNotEqual(first, hashlib.sha256(b"same-provider-room").hexdigest())
+
+    def test_ambiguous_sip_room_cannot_select_an_arbitrary_caller(self):
+        # Execute the real LiveKit worker helper without importing the SIP SDK.
+        # A room may have multiple remote SIP participants (conference/reconnect);
+        # selecting the first would transfer the wrong caller or leak their number.
+        tree = ast.parse(WORKER.read_text(encoding="utf-8"))
+        helper = next(node for node in tree.body
+                      if isinstance(node, ast.FunctionDef) and node.name == "_sip_participant")
+        rtc = SimpleNamespace(ParticipantKind=SimpleNamespace(SIP="sip"))
+        scope = {"JobContext": object, "rtc": rtc}
+        exec(compile(ast.Module(body=[helper], type_ignores=[]), str(WORKER), "exec"), scope)
+        select = scope["_sip_participant"]
+        alice = SimpleNamespace(kind="sip", identity="alice")
+        bob = SimpleNamespace(kind="sip", identity="bob")
+        observer = SimpleNamespace(kind="other", identity="observer")
+
+        def room(*participants):
+            return SimpleNamespace(room=SimpleNamespace(
+                remote_participants={str(i): p for i, p in enumerate(participants)}
+            ))
+
+        self.assertIs(select(room(observer, alice)), alice)
+        self.assertIsNone(select(room(observer)))
+        for participants in ((alice, bob), (bob, alice), (observer, alice, bob)):
+            with self.subTest(participants=participants):
+                self.assertIsNone(select(room(*participants)))
+
+        # Both SIP transfer and callback-number capture must use this same
+        # fail-closed selector rather than independently choosing a participant.
+        agent = next(node for node in tree.body
+                     if isinstance(node, ast.ClassDef) and node.name == "ReceptionistVoiceAgent")
+        for method in ("transfer_to_human", "capture_message"):
+            implementation = next(node for node in agent.body
+                                  if isinstance(node, ast.AsyncFunctionDef) and node.name == method)
+            self.assertIn("_sip_participant(job_ctx)", ast.unparse(implementation))
 
     def test_worker_uses_invocation_identity_for_transcript_and_lifecycle(self):
         tree = ast.parse(WORKER.read_text(encoding="utf-8"))
