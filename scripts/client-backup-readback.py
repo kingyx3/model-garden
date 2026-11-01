@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """Read back a completed encrypted GCS backup using a separate read-only identity.
 
-No list, delete, write, decryption or Docker permission is needed for ciphertext
-verification. This is NOT a recovery drill or proof of signed backup provenance.
+No write, decryption or Docker permission is needed for ciphertext verification.
+Gcloud must impersonate the exact Terraform-derived, bucket-scoped reader; the
+caller needs separate client-approved permission to impersonate it. This is NOT
+a recovery drill or proof of signed backup provenance.
 """
 from __future__ import annotations
 
@@ -30,9 +32,21 @@ class ReadbackError(ValueError):
     pass
 
 
-def _run_gcloud(args: list[str], *, timeout: int) -> str:
+def expected_reader_identity(gcp_project: str, client_slug: str, environment: str) -> str:
+    """Match the Terraform read-only recovery principal for one tenant/environment."""
     try:
-        result = subprocess.run(["gcloud", *args, "--quiet"], capture_output=True,
+        UPLOAD.expected_bucket(gcp_project, client_slug, environment)
+    except UPLOAD.UploadError as exc:
+        raise ReadbackError("invalid client GCP recovery reader binding") from exc
+    import hashlib
+    name = f"{client_slug}-{environment}-mg"
+    account_id = "mg-bkr-" + hashlib.md5(name.encode("ascii"), usedforsecurity=False).hexdigest()[:8]
+    return f"{account_id}@{gcp_project}.iam.gserviceaccount.com"
+
+
+def _run_gcloud(args: list[str], *, timeout: int, reader_identity: str) -> str:
+    try:
+        result = subprocess.run(["gcloud", f"--impersonate-service-account={reader_identity}", *args, "--quiet"], capture_output=True,
                                 text=True, check=False, timeout=timeout)
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise ReadbackError("GCS read-back unavailable or timed out") from exc
@@ -41,9 +55,9 @@ def _run_gcloud(args: list[str], *, timeout: int) -> str:
     return result.stdout
 
 
-def _cloud_size(uri: str) -> int:
+def _cloud_size(uri: str, *, reader_identity: str) -> int:
     raw = _run_gcloud(["storage", "objects", "describe", uri,
-                       "--format=json(size)"], timeout=120)
+                       "--format=json(size)"], timeout=120, reader_identity=reader_identity)
     try:
         size = json.loads(raw)["size"]
         if isinstance(size, bool) or not isinstance(size, (int, str)):
@@ -56,8 +70,8 @@ def _cloud_size(uri: str) -> int:
         raise ReadbackError("GCS object size metadata is missing or invalid") from exc
 
 
-def _cloud_copy(uri: str, target: pathlib.Path) -> None:
-    _run_gcloud(["storage", "cp", uri, str(target)], timeout=3600)
+def _cloud_copy(uri: str, target: pathlib.Path, *, reader_identity: str) -> None:
+    _run_gcloud(["storage", "cp", uri, str(target)], timeout=3600, reader_identity=reader_identity)
     if target.is_symlink() or not target.is_file():
         raise ReadbackError("GCS download did not create a safe regular file")
     target.chmod(0o600)
@@ -104,6 +118,7 @@ def retrieve(*, compose: pathlib.Path, project: str, destination: pathlib.Path,
         bucket = UPLOAD.expected_bucket(gcp_project, client_slug, environment)
     except UPLOAD.UploadError as exc:
         raise ReadbackError("invalid client GCP backup binding") from exc
+    reader_identity = expected_reader_identity(gcp_project, client_slug, environment)
     if project != f"{client_slug}-{environment}" or \
        not UPLOAD.RUN_ID.fullmatch(run_id) or not run_id.startswith(project + "-"):
         raise ReadbackError("snapshot run is not bound to the exact client and environment")
@@ -121,14 +136,14 @@ def retrieve(*, compose: pathlib.Path, project: str, destination: pathlib.Path,
         raise ReadbackError("gcloud not available for authorized read-back")
     prefix = f"gs://{bucket}/v1/{project}/{run_id}/"
     # Size-bound the untrusted manifest BEFORE downloading it.
-    manifest_size = _cloud_size(prefix + "manifest.json")
+    manifest_size = _cloud_size(prefix + "manifest.json", reader_identity=reader_identity)
     if manifest_size > RESTORE.MAX_MANIFEST_BYTES:
         raise ReadbackError("cloud backup manifest exceeds permitted size")
     previous_umask = os.umask(0o077)
     try:
         destination.mkdir(mode=0o700)
         pending = destination / ".manifest.partial"
-        _cloud_copy(prefix + "manifest.json", pending)
+        _cloud_copy(prefix + "manifest.json", pending, reader_identity=reader_identity)
         _verify_download(pending, manifest_size)
         try:
             doc = json.loads(pending.read_text(encoding="utf-8"))
@@ -137,11 +152,11 @@ def retrieve(*, compose: pathlib.Path, project: str, destination: pathlib.Path,
         rows = _entries(doc, compose, project)
         for row in rows:
             uri = prefix + row["object"]
-            remote_size = _cloud_size(uri)
+            remote_size = _cloud_size(uri, reader_identity=reader_identity)
             if remote_size != row["bytes"]:
                 raise ReadbackError("cloud object size differs from signed-off snapshot inventory")
             target = destination / row["object"]
-            _cloud_copy(uri, target)
+            _cloud_copy(uri, target, reader_identity=reader_identity)
             _verify_download(target, row["bytes"], row["sha256"])
         # Commit the manifest last; an interrupted download must not masquerade
         # as a complete recovery candidate.
