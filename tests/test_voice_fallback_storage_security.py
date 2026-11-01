@@ -232,6 +232,14 @@ class PrivateFallbackMessageTests(unittest.TestCase):
         self.assertNotIn("4111", self.path.read_text())
         self.assertNotIn("VIP-", self.path.read_text())
 
+    def test_non_string_tool_arguments_are_refused_before_any_write(self):
+        agent = namespace["ReceptionistVoiceAgent"]("test")
+        for message, name in ((None, ""), ({"private": "value"}, ""), ("safe", None), ("safe", ["name"])):
+            with self.subTest(message_type=type(message).__name__, name_type=type(name).__name__):
+                result = asyncio.run(agent.capture_message(None, message, caller_name=name))
+                self.assertIn("invalid", result)
+                self.assertFalse(self.path.exists())
+
     def test_oversized_fallback_message_or_name_is_refused_without_persistence(self):
         agent = namespace["ReceptionistVoiceAgent"]("test")
         for message, name in (("x" * 4001, ""), ("safe", "y" * 201)):
