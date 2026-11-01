@@ -4,6 +4,7 @@ from __future__ import annotations
 import calendar
 import importlib.util
 import json
+import os
 import pathlib
 import re
 import subprocess
@@ -701,6 +702,47 @@ class CallFilingTests(Case):
         self.assertEqual(self.interactions(runtime), [])
         self.assertFalse(any(event.get("action") == "transcript.write-failed" for event in self.events()))
 
+    def test_voice_project_scope_allows_exact_project_after_validation(self):
+        runtime = self.runtime([dict(call_record(), project="acme-dev")])
+        runtime.voice_project = "acme-dev"
+        self.assertEqual(runtime.run_calls(T0)["filed"], 1)
+        self.assertEqual(len(self.interactions(runtime)), 1)
+
+    def test_legacy_voice_overlay_without_project_refuses_worker_startup(self):
+        runtime = self.make(crm=True)
+        with mock.patch.dict(os.environ, {"MODEL_GARDEN_VOICE_AGENT_NAME": "receptionist"}, clear=False):
+            with self.assertRaisesRegex(worker.WorkerConfigError, "MODEL_GARDEN_VOICE_PROJECT is required"):
+                worker.Worker(runtime.desired_state_path, self.data, {},
+                              voice_transcripts=self.root / "voice" / "transcripts.jsonl")
+
+    def test_voice_project_scope_blocks_foreign_and_legacy_calls_before_model_or_crm(self):
+        for foreign in ("another-client-dev", None):
+            with self.subTest(project=foreign):
+                coworker = FakeCoworker()
+                first = dict(call_record("a" * 64), project="acme-dev")
+                second = dict(call_record("b" * 64), project=foreign) if foreign else call_record("b" * 64)
+                runtime = self.runtime([first, second], coworker=coworker)
+                runtime.voice_project = "acme-dev"
+                with self.assertRaisesRegex(ValueError, "voice record project mismatch"):
+                    runtime.run_calls(T0)
+                self.assertEqual(coworker.calls, [])
+                self.assertEqual(self.interactions(runtime), [])
+                self.assertFalse(any(event.get("tool") == "crm.log-interaction" for event in self.events()))
+                self.transcripts.unlink()
+                self.transcripts.parent.rmdir()
+
+    def test_voice_project_scope_blocks_foreign_failure_receipts_before_any_effect(self):
+        coworker = FakeCoworker()
+        failure = {"type": "TranscriptWriteFailed", "agent": "receptionist", "project": "other-dev",
+                   "timestamp": T0 - 30, "callHash": "b" * 64, "errorType": "OSError"}
+        runtime = self.runtime([dict(call_record(), project="acme-dev")], coworker=coworker, extra_lines=[failure])
+        runtime.voice_project = "acme-dev"
+        with self.assertRaisesRegex(ValueError, "voice record project mismatch"):
+            runtime.run_calls(T0)
+        self.assertEqual(coworker.calls, [])
+        self.assertEqual(self.interactions(runtime), [])
+        self.assertFalse(any(event.get("action") == "transcript.write-failed" for event in self.events()))
+
     def test_explicit_voice_agent_name_is_checked_against_transcript_attribution(self):
         runtime = self.runtime([dict(call_record(), agent="voice-livekit")])
         runtime.voice_agent = "voice-livekit"
@@ -827,8 +869,14 @@ class CallFilingTests(Case):
 
     def test_the_transcript_path_comes_from_the_environment(self):
         args = type("Args", (), {"config": None, "desired_state": compiled(self.root), "data_root": self.data})()
-        self.assertEqual(worker.build(args, {"MODEL_GARDEN_VOICE_TRANSCRIPTS": "/opt/voice/transcripts.jsonl"}).voice_transcripts,
-                         pathlib.Path("/opt/voice/transcripts.jsonl"))
+        scoped = worker.build(args, {"MODEL_GARDEN_VOICE_TRANSCRIPTS": "/opt/voice/transcripts.jsonl",
+                                     "MODEL_GARDEN_VOICE_PROJECT": "acme-dev",
+                                     "MODEL_GARDEN_VOICE_AGENT_NAME": "livekit-receptionist"})
+        self.assertEqual(scoped.voice_transcripts, pathlib.Path("/opt/voice/transcripts.jsonl"))
+        self.assertEqual(scoped.voice_project, "acme-dev")
+        self.assertEqual(scoped.voice_agent, "livekit-receptionist")
+        with self.assertRaisesRegex(worker.WorkerConfigError, "MODEL_GARDEN_VOICE_PROJECT is required"):
+            worker.build(args, {"MODEL_GARDEN_VOICE_TRANSCRIPTS": "/opt/voice/transcripts.jsonl"})
         self.assertIsNone(worker.build(args, {}).voice_transcripts)
 
 

@@ -191,10 +191,15 @@ class CallTranscript:
         config: TranscriptConfig,
         *,
         started: int | None = None,
+        project: str | None = None,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
+        if project is not None and (not isinstance(project, str) or
+                                    re.fullmatch(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?", project) is None):
+            raise ValueError("invalid voice project identity")
         self.call_hash = call_hash
         self.agent = agent
+        self.project = project
         self.config = config
         self.started = int(time.time()) if started is None else started
         self._clock = clock
@@ -366,6 +371,8 @@ class CallTranscript:
             "requestIds": ids,
             "redactions": counts,
         }
+        if self.project is not None:
+            record["project"] = self.project
         if summary_text:
             record["summary"] = summary_text
             record["summarySource"] = summary_source

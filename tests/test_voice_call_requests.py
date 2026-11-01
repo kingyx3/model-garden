@@ -239,17 +239,26 @@ class RequestIdTests(unittest.TestCase):
 
 class OverlayTests(unittest.TestCase):
     def test_the_worker_reads_the_voice_volume_read_only(self):
-        overlay = voice.worker_overlay({"services": {"hermes": {}, "governed-worker": {}}})
+        overlay = voice.worker_overlay({"services": {"hermes": {}, "governed-worker": {}}}, project="acme-dev")
         self.assertEqual(overlay["volumes"], ["voice-data:/opt/voice:ro"])
         self.assertEqual(overlay["environment"], {"MODEL_GARDEN_VOICE_TRANSCRIPTS": "/opt/voice/transcripts.jsonl",
-                                                  "MODEL_GARDEN_VOICE_AGENT_NAME": "model-garden-receptionist"})
+                                                  "MODEL_GARDEN_VOICE_AGENT_NAME": "model-garden-receptionist",
+                                                  "MODEL_GARDEN_VOICE_PROJECT": "acme-dev"})
 
     def test_voice_worker_mount_is_bound_to_exact_deployed_agent(self):
-        overlay = voice.worker_overlay({"services": {"governed-worker": {}}}, agent_name="client-receptionist")
+        overlay = voice.worker_overlay({"services": {"governed-worker": {}}}, agent_name="client-receptionist", project="acme-dev")
         self.assertEqual(overlay["environment"]["MODEL_GARDEN_VOICE_AGENT_NAME"], "client-receptionist")
         for invalid in ("", " ", "../other", "agent/name"):
             with self.subTest(invalid=invalid), self.assertRaisesRegex(ValueError, "voice agent"):
-                voice.worker_overlay({"services": {"governed-worker": {}}}, agent_name=invalid)
+                voice.worker_overlay({"services": {"governed-worker": {}}}, agent_name=invalid, project="acme-dev")
+
+    def test_worker_voice_project_scope_is_explicit_and_rejects_invalid_names(self):
+        overlay = voice.worker_overlay({"services": {"governed-worker": {}}},
+                                       agent_name="receptionist", project="acme-dev")
+        self.assertEqual(overlay["environment"]["MODEL_GARDEN_VOICE_PROJECT"], "acme-dev")
+        for invalid in (None, "", "Acme-dev", "../other", "other/client", "a" * 64):
+            with self.subTest(invalid=invalid), self.assertRaisesRegex(ValueError, "voice project"):
+                voice.worker_overlay({"services": {"governed-worker": {}}}, project=invalid)
 
     def test_no_worker_in_the_base_means_nothing_is_added(self):
         self.assertIsNone(voice.worker_overlay({"services": {"hermes": {}}}))

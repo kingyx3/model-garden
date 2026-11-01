@@ -23,6 +23,7 @@ import hashlib
 import logging
 import os
 import pathlib
+import re
 import secrets
 import time
 from typing import Any
@@ -98,10 +99,12 @@ def _sip_participant(ctx: JobContext):
 
 
 class ReceptionistVoiceAgent(Agent):
-    def __init__(self, instructions: str, transcript: CallTranscript | None = None, *, call_hash: str | None = None) -> None:
+    def __init__(self, instructions: str, transcript: CallTranscript | None = None, *, call_hash: str | None = None,
+                 project: str | None = None) -> None:
         super().__init__(instructions=instructions)
         self._transcript = transcript
         self._call_hash = call_hash
+        self._project = project
 
     async def on_enter(self) -> None:
         # The owner pause must stop new model dialogue, not just governed Tools.
@@ -169,6 +172,7 @@ class ReceptionistVoiceAgent(Agent):
                     "agent": AGENT_NAME,
                     "roomHash": _safe_digest(job_ctx.room.name),
                     "callHash": self._call_hash,
+                    "project": self._project,
                     "participantHash": _safe_digest(participant.identity),
                     "targetHash": _safe_digest(target),
                     "status": "requested",
@@ -224,6 +228,7 @@ class ReceptionistVoiceAgent(Agent):
                     "agent": AGENT_NAME,
                     "roomHash": _safe_digest(job_ctx.room.name),
                     "callHash": self._call_hash,
+                    "project": self._project,
                     "caller_name": safe_name or None,
                     "caller_number": caller_number,
                     "message": safe_message,
@@ -271,12 +276,16 @@ server = AgentServer(host="127.0.0.1", port=8081)
 
 @server.rtc_session(agent_name=AGENT_NAME)
 async def receptionist(ctx: JobContext) -> None:
+    # A voice volume must not be reused as another client deployment's evidence.
+    project = _required("MODEL_GARDEN_VOICE_PROJECT")
+    if re.fullmatch(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?", project) is None:
+        raise RuntimeError("MODEL_GARDEN_VOICE_PROJECT must be a valid Compose project")
     room_hash = _safe_digest(ctx.room.name)
     call_hash = _call_hash(ctx.room.name)
     ctx.log_context_fields = {"room_hash": room_hash, "call_hash": call_hash, "agent": AGENT_NAME}
     started = int(time.time())
     try:
-        _append_message({"type": "CallStarted", "timestamp": started, "roomHash": room_hash, "callHash": call_hash, "agent": AGENT_NAME})
+        _append_message({"type": "CallStarted", "timestamp": started, "roomHash": room_hash, "callHash": call_hash, "agent": AGENT_NAME, "project": project})
     except Exception as exc:
         LOGGER.error("call start receipt not stored: %s", type(exc).__name__)
 
@@ -289,13 +298,14 @@ async def receptionist(ctx: JobContext) -> None:
                     "roomHash": room_hash,
                     "callHash": call_hash,
                     "agent": AGENT_NAME,
+                    "project": project,
                     "started": started,
                 }
             )
         except Exception as exc:
             LOGGER.error("call end receipt not stored: %s", type(exc).__name__)
 
-    transcript = CallTranscript(call_hash, AGENT_NAME, TRANSCRIPT_CONFIG, started=started)
+    transcript = CallTranscript(call_hash, AGENT_NAME, TRANSCRIPT_CONFIG, started=started, project=project)
 
     def record_turn(event: Any) -> None:
         # Never let a transcript problem reach the call: log the type only and carry on.
@@ -322,6 +332,7 @@ async def receptionist(ctx: JobContext) -> None:
                     "roomHash": room_hash,
                     "callHash": call_hash,
                     "agent": AGENT_NAME,
+                    "project": project,
                     "errorType": error_type,
                 }
             )
@@ -332,7 +343,7 @@ async def receptionist(ctx: JobContext) -> None:
     ctx.add_shutdown_callback(on_transcript_shutdown)
     session = build_session()
     session.on("conversation_item_added", record_turn)
-    await session.start(agent=ReceptionistVoiceAgent(_instructions(), transcript, call_hash=call_hash), room=ctx.room)
+    await session.start(agent=ReceptionistVoiceAgent(_instructions(), transcript, call_hash=call_hash, project=project), room=ctx.room)
     await ctx.connect()
 
 
