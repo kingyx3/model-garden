@@ -174,8 +174,8 @@ class CallIdentityTests(unittest.TestCase):
         exec(compile(module, str(WORKER), "exec"), scope)
         agent = scope["ReceptionistVoiceAgent"]("receptionist", call_hash="a" * 64)
         with mock.patch.dict(os.environ, {"MODEL_GARDEN_HUMAN_TRANSFER_TARGET": "tel:+1234567"}):
-            self.assertIn("multiple SIP", asyncio.run(agent.transfer_to_human(None)))
-            self.assertIn("multiple SIP", asyncio.run(agent.capture_message(None, "private message")))
+            self.assertIn("Multiple SIP", asyncio.run(agent.transfer_to_human(None)))
+            self.assertIn("Multiple SIP", asyncio.run(agent.capture_message(None, "private message")))
         self.assertEqual(transfers, [])
         self.assertEqual(writes, [])
 
