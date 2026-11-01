@@ -34,7 +34,7 @@ from livekit.agents import Agent, AgentServer, AgentSession, JobContext, RunCont
 from livekit.plugins import openai
 
 from call_transcript import CallTranscript, config_from_env as transcript_config_from_env, finalize as finalize_transcript, redact, store_private_jsonl
-from voice_pause import HOLDING, paused as voice_paused
+from voice_pause import HOLDING, paused as voice_paused, stop_session_on_pause
 
 LOGGER = logging.getLogger("model-garden.receptionist")
 # An unsafe transcript configuration (for example no disclosure and no lawful-basis owner) stops the worker at start.
@@ -392,6 +392,19 @@ async def receptionist(ctx: JobContext) -> None:
     session.on("conversation_item_added", record_turn)
     await session.start(agent=ReceptionistVoiceAgent(_instructions(), transcript, call_hash=call_hash, project=project), room=ctx.room)
     await ctx.connect()
+    # Admission-only checks do not stop an already active conversation after
+    # owner pause. Poll the private sidecar and close this session on pause or
+    # loss of the trusted status route. No new model or provider credentials.
+    monitor_task = asyncio.create_task(stop_session_on_pause(session, on_pause=transcript.suppress))
+
+    async def stop_pause_monitor() -> None:
+        monitor_task.cancel()
+        try:
+            await monitor_task
+        except asyncio.CancelledError:
+            pass
+
+    ctx.add_shutdown_callback(stop_pause_monitor)
 
 
 if __name__ == "__main__":
