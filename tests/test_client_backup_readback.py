@@ -46,12 +46,15 @@ class CloudReadbackTests(unittest.TestCase):
             "hermes-data.tar.age": self.ciphertext,
         }
         self.calls = []
+        self.readers = []
 
-    def copy(self, uri, destination):
+    def copy(self, uri, destination, *, reader_identity):
+        self.readers.append(reader_identity)
         self.calls.append(uri)
         pathlib.Path(destination).write_bytes(self.remote[uri.rsplit("/", 1)[-1]])
 
-    def size(self, uri):
+    def size(self, uri, *, reader_identity):
+        self.readers.append(reader_identity)
         name = uri.rsplit("/", 1)[-1]
         if name not in self.remote:
             raise READBACK.ReadbackError("cloud object missing")
@@ -73,6 +76,7 @@ class CloudReadbackTests(unittest.TestCase):
         bucket = READBACK.UPLOAD.expected_bucket("sample-project-123", "acme", "dev")
         prefix = f"gs://{bucket}/v1/acme-dev/acme-dev-run12345/"
         self.assertEqual(self.calls, [prefix + "manifest.json", prefix + "hermes-data.tar.age"])
+        self.assertEqual(set(self.readers), {READBACK.expected_reader_identity("sample-project-123", "acme", "dev")})
         self.assertEqual(result["status"], "cloud-ciphertext-verified-not-recovery-proven")
         self.assertEqual(result["volumes"], 1)
         self.assertEqual(self.destination.stat().st_mode & 0o777, 0o700)
@@ -132,8 +136,8 @@ class CloudReadbackTests(unittest.TestCase):
 
     def test_metadata_size_mismatch_blocks_archive_copy(self):
         original = self.size
-        def wrong_size(uri):
-            return original(uri) + (1 if uri.endswith(".tar.age") else 0)
+        def wrong_size(uri, *, reader_identity):
+            return original(uri, reader_identity=reader_identity) + (1 if uri.endswith(".tar.age") else 0)
         with mock.patch.object(READBACK.shutil, "which", return_value="/usr/bin/gcloud"), \
              mock.patch.object(READBACK, "_cloud_size", side_effect=wrong_size), \
              mock.patch.object(READBACK, "_cloud_copy", side_effect=self.copy):
@@ -144,6 +148,32 @@ class CloudReadbackTests(unittest.TestCase):
                                   environment="dev")
         self.assertEqual(len(self.calls), 1)
         self.assertFalse((self.destination / "manifest.json").exists())
+
+    def test_readback_uses_exact_terraform_reader_and_never_ambient_gcloud_identity(self):
+        reader = READBACK.expected_reader_identity("sample-project-123", "acme", "dev")
+        self.assertEqual(reader, "mg-bkr-" + hashlib.md5(b"acme-dev-mg").hexdigest()[:8]
+                         + "@sample-project-123.iam.gserviceaccount.com")
+        self.assertNotEqual(reader, READBACK.UPLOAD.expected_writer_identity("sample-project-123", "acme", "dev"))
+        self.assertNotEqual(reader, READBACK.expected_reader_identity("sample-project-123", "acme", "prod"))
+        for cloud, client, env in (("bad project", "acme", "dev"),
+                                   ("sample-project-123", "bad;client", "dev"),
+                                   ("sample-project-123", "acme", "staging")):
+            with self.subTest(cloud=cloud, client=client, env=env), self.assertRaises(READBACK.ReadbackError):
+                READBACK.expected_reader_identity(cloud, client, env)
+        with mock.patch.object(READBACK.subprocess, "run", return_value=mock.Mock(returncode=0, stdout="ok")) as run:
+            self.assertEqual(READBACK._run_gcloud(["storage", "objects", "describe", "gs://example"],
+                                                  timeout=120, reader_identity=reader), "ok")
+        args, kwargs = run.call_args
+        self.assertEqual(args[0][:3], ["gcloud", "--impersonate-service-account=" + reader, "storage"])
+        self.assertTrue(kwargs["capture_output"])
+        self.assertNotIn("secret", str(kwargs))
+
+    def test_readback_refuses_gcloud_reader_impersonation_failure(self):
+        reader = READBACK.expected_reader_identity("sample-project-123", "acme", "dev")
+        with mock.patch.object(READBACK.subprocess, "run", return_value=mock.Mock(returncode=1, stdout="", stderr="secret")):
+            with self.assertRaisesRegex(READBACK.ReadbackError, "access denied"):
+                READBACK._run_gcloud(["storage", "objects", "describe", "gs://example"],
+                                     timeout=120, reader_identity=reader)
 
     def test_explicit_private_age_key_can_add_authenticated_archive_validation(self):
         identity = self.root / "age-key"
