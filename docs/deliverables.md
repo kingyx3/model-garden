@@ -74,3 +74,20 @@ all match. A changed provenance field creates a separately audited artifact
 instead of silently returning an older object with misleading metadata. This is
 host-local credential-free behavior, not independently immutable evidence or
 proof of real tenant delivery and retention enforcement.
+
+## Artifact creation audit failure boundary (v0.8.259)
+
+A new Tier 0 file is not published in the tenant index until the
+`artifact.create` audit hook accepts its redacted creation receipt. If the
+hook fails before accepting the receipt, the new payload is removed and the
+index is not updated; an identical retry must create a new accounted artifact,
+not return an unledgered duplicate. Existing artifacts remain readable.
+
+This is a **host-local fail-closed prerequisite**, not a distributed transaction
+with an independent immutable ledger. A crash or storage failure after the
+receipt was accepted but before the index was committed can leave a receipt
+without a published artifact; an audit sink that writes and then raises can
+also leave an uncertain receipt. In either case, operators must reconcile the
+private ledger and artifact inventory before retrying or asserting completeness.
+It does not establish provider-live delivery, retention erasure in backups or
+client acceptance (#77/#101).
