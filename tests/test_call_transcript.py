@@ -30,6 +30,12 @@ def config(tmp: str, **overrides) -> T.TranscriptConfig:
     return T.TranscriptConfig(**values)
 
 
+def _write_private(path: pathlib.Path, text: str, **kwargs) -> None:
+    """Seed an existing private fixture without depending on writer auto-chmod."""
+    path.write_text(text, **kwargs)
+    path.chmod(0o600)
+
+
 class Clock:
     def __init__(self) -> None:
         self.now = 100.0
@@ -284,10 +290,10 @@ class StorageTests(unittest.TestCase):
         for invalid in ("not json", "[]", '{"timestamp":"invalid"}', '{"timestamp":null}'):
             with self.subTest(invalid=invalid), tempfile.TemporaryDirectory() as tmp:
                 cfg = config(tmp)
-                cfg.path.parent.mkdir(parents=True)
+                cfg.path.parent.mkdir(parents=True, mode=0o700)
                 prior = {"type": "CallTranscript", "timestamp": 1_700_000_000, "callHash": "previous"}
                 original = json.dumps(prior) + "\n" + invalid + "\n"
-                cfg.path.write_text(original, encoding="utf-8")
+                _write_private(cfg.path, original, encoding="utf-8")
                 next_record = {"type": "CallTranscript", "timestamp": 1_700_000_010, "callHash": "next"}
                 with self.assertRaisesRegex(ValueError, "invalid existing voice record"):
                     T.store_record(cfg, next_record, now=1_700_000_010)
@@ -299,10 +305,10 @@ class StorageTests(unittest.TestCase):
         # of an interrupted/foreign writer while appending a new call.
         with tempfile.TemporaryDirectory() as tmp:
             cfg = config(tmp)
-            cfg.path.parent.mkdir(parents=True)
+            cfg.path.parent.mkdir(parents=True, mode=0o700)
             previous = {"type": "CallTranscript", "timestamp": 1_700_000_000, "callHash": "previous"}
             original = json.dumps(previous)  # deliberately no terminating newline
-            cfg.path.write_text(original, encoding="utf-8")
+            _write_private(cfg.path, original, encoding="utf-8")
             next_record = {"type": "CallTranscript", "timestamp": 1_700_000_010, "callHash": "next"}
             with self.assertRaisesRegex(ValueError, "unterminated"):
                 T.store_record(cfg, next_record, now=1_700_000_010)
@@ -313,11 +319,11 @@ class StorageTests(unittest.TestCase):
         # transcript/fallback file. Use a tiny test limit, not a huge fixture.
         with tempfile.TemporaryDirectory() as tmp:
             cfg = config(tmp)
-            cfg.path.parent.mkdir(parents=True)
+            cfg.path.parent.mkdir(parents=True, mode=0o700)
             previous = {"type": "CallTranscript", "timestamp": 1_700_000_000,
                         "callHash": "previous", "payload": "x" * 500}
             original = json.dumps(previous) + "\n"
-            cfg.path.write_text(original, encoding="utf-8")
+            _write_private(cfg.path, original, encoding="utf-8")
             next_record = {"type": "CallTranscript", "timestamp": 1_700_000_010, "callHash": "next"}
             with mock.patch.object(T, "MAX_RETAINED_BYTES", 256, create=True):
                 with self.assertRaisesRegex(ValueError, "exceeds.*limit"):
@@ -327,11 +333,11 @@ class StorageTests(unittest.TestCase):
     def test_excessive_historical_rows_fail_without_silent_truncation(self):
         with tempfile.TemporaryDirectory() as tmp:
             cfg = config(tmp)
-            cfg.path.parent.mkdir(parents=True)
+            cfg.path.parent.mkdir(parents=True, mode=0o700)
             original = "".join(json.dumps({"type": "CallTranscript",
                 "timestamp": 1_700_000_000, "callHash": f"previous-{n}"}) + "\n"
                 for n in range(2))
-            cfg.path.write_text(original, encoding="utf-8")
+            _write_private(cfg.path, original, encoding="utf-8")
             next_record = {"type": "CallTranscript", "timestamp": 1_700_000_010, "callHash": "next"}
             with mock.patch.object(T, "MAX_RETAINED_ROWS", 1, create=True):
                 with self.assertRaisesRegex(ValueError, "exceeds.*limit"):
@@ -341,10 +347,10 @@ class StorageTests(unittest.TestCase):
     def test_new_record_cannot_publish_an_over_limit_store(self):
         with tempfile.TemporaryDirectory() as tmp:
             cfg = config(tmp)
-            cfg.path.parent.mkdir(parents=True)
+            cfg.path.parent.mkdir(parents=True, mode=0o700)
             original = json.dumps({"type": "CallTranscript",
                 "timestamp": 1_700_000_000, "callHash": "previous"}) + "\n"
-            cfg.path.write_text(original, encoding="utf-8")
+            _write_private(cfg.path, original, encoding="utf-8")
             next_record = {"type": "CallTranscript", "timestamp": 1_700_000_010,
                            "callHash": "next", "payload": "x" * 500}
             with mock.patch.object(T, "MAX_RETAINED_BYTES", 256, create=True):
@@ -358,8 +364,8 @@ class StorageTests(unittest.TestCase):
             transcript.add_turn("caller", "please help")
             transcript.mark_disclosure_played()
             path = config(tmp).path
-            path.parent.mkdir(parents=True)
-            path.write_text('{"timestamp":false}\n', encoding="utf-8")
+            path.parent.mkdir(parents=True, mode=0o700)
+            _write_private(path, '{"timestamp":false}\n', encoding="utf-8")
             failures = []
             with self.assertLogs("model-garden.call-transcript", level="ERROR"):
                 self.assertIsNone(T.finalize(transcript, on_failure=failures.append))
@@ -369,10 +375,10 @@ class StorageTests(unittest.TestCase):
     def test_expired_rows_are_dropped_on_write(self):
         with tempfile.TemporaryDirectory() as tmp:
             cfg = config(tmp, retention_seconds=3600)
-            cfg.path.parent.mkdir(parents=True)
+            cfg.path.parent.mkdir(parents=True, mode=0o700)
             old = {"type": "CallTranscript", "timestamp": 1_000, "callHash": "old"}
             fresh = {"type": "CallTranscript", "timestamp": 1_700_000_000 - 10, "callHash": "fresh"}
-            cfg.path.write_text("\n".join(json.dumps(item) for item in (old, fresh)) + "\n", encoding="utf-8")
+            _write_private(cfg.path, "\n".join(json.dumps(item) for item in (old, fresh)) + "\n", encoding="utf-8")
             record = {"type": "CallTranscript", "timestamp": 1_700_000_000, "callHash": "new"}
             self.assertTrue(T.store_record(cfg, record, now=1_700_000_000))
             hashes = [json.loads(line)["callHash"] for line in cfg.path.read_text(encoding="utf-8").splitlines()]
