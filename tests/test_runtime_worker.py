@@ -701,6 +701,34 @@ class CallFilingTests(Case):
         self.assertEqual(self.interactions(runtime), [])
         self.assertFalse(any(event.get("action") == "transcript.write-failed" for event in self.events()))
 
+    def test_voice_project_scope_blocks_foreign_and_legacy_calls_before_model_or_crm(self):
+        for foreign in ("another-client-dev", None):
+            with self.subTest(project=foreign):
+                coworker = FakeCoworker()
+                first = dict(call_record("a" * 64), project="acme-dev")
+                second = dict(call_record("b" * 64), project=foreign) if foreign else call_record("b" * 64)
+                runtime = self.runtime([first, second], coworker=coworker)
+                runtime.voice_project = "acme-dev"
+                with self.assertRaisesRegex(ValueError, "voice record project mismatch"):
+                    runtime.run_calls(T0)
+                self.assertEqual(coworker.calls, [])
+                self.assertEqual(self.interactions(runtime), [])
+                self.assertFalse(any(event.get("tool") == "crm.log-interaction" for event in self.events()))
+                self.transcripts.unlink()
+                self.transcripts.parent.rmdir()
+
+    def test_voice_project_scope_blocks_foreign_failure_receipts_before_any_effect(self):
+        coworker = FakeCoworker()
+        failure = {"type": "TranscriptWriteFailed", "agent": "receptionist", "project": "other-dev",
+                   "timestamp": T0 - 30, "callHash": "b" * 64, "errorType": "OSError"}
+        runtime = self.runtime([dict(call_record(), project="acme-dev")], coworker=coworker, extra_lines=[failure])
+        runtime.voice_project = "acme-dev"
+        with self.assertRaisesRegex(ValueError, "voice record project mismatch"):
+            runtime.run_calls(T0)
+        self.assertEqual(coworker.calls, [])
+        self.assertEqual(self.interactions(runtime), [])
+        self.assertFalse(any(event.get("action") == "transcript.write-failed" for event in self.events()))
+
     def test_explicit_voice_agent_name_is_checked_against_transcript_attribution(self):
         runtime = self.runtime([dict(call_record(), agent="voice-livekit")])
         runtime.voice_agent = "voice-livekit"
