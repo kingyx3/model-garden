@@ -492,27 +492,68 @@ def export_ledger(
 
 
 def _exported_chain_problems(records: list[dict[str, Any]], first: int) -> tuple[list[str], list[int]]:
+    """Validate the *export envelope* and the event chain, not only event hashes.
+
+    Export objects are independently retained but not intrinsically trustworthy. Keep
+    gap diagnostics bounded: an adversarial sequence must not allocate a trillion
+    integers or prevent an unhealthy verifier result from being published.
+    """
     problems: list[str] = []
     gaps: list[int] = []
     expected = first
     previous: str | None = None
+    previous_schema = 1
     seen: set[int] = set()
     for record in records:
-        sequence = record.get("sequence")
-        event = record.get("event", {})
-        if not isinstance(sequence, int) or sequence in seen:
+        sequence = record["sequence"]  # caller already rejected non-positive/non-integer values
+        if sequence in seen:
             problems.append(f"exported record has an invalid or duplicate sequence {sequence!r}")
             continue
         seen.add(sequence)
         if sequence > expected:
-            gaps.extend(range(expected, sequence))
-            expected = sequence
-            previous = None  # linkage across a gap cannot be proven
-        if record.get("recordId") != event.get("eventHash") or event.get("eventHash") != event_hash(event):
+            if len(gaps) < 21:
+                gaps.extend(range(expected, min(sequence, expected + 21 - len(gaps))))
+            previous = None
+        elif sequence < expected:
+            problems.append(f"exported record {sequence} has an unexpected sequence before {expected}")
+            previous = None
+
+        event = record.get("event")
+        if (type(record.get("exportSchema")) is not int
+                or record["exportSchema"] != EXPORT_SCHEMA_VERSION
+                or not isinstance(event, dict)
+                or type(event.get("sequence")) is not int or event["sequence"] != sequence
+                or type(event.get("schemaVersion")) is not int
+                or event["schemaVersion"] not in CHAINED_SCHEMA_VERSIONS
+                or event["schemaVersion"] < previous_schema):
+            problems.append(f"exported record {sequence} has invalid schema or event metadata")
+            previous = None
+            expected = sequence + 1
+            continue
+        previous_schema = event["schemaVersion"]
+        digest = event.get("eventHash")
+        try:
+            valid_hash = (isinstance(digest, str)
+                          and re.fullmatch(r"[0-9a-f]{64}", digest) is not None
+                          and record.get("recordId") == digest
+                          and event_hash(event) == digest)
+        except (TypeError, ValueError, OverflowError):
+            valid_hash = False
+        if not valid_hash:
             problems.append(f"exported record {sequence} fails its hash check")
-        elif previous is not None and event.get("previousEventHash") != previous:
-            problems.append(f"exported record {sequence} does not link to {sequence - 1}")
-        previous = event.get("eventHash")
+            previous = None
+        else:
+            link = event.get("previousEventHash")
+            if sequence == first:
+                if first == 1 and link is not None:
+                    problems.append("first exported event has an unexpected predecessor")
+                elif first > 1 and (
+                    not isinstance(link, str) or re.fullmatch(r"[0-9a-f]{64}", link) is None
+                ):
+                    problems.append("legacy-prefix first event has an invalid predecessor")
+            elif previous is None or link != previous:
+                problems.append(f"exported record {sequence} does not link to {sequence - 1}")
+            previous = digest
         expected = sequence + 1
     return problems, gaps
 
@@ -547,11 +588,26 @@ def verify_export(
     except LedgerExportError as exc:
         local = []
         problems.append(f"local ledger invalid: {exc}")
-    exported = sorted(sink.records(), key=lambda record: record.get("sequence", 0))
-    by_sequence = {record["sequence"]: record for record in exported if isinstance(record.get("sequence"), int)}
+    raw_records = sink.records()
+    if not isinstance(raw_records, list):
+        raise LedgerExportError("export reader returned invalid records collection")
+    exported: list[dict[str, Any]] = []
+    for record in raw_records:
+        if not isinstance(record, dict):
+            problems.append("exported record has invalid structure")
+        elif type(record.get("sequence")) is not int or record["sequence"] < 1:
+            problems.append("exported record has an invalid sequence")
+        else:
+            exported.append(record)
+    exported.sort(key=lambda record: record["sequence"])
+    # Preserve the first entry for parity comparisons; duplicates are a hard
+    # integrity failure in _exported_chain_problems, never silently deduplicated.
+    by_sequence: dict[int, dict[str, Any]] = {}
+    for record in exported:
+        by_sequence.setdefault(record["sequence"], record)
     exported_head = max(by_sequence, default=0)
     local_head = local[-1]["sequence"] if local else 0
-    if local and not exported:
+    if local and not raw_records:
         # No baseline means there is no independent chain to verify. Optional lag
         # thresholds apply only after at least one record has been exported.
         problems.append("no exported records for nonempty local ledger")
@@ -572,7 +628,9 @@ def verify_export(
     if diverged_at is not None:
         problems.append(f"local ledger differs from the export at sequence {diverged_at}")
     heads = sink.heads()
-    exported_sequences = [record["sequence"] for record in exported if type(record.get("sequence")) is int]
+    if not isinstance(heads, list):
+        raise LedgerExportError("export reader returned invalid heads collection")
+    exported_sequences = [record["sequence"] for record in exported]
     newest: dict[str, Any] | None = None
     for head in heads:
         if not isinstance(head, dict):
@@ -584,7 +642,8 @@ def verify_export(
         if not isinstance(sequence, int) or isinstance(sequence, bool) or sequence < 1:
             problems.append("head manifest has invalid sequence")
             continue
-        if (head.get("kind") != "head" or head.get("exportSchema") != EXPORT_SCHEMA_VERSION
+        if (head.get("kind") != "head" or type(head.get("exportSchema")) is not int
+                or head["exportSchema"] != EXPORT_SCHEMA_VERSION
                 or not isinstance(count, int) or isinstance(count, bool)
                 or count != bisect_right(exported_sequences, sequence)):
             problems.append(f"head manifest at sequence {sequence} has invalid metadata")
@@ -620,7 +679,7 @@ def verify_export(
     return {
         "ok": not problems,
         "localChainedEvents": len(local),
-        "exportedRecords": len(exported),
+        "exportedRecords": len(raw_records),
         "exportedHeadSequence": exported_head,
         "gaps": gaps,
         "truncated": truncated,
