@@ -60,6 +60,14 @@ class MemberSignatureMigrationTests(unittest.TestCase):
         self.assertEqual(govern.authorize_action(
             state(self.signed), "calendar.book", {}, initiating_user="member:synthetic",
             principal_access="member")["decision"], "require-approval")
+        # A queued approval is not a provider execution; no fallback may dispatch.
+        called = []
+        result = govern.execute_action(
+            state(self.digest), "calendar.book", {"slot": "10:00"},
+            lambda args: called.append(args), initiating_user="member:synthetic",
+            principal_access="member")
+        self.assertEqual(result["status"], "pending-approval")
+        self.assertEqual(called, [])
 
     def test_authenticated_member_rule_can_waive_default_only_with_matching_key(self):
         for keys in (self.keys, {}, {"other@client.example": self.key["public"]}):
