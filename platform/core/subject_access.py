@@ -343,9 +343,24 @@ class SubjectAccess:
             result["crmSync"]["items"].sort(key=lambda row: row["keyDigest"])
         return result
 
+    def _require_contact_tenant(self) -> None:
+        try:
+            self.contacts.require_tenant(self.tenant)
+        except (AttributeError, OSError, ValueError) as exc:
+            raise SubjectAccessError("contact store tenant binding is unavailable or mismatched; no subject data released") from exc
+        if pathlib.Path(self.contacts.root) != self.root.parent / "contacts":
+            raise SubjectAccessError("contact store root does not match the subject-access governance root")
+        if self.conversations is not None:
+            expected = pathlib.Path(self.contacts.root).parent / "conversations"
+            if (getattr(self.conversations, "tenant", None) != self.tenant
+                    or pathlib.Path(getattr(self.conversations, "root", "")) != expected
+                    or pathlib.Path(getattr(self.conversations, "path", "")) != expected / f"{self.tenant}.conversations.json"):
+                raise SubjectAccessError("conversation store tenant or root does not match the bound contact client")
+
     def export(self, out_dir: str | os.PathLike[str], *, verified_by: str, approved_by: str, method: str, reason: str, now: int,
                contact_id: str | None = None, email: str | None = None, phone: str | None = None) -> dict[str, Any]:
         verified, approved, method, reason = self._check_people(verified_by, approved_by, method, reason)
+        self._require_contact_tenant()
         subject = resolve(self.contacts, contact_id=contact_id, email=email, phone=phone)
         request_id = "sa-" + hashlib.sha256(f"{self.tenant}|{subject}|{verified}|{approved}|{reason}".encode("utf-8")).hexdigest()[:12]
         record = self.contacts.export_subject(subject)
@@ -442,6 +457,7 @@ class SubjectAccess:
 
     def request_correction(self, *, contact_id: str, field: str, verified_by: str, approved_by: str, method: str, reason: str, now: int) -> dict[str, Any]:
         verified, approved, method, reason = self._check_people(verified_by, approved_by, method, reason)
+        self._require_contact_tenant()
         subject = resolve(self.contacts, contact_id=contact_id)
         if field not in CORRECTABLE:
             raise SubjectAccessError("the field to correct is one of " + ", ".join(CORRECTABLE))

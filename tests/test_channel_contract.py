@@ -201,6 +201,8 @@ class ContractCase(unittest.TestCase):
         self.root = pathlib.Path(self._tmp.name)
         # One compiled Agent definition, reused unchanged behind every surface.
         self.desired = compiler.compile_workspace(ROOT / "examples" / "workspace", "receptionist")[0]
+        # The example workspace has no client binding; channel tests explicitly use an isolated tenant.
+        self.desired["source"]["client"] = "acme"
         (self.root / "desired.json").write_text(json.dumps(self.desired), encoding="utf-8")
 
     def runtime(self, surface: Surface, principal, calendar: FakeCalendar):

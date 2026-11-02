@@ -6,6 +6,7 @@
   runtime-contacts.py /opt/data/.modelgarden/contacts dismiss <review-id> --by jordan@client.example
   runtime-contacts.py /opt/data/.modelgarden/contacts erase-contact <contact-id> --by jordan@client.example
   runtime-contacts.py /opt/data/.modelgarden/contacts erase-interaction <interaction-id> --by jordan@client.example
+  runtime-contacts.py /opt/data/.modelgarden/contacts bind-tenant --tenant acme --by privacy-owner --source-reviewed
 
 `review` prints personal data (contact IDs and interaction summaries) for a person to act on, so run
 it only on the client's host. Every change writes a chained `operator-action` event naming the person
@@ -50,7 +51,10 @@ def main(argv: list[str] | None = None) -> int:
     erase_contact.add_argument("contact_id")
     erase_interaction = sub.add_parser("erase-interaction", help="erase one interaction")
     erase_interaction.add_argument("interaction_id")
-    for command in (assign, dismiss, erase_contact, erase_interaction):
+    migration = sub.add_parser("bind-tenant", help="explicitly bind a reviewed legacy contact store to a client")
+    migration.add_argument("--tenant", required=True)
+    migration.add_argument("--source-reviewed", action="store_true", help="operator attests to independent source/root ownership review")
+    for command in (assign, dismiss, erase_contact, erase_interaction, migration):
         command.add_argument("--by", required=True, help="the named person performing the action")
     args = parser.parse_args(argv)
     store = CONTACTS.ContactStore(args.store)
@@ -59,7 +63,10 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "review":
             print(json.dumps(store.review_queue(), indent=2, sort_keys=True))
             return 0
-        if args.command == "assign":
+        if args.command == "bind-tenant":
+            store.bind_tenant(args.tenant, reviewed=args.source_reviewed)
+            result = {"tenant": args.tenant, "sourceReviewed": True}
+        elif args.command == "assign":
             result = store.assign_interaction(args.interaction_id, args.contact_id)
         elif args.command == "dismiss":
             result = store.dismiss_review(args.review_id)

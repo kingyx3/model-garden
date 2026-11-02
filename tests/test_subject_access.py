@@ -27,7 +27,7 @@ class Case(unittest.TestCase):
         self.addCleanup(self._tmp.cleanup)
         self.root = pathlib.Path(self._tmp.name)
         self.events = []
-        self.contacts = contacts.ContactStore(self.root / "contacts")
+        self.contacts = contacts.ContactStore(self.root / "contacts", tenant="acme")
         self.conversations = conversations.ConversationStore(self.root / "conversations", tenant="acme")
         self.service = subject.SubjectAccess(self.root / "subject-access", tenant="acme", contacts=self.contacts, conversations=self.conversations,
                                              audit=lambda action, by, details: self.events.append((action, by, details)))
@@ -140,12 +140,43 @@ class ExportTests(Case):
         self.assertEqual(self.events[-1][2], {"bundles": 1})
 
     def test_after_erasure_nothing_is_exported_and_tenants_do_not_see_each_other(self):
-        other = subject.SubjectAccess(self.root / "other", tenant="beta", contacts=contacts.ContactStore(self.root / "contacts-beta"))
+        other = subject.SubjectAccess(self.root / "beta" / "subject-access", tenant="beta", contacts=contacts.ContactStore(self.root / "beta" / "contacts", tenant="beta"))
         with self.assertRaisesRegex(subject.SubjectAccessError, "no contact matches"):
             other.export(self.bundles, now=NOW, **PEOPLE, contact_id=self.alex)
         self.contacts.erase_contact(self.alex)
         with self.assertRaisesRegex(subject.SubjectAccessError, "no contact matches"):
             self.export()
+
+    def test_foreign_contact_store_is_rejected_before_export_or_correction(self):
+        foreign = subject.SubjectAccess(self.root / "foreign", tenant="beta", contacts=self.contacts)
+        with self.assertRaisesRegex(subject.SubjectAccessError, "tenant"):
+            foreign.export(foreign.root / "bundles", now=NOW, **PEOPLE, contact_id=self.alex)
+        with self.assertRaisesRegex(subject.SubjectAccessError, "tenant"):
+            foreign.request_correction(contact_id=self.alex, field="phone", now=NOW, **PEOPLE)
+        self.assertFalse((foreign.root / "bundles").exists())
+
+    def test_foreign_conversation_store_is_rejected_before_export(self):
+        self.service.conversations = conversations.ConversationStore(self.root / "foreign-conversations", tenant="beta")
+        with self.assertRaisesRegex(subject.SubjectAccessError, "conversation"):
+            self.export()
+        self.assertFalse(self.bundles.exists())
+
+    def test_contact_store_from_another_root_with_same_tenant_is_rejected(self):
+        foreign = contacts.ContactStore(self.root / "another-workspace" / "contacts", tenant="acme")
+        foreign.create_contact({"name": "Other Client"})
+        service = subject.SubjectAccess(self.root / "subject-access", tenant="acme", contacts=foreign)
+        with self.assertRaisesRegex(subject.SubjectAccessError, "root|contact"):
+            service.export(service.root / "bundles", now=NOW, **PEOPLE, contact_id=self.alex)
+        self.assertFalse(self.bundles.exists())
+
+    def test_legacy_unbound_contact_store_cannot_issue_export(self):
+        legacy_root = self.root / "legacy"
+        legacy = contacts.ContactStore(legacy_root)
+        old = legacy.create_contact({"name": "Legacy"})["objectId"]
+        service = subject.SubjectAccess(self.root / "legacy-access", tenant="acme", contacts=legacy)
+        with self.assertRaisesRegex(subject.SubjectAccessError, "tenant|binding"):
+            service.export(service.root / "bundles", now=NOW, **PEOPLE, contact_id=old)
+        self.assertFalse((service.root / "bundles").exists())
 
     def test_a_store_with_no_conversations_still_exports_the_contact(self):
         bare = subject.SubjectAccess(self.root / "bare", tenant="acme", contacts=self.contacts)

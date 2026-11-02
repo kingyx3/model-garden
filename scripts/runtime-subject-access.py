@@ -92,7 +92,7 @@ def main(argv: list[str] | None = None, *, now: int | None = None) -> int:
         tenant = args.tenant if args.tenant is not None else default_tenant(args.desired_state)
         audit = lambda action, by, details: GOVERN.record_operator_action(args.audit_path, action, by, details)  # noqa: E731
         service = SUBJECT.SubjectAccess(
-            args.root / "subject-access", tenant=tenant, contacts=CONTACTS.ContactStore(args.root / "contacts"),
+            args.root / "subject-access", tenant=tenant, contacts=CONTACTS.ContactStore(args.root / "contacts", tenant=tenant),
             conversations=CONVERSATIONS.ConversationStore(args.root / "conversations", tenant=tenant),
             memory=MEMORY.MemoryStore(args.root / "memory", tenant=tenant),
             sync=SYNC.SyncLedger(args.root / "crm-sync", tenant=tenant), audit=audit)
