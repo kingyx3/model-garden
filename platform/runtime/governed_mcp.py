@@ -350,11 +350,27 @@ class GovernedToolRuntime:
         return identity, governance_context, principal_access
 
     def _material_tool(self, tool_name: str) -> bool:
-        """Unknown Tools are material; only declared read-only Tools bypass the effect lock."""
-        for tool in self.desired_state.get("tools", []) if isinstance(self.desired_state, dict) else []:
-            if tool.get("metadata", {}).get("name") == tool_name:
-                return tool.get("spec", {}).get("risk") != "read"
-        return True
+        """Only an unambiguous catalogued read may bypass the owner-pause effect lock.
+
+        The compiled Tool's risk is not an independent authority: a stale,
+        duplicated or modified declaration must never relabel a catalogued
+        material operation as a read. Uncatalogued Tools conservatively hold
+        the material-effect lease, even if their declaration says "read".
+        """
+        tools = self.desired_state.get("tools", []) if isinstance(self.desired_state, dict) else []
+        if not isinstance(tools, list):
+            return True
+        matches = [
+            tool for tool in tools
+            if isinstance(tool, dict) and isinstance(tool.get("metadata"), dict)
+            and tool["metadata"].get("name") == tool_name
+        ]
+        if len(matches) != 1 or not isinstance(matches[0].get("spec"), dict):
+            return True
+        return not (
+            matches[0]["spec"].get("risk") == "read"
+            and CAPABILITIES.tool_risk(tool_name) == "read"
+        )
 
     def _paused_for(self, tool_name: str) -> bool:
         """The owner pause blocks every material Tool; read-only Tools remain available."""
