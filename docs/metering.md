@@ -71,6 +71,12 @@ skipped or fails loses nothing, and the next pass meters the whole difference; a
 between the ledger write and the cursor update) has the same identity and is billed once. The same `usage.recorded` events feed the
 audit timeline's `usage` totals.
 
+### Monthly spend-cap integrity (#238)
+
+The optional per-client monthly model-spend cap is a **safety estimate**, not an invoice or an atomic provider-side reservation. Before warning, asserting a cap hold or releasing a previous hold, the worker verifies the **entire local v2/v3 hash-chained action ledger**. It refuses malformed JSON, broken sequence/hash links, invalid usage costs or timestamps instead of silently undercounting usage. A usage timestamp is assigned to its **UTC** month, even if it carries a different explicit offset. A genuinely new workspace may have no ledger; a missing ledger **after a spend-cap hold** cannot release that hold.
+
+A failed reconciliation makes the worker's preflight block billable jobs and request a metering-unavailable hold; it does not authorize resume. Repair the ledger from independently verified retained evidence and reconcile Hermes/provider consumption before resuming. Local chain validation alone **cannot detect a privileged actor's clean suffix truncation or establish invoice-level accuracy**; external immutable receipts, concurrency/in-flight cap enforcement, per-coworker budgets, delivered notifications and authorized live acceptance remain open. Never interpret a passing offline test as a real-time hard spend ceiling.
+
 ### The billing sync
 
 `scripts/billing-sync.py` runs on the billing host every `billing_sync_minutes` (default 15):
