@@ -99,6 +99,9 @@ class RuntimeCase(unittest.TestCase):
 class FilingTests(RuntimeCase):
     def test_governed_crm_creates_tenant_bound_contact_data(self):
         runtime = self.runtime()
+        pending = runtime.crm_create(fields={"name": "Tenant Bound"}, justification="verified customer intake")
+        self.assertEqual(pending["status"], "pending-approval")
+        self.approve(pending)
         result = runtime.crm_create(fields={"name": "Tenant Bound"}, justification="verified customer intake")
         self.assertEqual(result["status"], "executed")
         self.assertEqual(json.loads((self.root / "contacts" / "contacts.json").read_text())["tenant"], "acme")
