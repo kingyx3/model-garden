@@ -136,9 +136,12 @@ class LedgerTests(unittest.TestCase):
         denied = govern.authorize_action(self.state(public_rule), "mail.send", {"to": "x@example.com"}, initiating_user=STRANGER, principal_access="public")
         self.assertEqual((denied["decision"], denied["reason"]), ("deny", "principal-not-authorized"))
         write_tool = [{"metadata": {"name": "calendar.book"}, "spec": {"type": "internal", "risk": "write", "approvalRequired": True}}]
-        book = signed({"id": "public-book", "effect": "allow", "actions": ["calendar.book"], "principals": ["public"],
-                       "conditions": {"maxPerPrincipalPerDay": 1}})
-        booking = {**self.state(book), "tools": write_tool}
+        owner_key = policy.generate_owner_key()
+        book = policy.sign_rule({"id": "public-book", "effect": "allow", "actions": ["calendar.book"], "principals": ["public"],
+                                 "conditions": {"maxPerPrincipalPerDay": 1}},
+                                "owner@client.example", owner_key["private"])
+        booking = {**self.state(book), "tools": write_tool,
+                   "policyOwnerKeys": {"owner@client.example": owner_key["public"]}}
         with tempfile.TemporaryDirectory() as tmp:
             audit = pathlib.Path(tmp) / "audit.jsonl"
 
