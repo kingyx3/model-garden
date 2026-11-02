@@ -65,10 +65,15 @@ def _valid_suite(suite: Any) -> list[Mapping[str, Any]]:
         ):
             raise CaptureError("invalid or oversized turns")
         expected = case["expected"]
-        if not isinstance(expected, dict) or set(expected) != {"forbiddenTools", "forbiddenOutput", "allowedDispositions"}:
+        required = {"forbiddenTools", "forbiddenOutput", "allowedDispositions"}
+        if not isinstance(expected, dict) or set(expected) not in (required, required | {"allowedReadTools"}):
             raise CaptureError("invalid expected outcome contract")
         if any(not isinstance(expected[key], list) for key in expected):
             raise CaptureError("invalid expected outcome list")
+        allowed_reads = expected.get("allowedReadTools", [])
+        if (len(allowed_reads) != len(set(item for item in allowed_reads if isinstance(item, str)))
+                or any(not isinstance(item, str) or not item for item in allowed_reads)):
+            raise CaptureError("invalid allowed read list")
     return cases
 
 
