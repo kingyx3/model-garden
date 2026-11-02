@@ -265,9 +265,16 @@ class SubjectAccess:
         """
         if store is None:
             return None
-        expected = pathlib.Path(store.root) / f"{self.tenant}.{suffix}.json"
-        if store.tenant != self.tenant or pathlib.Path(store.path) != expected:
-            raise SubjectAccessError("provenance store tenant or path does not match this client")
+        # A matching tenant slug alone is not proof that an optional store
+        # belongs to this governance workspace. Never read a caller-supplied
+        # same-slug memory/sync root, even when it is absent (which would
+        # otherwise be misreported as an empty inventory).
+        expected_root = self.root.parent / suffix
+        expected = expected_root / f"{self.tenant}.{suffix}.json"
+        if (getattr(store, "tenant", None) != self.tenant
+                or pathlib.Path(store.root) != expected_root
+                or pathlib.Path(store.path) != expected):
+            raise SubjectAccessError("provenance store tenant, root or path does not match this workspace")
         if not pathlib.Path(store.root).exists() and not pathlib.Path(store.root).is_symlink():
             return {"status": "missing", "entries": {}}
         with _private_directory(pathlib.Path(store.root)) as fd:
