@@ -32,6 +32,11 @@ STRANGER = "unmapped:slack:3f2a9c0d11"
 
 TEST_OWNER_KEY = policy.generate_owner_key()
 TEST_KEYS = {"owner@client.example": TEST_OWNER_KEY["public"]}
+TEST_BINDING = {"environment": "dev", "connectors": {
+    "kb": {"provider": "text-knowledge", "tier": 0},
+    "crm": {"provider": "built-in-crm", "tier": 0},
+    "calendar": {"provider": "google", "tier": 1, "token_ref": "secret://google/dev"}},
+    "governance": {"ownerKeys": TEST_KEYS}}
 
 
 def signed(rule: dict, owner: str = "owner@client.example") -> dict:
@@ -205,7 +210,7 @@ class CompileTests(unittest.TestCase):
     def test_schema_accepts_the_limit_and_rejects_malformed_values(self):
         good = signed({"id": "faq-book", "effect": "allow", "actions": ["calendar.book"], "conditions": {"maxPerPrincipalPerDay": 2}})
         with tempfile.TemporaryDirectory() as tmp:
-            compiled = compiler.compile_workspace(self.workspace(tmp, good), "receptionist")[0]
+            compiled = compiler.compile_workspace(self.workspace(tmp, good), "receptionist", environment_binding=TEST_BINDING)[0]
         self.assertTrue(any(r["id"] == "faq-book" for p in compiled["policies"] for r in p["spec"]["rules"]))
         for bad in (0, "2", 10001, -1, 1.5, True):
             malformed = {"id": "bad", "effect": "allow", "actions": ["calendar.book"], "conditions": {"maxPerPrincipalPerDay": bad}}
@@ -223,7 +228,8 @@ class CompileTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             report = compiler.workspace_approvals(self.workspace(tmp, booking), "receptionist", ())
         rows = {a["tool"]: a for entry in report[0]["skills"] for a in entry["actions"]}
-        self.assertEqual(rows["calendar.book"]["member"], "conditional")
+        # Preview without a trusted binding must not promise conditional autonomy.
+        self.assertEqual(rows["calendar.book"]["member"], "approval")
 
 
 if __name__ == "__main__":
