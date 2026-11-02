@@ -405,3 +405,29 @@ This is an offline, same-host filesystem integrity prerequisite for #159/#87. It
 does **not** authenticate the human reviewer, protect against a privileged host
 administrator changing both state and trust roots, or prove customer-owned MCP
 connection, provider-side identity, consent, OAuth, revocation or live action receipts.
+
+
+### Public-write owner-key safety floor (v0.8.283; #114)
+
+A client-editable Policy rule with `signoff.owner` and a matching
+`ruleDigest` is **not** authenticated owner consent. Public callers may
+reach a specifically named low-risk write such as `calendar.book` only
+when the EnvironmentBinding supplies an independently approved
+`governance.ownerKeys` Ed25519 public key for the named owner **and**
+the rule carries a valid signature over its exact content. The governed
+runtime rechecks the key and signature for each call; missing, revoked,
+wrong-owner or tampered keys/rules deny the public write before execution.
+The compiler now rejects public autonomy rules without the trusted key
+binding. A public principal still cannot approve, reach privileged Tools,
+or send external communications, and Agent/Tool/Policy stricter rules win.
+
+**Migration:** Before upgrading any workspace that previously used a
+digest-only public booking rule, arrange independent client-owner key
+enrollment and protected review/promotion, re-sign the exact rule using
+`scripts/policy-signoff.py`, and include the trusted owner public key
+in the approved EnvironmentBinding. Otherwise the public booking is
+**intentionally unavailable**, not silently auto-approved; use a named
+human/approval route instead. The older digest-only member-policy
+compatibility path remains unchanged and is not proof of authenticated
+client consent. Offline signature and authorization regressions do not
+establish key custody, real tenant approval or provider booking evidence.
