@@ -269,7 +269,8 @@ class RenderTests(Case):
     def test_a_switched_off_skill_is_not_called_working(self):
         text = pack.render([self.packs(self.workspace(disabled=["book-appointment"]))])
         self.assertIn("## Switched off on purpose", text)
-        self.assertIn("- book-appointment: listed for review but not active.", text)
+        self.assertIn("- book-appointment: switched off and still needs setup:", text)
+        self.assertIn("connect calendar --agent receptionist", text)
         self.assertNotIn("**book-appointment**", text)
 
 
