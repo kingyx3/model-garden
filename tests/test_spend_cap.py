@@ -131,6 +131,61 @@ class SpendCapTests(base.Case):
         runtime.run_spend(self.clock[0])
         self.assertTrue(self.pause_state()["paused"])
 
+    def test_tampered_chained_usage_cannot_clear_an_existing_cap_hold(self):
+        runtime = self.make_runtime()
+        self.spend(runtime, 1000)
+        self.assertTrue(runtime.run_spend(T0)["paused"])
+        records = [json.loads(line) for line in runtime.audit_path.read_text(encoding="utf-8").splitlines()]
+        for record in records:
+            if record.get("action") == "usage.recorded":
+                record["details"]["costMicrosUsd"] = 0  # valid JSON, invalid chained hash
+                break
+        runtime.audit_path.write_text(
+            "\n".join(json.dumps(record, sort_keys=True) for record in records) + "\n", encoding="utf-8"
+        )
+        with self.assertRaisesRegex(ValueError, "spend ledger"):
+            runtime.run_spend(later(T0, 1))
+        self.assertTrue(self.pause_state()["paused"])  # never clear on a forged lower total
+
+    def test_missing_ledger_cannot_clear_an_existing_cap_hold(self):
+        runtime = self.make_runtime()
+        self.spend(runtime, 1000)
+        self.assertTrue(runtime.run_spend(T0)["paused"])
+        runtime.audit_path.unlink()
+        with self.assertRaisesRegex(ValueError, "spend ledger"):
+            runtime.run_spend(later(T0, 1))
+        self.assertTrue(self.pause_state()["paused"])
+
+    def test_malformed_spend_ledger_is_not_silently_skipped(self):
+        runtime = self.make_runtime()
+        self.spend(runtime, 500)
+        with runtime.audit_path.open("a", encoding="utf-8") as stream:
+            stream.write('{"action":"usage.recorded","details":\n')
+        with self.assertRaisesRegex(ValueError, "spend ledger"):
+            runtime.run_spend(T0)
+
+    def test_invalid_chained_usage_cost_is_not_treated_as_zero(self):
+        runtime = self.make_runtime()
+        govern = base.worker._module("govern")
+        govern.append_audit_event(runtime.audit_path, {
+            "schemaVersion": govern.AUDIT_SCHEMA_VERSION, "timestamp": month_start(T0),
+            "event": "operator-action", "outcome": "recorded", "action": "usage.recorded",
+            "performedBy": "runtime:worker", "details": {"usageId": "bad-cost", "costMicrosUsd": -1},
+        })
+        with self.assertRaisesRegex(ValueError, "spend ledger"):
+            runtime.run_spend(T0)
+
+    def test_spend_window_uses_utc_not_the_supplied_timestamp_offset(self):
+        runtime = self.make_runtime()
+        govern = base.worker._module("govern")
+        govern.append_audit_event(runtime.audit_path, {
+            "schemaVersion": govern.AUDIT_SCHEMA_VERSION, "timestamp": "2027-01-31T23:30:00-08:00",
+            "event": "operator-action", "outcome": "recorded", "action": "usage.recorded",
+            "performedBy": "runtime:worker", "details": {"usageId": "offset-month", "costMicrosUsd": 12345},
+        })
+        self.assertEqual(runtime.month_to_date_micros("2027-01"), 0)
+        self.assertEqual(runtime.month_to_date_micros("2027-02"), 12345)
+
     def test_an_owner_pause_is_not_relabelled_by_the_cap_and_a_missing_ledger_is_zero(self):
         runtime = self.make_runtime()
         self.assertEqual(runtime.run_spend(T0)["spentMicrosUsd"], 0)
