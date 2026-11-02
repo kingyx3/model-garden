@@ -26,8 +26,12 @@ govern = _load("govern_action_for_policy", "scripts/govern-action.py")
 compiler = _load("compile_workspace_for_policy", "scripts/compile-workspace.py")
 
 
+TEST_OWNER_KEY = policy.generate_owner_key()
+TEST_KEYS = {"owner@client.example": TEST_OWNER_KEY["public"]}
+
+
 def signed(rule: dict, owner: str = "owner@client.example") -> dict:
-    return {**rule, "signoff": {"owner": owner, "ruleDigest": policy.rule_digest(rule)}}
+    return policy.sign_rule(rule, owner, TEST_OWNER_KEY["private"])
 
 
 def policy_doc(*rules: dict) -> dict:
@@ -40,6 +44,7 @@ def policy_doc(*rules: dict) -> dict:
 
 
 def evaluate(*rules: dict, tool: str = "calendar.book", risk: str = "write", **kwargs) -> dict:
+    kwargs.setdefault("owner_keys", TEST_KEYS)
     return policy.evaluate([policy_doc(*rules)] if rules else None, tool_name=tool, risk=risk, **kwargs)
 
 
@@ -142,7 +147,7 @@ class PolicyChecksTests(unittest.TestCase):
     ]
 
     def errors(self, *rules: dict) -> list[str]:
-        return policy.relaxation_errors([policy_doc(*rules)], self.TOOLS)
+        return policy.relaxation_errors([policy_doc(*rules)], self.TOOLS, owner_keys=TEST_KEYS)
 
     def test_read_only_allow_rule_needs_no_signoff(self):
         self.assertEqual(self.errors({"id": "reads", "effect": "allow", "actions": ["*.availability"]}), [])
@@ -296,7 +301,11 @@ class CompiledPolicyTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "auto-book.*sign-off"):
                 compiler.compile_workspace(self.workspace(tmp, rule), "receptionist")
         with tempfile.TemporaryDirectory() as tmp:
-            compiled = compiler.compile_workspace(self.workspace(tmp, signed(rule)), "receptionist")[0]
+            compiled = compiler.compile_workspace(self.workspace(tmp, signed(rule)), "receptionist",
+                environment_binding={"environment": "dev", "connectors": {
+                    "kb": {"provider": "text-knowledge", "tier": 0},
+                    "crm": {"provider": "built-in-crm", "tier": 0}},
+                    "governance": {"ownerKeys": TEST_KEYS}})[0]
             outcome = govern.authorize_action(compiled, "calendar.book", {"start": "x", "end": "y"})
         self.assertEqual((outcome["decision"], outcome["ruleId"]), ("allow", "auto-book"))
 
