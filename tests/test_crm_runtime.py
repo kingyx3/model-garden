@@ -87,7 +87,7 @@ class RuntimeCase(unittest.TestCase):
         )
 
     def store(self):
-        return runtime_module.CONTACTS.ContactStore(self.root / "contacts")
+        return runtime_module.CONTACTS.ContactStore(self.root / "contacts", tenant="acme")
 
     def audit(self) -> list[dict]:
         return [json.loads(line) for line in (self.root / "audit.jsonl").read_text().splitlines()]
@@ -97,6 +97,13 @@ class RuntimeCase(unittest.TestCase):
 
 
 class FilingTests(RuntimeCase):
+    def test_governed_crm_creates_tenant_bound_contact_data(self):
+        runtime = self.runtime()
+        result = runtime.crm_create(fields={"name": "Tenant Bound"}, justification="verified customer intake")
+        self.assertEqual(result["status"], "executed")
+        self.assertEqual(json.loads((self.root / "contacts" / "contacts.json").read_text())["tenant"], "acme")
+        self.assertTrue((self.root / "contacts" / ".tenant-binding.json").is_file())
+
     def test_log_interaction_runs_without_approval_and_is_ledgered_at_tier_zero_without_personal_data(self):
         runtime = self.runtime()
         contact = self.store().create_contact({"name": "Alex Tan", "phone": "+65 6123 4567"})["objectId"]
