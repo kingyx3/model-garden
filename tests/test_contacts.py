@@ -422,6 +422,22 @@ class TenantBindingTests(StoreCase):
         with self.assertRaisesRegex(C.ContactError, "binding|missing"):
             bound.review_queue()
 
+    def test_operator_migration_requires_explicit_review_and_records_audit(self):
+        customer = self.store.create_contact({"name": "Legacy"})["objectId"]
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = cli.main([str(self.root), "bind-tenant", "--tenant", "acme", "--by", "privacy-owner"])
+        self.assertEqual(code, 1)
+        self.assertFalse((self.root / ".tenant-binding.json").exists())
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            code = cli.main([str(self.root), "bind-tenant", "--tenant", "acme", "--by", "privacy-owner", "--source-reviewed"])
+        self.assertEqual(code, 0)
+        self.assertTrue(C.ContactStore(self.root, tenant="acme").has_contact(customer))
+        audit = self.root.parent / "audit.jsonl"
+        events = [json.loads(line) for line in audit.read_text().splitlines()]
+        self.assertEqual(events[-1]["action"], "contacts.bind-tenant")
+        self.assertEqual(events[-1]["details"], {"tenant": "acme", "sourceReviewed": True})
+
     def test_linked_witness_is_rejected(self):
         bound = C.ContactStore(self.root, tenant="acme")
         bound.create_contact({"name": "Alex"})
