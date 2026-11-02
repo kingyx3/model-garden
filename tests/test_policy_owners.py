@@ -50,8 +50,9 @@ class RelaxationTests(unittest.TestCase):
     def errors(self, rule, owners):
         return policy.relaxation_errors([doc(rule)], TOOLS, owners, TEST_KEYS)
 
-    def test_no_owner_list_keeps_the_previous_behaviour(self):
-        self.assertEqual(self.errors(signed("anyone@x.example"), None), [])
+    def test_no_owner_list_still_requires_a_trusted_signing_key(self):
+        self.assertEqual(self.errors(signed("owner@client.example"), None), [])
+        self.assertTrue(any("signoff.signature" in e for e in self.errors(signed("anyone@x.example"), None)))
 
     def test_a_named_owner_may_sign_and_matching_ignores_case_and_spacing(self):
         self.assertEqual(self.errors(signed(" Owner@Client.example "), ["owner@client.example"]), [])
