@@ -64,9 +64,10 @@ class SignatureTests(unittest.TestCase):
     def test_an_owner_without_a_listed_key_is_refused(self):
         self.assertTrue(self.errors(policy.sign_rule(RULE, "stranger@x.example", self.key["private"])))
 
-    def test_without_owner_keys_behaviour_is_unchanged(self):
+    def test_without_owner_keys_member_digest_waiver_is_rejected(self):
         unsigned = {**RULE, "signoff": {"owner": OWNER, "ruleDigest": policy.rule_digest(RULE)}}
-        self.assertEqual(policy.relaxation_errors([doc(unsigned)], TOOLS, None, None), [])
+        errors = policy.relaxation_errors([doc(unsigned)], TOOLS, None, None)
+        self.assertTrue(any("governance.ownerKeys" in error for error in errors), errors)
 
     def test_the_binding_keys_are_validated(self):
         self.assertIsNone(policy.owner_keys_from_binding({"spec": {}}))
