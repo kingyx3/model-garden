@@ -147,6 +147,15 @@ class SpendCapTests(base.Case):
             runtime.run_spend(later(T0, 1))
         self.assertTrue(self.pause_state()["paused"])  # never clear on a forged lower total
 
+    def test_missing_ledger_cannot_clear_an_existing_cap_hold(self):
+        runtime = self.make_runtime()
+        self.spend(runtime, 1000)
+        self.assertTrue(runtime.run_spend(T0)["paused"])
+        runtime.audit_path.unlink()
+        with self.assertRaisesRegex(ValueError, "spend ledger"):
+            runtime.run_spend(later(T0, 1))
+        self.assertTrue(self.pause_state()["paused"])
+
     def test_malformed_spend_ledger_is_not_silently_skipped(self):
         runtime = self.make_runtime()
         self.spend(runtime, 500)
