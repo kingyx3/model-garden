@@ -243,8 +243,8 @@ def evaluate(
     ``arguments``, ``usage_today`` (successful executions of this Tool so far today, UTC) and
     ``usage_by_principal`` (those the requesting identity made) feed the bounded conditions of
     `allow` rules; omit them and conditional rules do not apply. When ``owner_keys`` is
-    provided, approval-relaxing waivers require a valid owner Ed25519 signature at
-    runtime as well as the content digest.
+    must be configured for approval-relaxing waivers: a matching digest alone
+    is not authenticated consent, even for a member principal.
     """
     who = principal or MEMBER
     matched = []
@@ -343,13 +343,14 @@ def relaxation_errors(
     """Deploy-time checks: rule ids are unique, and every approval-relaxing rule is signed.
 
     An `allow` rule relaxes approval when it matches a selected Tool that is not read-class.
-    Its sign-off must name the client owner and carry the digest of the rule's exact content,
-    so editing a rule after it was approved blocks compilation until the owner re-signs.
+    Its sign-off must name the client owner, carry the digest of the rule's exact
+    content, and verify against a trusted owner Ed25519 public key. Editing a
+    rule or retaining a legacy digest-only waiver blocks compilation.
 
     When ``trusted_owners`` is given (the environment's ``governance.owners``), the sign-off must also
     name one of them. The digest proves the rule was not edited after signing, and this list narrows who
-    may claim to be the owner; neither authenticates the signer's identity. When ``owner_keys`` is given
-    (``governance.ownerKeys``), the sign-off must also carry an Ed25519 signature by that owner's key, which does.
+    may claim to be the owner; neither authenticates the signer. A relaxing
+    rule always requires ``governance.ownerKeys`` and a verified Ed25519 signature.
     """
     trusted = None if trusted_owners is None else {item.strip().lower() for item in trusted_owners}
     errors: list[str] = []
