@@ -268,7 +268,11 @@ def evaluate(
         if not signoff_valid(rule):
             return False
         if owner_keys is None:
-            return True
+            # A digest in a client-editable Policy is not authenticated owner
+            # consent. Public write access must never be granted without an
+            # independently trusted Ed25519 owner key. Preserve the existing
+            # member-only legacy path until its separate migration is approved.
+            return who != PUBLIC
         if not isinstance(owner_keys, Mapping):
             return False
         owner = rule["signoff"]["owner"].strip().lower()
@@ -385,6 +389,11 @@ def relaxation_errors(
             errors.append(
                 f"Policy rule {rule_id!r} relaxes an approval requirement and needs the client owner's "
                 f"sign-off: signoff.owner plus signoff.ruleDigest {rule_digest(rule)}"
+            )
+        elif relaxes and PUBLIC in (rule.get("principals") or []) and owner_keys is None:
+            errors.append(
+                f"Policy rule {rule_id!r} grants public autonomy and requires a trusted "
+                "governance.ownerKeys Ed25519 signer in the EnvironmentBinding"
             )
         elif relaxes and trusted is not None and rule["signoff"]["owner"].strip().lower() not in trusted:
             errors.append(

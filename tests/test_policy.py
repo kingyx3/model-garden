@@ -93,11 +93,14 @@ class PolicyEvaluationTests(unittest.TestCase):
         self.assertEqual(evaluate(member_only, principal="public")["reason"], "principal-not-authorized")
         unsigned_public = {"id": "public-book", "effect": "allow", "actions": ["calendar.book"], "principals": ["public"]}
         self.assertEqual(evaluate(unsigned_public, principal="public")["reason"], "principal-not-authorized")
-        public_rule = signed({"id": "public-book", "effect": "allow", "actions": ["calendar.book"], "principals": ["public"]})
-        granted = evaluate(public_rule, principal="public", tool_requires_approval=True)
+        owner_key = policy.generate_owner_key()
+        public_rule = policy.sign_rule({"id": "public-book", "effect": "allow", "actions": ["calendar.book"], "principals": ["public"]},
+                                       "owner@client.example", owner_key["private"])
+        trusted = {"owner@client.example": owner_key["public"]}
+        granted = evaluate(public_rule, principal="public", tool_requires_approval=True, owner_keys=trusted)
         self.assertEqual((granted["decision"], granted["ruleId"]), ("allow", "public-book"))
         # The Agent-wide switch still holds for a public caller, who cannot approve it.
-        held = evaluate(public_rule, principal="public", agent_requires_approval=True)
+        held = evaluate(public_rule, principal="public", agent_requires_approval=True, owner_keys=trusted)
         self.assertEqual(held["decision"], "require-approval")
 
     def test_public_principals_never_reach_external_communication(self):
@@ -234,8 +237,10 @@ class GovernedBoundaryPolicyTests(unittest.TestCase):
         self.assertEqual(calls, [])
 
     def test_signed_public_rule_lets_a_public_caller_book_and_nothing_else(self):
-        rule = signed({"id": "public-booking", "effect": "allow", "actions": ["calendar.book"], "principals": ["public"]})
-        state = desired_state(rule)
+        key = policy.generate_owner_key()
+        rule = policy.sign_rule({"id": "public-booking", "effect": "allow", "actions": ["calendar.book"], "principals": ["public"]},
+                                "owner@client.example", key["private"])
+        state = {**desired_state(rule), "policyOwnerKeys": {"owner@client.example": key["public"]}}
         calls: list[dict] = []
         result = govern.execute_action(state, "calendar.book", self.ARGS, lambda args: calls.append(args) or {"eventId": "e"}, principal_access="public")
         self.assertEqual(result["status"], "executed")
