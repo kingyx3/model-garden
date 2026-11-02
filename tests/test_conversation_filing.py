@@ -291,7 +291,7 @@ class EmailFilingTests(FilingCase):
 
     def test_creation_stays_off_unless_enabled(self):
         rule = {"id": "auto-create", "effect": "allow", "actions": ["crm.create"]}
-        signed = {**rule, "signoff": {"owner": "owner@client.example", "ruleDigest": policy.rule_digest(rule)}}
+        signed = policy.sign_rule(rule, "owner@client.example", TEST_OWNER_KEY["private"])
         runtime = self.runtime(signed)
         self.assertEqual(self.file(runtime, verified="new@client.example")["basis"], "unmatched")
         self.assertEqual(runtime.crm_store().review_queue()["contacts"], 0)
