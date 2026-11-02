@@ -162,7 +162,7 @@ class ContactStore:
         try:
             fd = os.open(self.binding_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
             with os.fdopen(fd, "w", encoding="utf-8") as stream:
-                stream.write(_canonical(binding) + "\\n")
+                stream.write(_canonical(binding) + "\n")
                 stream.flush()
                 os.fsync(stream.fileno())
             directory = os.open(self.root, os.O_RDONLY | os.O_DIRECTORY)
