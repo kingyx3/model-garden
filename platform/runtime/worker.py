@@ -813,10 +813,15 @@ class Worker:
         could undercount spending and release the emergency spend-cap hold.
         The outer tick fails closed on this error before starting billable work.
         """
+        # A first-boot ledger can be absent. Once a spend-cap hold exists,
+        # losing the ledger must never be interpreted as a zero-cost new month.
+        if (not self.audit_path.is_file()
+                and _module("pause").PauseStore(self.data).status().get("cause") == "spend-cap"):
+            raise ValueError("spend ledger missing while spend-cap hold is active")
         ledger = _module("ledger")
         try:
             events = ledger.read_chained_events(self.audit_path)
-        except (ledger.LedgerExportError, OSError, UnicodeError) as exc:
+        except (ledger.LedgerExportError, OSError, UnicodeError):
             raise ValueError("spend ledger is unreadable or fails chain verification") from None
         total = 0
         for event in events:
