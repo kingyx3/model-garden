@@ -407,7 +407,7 @@ administrator changing both state and trust roots, or prove customer-owned MCP
 connection, provider-side identity, consent, OAuth, revocation or live action receipts.
 
 
-### Public-write owner-key safety floor (v0.8.283; #114)
+### Authenticated owner-key safety floor (v0.8.285; #114)
 
 A client-editable Policy rule with `signoff.owner` and a matching
 `ruleDigest` is **not** authenticated owner consent. Public callers may
@@ -417,8 +417,8 @@ when the EnvironmentBinding supplies an independently approved
 the rule carries a valid signature over its exact content. The governed
 runtime rechecks the key and signature for each call; missing, revoked,
 wrong-owner or tampered keys/rules deny the public write before execution.
-The compiler now rejects public autonomy rules without the trusted key
-binding. A public principal still cannot approve, reach privileged Tools,
+The compiler now rejects **all** approval-relaxing rules without the trusted key
+binding, including legacy member-only digest waivers. A public principal still cannot approve, reach privileged Tools,
 or send external communications, and Agent/Tool/Policy stricter rules win.
 
 **Migration:** Before upgrading any workspace that previously used a
