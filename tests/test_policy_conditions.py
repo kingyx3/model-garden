@@ -127,11 +127,11 @@ class UsageLimitTests(unittest.TestCase):
 
     def test_preview_reports_conditional_autonomy_instead_of_claiming_it_is_automatic(self):
         preview = policy.preview([doc(rule(maxPerDay=2))], tool_name="mail.send", risk="external-communication",
-                                 tool_requires_approval=True)
+                                 tool_requires_approval=True, owner_keys=TEST_KEYS)
         self.assertEqual(preview, {"member": "conditional", "public": "denied"})
         unconditional = signed({"id": "all", "effect": "allow", "actions": ["mail.send"]})
         self.assertEqual(policy.preview([doc(unconditional)], tool_name="mail.send", risk="external-communication",
-                                        tool_requires_approval=True)["member"], "automatic")
+                                        tool_requires_approval=True, owner_keys=TEST_KEYS)["member"], "automatic")
 
 
 class LedgerCountTests(unittest.TestCase):
