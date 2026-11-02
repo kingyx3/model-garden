@@ -925,6 +925,59 @@ class SkillStatusTests(GatewayCase):
         self.assertNotIn("SECRET-ACCOUNT", answer)
         self.assertEqual(self.coworker.calls, [])
 
+    def test_normal_member_conversation_receives_current_skill_readiness_context(self):
+        # Unlike /skills, this goes through the real coworker prompt path.
+        self.set_manifest([
+            {"name": "book-appointment", "enabled": True, "ready": False,
+             "dependencies": [{"family": "calendar", "capability": "calendar.book",
+                               "status": "missing", "required": True}],
+             "remediation": "SECRET://never-copy-manifest-remediation"},
+            {"name": "take-message", "enabled": True, "ready": True, "dependencies": []},
+        ])
+        self.ask("Can you book an appointment?", index=21)
+        instructions, _, _ = self.coworker.calls[-1]
+        self.assertIn("book-appointment: blocked", instructions)
+        self.assertIn("Connect calendar", instructions)
+        self.assertIn("take-message: ready", instructions)
+        self.assertIn("configuration only", instructions)
+        self.assertNotIn("SECRET", instructions)
+        self.assertNotIn("scripts/client-operator", instructions)
+
+    def test_model_context_never_exposes_private_skill_readiness_to_public_or_shared_channel(self):
+        self.set_manifest([
+            {"name": "private-skill", "enabled": True, "ready": False,
+             "dependencies": [{"family": "crm", "capability": "crm", "status": "missing", "required": True}]},
+        ])
+        self.ask("What skills can you use?", user="U0STRANGER", index=22)
+        self.ask("What skills can you use?", channel="C0GROUP0001", index=23)
+        self.assertEqual(len(self.coworker.calls), 2)
+        for instructions, _, _ in self.coworker.calls:
+            self.assertNotIn("private-skill", instructions)
+            self.assertNotIn("Skill readiness (current configuration)", instructions)
+
+    def test_model_skill_context_rechecks_revocation_and_fails_closed_on_wrong_tenant(self):
+        path = self.set_manifest([
+            {"name": "book-appointment", "enabled": True, "ready": True,
+             "dependencies": [{"family": "calendar", "capability": "calendar.book",
+                               "status": "bound", "required": True}]},
+        ], capabilities=[{"family": "calendar", "status": "available", "provider": "google"}])
+        self.ask("Can you book?", index=24)
+        self.assertIn("book-appointment: ready", self.coworker.calls[-1][0])
+        health = self.data / "connections"
+        health.mkdir(parents=True)
+        (health / "calendar.json").write_text(json.dumps({"family": "calendar", "health": "revoked",
+                                                          "reason": "SECRET-ACCOUNT"}), encoding="utf-8")
+        self.ask("Can you book?", index=25)
+        self.assertIn("book-appointment: blocked", self.coworker.calls[-1][0])
+        self.assertIn("reauthorize", self.coworker.calls[-1][0])
+        self.assertNotIn("SECRET-ACCOUNT", self.coworker.calls[-1][0])
+        document = json.loads(path.read_text(encoding="utf-8"))
+        document["client"] = "another-tenant"
+        path.write_text(json.dumps(document), encoding="utf-8")
+        self.ask("Can you book?", index=26)
+        self.assertIn("Skill status is unavailable", self.coworker.calls[-1][0])
+        self.assertNotIn("book-appointment:", self.coworker.calls[-1][0])
+
     def test_malformed_skill_name_never_becomes_a_channel_response(self):
         self.set_manifest([{"name": "private\\nSECRET", "enabled": True, "ready": False,
                             "dependencies": []}])
