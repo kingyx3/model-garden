@@ -273,7 +273,7 @@ class DirectorySink:
             for name in sorted(os.listdir(folder_fd)):
                 if not name.endswith(".json"):
                     continue
-                if not re.fullmatch(r"[0-9]{12,}-(?:[0-9]+-)?[0-9a-f]{16}\\.json", name):
+                if not re.fullmatch(r"[0-9]{12,}-(?:[0-9]+-)?[0-9a-f]{16}\.json", name):
                     raise LedgerExportError("ledger sink object name is invalid")
                 sequence = int(name.split("-", 1)[0])
                 if sequence <= after:
