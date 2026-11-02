@@ -448,6 +448,7 @@ def preview(
     classification: str | None = None,
     agent_requires_approval: bool = False,
     tool_requires_approval: bool = False,
+    owner_keys: Mapping[str, str] | None = None,
 ) -> dict[str, str]:
     """Outcome per principal type for the readiness/onboarding preview (channel-agnostic)."""
     outcome: dict[str, str] = {}
@@ -460,6 +461,7 @@ def preview(
             principal=who,
             agent_requires_approval=agent_requires_approval,
             tool_requires_approval=tool_requires_approval,
+            owner_keys=owner_keys,
         )
         outcome[who] = {
             "allow": "automatic", "require-approval": "approval", "deny": "denied", "hand-off": "human",
@@ -467,6 +469,10 @@ def preview(
         if outcome[who] == "approval" and any(
             rule.get("effect") == "allow" and rule.get("conditions") and _action_matches(rule, tool_name)
             and (who in (rule.get("principals") or [MEMBER]))
+            and isinstance(owner_keys, Mapping)
+            and signoff_valid(rule)
+            and isinstance(owner_keys.get(rule["signoff"]["owner"].strip().lower()), str)
+            and signature_valid(rule, owner_keys[rule["signoff"]["owner"].strip().lower()])
             for rule in rules_of(policies)
         ):
             # Some calls (matching arguments, inside the daily limit) run automatically; others still need approval.
