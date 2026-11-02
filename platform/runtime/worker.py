@@ -807,24 +807,34 @@ class Worker:
             os.close(descriptor)
 
     def month_to_date_micros(self, window: str) -> int:
-        """Model cost metered into the ledger so far in the UTC calendar month ``window`` (``YYYY-MM``), in micro-dollars (an estimate)."""
-        total = 0
+        """UTC-month estimated model cost from a *verified* local action-ledger chain.
+
+        Never skip a malformed usage event or a broken hash chain: doing so
+        could undercount spending and release the emergency spend-cap hold.
+        The outer tick fails closed on this error before starting billable work.
+        """
+        ledger = _module("ledger")
         try:
-            lines = self.audit_path.open(encoding="utf-8")
-        except FileNotFoundError:
-            return 0
-        with lines:
-            for line in lines:
-                if '"usage.recorded"' not in line:
-                    continue
-                try:
-                    event = json.loads(line)
-                except ValueError:
-                    continue
-                cost = (event.get("details") or {}).get("costMicrosUsd")
-                if (event.get("action") == "usage.recorded" and str(event.get("timestamp", ""))[:7] == window
-                        and isinstance(cost, int) and not isinstance(cost, bool) and cost > 0):
-                    total += cost
+            events = ledger.read_chained_events(self.audit_path)
+        except (ledger.LedgerExportError, OSError, UnicodeError) as exc:
+            raise ValueError("spend ledger is unreadable or fails chain verification") from None
+        total = 0
+        for event in events:
+            if event.get("action") != "usage.recorded":
+                continue
+            details = event.get("details")
+            cost = details.get("costMicrosUsd") if isinstance(details, Mapping) else None
+            if type(cost) is not int or cost < 0:
+                raise ValueError("spend ledger contains an invalid usage cost")
+            try:
+                stamp = dt.datetime.fromisoformat(event["timestamp"].replace("Z", "+00:00"))
+                if stamp.tzinfo is None or stamp.utcoffset() is None:
+                    raise ValueError("naive timestamp")
+                utc_month = stamp.astimezone(dt.timezone.utc).strftime("%Y-%m")
+            except (KeyError, AttributeError, TypeError, ValueError, OverflowError):
+                raise ValueError("spend ledger contains an invalid usage timestamp") from None
+            if utc_month == window:
+                total += cost
         return total
 
     def _hold_unmetered_spend(self, now: int) -> dict[str, Any]:
