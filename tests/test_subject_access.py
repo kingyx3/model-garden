@@ -155,6 +155,12 @@ class ExportTests(Case):
             foreign.request_correction(contact_id=self.alex, field="phone", now=NOW, **PEOPLE)
         self.assertFalse((foreign.root / "bundles").exists())
 
+    def test_foreign_conversation_store_is_rejected_before_export(self):
+        self.service.conversations = conversations.ConversationStore(self.root / "foreign-conversations", tenant="beta")
+        with self.assertRaisesRegex(subject.SubjectAccessError, "conversation"):
+            self.export()
+        self.assertFalse(self.bundles.exists())
+
     def test_legacy_unbound_contact_store_cannot_issue_export(self):
         legacy_root = self.root / "legacy"
         legacy = contacts.ContactStore(legacy_root)
