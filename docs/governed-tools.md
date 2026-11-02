@@ -422,12 +422,14 @@ binding, including legacy member-only digest waivers. A public principal still c
 or send external communications, and Agent/Tool/Policy stricter rules win.
 
 **Migration:** Before upgrading any workspace that previously used a
-digest-only public booking rule, arrange independent client-owner key
+digest-only public or member write-approval waiver, arrange independent client-owner key
 enrollment and protected review/promotion, re-sign the exact rule using
 `scripts/policy-signoff.py`, and include the trusted owner public key
-in the approved EnvironmentBinding. Otherwise the public booking is
-**intentionally unavailable**, not silently auto-approved; use a named
-human/approval route instead. The older digest-only member-policy
-compatibility path remains unchanged and is not proof of authenticated
-client consent. Offline signature and authorization regressions do not
+in the approved EnvironmentBinding. Otherwise the write remains **approval-required** for members and
+**unavailable** for public callers; use the existing named human/approval
+route. Compilation rejects digest-only relaxing rules, including members,
+until they are re-signed with a trusted owner key. Pre-existing compiled
+states also fail closed at Tool time. Test the migration in DEV before
+promoting the signed policy and retain a reviewed rollback to a more
+restrictive rule; do not downgrade to digest-only autonomy. Offline signature and authorization regressions do not
 establish key custody, real tenant approval or provider booking evidence.
