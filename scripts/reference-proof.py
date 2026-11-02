@@ -494,9 +494,21 @@ def _single_call_scenario_count(
             row for row in voice_rows
             if _voice_call_id(row) == call_id and row.get("agent") == agent
         ]
+        # Repeated identical receipts may be retries, but two distinct starts
+        # or ends under one invocation ID cannot be joined into a single call.
+        starts = [row.get("timestamp") for row in scoped if row.get("type") == "CallStarted"]
+        ends = [row.get("timestamp") for row in scoped if row.get("type") == "CallEnded"]
+        if (not starts or not ends
+                or any(type(at) is not int for at in (*starts, *ends))
+                or len(set(starts)) != 1 or len(set(ends)) != 1
+                or ends[0] < starts[0]):
+            continue
         if _voice_summary(scoped)["completedCallFallbackEvidence"] != 1:
             continue
-        if _transcript_summary(scoped, transcript_rows)["completeTwoWayCalls"] != 1:
+        # A cold SIP transfer has a two-sided *pre-transfer* transcript but
+        # no captured human leg. It must not satisfy Scenario A's combined
+        # transcript + handoff + governed-action acceptance.
+        if _transcript_summary(scoped, transcript_rows)["completeThroughTransferCalls"] != 1:
             continue
         if (require_model_summary and _model_completion_summary(
                 scoped, transcript_rows, list(completion_rows))["matchedModelCalls"] != 1):
