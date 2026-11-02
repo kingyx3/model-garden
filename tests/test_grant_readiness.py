@@ -133,6 +133,20 @@ class Case(unittest.TestCase):
         self.assertEqual((booking["ready"], booking["dependencies"][0]["status"]), (False, "grant-scope"))
         self.assertEqual(booking["dependencies"][0]["missingTools"], ["calendar.book"])
         self.assertIn("calendar.book", booking["remediation"])
+        # A partially scoped grant cannot make the family appear fully usable to
+        # a model or other manifest consumer when a selected Tool is denied.
+        family = next(item for item in self.applied()["capabilities"] if item["family"] == "calendar")
+        self.assertEqual((family["status"], family["grant"]), ("unavailable", "unavailable"))
+
+    def test_several_partial_grants_cannot_combine_into_full_family_readiness(self):
+        self.grant(scopes=["calendar.availability"])
+        self.grant(scopes=["calendar.book"])
+        result = self.applied()
+        booking = skill(result, "book-appointment")
+        self.assertFalse(booking["ready"])
+        self.assertEqual(booking["dependencies"][0]["status"], "grant-scope")
+        family = next(item for item in result["capabilities"] if item["family"] == "calendar")
+        self.assertEqual((family["status"], family["grant"]), ("unavailable", "unavailable"))
 
     def test_the_best_covering_grant_counts_when_there_are_several(self):
         self.grant(scopes=["calendar.availability"])

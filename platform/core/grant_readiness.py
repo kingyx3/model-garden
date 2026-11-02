@@ -115,8 +115,10 @@ def overlay(
             if status == "bound":
                 dependency.update(extra)
                 continue
-            if status != "grant-scope":
-                unavailable_families.add(family)
+            # A grant missing any selected Tool is not a usable family binding.
+            # Keep the family-level manifest in sync with the blocked Skill:
+            # downstream consumers must not mistake partial scope for readiness.
+            unavailable_families.add(family)
             if dependency.get("required"):
                 dependency["status"] = status
             else:
