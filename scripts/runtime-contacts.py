@@ -60,14 +60,12 @@ def main(argv: list[str] | None = None) -> int:
     store = CONTACTS.ContactStore(args.store)
     audit_path = args.audit_path or args.store.parent / "audit.jsonl"
     try:
-        if args.command == "bind-tenant":
-            store.bind_tenant(args.tenant, reviewed=args.source_reviewed)
-            result = {"tenant": args.tenant, "sourceReviewed": True}
-        elif args.command == "review":
+        if args.command == "review":
             print(json.dumps(store.review_queue(), indent=2, sort_keys=True))
             return 0
         if args.command == "bind-tenant":
-            pass
+            store.bind_tenant(args.tenant, reviewed=args.source_reviewed)
+            result = {"tenant": args.tenant, "sourceReviewed": True}
         elif args.command == "assign":
             result = store.assign_interaction(args.interaction_id, args.contact_id)
         elif args.command == "dismiss":
