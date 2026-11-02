@@ -308,8 +308,7 @@ class CompiledPolicyTests(unittest.TestCase):
             compiled = compiler.compile_workspace(self.workspace(tmp, signed(rule)), "receptionist",
                 environment_binding={"environment": "dev", "connectors": {
                     "kb": {"provider": "text-knowledge", "tier": 0},
-                    "crm": {"provider": "built-in-crm", "tier": 0},
-                    "calendar": {"provider": "google", "tier": 1, "token_ref": "secret://google/dev"}},
+                    "crm": {"provider": "built-in-crm", "tier": 0}},
                     "governance": {"ownerKeys": TEST_KEYS}})[0]
             outcome = govern.authorize_action(compiled, "crm.create", {"start": "x", "end": "y"})
         self.assertEqual((outcome["decision"], outcome["ruleId"]), ("allow", "auto-book"))
