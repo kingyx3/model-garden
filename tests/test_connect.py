@@ -242,7 +242,7 @@ class Case(unittest.TestCase):
     def test_disconnect_revokes_one_coworker_only_and_is_ledgered_with_both_people(self):
         first = self.apply(self.plan())
         second = self.apply(self.plan(agent="researcher"), connection_id="calendar-research", acting_identity="grant-researcher-1", secret_ref=SECRET_B)
-        revoked = connect.disconnect(self.registry, first["grant"]["id"], operator=OPERATOR, owner=OWNER, now=T0 + 5, audit=lambda *event: self.events.append(event))
+        revoked = connect.disconnect(self.registry, first["grant"]["id"], operator=OPERATOR, owner=OWNER, now=T0 + 5, verify_operator=lambda who, grant: who == OPERATOR and grant["id"] == first["grant"]["id"], audit=lambda *event: self.events.append(event))
         self.assertTrue(revoked["revokedAt"])
         by_agent = {item["agent"]: item for item in self.registry.list()}
         self.assertTrue(by_agent["receptionist"].get("revokedAt"))
@@ -254,6 +254,43 @@ class Case(unittest.TestCase):
             connect.disconnect(self.registry, "g-missing", operator=OPERATOR, owner=OWNER, now=T0)
         with self.assertRaises(Error):
             connect.disconnect(self.registry, first["grant"]["id"], operator="", owner=OWNER, now=T0)
+
+    def test_disconnect_refuses_unverified_operator_or_wrong_grant_owner_before_revocation(self):
+        grant = self.apply(self.plan())["grant"]
+        witnessed = []
+        def verified(operator, selected):
+            witnessed.append((operator, selected))
+            return operator == OPERATOR and selected["id"] == grant["id"]
+
+        for override in (
+            {"verify_operator": None},
+            {"verify_operator": lambda *args: False},
+            {"verify_operator": lambda *args: None},
+            {"verify_operator": lambda *args: (_ for _ in ()).throw(RuntimeError("PRIVATE-OPERATOR-TOKEN"))},
+            {"owner": "different@client.example", "verify_operator": verified},
+        ):
+            with self.subTest(override=override), self.assertRaises(Error):
+                connect.disconnect(self.registry, grant["id"], operator=OPERATOR, owner=OWNER, now=T0 + 5,
+                                   audit=lambda *event: self.events.append(event), **override)
+            self.assertFalse(self.registry.list(agent="receptionist")[0].get("revokedAt"))
+        self.assertEqual(witnessed, [])  # mismatched grant owner must fail before any verifier
+        self.assertNotIn("PRIVATE-OPERATOR-TOKEN", json.dumps(self.events))
+        self.assertNotIn(SECRET_A, json.dumps(self.events))
+        self.assertFalse([event for event in self.events if event[0] == "connection.disconnect"])
+
+    def test_disconnect_operator_verifier_is_bound_to_the_selected_grant(self):
+        first = self.apply(self.plan())["grant"]
+        second = self.apply(self.plan(agent="researcher"), connection_id="calendar-research",
+                            acting_identity="grant-researcher-1", secret_ref=SECRET_B)["grant"]
+        def only_first(operator, selected):
+            return operator == OPERATOR and selected["id"] == first["id"]
+        with self.assertRaisesRegex(Error, "verified operator"):
+            connect.disconnect(self.registry, second["id"], operator=OPERATOR, owner=OWNER, now=T0 + 5,
+                               verify_operator=only_first)
+        self.assertFalse(next(g for g in self.registry.list() if g["id"] == second["id"]).get("revokedAt"))
+        connect.disconnect(self.registry, first["id"], operator=OPERATOR, owner=OWNER, now=T0 + 5,
+                           verify_operator=only_first)
+        self.assertTrue(next(g for g in self.registry.list() if g["id"] == first["id"]).get("revokedAt"))
 
     def test_events_are_accepted_by_the_real_ledger_and_hold_no_credentials(self):
         self.apply(self.plan())
@@ -412,6 +449,17 @@ class Case(unittest.TestCase):
         self.registry.revoke(mine, by=OPERATOR, now=T0 + 5)
         with self.assertRaises(Error):
             self.replace(self.plan(), mine, lambda _: None)
+
+    def test_replace_refuses_to_retire_another_owners_grant(self):
+        old = self.apply(self.plan())["grant"]["id"]
+        writes, tests = [], []
+        proposal = self.plan(owner="other@client.example")
+        with self.assertRaisesRegex(Error, "owner"):
+            self.replace(proposal, old, writes.append,
+                         verify_owner=lambda *args: True,
+                         connection_test=lambda: tests.append(1) or passing())
+        self.assertEqual((writes, tests), ([], []))
+        self.assertEqual([g["id"] for g in self.registry.list() if not g.get("revokedAt")], [old])
 
     def test_a_failed_revocation_of_the_old_grant_is_reported_not_hidden(self):
         old = self.apply(self.plan())["grant"]["id"]
