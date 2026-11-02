@@ -126,47 +126,169 @@ def make_head(events: list[dict[str, Any]], *, exported_at: int | None = None) -
 
 
 class DirectorySink:
-    """Append-only directory layout: one immutable file per record and per head manifest.
+    """Append-only local sink with pinned, no-follow directory and object I/O.
 
-    Files are created exclusively and never rewritten. Re-delivering identical content is a
-    no-op; different content under an existing name raises. Point ``root`` at a mount whose
-    write policy the runtime and deployment identities cannot change.
+    Directory mode is an operator-controlled mount, not independent immutability:
+    use the retention-locked GCS target for the external assurance gate. A
+    linked, replaced or publicly writable object must never count as an
+    acknowledged export or a verified audit receipt.
     """
+
+    MAX_OBJECT_BYTES = 16 * 1024 * 1024
 
     def __init__(self, root: pathlib.Path) -> None:
         self.root = pathlib.Path(root)
 
-    def _write_once(self, path: pathlib.Path, document: Mapping[str, Any]) -> None:
-        path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-        text = _canonical(document) + "\n"
+    @staticmethod
+    def _trusted_directory(info: os.stat_result) -> bool:
+        return stat.S_ISDIR(info.st_mode) and not info.st_mode & 0o022
+
+    @staticmethod
+    def _trusted_object(info: os.stat_result) -> bool:
+        return (stat.S_ISREG(info.st_mode) and info.st_nlink == 1
+                and not info.st_mode & 0o022)
+
+    @contextmanager
+    def _folder(self, name: str, *, create: bool = False) -> Iterator[int | None]:
+        """Pin root and child directory fds; never follow a sink symlink."""
+        if create:
+            try:
+                self.root.mkdir(mode=0o700, parents=True, exist_ok=True)
+            except OSError as exc:
+                raise LedgerExportError("ledger sink directory unavailable") from exc
         try:
-            descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-        except FileExistsError:
-            if path.read_text(encoding="utf-8") != text:
-                raise LedgerExportError(f"sink already holds different content at {path.name}") from None
-            return
-        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
-            handle.write(text)
-            handle.flush()
-            os.fsync(handle.fileno())
+            root_fd = os.open(self.root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        except FileNotFoundError:
+            if not create:
+                yield None
+                return
+            raise LedgerExportError("ledger sink root disappeared") from None
+        except OSError as exc:
+            raise LedgerExportError("ledger sink root is untrusted") from exc
+        try:
+            root_info = os.fstat(root_fd)
+            if not self._trusted_directory(root_info):
+                raise LedgerExportError("ledger sink root is untrusted")
+            if create:
+                try:
+                    os.mkdir(name, mode=0o700, dir_fd=root_fd)
+                except FileExistsError:
+                    pass
+            try:
+                child_fd = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                                   dir_fd=root_fd)
+            except FileNotFoundError:
+                if not create:
+                    yield None
+                    return
+                raise LedgerExportError("ledger sink directory disappeared") from None
+            except OSError as exc:
+                raise LedgerExportError("ledger sink directory is untrusted") from exc
+            try:
+                child_info = os.fstat(child_fd)
+                if not self._trusted_directory(child_info):
+                    raise LedgerExportError("ledger sink directory is untrusted")
+                # Reject a swapped mount or directory entry after opening it.
+                current_root = self.root.lstat()
+                current_child = os.stat(name, dir_fd=root_fd, follow_symlinks=False)
+                if ((current_root.st_dev, current_root.st_ino) !=
+                        (root_info.st_dev, root_info.st_ino) or
+                        (current_child.st_dev, current_child.st_ino) !=
+                        (child_info.st_dev, child_info.st_ino)):
+                    raise LedgerExportError("ledger sink directory changed")
+                yield child_fd
+            finally:
+                os.close(child_fd)
+        except OSError as exc:
+            raise LedgerExportError("ledger sink directory unavailable or changed") from exc
+        finally:
+            os.close(root_fd)
+
+    def _read_object(self, folder_fd: int, name: str) -> bytes:
+        try:
+            fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK,
+                         dir_fd=folder_fd)
+            try:
+                info = os.fstat(fd)
+                if not self._trusted_object(info):
+                    raise LedgerExportError("ledger sink object is untrusted")
+                raw = os.read(fd, self.MAX_OBJECT_BYTES + 1)
+                if len(raw) > self.MAX_OBJECT_BYTES:
+                    raise LedgerExportError("ledger sink object is oversized")
+                current = os.stat(name, dir_fd=folder_fd, follow_symlinks=False)
+                if (not self._trusted_object(current) or
+                        (current.st_dev, current.st_ino) != (info.st_dev, info.st_ino)):
+                    raise LedgerExportError("ledger sink object changed while reading")
+                return raw
+            finally:
+                os.close(fd)
+        except OSError as exc:
+            raise LedgerExportError("ledger sink object unavailable or untrusted") from exc
+
+    def _write_once(self, folder: str, name: str, document: Mapping[str, Any]) -> None:
+        data = (_canonical(document) + "\n").encode("utf-8")
+        if len(data) > self.MAX_OBJECT_BYTES:
+            raise LedgerExportError("ledger sink object is oversized")
+        with self._folder(folder, create=True) as folder_fd:
+            assert folder_fd is not None
+            try:
+                fd = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                             0o600, dir_fd=folder_fd)
+            except FileExistsError:
+                if self._read_object(folder_fd, name) != data:
+                    raise LedgerExportError(f"sink already holds different content at {name}")
+                return
+            except OSError as exc:
+                raise LedgerExportError("ledger sink object could not be created") from exc
+            try:
+                with os.fdopen(fd, "wb") as handle:
+                    info = os.fstat(handle.fileno())
+                    if not self._trusted_object(info):
+                        raise LedgerExportError("ledger sink object is untrusted")
+                    handle.write(data)
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                current = os.stat(name, dir_fd=folder_fd, follow_symlinks=False)
+                if ((current.st_dev, current.st_ino) != (info.st_dev, info.st_ino)
+                        or not self._trusted_object(current)):
+                    raise LedgerExportError("ledger sink object changed while writing")
+                os.fsync(folder_fd)
+            except OSError as exc:
+                raise LedgerExportError("ledger sink object write failed") from exc
 
     def put_records(self, records: Iterable[Mapping[str, Any]]) -> None:
         for record in records:
             name = f"{record['sequence']:0{_SEQUENCE_WIDTH}d}-{record['recordId'][:16]}.json"
-            self._write_once(self.root / "records" / name, record)
+            self._write_once("records", name, record)
 
     def put_head(self, head: Mapping[str, Any]) -> None:
         name = f"{head['sequence']:0{_SEQUENCE_WIDTH}d}-{head['exportedAt']}-{head['headHash'][:16]}.json"
-        self._write_once(self.root / "heads" / name, head)
+        self._write_once("heads", name, head)
+
+    def _read_folder(self, folder: str, *, after: int = 0) -> list[dict[str, Any]]:
+        with self._folder(folder) as folder_fd:
+            if folder_fd is None:
+                return []
+            objects = []
+            for name in sorted(os.listdir(folder_fd)):
+                if not name.endswith(".json"):
+                    continue
+                if not re.fullmatch(r"[0-9]{12,}-(?:[0-9]+-)?[0-9a-f]{16}\\.json", name):
+                    raise LedgerExportError("ledger sink object name is invalid")
+                sequence = int(name.split("-", 1)[0])
+                if sequence <= after:
+                    continue
+                try:
+                    objects.append(json.loads(self._read_object(folder_fd, name)))
+                except (ValueError, UnicodeError) as exc:
+                    raise LedgerExportError("ledger sink object is not valid JSON") from exc
+            return objects
 
     def records(self, after: int = 0) -> list[dict[str, Any]]:
-        folder = self.root / "records"
-        paths = sorted(path for path in folder.glob("*.json") if int(path.name.split("-", 1)[0]) > after) if folder.is_dir() else []
-        return [json.loads(path.read_text(encoding="utf-8")) for path in paths]
+        return self._read_folder("records", after=after)
 
     def heads(self) -> list[dict[str, Any]]:
-        folder = self.root / "heads"
-        return [json.loads(path.read_text(encoding="utf-8")) for path in sorted(folder.glob("*.json"))] if folder.is_dir() else []
+        return self._read_folder("heads")
 
 
 Transport = Callable[[urllib.request.Request], Any]
