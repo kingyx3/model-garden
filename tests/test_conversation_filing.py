@@ -34,7 +34,12 @@ cli = _load("runtime_file_calls_under_test", "scripts/runtime-file-calls.py")
 operator = _load("client_operator_for_filing", "scripts/client-operator.py")
 policy = runtime_module.POLICY if hasattr(runtime_module, "POLICY") else _load("policy_for_filing", "platform/core/policy.py")
 
+TEST_OWNER_KEY = policy.generate_owner_key()
+TEST_KEYS = {"owner@client.example": TEST_OWNER_KEY["public"]}
 CRM_BINDING = {"environment": "dev", "connectors": {"crm": {"provider": "built-in-crm", "tier": 0, "owner": "owner@client.example"}}}
+SIGNED_BINDING = {"environment": "dev", "connectors": {
+    "crm": {"provider": "built-in-crm", "tier": 0}, "kb": {"provider": "text-knowledge", "tier": 0}},
+    "governance": {"ownerKeys": TEST_KEYS}}
 SECRET_WORDS = "my card is blue and my mother's maiden name is Hargreaves"
 
 
@@ -75,7 +80,8 @@ class FilingCase(unittest.TestCase):
         return target
 
     def runtime(self, *rules: dict, binding=CRM_BINDING):
-        desired = compiler.compile_workspace(self.workspace(*rules), "receptionist")[0]
+        desired = compiler.compile_workspace(self.workspace(*rules), "receptionist",
+            environment_binding=SIGNED_BINDING if rules else None)[0]
         desired["source"]["client"] = "acme"
         path = self.root / "desired.json"
         path.write_text(json.dumps(desired), encoding="utf-8")
@@ -274,7 +280,7 @@ class EmailFilingTests(FilingCase):
 
     def test_with_a_signed_allow_rule_the_verified_sender_gets_a_contact_and_the_interaction(self):
         rule = {"id": "auto-create", "effect": "allow", "actions": ["crm.create"]}
-        signed = {**rule, "signoff": {"owner": "owner@client.example", "ruleDigest": policy.rule_digest(rule)}}
+        signed = policy.sign_rule(rule, "owner@client.example", TEST_OWNER_KEY["private"])
         runtime = self.runtime(signed)
         result = self.file(runtime, verified="new@client.example", allow_create=True)
         self.assertEqual((result["status"], result["basis"]), ("filed", "created-from-verified-email"))
