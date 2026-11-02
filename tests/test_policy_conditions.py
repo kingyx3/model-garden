@@ -33,7 +33,8 @@ TEST_OWNER_KEY = policy.generate_owner_key()
 TEST_KEYS = {"owner@client.example": TEST_OWNER_KEY["public"]}
 TEST_BINDING = {"environment": "dev", "connectors": {
     "kb": {"provider": "text-knowledge", "tier": 0},
-    "crm": {"provider": "built-in-crm", "tier": 0}},
+    "crm": {"provider": "built-in-crm", "tier": 0},
+    "calendar": {"provider": "google", "tier": 1, "token_ref": "secret://google/dev"}},
     "governance": {"ownerKeys": TEST_KEYS}}
 
 
