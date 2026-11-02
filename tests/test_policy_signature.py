@@ -77,6 +77,31 @@ class SignatureTests(unittest.TestCase):
                 policy.owner_keys_from_binding({"kind": "EnvironmentBinding", "spec": {"governance": {"ownerKeys": bad}}})
 
 
+    def test_colliding_normalized_owner_names_are_not_silent_key_replacement(self):
+        # EnvironmentBinding is an operator-reviewed trust anchor. Distinct YAML
+        # spellings must not silently replace an earlier owner's verifier.
+        other = policy.generate_owner_key()
+        for second in (self.key["public"], other["public"]):
+            with self.subTest(second_matches=second == self.key["public"]):
+                binding = {"kind": "EnvironmentBinding", "spec": {"governance": {"ownerKeys": {
+                    " Owner@Client.example ": self.key["public"],
+                    OWNER: second,
+                }}}}
+                with self.assertRaisesRegex(ValueError, "duplicate.*ownerKeys|ownerKeys.*duplicate"):
+                    policy.owner_keys_from_binding(binding)
+
+    def test_distinct_owner_names_remain_valid(self):
+        other = policy.generate_owner_key()
+        binding = {"governance": {"ownerKeys": {
+            OWNER: self.key["public"],
+            "delegate@client.example": other["public"],
+        }}}
+        self.assertEqual(policy.owner_keys_from_binding(binding), {
+            OWNER: self.key["public"],
+            "delegate@client.example": other["public"],
+        })
+
+
 class PolicyContractSignatureTests(unittest.TestCase):
     """The owner-signed rule must survive the actual v1 contract and compiler, not only the policy helper."""
 
