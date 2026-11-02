@@ -372,5 +372,66 @@ class ParityTests(unittest.TestCase):
             self.assertEqual(actual, expected, sample)
 
 
+
+class TenantBindingTests(StoreCase):
+    def test_new_tenant_store_persists_binding_and_rejects_foreign_tenant(self):
+        bound = C.ContactStore(self.root, tenant="acme")
+        customer = bound.create_contact({"name": "Alex"})["objectId"]
+        state = self.raw()
+        witness = json.loads((self.root / ".tenant-binding.json").read_text())
+        self.assertEqual((state["tenant"], witness["tenant"]), ("acme", "acme"))
+        self.assertEqual(state["bindingId"], witness["bindingId"])
+        self.assertEqual(stat.S_IMODE((self.root / ".tenant-binding.json").stat().st_mode), 0o600)
+        self.assertTrue(C.ContactStore(self.root, tenant="acme").has_contact(customer))
+        with self.assertRaisesRegex(C.ContactError, "tenant"):
+            C.ContactStore(self.root, tenant="beta").has_contact(customer)
+        bound.erase_contact(customer)
+        with self.assertRaisesRegex(C.ContactError, "tenant"):
+            C.ContactStore(self.root, tenant="beta").review_queue()
+
+    def test_legacy_data_requires_explicit_reviewed_migration(self):
+        customer = self.store.create_contact({"name": "Legacy"})["objectId"]
+        with self.assertRaisesRegex(C.ContactError, "legacy|migration"):
+            C.ContactStore(self.root, tenant="acme").has_contact(customer)
+        with self.assertRaisesRegex(C.ContactError, "review"):
+            self.store.bind_tenant("acme", reviewed=False)
+        self.assertFalse((self.root / ".tenant-binding.json").exists())
+        self.store.bind_tenant("acme", reviewed=True)
+        self.assertTrue(C.ContactStore(self.root, tenant="acme").has_contact(customer))
+        self.store.bind_tenant("acme", reviewed=True)
+        with self.assertRaisesRegex(C.ContactError, "tenant"):
+            self.store.bind_tenant("beta", reviewed=True)
+
+    def test_missing_or_tampered_witness_and_missing_data_fail_closed(self):
+        bound = C.ContactStore(self.root, tenant="acme")
+        bound.create_contact({"name": "Alex"})
+        witness = self.root / ".tenant-binding.json"
+        original = witness.read_text()
+        witness.unlink()
+        with self.assertRaisesRegex(C.ContactError, "binding"):
+            bound.review_queue()
+        witness.write_text(original)
+        witness.chmod(0o600)
+        data = json.loads(original)
+        data["tenant"] = "beta"
+        witness.write_text(json.dumps(data))
+        with self.assertRaisesRegex(C.ContactError, "binding|tenant"):
+            bound.review_queue()
+        witness.write_text(original)
+        self.store.path.unlink()
+        with self.assertRaisesRegex(C.ContactError, "binding|missing"):
+            bound.review_queue()
+
+    def test_linked_witness_is_rejected(self):
+        bound = C.ContactStore(self.root, tenant="acme")
+        bound.create_contact({"name": "Alex"})
+        witness = self.root / ".tenant-binding.json"
+        saved = self.root / "saved"
+        witness.rename(saved)
+        witness.symlink_to(saved)
+        with self.assertRaisesRegex(C.ContactError, "binding"):
+            bound.review_queue()
+
+
 if __name__ == "__main__":
     unittest.main()
