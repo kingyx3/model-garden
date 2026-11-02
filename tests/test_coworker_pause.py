@@ -615,6 +615,36 @@ class BoundaryTests(unittest.TestCase):
             self.runtime.crm_create(fields={"name": "Demo"})
         self.assertEqual(self.events()[-1]["details"]["reason"], "coworker-paused")
 
+    def test_paused_boundary_does_not_trust_spoofed_or_duplicate_tool_risk(self):
+        # A changed compiled declaration must not turn a catalogued write
+        # into a read that bypasses the emergency pause effect lease.
+        pause.PauseStore(self.root).pause("alice@acme.example", "incident", NOW)
+        tools = self.runtime.desired_state["tools"]
+        write = next(item for item in tools if item["metadata"]["name"] == "crm.create")
+        original_risk = write["spec"]["risk"]
+        write["spec"]["risk"] = "read"
+        try:
+            self.assertTrue(self.runtime._material_tool("crm.create"))
+            self.assertTrue(self.runtime._paused_for("crm.create"))
+            with self.assertRaisesRegex(PermissionError, "paused by its owner"):
+                self.runtime.crm_create(fields={"name": "Must not be created"})
+            self.assertEqual(self.events()[-1]["details"]["reason"], "coworker-paused")
+        finally:
+            write["spec"]["risk"] = original_risk
+
+        # Even an apparently harmless duplicate declaration is ambiguous;
+        # do not use the first matching (read) entry as authority.
+        read = next(item for item in tools if item["metadata"]["name"] == "kb.search")
+        self.assertFalse(self.runtime._material_tool("kb.search"))
+        duplicate = json.loads(json.dumps(read))
+        tools.insert(0, duplicate)
+        self.assertTrue(self.runtime._material_tool("kb.search"))
+        tools.remove(duplicate)
+
+        # A non-catalogued read claim cannot prove it has no side effects.
+        tools.append({"metadata": {"name": "custom.peek"}, "spec": {"risk": "read"}})
+        self.assertTrue(self.runtime._material_tool("custom.peek"))
+
     def test_an_unknown_tool_counts_as_material_and_the_check_is_per_deployment_root(self):
         self.assertFalse(self.runtime._paused_for("crm.create"))  # nothing paused yet
         pause.PauseStore(self.root).pause("alice@acme.example", "", NOW)
