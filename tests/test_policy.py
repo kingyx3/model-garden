@@ -283,10 +283,13 @@ class CompiledPolicyTests(unittest.TestCase):
         shutil.copytree(ROOT / "examples" / "workspace", target)
         agent_file = target / "agents/front-office/receptionist/agent.yaml"
         agent = yaml.safe_load(agent_file.read_text())
-        agent["spec"]["disabledSkills"] = []
+        agent["spec"]["disabledSkills"] = ["book-appointment"]
         agent_file.write_text(yaml.safe_dump(agent))
         policy_path = target / "policies" / "default.yaml"
         document = yaml.safe_load(policy_path.read_text())
+        for existing in document["spec"]["rules"]:
+            if existing["id"] == "approve-external-write":
+                existing["actions"] = [a for a in existing["actions"] if a != "*.create"]
         document["spec"]["rules"].extend(extra_rules)
         policy_path.write_text(yaml.safe_dump(document))
         return target
@@ -297,7 +300,7 @@ class CompiledPolicyTests(unittest.TestCase):
         self.assertEqual([item["metadata"]["name"] for item in compiled["policies"]], ["default-agent-policy"])
 
     def test_unsigned_relaxing_rule_fails_compilation_until_the_owner_signs(self):
-        rule = {"id": "auto-book", "effect": "allow", "actions": ["calendar.book"]}
+        rule = {"id": "auto-book", "effect": "allow", "actions": ["crm.create"]}
         with tempfile.TemporaryDirectory() as tmp:
             with self.assertRaisesRegex(ValueError, "auto-book.*sign-off"):
                 compiler.compile_workspace(self.workspace(tmp, rule), "receptionist")
@@ -308,7 +311,7 @@ class CompiledPolicyTests(unittest.TestCase):
                     "crm": {"provider": "built-in-crm", "tier": 0},
                     "calendar": {"provider": "google", "tier": 1, "token_ref": "secret://google/dev"}},
                     "governance": {"ownerKeys": TEST_KEYS}})[0]
-            outcome = govern.authorize_action(compiled, "calendar.book", {"start": "x", "end": "y"})
+            outcome = govern.authorize_action(compiled, "crm.create", {"start": "x", "end": "y"})
         self.assertEqual((outcome["decision"], outcome["ruleId"]), ("allow", "auto-book"))
 
     def test_policy_reference_must_exist(self):
@@ -325,8 +328,8 @@ class CompiledPolicyTests(unittest.TestCase):
             text = compiler.format_approvals(report)
         rows = {action["tool"]: action for entry in report[0]["skills"] for action in entry["actions"]}
         self.assertEqual((rows["calendar.availability"]["member"], rows["calendar.availability"]["public"]), ("automatic", "automatic"))
-        self.assertEqual((rows["calendar.book"]["member"], rows["calendar.book"]["public"]), ("approval", "denied"))
-        self.assertIn("calendar.book", text)
+        self.assertEqual((rows["crm.create"]["member"], rows["crm.create"]["public"]), ("approval", "denied"))
+        self.assertIn("crm.create", text)
         self.assertIn("public callers never approve", text)
 
 
