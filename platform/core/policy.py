@@ -265,20 +265,16 @@ def evaluate(
     if denied is not None:
         return {"decision": "deny", "reason": "policy-deny", "ruleId": denied["id"]}
     allows = [rule for rule in matched if rule["effect"] == "allow"]
-    # A digest/name alone is not an authenticated owner waiver. When a deployment
-    # carries its trusted public-key binding, reverify the Ed25519 signature at the
-    # execution boundary, not only when the workspace was compiled. An empty or
-    # malformed key set grants no waiver; legacy unbound states retain their
-    # existing approval behavior until the operator configures owner keys.
+    # A digest/name alone is not authenticated owner consent, even for
+    # members. Require the independently trusted public-key binding and
+    # reverify the signature at execution time; legacy states fail closed.
     def signed_waiver(rule: Mapping[str, Any]) -> bool:
         if not signoff_valid(rule):
             return False
         if owner_keys is None:
-            # A digest in a client-editable Policy is not authenticated owner
-            # consent. Public write access must never be granted without an
-            # independently trusted Ed25519 owner key. Preserve the existing
-            # member-only legacy path until its separate migration is approved.
-            return who != PUBLIC
+            # Member and public write autonomy both require independently
+            # authenticated owner consent; a digest-only rule is never enough.
+            return False
         if not isinstance(owner_keys, Mapping):
             return False
         owner = rule["signoff"]["owner"].strip().lower()
@@ -396,10 +392,11 @@ def relaxation_errors(
                 f"Policy rule {rule_id!r} relaxes an approval requirement and needs the client owner's "
                 f"sign-off: signoff.owner plus signoff.ruleDigest {rule_digest(rule)}"
             )
-        elif relaxes and PUBLIC in (rule.get("principals") or []) and owner_keys is None:
+        elif relaxes and owner_keys is None:
             errors.append(
-                f"Policy rule {rule_id!r} grants public autonomy and requires a trusted "
-                "governance.ownerKeys Ed25519 signer in the EnvironmentBinding"
+                f"Policy rule {rule_id!r} relaxes approval and requires a trusted "
+                "governance.ownerKeys Ed25519 signer in the EnvironmentBinding; "
+                "migrate digest-only member rules with scripts/policy-signoff.py"
             )
         elif relaxes and trusted is not None and rule["signoff"]["owner"].strip().lower() not in trusted:
             errors.append(
