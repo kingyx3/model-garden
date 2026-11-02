@@ -63,7 +63,7 @@ class Case(unittest.TestCase):
         return connect.plan(**values)
 
     def apply(self, proposal, **overrides):
-        values = dict(owner_consent=proposal["digest"], connection_test=passing, connection_id="calendar-front", isolation="isolated-grant",
+        values = dict(owner_consent=proposal["digest"], verify_owner=lambda owner, digest, approved: owner == OWNER and digest == approved["digest"], connection_test=passing, connection_id="calendar-front", isolation="isolated-grant",
                       acting_identity="grant-receptionist-1", secret_ref=SECRET_A, now=T0, audit=lambda *event: self.events.append(event))
         values.update(overrides)
         return connect.apply(proposal, self.registry, **values)
@@ -155,6 +155,41 @@ class Case(unittest.TestCase):
             self.plan(mailbox={"kind": "shared", "address": "a@b.example"})
 
     # -- apply: consent, test, own grant, ledger -----------------------------------------
+
+    def test_unkeyed_plan_digest_alone_cannot_create_provider_grant(self):
+        proposal = self.plan()
+        calls = []
+        for verifier in (None, lambda *args: False, lambda *args: None,
+                         lambda *args: (_ for _ in ()).throw(RuntimeError("PRIVATE-OWNER-IDENTITY"))):
+            with self.subTest(verifier=verifier), self.assertRaisesRegex(Error, "authenticated owner"):
+                self.apply(proposal, verify_owner=verifier, connection_test=lambda: calls.append(1) or passing())
+        self.assertEqual(calls, [])
+        self.assertEqual(self.registry.list(), [])
+        self.assertNotIn("PRIVATE-OWNER-IDENTITY", json.dumps(self.events))
+
+    def test_owner_verifier_receives_rebuilt_exact_plan_and_cannot_replay_another_owner(self):
+        proposal = self.plan()
+        witnessed = []
+        def verify(owner, digest, approved):
+            witnessed.append((owner, digest, approved))
+            return owner == OWNER and digest == proposal["digest"] and approved == proposal
+        self.apply(proposal, verify_owner=verify)
+        self.assertEqual(len(witnessed), 1)
+        self.assertEqual(witnessed[0][2]["agent"], "receptionist")
+        other = self.plan(agent="researcher")
+        with self.assertRaisesRegex(Error, "authenticated owner"):
+            self.apply(other, verify_owner=verify, connection_test=lambda: self.fail("unapproved test ran"))
+        self.assertEqual(len(self.registry.list()), 1)
+
+    def test_replacement_refuses_unverified_owner_before_new_grant_or_binding(self):
+        old = self.apply(self.plan())["grant"]["id"]
+        writes = []
+        with self.assertRaisesRegex(Error, "authenticated owner"):
+            self.replace(self.plan(), old, writes.append, verify_owner=None,
+                         connection_test=lambda: self.fail("unapproved test ran"))
+        self.assertEqual(writes, [])
+        self.assertEqual(len(self.registry.list()), 1)
+        self.assertFalse(self.registry.list()[0].get("revokedAt"))
 
     def test_a_passing_test_records_the_coworkers_own_grant_and_returns_the_binding_fragment(self):
         proposal = self.plan()
@@ -286,7 +321,7 @@ class Case(unittest.TestCase):
         self.assertEqual(binding, self.existing_binding())
 
     def replace(self, proposal, previous, write, **overrides):
-        values = dict(previous_grant_id=previous, write_binding=write, owner_consent=proposal["digest"], connection_test=passing,
+        values = dict(previous_grant_id=previous, write_binding=write, owner_consent=proposal["digest"], verify_owner=lambda owner, digest, approved: owner == OWNER and digest == approved["digest"], connection_test=passing,
                       connection_id="calendar-front-2", isolation="isolated-grant", acting_identity="grant-receptionist-2", secret_ref=SECRET_B,
                       now=T0 + 10, audit=lambda *event: self.events.append(event))
         values.update(overrides)

@@ -15,7 +15,7 @@ itself (the read-only test is injected) or edit a file; it is not wired to the i
   and a Tier 0 provider (which needs no credentials) are not connectable; the plan says why instead of asking for credentials.
 - **Shared or delegated mailboxes.** A mailbox is connected as ``shared`` or ``delegated``; a ``personal`` mailbox needs an explicit
   owner exception, which is recorded.
-- **A preview is not an authorization token.** Before the read-only test, recompute the exact plan from the current registry and refuse any stale, modified or no-longer-connectable provider, even if someone recalculates its unkeyed digest.
+- **A preview is not an authorization token.** Before the read-only test, recompute the exact plan from the current registry and refuse any stale, modified or no-longer-connectable provider, even if someone recalculates its unkeyed digest. A trusted, independent owner-identity verifier is mandatory before any grant can be created or replaced; a digest alone cannot authorize a connection.
 - **The test comes first and failure changes nothing.** ``apply`` runs the injected read-only connection test before touching
   anything. If it fails, no grant is recorded, the binding is unchanged and the failure is ledgered; on success the grant is
   recorded and the binding fragment (provider, tier, scopes, owner, never a secret) is returned for the caller to merge.
@@ -145,6 +145,7 @@ def apply(
     registry: Any,
     *,
     owner_consent: str,
+    verify_owner: Callable[[str, str, Mapping[str, Any]], bool] | None = None,
     connection_test: Callable[[], Mapping[str, Any]],
     connection_id: str,
     isolation: str,
@@ -153,7 +154,12 @@ def apply(
     now: int,
     audit: Audit | None = None,
 ) -> dict[str, Any]:
-    """Run the read-only test and, only if it passes, record the coworker's own grant and return the binding fragment."""
+    """Require independently authenticated owner consent, then test and record a scoped grant.
+
+    verify_owner must be a trusted host-provided identity/consent verifier (owner,
+    exact plan digest, rebuilt plan), not a model/CLI assertion or digest comparison.
+    A missing, failed, or ambiguous verification denies all grant writes.
+    """
     if not isinstance(owner_consent, str) or not _DIGEST.match(owner_consent) or owner_consent != proposal.get("digest") or digest_of(proposal) != proposal["digest"]:
         raise ConnectError("the owner's consent does not match this plan; show the owner the exact scopes and ask again")
     # A digest is an owner-facing change detector, not a signed capability. Rebuild the
@@ -172,6 +178,21 @@ def apply(
         raise ConnectError("connection plan is invalid or no longer approved; preview again")
     base = {"agent": proposal["agent"], "family": proposal["family"], "provider": proposal["provider"], "owner": proposal["owner"],
             "operator": proposal["operator"], "tools": list(proposal["tools"]), "consentDigest": proposal["digest"]}
+
+    # A SHA-256 digest is unkeyed and client-editable. It is only a change
+    # detector, never proof that the named owner authenticated and consented.
+    # Verify the *rebuilt* registry-approved plan before any network test or
+    # grant creation. The callback must be supplied by a trusted host/session
+    # boundary, not by an untrusted plan, model, or operator-provided flag.
+    authorized = False
+    if callable(verify_owner):
+        try:
+            authorized = verify_owner(expected["owner"], expected["digest"], copy.deepcopy(expected)) is True
+        except Exception:  # noqa: BLE001 - identity-provider errors may contain tokens or PII
+            authorized = False
+    if not authorized:
+        _record(audit, "connection.connect-denied", proposal["operator"], {**base, "reason": "owner-not-verified"})
+        raise ConnectError("authenticated owner consent is required before connecting; nothing was changed")
 
     def failed(reason: str) -> ConnectError:
         _record(audit, "connection.connect-failed", proposal["operator"], {**base, "reason": reason})
@@ -270,6 +291,7 @@ def replace(
     previous_grant_id: str,
     write_binding: Callable[[Mapping[str, Any]], Any],
     owner_consent: str,
+    verify_owner: Callable[[str, str, Mapping[str, Any]], bool] | None = None,
     connection_test: Callable[[], Mapping[str, Any]],
     connection_id: str,
     isolation: str,
@@ -293,7 +315,7 @@ def replace(
     if (previous.get("agent"), previous.get("family")) != (proposal.get("agent"), proposal.get("family")):
         raise ConnectError("a grant can only be replaced by a grant for the same coworker and capability")
     result = apply(
-        proposal, registry, owner_consent=owner_consent, connection_test=connection_test, connection_id=connection_id,
+        proposal, registry, owner_consent=owner_consent, verify_owner=verify_owner, connection_test=connection_test, connection_id=connection_id,
         isolation=isolation, acting_identity=acting_identity, secret_ref=secret_ref, now=now, audit=audit,
     )
     base = {"agent": proposal["agent"], "family": proposal["family"], "provider": proposal["provider"], "owner": proposal["owner"],
