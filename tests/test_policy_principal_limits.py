@@ -199,7 +199,7 @@ class CompileTests(unittest.TestCase):
         shutil.copytree(ROOT / "examples" / "workspace", target)
         agent_file = target / "agents/front-office/receptionist/agent.yaml"
         agent = yaml.safe_load(agent_file.read_text())
-        agent["spec"]["disabledSkills"] = []  # booking enabled, so calendar.book is selected and a relaxing rule is checked
+        agent["spec"]["disabledSkills"] = ["book-appointment"]  # booking enabled, so calendar.book is selected and a relaxing rule is checked
         agent_file.write_text(yaml.safe_dump(agent))
         path = target / "policies" / "default.yaml"
         document = yaml.safe_load(path.read_text())
@@ -208,28 +208,28 @@ class CompileTests(unittest.TestCase):
         return target
 
     def test_schema_accepts_the_limit_and_rejects_malformed_values(self):
-        good = signed({"id": "faq-book", "effect": "allow", "actions": ["calendar.book"], "conditions": {"maxPerPrincipalPerDay": 2}})
+        good = signed({"id": "faq-book", "effect": "allow", "actions": ["crm.create"], "conditions": {"maxPerPrincipalPerDay": 2}})
         with tempfile.TemporaryDirectory() as tmp:
             compiled = compiler.compile_workspace(self.workspace(tmp, good), "receptionist", environment_binding=TEST_BINDING)[0]
         self.assertTrue(any(r["id"] == "faq-book" for p in compiled["policies"] for r in p["spec"]["rules"]))
         for bad in (0, "2", 10001, -1, 1.5, True):
-            malformed = {"id": "bad", "effect": "allow", "actions": ["calendar.book"], "conditions": {"maxPerPrincipalPerDay": bad}}
+            malformed = {"id": "bad", "effect": "allow", "actions": ["crm.create"], "conditions": {"maxPerPrincipalPerDay": bad}}
             with tempfile.TemporaryDirectory() as tmp, self.assertRaises(ValueError, msg=str(bad)):
                 compiler.compile_workspace(self.workspace(tmp, malformed), "receptionist")
 
     def test_editing_the_limit_after_signing_blocks_compilation_until_resigned(self):
-        approved = signed({"id": "faq-book", "effect": "allow", "actions": ["calendar.book"], "conditions": {"maxPerPrincipalPerDay": 2}})
+        approved = signed({"id": "faq-book", "effect": "allow", "actions": ["crm.create"], "conditions": {"maxPerPrincipalPerDay": 2}})
         edited = {**approved, "conditions": {"maxPerPrincipalPerDay": 2000}}
         with tempfile.TemporaryDirectory() as tmp, self.assertRaisesRegex(ValueError, "faq-book.*sign-off"):
             compiler.compile_workspace(self.workspace(tmp, edited), "receptionist")
 
     def test_the_approvals_preview_shows_the_rule_as_conditional(self):
-        booking = signed({"id": "limited-book", "effect": "allow", "actions": ["calendar.book"], "conditions": {"maxPerPrincipalPerDay": 1}})
+        booking = signed({"id": "limited-book", "effect": "allow", "actions": ["crm.create"], "conditions": {"maxPerPrincipalPerDay": 1}})
         with tempfile.TemporaryDirectory() as tmp:
             report = compiler.workspace_approvals(self.workspace(tmp, booking), "receptionist", ())
         rows = {a["tool"]: a for entry in report[0]["skills"] for a in entry["actions"]}
         # Preview without a trusted binding must not promise conditional autonomy.
-        self.assertEqual(rows["calendar.book"]["member"], "approval")
+        self.assertEqual(rows["crm.create"]["member"], "approval")
 
 
 if __name__ == "__main__":
