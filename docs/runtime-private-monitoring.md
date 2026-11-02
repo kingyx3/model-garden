@@ -19,6 +19,8 @@ is required. Docker output and metadata tokens never enter logs.
 
 The loopback sampler requires an **exact HTTP 200** from each component even when the gateway container runs Python with optimization (`-O`/`PYTHONOPTIMIZE`); any other status or probe failure publishes unhealthy rather than silently accepting a non-200 response. This is a local metric integrity check, not proof of alert delivery.
 
+Both direct host samplers (`runtime-health-metric.py` and `voice-health-metric.py`) now reject any `--compose-project` other than the exact `<client>-<environment>` value **before** reading VM metadata, invoking Docker or publishing metrics. This enforces the same tenant binding as the review-only unit renderer; a syntactically valid other-client project can no longer be sampled and relabeled as this client's health. This is a local input-integrity prerequisite, not authentication of the host or proof of alert delivery.
+
 The host must run a trusted approved script and have local Docker access.
 This is not SIP, provider action, client ownership or delivered alert proof;
 a compromised Docker daemon/host can forge its own signal. A broken sampler

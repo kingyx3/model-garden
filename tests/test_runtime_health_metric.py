@@ -22,6 +22,20 @@ def result(stdout=""):
 
 
 class RuntimeMetricTests(unittest.TestCase):
+    def test_cross_tenant_compose_project_refused_before_host_or_metric_access(self):
+        # The direct CLI must enforce the same binding as the reviewed timer
+        # renderer; an operator typo cannot relabel another tenant as healthy.
+        with mock.patch.object(METRIC.VOICE, "metadata") as metadata, \
+             mock.patch.object(METRIC, "sample") as sample, \
+             mock.patch.object(METRIC.VOICE, "publish_sample") as publish:
+            self.assertEqual(METRIC.main([
+                "--project-id", "sample-project-123", "--client", "acme",
+                "--environment", "dev", "--compose-project", "other-dev",
+            ]), 1)
+            metadata.assert_not_called()
+            sample.assert_not_called()
+            publish.assert_not_called()
+
     def test_one_exact_gateway_container_is_probed_over_private_loopback(self):
         with mock.patch.object(METRIC.subprocess, "run", side_effect=[result("a" * 64 + "\n"), result(), result()]) as run:
             self.assertEqual(METRIC.sample("acme-dev"), {"gateway": True, "worker": True})

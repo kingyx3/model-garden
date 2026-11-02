@@ -28,8 +28,8 @@ def validate_inputs(project_id: str, client: str, environment: str, compose_proj
         raise ValueError("invalid GCP project ID")
     if not NAME_RE.fullmatch(client) or environment not in {"dev", "prod"}:
         raise ValueError("invalid client or environment")
-    if not COMPOSE_RE.fullmatch(compose_project):
-        raise ValueError("invalid Docker Compose project")
+    if not COMPOSE_RE.fullmatch(compose_project) or compose_project != f"{client}-{environment}":
+        raise ValueError("Docker Compose project must match client/environment")
 
 
 def docker_voice_ready(compose_project: str, *, now: datetime | None = None) -> bool:

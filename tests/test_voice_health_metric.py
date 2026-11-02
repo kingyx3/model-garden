@@ -20,6 +20,24 @@ def result(text):
 
 
 class VoiceMetricTests(unittest.TestCase):
+    def test_client_environment_must_match_compose_project_before_host_access(self):
+        # A valid but different tenant's Compose project must never be
+        # sampled and published under this client's Cloud Monitoring labels.
+        with mock.patch.object(METRIC, "metadata") as metadata, \
+             mock.patch.object(METRIC, "docker_voice_ready") as docker, \
+             mock.patch.object(METRIC, "publish_sample") as publish:
+            self.assertEqual(METRIC.main([
+                "--project-id", "sample-project-123", "--client", "acme",
+                "--environment", "dev", "--compose-project", "other-dev",
+            ]), 1)
+            metadata.assert_not_called()
+            docker.assert_not_called()
+            publish.assert_not_called()
+        for wrong in ("acme-prod", "other-dev", "acme_dev"):
+            with self.subTest(compose=wrong), self.assertRaises(ValueError):
+                METRIC.validate_inputs("sample-project-123", "acme", "dev", wrong)
+        METRIC.validate_inputs("sample-project-123", "acme", "dev", "acme-dev")
+
     def test_only_one_exact_project_voice_container_can_report_healthy(self):
         with mock.patch.object(METRIC.subprocess, "run", side_effect=[
             result("a1\n"), result(json.dumps({"Running": True, "Health": {"Status": "healthy", "Log": [{"End": datetime.now(timezone.utc).isoformat(), "ExitCode": 0}]}}))
