@@ -348,6 +348,8 @@ class SubjectAccess:
             self.contacts.require_tenant(self.tenant)
         except (AttributeError, OSError, ValueError) as exc:
             raise SubjectAccessError("contact store tenant binding is unavailable or mismatched; no subject data released") from exc
+        if pathlib.Path(self.contacts.root) != self.root.parent / "contacts":
+            raise SubjectAccessError("contact store root does not match the subject-access governance root")
         if self.conversations is not None:
             expected = pathlib.Path(self.contacts.root).parent / "conversations"
             if (getattr(self.conversations, "tenant", None) != self.tenant
