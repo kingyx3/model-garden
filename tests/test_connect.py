@@ -270,8 +270,10 @@ class Case(unittest.TestCase):
             {"owner": "different@client.example", "verify_operator": verified},
         ):
             with self.subTest(override=override), self.assertRaises(Error):
-                connect.disconnect(self.registry, grant["id"], operator=OPERATOR, owner=OWNER, now=T0 + 5,
-                                   audit=lambda *event: self.events.append(event), **override)
+                options = dict(operator=OPERATOR, owner=OWNER, now=T0 + 5,
+                               audit=lambda *event: self.events.append(event))
+                options.update(override)
+                connect.disconnect(self.registry, grant["id"], **options)
             self.assertFalse(self.registry.list(agent="receptionist")[0].get("revokedAt"))
         self.assertEqual(witnessed, [])  # mismatched grant owner must fail before any verifier
         self.assertNotIn("PRIVATE-OPERATOR-TOKEN", json.dumps(self.events))
