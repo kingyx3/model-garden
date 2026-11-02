@@ -21,6 +21,10 @@ itself (the read-only test is injected) or edit a file; it is not wired to the i
   recorded and the binding fragment (provider, tier, scopes, owner, never a secret) is returned for the caller to merge.
 - **Ledgered with both people.** Connect, failed connect and disconnect each call the audit hook naming the operator and the
   client owner, with identifiers, never a credential, reference or account.
+- **Revocation requires a trusted operator.** A disconnect checks the active grant's actual owner and requires a trusted
+  host-provided verifier for the named operator and exact public grant before revoking. The owner label alone is not
+  authentication. Replacement refuses to retire a grant belonging to a different owner; transfer of ownership needs
+  a separately authorized revoke/connect flow. The host must protect registry writers and the verifier itself.
 
 - **Changing a working connection is explicit and reversible.** ``merge_binding`` refuses, unless the caller says so, to widen the
   scopes of an existing binding, change its owner or switch its provider; ``describe_change`` shows exactly what a fragment would
@@ -218,14 +222,39 @@ def apply(
 
 
 def disconnect(
-    registry: Any, grant_id: str, *, operator: str, owner: str, now: int, audit: Audit | None = None
+    registry: Any, grant_id: str, *, operator: str, owner: str, now: int,
+    verify_operator: Callable[[str, Mapping[str, Any]], bool] | None = None,
+    audit: Audit | None = None,
 ) -> dict[str, Any]:
-    """Revoke one coworker's grant (no other coworker is affected) and ledger who did it and for which owner."""
+    """Revoke only a grant belonging to the named owner after trusted operator verification.
+
+    The verifier is provided by the authenticated host boundary, never the
+    model, operator's submitted payload or the client-editable binding. It
+    receives a public grant record (no secret reference). Revocation remains
+    an operator safety action, not a new owner OAuth consent transaction.
+    """
     operator, owner = _person(operator, "operator"), _person(owner, "owner")
+    selected = next((item for item in registry.list() if item.get("id") == grant_id), None)
+    if selected is None or selected.get("revokedAt"):
+        raise ConnectError("the grant is missing or already revoked")
+    if selected.get("owner") != owner:
+        raise ConnectError("the named owner does not own this grant; nothing was changed")
+    verified = False
+    if callable(verify_operator):
+        try:
+            verified = verify_operator(operator, copy.deepcopy(selected)) is True
+        except Exception:  # noqa: BLE001 - authentication-provider errors may contain secrets
+            verified = False
+    if not verified:
+        _record(audit, "connection.disconnect-denied", operator, {
+            "grantId": selected["id"], "agent": selected["agent"], "family": selected["family"],
+            "owner": owner, "operator": operator, "reason": "operator-not-verified",
+        })
+        raise ConnectError("a verified operator is required before disconnecting; nothing was changed")
     try:
         grant = registry.revoke(grant_id, by=operator, now=now)
     except PermissionError as exc:
-        raise ConnectError(str(exc)) from exc
+        raise ConnectError("the grant could not be revoked; verify registry permissions") from exc
     _record(audit, "connection.disconnect", operator, {
         "agent": grant["agent"], "family": grant["family"], "provider": grant["provider"], "owner": owner, "operator": operator,
         "grantId": grant["id"],
@@ -314,6 +343,8 @@ def replace(
         raise ConnectError("the grant being replaced is not an active grant of this coworker")
     if (previous.get("agent"), previous.get("family")) != (proposal.get("agent"), proposal.get("family")):
         raise ConnectError("a grant can only be replaced by a grant for the same coworker and capability")
+    if previous.get("owner") != proposal.get("owner"):
+        raise ConnectError("replacement cannot retire another owner's grant; use an independently authorized ownership transfer")
     result = apply(
         proposal, registry, owner_consent=owner_consent, verify_owner=verify_owner, connection_test=connection_test, connection_id=connection_id,
         isolation=isolation, acting_identity=acting_identity, secret_ref=secret_ref, now=now, audit=audit,
