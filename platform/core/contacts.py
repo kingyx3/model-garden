@@ -38,6 +38,7 @@ import pathlib
 import re
 import sys
 import secrets
+import stat
 import time
 from collections.abc import Iterator, Mapping
 from typing import Any
@@ -121,9 +122,79 @@ def _empty() -> dict[str, Any]:
 class ContactStore:
     """File-backed store under ``root``; every public method is atomic under an exclusive lock."""
 
-    def __init__(self, root: pathlib.Path) -> None:
+    def __init__(self, root: pathlib.Path, *, tenant: str | None = None) -> None:
+        if tenant is not None and (not isinstance(tenant, str) or not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,62}", tenant)):
+            raise ContactError("tenant must be an exact lowercase client slug")
         self.root = pathlib.Path(root)
         self.path = self.root / "contacts.json"
+        self.binding_path = self.root / ".tenant-binding.json"
+        self.tenant = tenant
+
+    def _read_binding(self) -> dict[str, Any] | None:
+        if not os.path.lexists(self.binding_path):
+            return None
+        try:
+            fd = os.open(self.binding_path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+            try:
+                info = os.fstat(fd)
+                if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1
+                        or info.st_uid != os.geteuid() or info.st_mode & 0o077):
+                    raise ContactError("contact tenant binding is untrusted")
+                raw = os.read(fd, 1025)
+                if len(raw) > 1024:
+                    raise ContactError("contact tenant binding is oversized")
+            finally:
+                os.close(fd)
+            binding = json.loads(raw)
+            if (not isinstance(binding, dict) or set(binding) != {"schemaVersion", "tenant", "bindingId"}
+                    or binding["schemaVersion"] != 1
+                    or not isinstance(binding["tenant"], str)
+                    or not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,62}", binding["tenant"])
+                    or not isinstance(binding["bindingId"], str)
+                    or not re.fullmatch(r"[0-9a-f]{32}", binding["bindingId"])):
+                raise ContactError("contact tenant binding is untrusted")
+            return binding
+        except (OSError, ValueError, UnicodeError) as exc:
+            raise ContactError("contact tenant binding is unavailable or untrusted") from exc
+
+    def _write_binding(self, state: Mapping[str, Any]) -> None:
+        binding = {key: state[key] for key in ("schemaVersion", "tenant", "bindingId")}
+        try:
+            fd = os.open(self.binding_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+            with os.fdopen(fd, "w", encoding="utf-8") as stream:
+                stream.write(_canonical(binding) + "\\n")
+                stream.flush()
+                os.fsync(stream.fileno())
+            directory = os.open(self.root, os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                os.fsync(directory)
+            finally:
+                os.close(directory)
+        except OSError as exc:
+            raise ContactError("cannot persist contact tenant binding; manual recovery required") from exc
+
+    def require_tenant(self, tenant: str) -> None:
+        """Fail closed before any privacy export unless this store is bound to the exact tenant."""
+        if self.tenant != tenant:
+            raise ContactError("contact store tenant is not independently bound to the requested client")
+        with self._locked() as state:
+            if state.get("tenant") != tenant:
+                raise ContactError("contact store tenant binding is missing or mismatched")
+
+    def bind_tenant(self, tenant: str, *, reviewed: bool = False) -> None:
+        """Explicit operator-reviewed legacy migration; never infer ownership from a supplied path."""
+        if not reviewed:
+            raise ContactError("legacy tenant migration requires documented source review")
+        if not isinstance(tenant, str) or not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,62}", tenant):
+            raise ContactError("tenant must be an exact lowercase client slug")
+        with self._locked() as state:
+            existing = state.get("tenant")
+            if existing is not None:
+                if existing != tenant:
+                    raise ContactError("contact store tenant binding conflicts with requested tenant")
+                return
+            state["tenant"] = tenant
+            state["bindingId"] = secrets.token_hex(16)
 
     @contextlib.contextmanager
     def _locked(self) -> Iterator[dict[str, Any]]:
@@ -141,9 +212,24 @@ class ContactStore:
                 if not isinstance(loaded, dict) or loaded.get("schemaVersion") != SCHEMA_VERSION:
                     raise ContactError("contact store has an unsupported format")
                 state = loaded
+            binding = self._read_binding()
+            if binding is not None:
+                if not self.path.is_file() or any(state.get(key) != binding[key] for key in ("tenant", "bindingId")):
+                    raise ContactError("contact tenant binding or data is missing or mismatched")
+                if self.tenant is not None and self.tenant != binding["tenant"]:
+                    raise ContactError("contact store tenant does not match the requested client")
+            elif "tenant" in state or "bindingId" in state:
+                raise ContactError("contact tenant binding witness is missing; manual recovery required")
+            elif self.tenant is not None:
+                if self.path.exists():
+                    raise ContactError("legacy contact store requires explicit reviewed tenant migration")
+                state["tenant"] = self.tenant
+                state["bindingId"] = secrets.token_hex(16)
             before = _canonical(state)
             yield state
             if _canonical(state) != before:
+                if "tenant" in state and binding is None:
+                    self._write_binding(state)
                 temporary = self.path.with_suffix(".tmp")
                 handle = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
                 with os.fdopen(handle, "w", encoding="utf-8") as stream:
