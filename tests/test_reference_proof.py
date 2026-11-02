@@ -250,7 +250,7 @@ def transcript(*, room=ROOM, agent="receptionist", turns=None, disclosure=None, 
             {"index": 0, "speaker": "caller", "offsetSeconds": 1.0, "text": "What time are you open?"},
             {"index": 1, "speaker": "agent", "offsetSeconds": 2.0, "text": "We open at nine."},
         ] if turns is None else turns,
-        "summary": summary, "summarySource": "extractive", "requestIds": [],
+        "outcome": "resolved", "summary": summary, "summarySource": "extractive", "requestIds": [],
     }
 
 
@@ -396,6 +396,17 @@ class SameCallScenarioTests(unittest.TestCase):
                 data, result = self.check_scenario(lifecycle, [transcript()], self.action_rows())
                 self.assertEqual(data["referenceScenario"]["completeCalls"], 0)
                 self.assertFalse(result["passed"])
+
+    def test_missing_call_outcome_cannot_pass_complete_reference_scenario(self):
+        lifecycle = [voice("CallStarted"), voice("CallEnded", timestamp=110),
+                     voice("FallbackMessage", timestamp=105)]
+        incomplete = transcript()
+        del incomplete["outcome"]
+        data, result = self.check_scenario(lifecycle, [incomplete], self.action_rows())
+        self.assertEqual(data["transcripts"]["completeTwoWayCalls"], 1)
+        self.assertEqual(data["transcripts"]["completeThroughTransferCalls"], 0)
+        self.assertEqual(data["referenceScenario"]["completeCalls"], 0)
+        self.assertFalse(result["passed"])
 
     def test_reused_room_with_two_agents_is_not_unique_call_proof(self):
         lifecycle = [voice("CallStarted"), voice("CallEnded", timestamp=110),
