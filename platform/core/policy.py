@@ -147,7 +147,13 @@ def owner_keys_from_binding(binding: Mapping[str, Any] | None) -> dict[str, str]
             valid = False
         if not valid:
             raise ValueError("EnvironmentBinding governance.ownerKeys must map each owner identity to a base64 Ed25519 public key")
-        normal[identity.strip().lower()] = value
+        normalized = identity.strip().lower()
+        # YAML can contain distinct spellings of one owner identity. Never
+        # silently let the last key replace the first: the trusted signer
+        # must be unambiguous even when the two public keys happen to match.
+        if normalized in normal:
+            raise ValueError("EnvironmentBinding governance.ownerKeys contains a duplicate normalized owner identity")
+        normal[normalized] = value
     return normal
 
 
