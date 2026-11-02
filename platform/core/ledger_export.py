@@ -213,14 +213,25 @@ class DirectorySink:
                 info = os.fstat(fd)
                 if not self._trusted_object(info):
                     raise LedgerExportError("ledger sink object is untrusted")
-                raw = os.read(fd, self.MAX_OBJECT_BYTES + 1)
-                if len(raw) > self.MAX_OBJECT_BYTES:
+                if info.st_size > self.MAX_OBJECT_BYTES:
                     raise LedgerExportError("ledger sink object is oversized")
+                chunks = []
+                remaining = info.st_size
+                while remaining:
+                    chunk = os.read(fd, min(remaining, 65536))
+                    if not chunk:
+                        raise LedgerExportError("ledger sink object was truncated while reading")
+                    chunks.append(chunk)
+                    remaining -= len(chunk)
+                current_fd = os.fstat(fd)
                 current = os.stat(name, dir_fd=folder_fd, follow_symlinks=False)
                 if (not self._trusted_object(current) or
-                        (current.st_dev, current.st_ino) != (info.st_dev, info.st_ino)):
+                        (current.st_dev, current.st_ino) != (info.st_dev, info.st_ino) or
+                        current.st_size != info.st_size or
+                        current_fd.st_size != info.st_size or
+                        current_fd.st_mtime_ns != info.st_mtime_ns):
                     raise LedgerExportError("ledger sink object changed while reading")
-                return raw
+                return b"".join(chunks)
             finally:
                 os.close(fd)
         except OSError as exc:
