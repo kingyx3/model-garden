@@ -207,12 +207,27 @@ class ContactStore:
         try:
             fcntl.flock(descriptor, fcntl.LOCK_EX)
             state = _empty()
+            binding = self._read_binding()
             if self.path.is_file():
-                loaded = json.loads(self.path.read_text(encoding="utf-8"))
+                if binding is not None:
+                    info = os.lstat(self.path)
+                    if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1
+                            or info.st_uid != os.geteuid() or info.st_mode & 0o077):
+                        raise ContactError("tenant-bound contact data is untrusted")
+                    fd = os.open(self.path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+                    try:
+                        opened = os.fstat(fd)
+                        if (opened.st_dev, opened.st_ino) != (info.st_dev, info.st_ino):
+                            raise ContactError("tenant-bound contact data changed")
+                        with os.fdopen(fd, "r", encoding="utf-8", closefd=False) as stream:
+                            loaded = json.load(stream)
+                    finally:
+                        os.close(fd)
+                else:
+                    loaded = json.loads(self.path.read_text(encoding="utf-8"))
                 if not isinstance(loaded, dict) or loaded.get("schemaVersion") != SCHEMA_VERSION:
                     raise ContactError("contact store has an unsupported format")
                 state = loaded
-            binding = self._read_binding()
             if binding is not None:
                 if not self.path.is_file() or any(state.get(key) != binding[key] for key in ("tenant", "bindingId")):
                     raise ContactError("contact tenant binding or data is missing or mismatched")
