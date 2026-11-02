@@ -88,9 +88,12 @@ class ArgumentConditionTests(unittest.TestCase):
         result = evaluate(faq, arguments={"category": "faq"}, principal="public")
         self.assertEqual(result["decision"], "deny")
         # A signed public write rule with an unmet condition grants nothing.
-        booking = signed({"id": "public-book", "effect": "allow", "actions": ["calendar.book"], "principals": ["public"],
-                          "conditions": {"arguments": {"service": ["haircut"]}}})
-        kwargs = dict(tool="calendar.book", risk="write", principal="public")
+        key = policy.generate_owner_key()
+        booking = policy.sign_rule({"id": "public-book", "effect": "allow", "actions": ["calendar.book"], "principals": ["public"],
+                                    "conditions": {"arguments": {"service": ["haircut"]}}},
+                                   "owner@client.example", key["private"])
+        kwargs = dict(tool="calendar.book", risk="write", principal="public",
+                      owner_keys={"owner@client.example": key["public"]})
         self.assertEqual(evaluate(booking, arguments={"service": "haircut"}, **kwargs)["decision"], "allow")
         self.assertEqual(evaluate(booking, arguments={"service": "surgery"}, **kwargs)["decision"], "deny")
 
