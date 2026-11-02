@@ -10,6 +10,7 @@ import pathlib
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 from test_ledger_export import Workspace, export, write_ledger  # noqa: E402
@@ -60,6 +61,25 @@ class DirectorySinkTrustTests(unittest.TestCase):
             with self.assertRaises(export.LedgerExportError):
                 ws.export()
             self.assertEqual(list(outside.iterdir()), [])
+
+    def test_short_read_cannot_hide_trailing_tamper(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ws = Workspace(tmp)
+            write_ledger(ws.ledger, 1)
+            ws.export()
+            head = next((ws.sink.root / "heads").glob("*.json"))
+            original = head.read_bytes()
+            head.write_bytes(original + b"untrusted trailing bytes")
+            real_read = os.read
+
+            # POSIX permits short reads even for regular files. A single read
+            # ending after valid JSON must not hide trailing tampering.
+            def short_read(fd, count):
+                return real_read(fd, min(count, len(original)))
+
+            with mock.patch.object(export.os, "read", side_effect=short_read):
+                with self.assertRaises(export.LedgerExportError):
+                    ws.sink.heads()
 
     def test_verifier_refuses_linked_or_public_exported_head(self):
         for attack in ("symlink", "hardlink", "public"):
