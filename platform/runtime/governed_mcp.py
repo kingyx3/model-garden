@@ -681,7 +681,8 @@ class GovernedToolRuntime:
         entry = next((item for item in self.capabilities().get("capabilities", []) if item.get("family") == "crm"), None)
         if entry is None or entry.get("status") != "available" or entry.get("provider") != CONTACTS.PROVIDER_ID:
             raise PermissionError("Customer record keeping is not connected here; say so and offer a message or a human hand-off")
-        return CONTACTS.ContactStore(self.governance_root / "contacts")
+        tenant = TENANT.tenant_from_compiled(self.desired_state)
+        return CONTACTS.ContactStore(self.governance_root / "contacts", tenant=tenant)
 
     def _require_docs(self) -> "ARTIFACTS.ArtifactStore":
         """The Tier 0 artifact store, only when the manifest binds `docs` to the built-in provider."""
