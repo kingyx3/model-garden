@@ -69,6 +69,40 @@ class ConflictTests(unittest.TestCase):
         report = K.check_source(text, filename="rules.md")
         self.assertTrue(any("conflicting values" in warning and "$40" in warning for warning in report["warnings"]))
 
+    def test_single_source_limit_one_cannot_hide_a_conflicting_approved_section(self):
+        # A second section need not match the query to contradict the first.
+        text = "## Prices\nHaircut $40.\n\n## Prices\nStandard trim $45.\n"
+        result = K.search(K.build_index("rules", text, filename="rules.md", spec=APPROVED),
+                          "haircut", today=TODAY, limit=1)
+        self.assertEqual(len(result["documents"]), 1)
+        self.assertTrue(result["documents"][0]["conflict"])
+        self.assertEqual(result["conflicts"][0]["differences"], ["$40", "$45"])
+        self.assertEqual(len(result["conflicts"][0]["citations"]), 2)
+        self.assertIn("do not choose one", result["guidance"])
+
+    def test_global_limit_one_cannot_hide_cross_source_conflicts(self):
+        state = desired(("first", "## Haircut price\nHaircut $40.\n"),
+                        ("second", "## Haircut prices\nA standard cut costs $45.\n"))
+        result = K.search_selected(state, "haircut price", today=TODAY, limit=1)
+        self.assertEqual(len(result["documents"]), 1)
+        self.assertTrue(result["documents"][0]["conflict"])
+        self.assertEqual(result["conflicts"][0]["differences"], ["$40", "$45"])
+        self.assertEqual(len(result["conflicts"][0]["citations"]), 2)
+        self.assertIn("do not choose one", result["guidance"])
+
+    def test_unavailable_source_cannot_create_or_disclose_a_hidden_conflict(self):
+        state = desired(("first", "## Haircut price\nHaircut $40.\n"),
+                        ("private", "## Haircut prices\nA standard cut costs $45.\n"))
+        state["knowledge"][1]["spec"]["classification"] = "confidential"
+        result = K.search_selected(state, "haircut price", today=TODAY, limit=1, access="public")
+        self.assertEqual(len(result["documents"]), 1)
+        self.assertNotIn("conflicts", result)
+        self.assertFalse(result["documents"][0].get("conflict"))
+        state["knowledge"][1]["spec"]["classification"] = "public"
+        state["knowledge"][1]["spec"]["locale"] = "fr-FR"
+        result = K.search_selected(state, "haircut price", today=TODAY, limit=1, locale="en-SG")
+        self.assertNotIn("conflicts", result)
+
     def test_a_source_that_is_not_approved_cannot_create_a_conflict(self):
         state = desired(("website", "## Haircut price\nA haircut costs $40.\n"), ("draft-list", "## Haircut price\nHaircut: $45.\n"))
         state["knowledge"][1]["spec"]["status"] = "draft"

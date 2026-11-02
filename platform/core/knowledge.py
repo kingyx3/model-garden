@@ -23,7 +23,9 @@ Retrieved text is untrusted reference data: results are flagged `dataOnly` and n
 instructions. Text that reads like an instruction to the reader ("ignore your instructions") is
 flagged `instruction-like-text` on its document, and two approved sections with the same topic but
 different prices, amounts or times are flagged as a conflict (see `conflicts`) so the coworker
-says the rules disagree and escalates instead of choosing one. Each client/environment searches only the content compiled into its own desired
+says the rules disagree and escalates instead of choosing one. Conflict detection examines all
+authorized sections before applying the bounded search result limit; a lower-ranked contradictory
+price cannot silently turn a top-one answer into an apparently uncontested fact. Each client/environment searches only the content compiled into its own desired
 state. The governed runtime exposes it as `kb_search` and the registry lists `text-knowledge` as
 `built-credential-free`; there is no live acceptance evidence yet.
 """
@@ -343,6 +345,27 @@ def find_conflicts(documents: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return conflicts
 
 
+def _visible_conflicts(
+    documents: list[dict[str, Any]], candidates: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Detect contradictions before result limiting, but report only topics in visible results.
+
+    Candidates must come exclusively from sources authorized for this caller, Agent, Skill
+    and requested locale. A hidden draft/private/other-locale source must not disclose even
+    its existence through a conflict citation or differing value.
+    """
+    visible = {document["citation"] for document in documents}
+    conflicts = [
+        item for item in find_conflicts(candidates)
+        if visible.intersection(item["citations"])
+    ]
+    flagged = {citation for item in conflicts for citation in item["citations"]}
+    for document in documents:
+        if document["citation"] in flagged:
+            document["conflict"] = True
+    return conflicts
+
+
 def _conflict_guidance(result: dict[str, Any], conflicts: list[dict[str, Any]]) -> None:
     if conflicts:
         result["conflicts"] = conflicts
@@ -417,7 +440,12 @@ def search(
         if index.get("locale"):
             document["locale"] = index["locale"]
     result: dict[str, Any] = {"documents": documents, "dataOnly": True}
-    _conflict_guidance(result, find_conflicts(documents))
+    candidates = [
+        {"title": section["title"], "content": section["text"],
+         "citation": f"knowledge:{index['name']}#{section['id']}"}
+        for section in index["sections"]
+    ]
+    _conflict_guidance(result, _visible_conflicts(documents, candidates))
     if not documents:
         result["reason"] = "no-matching-section"
     return result
@@ -453,6 +481,7 @@ def search_selected(
     if source and source not in selected:
         return {"documents": [], "reason": "source-not-selected", "dataOnly": True}
     documents: list[dict[str, Any]] = []
+    conflict_candidates: list[dict[str, Any]] = []
     reasons: dict[str, str] = {}
     available_locales: set[str] = set()
     for name in names:
@@ -496,6 +525,13 @@ def search_selected(
         if locale and declared and declared.split("-")[0].lower() != locale.split("-")[0].lower():
             reasons[name] = "source-other-locale"
             continue
+        # Include every authorized section in conflict detection, even when it ranks
+        # below the per-source or global result limit (or lacks query terms).
+        conflict_candidates.extend(
+            {"title": section["title"], "content": section["text"],
+             "citation": f"knowledge:{name}#{section['id']}"}
+            for section in index["sections"]
+        )
         outcome = search(index, query, limit=limit, agent=agent, skill=skill, today=today, access=access)
         documents.extend(outcome["documents"])
         if outcome.get("reason") and not outcome["documents"]:
@@ -505,7 +541,7 @@ def search_selected(
         document.pop("conflict", None)
     kept = documents[: max(1, min(int(limit), MAX_RESULTS))]
     result: dict[str, Any] = {"documents": kept, "dataOnly": True}
-    _conflict_guidance(result, find_conflicts(kept))
+    _conflict_guidance(result, _visible_conflicts(kept, conflict_candidates))
     if not result["documents"]:
         result["reason"] = next(iter(reasons.values()), "no-matching-section")
         result["sources"] = reasons
