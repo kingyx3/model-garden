@@ -160,6 +160,8 @@ class ChannelApprovalTests(unittest.TestCase):
 class RuntimePrincipalTests(unittest.TestCase):
     def _runtime(self, root: pathlib.Path, principal, transport):
         desired = compiler.compile_workspace(ROOT / "examples" / "workspace", "receptionist")[0]
+        # This fixture models a tenant-bound runtime, unlike the unbound example workspace.
+        desired["source"]["client"] = "acme"
         (root / "desired.json").write_text(json.dumps(desired), encoding="utf-8")
         binding = {"connectors": {"kb": {"provider": "text-knowledge", "tier": 0},
                                   "crm": {"provider": "built-in-crm", "tier": 0}}}
