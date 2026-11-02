@@ -29,8 +29,16 @@ compiler = _load("compile_workspace_for_conditions", "scripts/compile-workspace.
 FAQ_ONLY = {"arguments": {"category": ["faq"]}}
 
 
+TEST_OWNER_KEY = policy.generate_owner_key()
+TEST_KEYS = {"owner@client.example": TEST_OWNER_KEY["public"]}
+TEST_BINDING = {"environment": "dev", "connectors": {
+    "kb": {"provider": "text-knowledge", "tier": 0},
+    "crm": {"provider": "built-in-crm", "tier": 0}},
+    "governance": {"ownerKeys": TEST_KEYS}}
+
+
 def signed(rule: dict, owner: str = "owner@client.example") -> dict:
-    return {**rule, "signoff": {"owner": owner, "ruleDigest": policy.rule_digest(rule)}}
+    return policy.sign_rule(rule, owner, TEST_OWNER_KEY["private"])
 
 
 def doc(*rules: dict) -> dict:
@@ -41,6 +49,7 @@ def doc(*rules: dict) -> dict:
 
 
 def evaluate(*rules: dict, tool: str = "mail.send", risk: str = "external-communication", **kwargs) -> dict:
+    kwargs.setdefault("owner_keys", TEST_KEYS)
     return policy.evaluate([doc(*rules)], tool_name=tool, risk=risk, tool_requires_approval=True, **kwargs)
 
 
@@ -118,11 +127,11 @@ class UsageLimitTests(unittest.TestCase):
 
     def test_preview_reports_conditional_autonomy_instead_of_claiming_it_is_automatic(self):
         preview = policy.preview([doc(rule(maxPerDay=2))], tool_name="mail.send", risk="external-communication",
-                                 tool_requires_approval=True)
+                                 tool_requires_approval=True, owner_keys=TEST_KEYS)
         self.assertEqual(preview, {"member": "conditional", "public": "denied"})
         unconditional = signed({"id": "all", "effect": "allow", "actions": ["mail.send"]})
         self.assertEqual(policy.preview([doc(unconditional)], tool_name="mail.send", risk="external-communication",
-                                        tool_requires_approval=True)["member"], "automatic")
+                                        tool_requires_approval=True, owner_keys=TEST_KEYS)["member"], "automatic")
 
 
 class LedgerCountTests(unittest.TestCase):
@@ -133,7 +142,7 @@ class LedgerCountTests(unittest.TestCase):
         return {
             "schemaVersion": 1, "source": {"name": "support"},
             "agent": {"spec": {"approvals": {"externalActions": "none"}, "security": {"dataClassification": "internal"}}},
-            "tools": self.TOOLS, "policies": [doc(*rules)],
+            "tools": self.TOOLS, "policies": [doc(*rules)], "policyOwnerKeys": TEST_KEYS,
         }
 
     def run_send(self, state: dict, audit: pathlib.Path, category: str = "faq") -> dict:
@@ -194,7 +203,7 @@ class CompiledConditionTests(unittest.TestCase):
         shutil.copytree(ROOT / "examples" / "workspace", target)
         agent_file = target / "agents/front-office/receptionist/agent.yaml"
         agent = yaml.safe_load(agent_file.read_text())
-        agent["spec"]["disabledSkills"] = []
+        agent["spec"]["disabledSkills"] = ["book-appointment"]
         agent_file.write_text(yaml.safe_dump(agent))
         path = target / "policies" / "default.yaml"
         document = yaml.safe_load(path.read_text())
@@ -204,35 +213,36 @@ class CompiledConditionTests(unittest.TestCase):
 
     def test_schema_accepts_a_bounded_signed_rule_and_rejects_malformed_conditions(self):
         good = rule(maxPerDay=3, **FAQ_ONLY)
-        good = {**good, "id": "faq-book", "actions": ["calendar.book"]}
-        good["signoff"] = {"owner": "owner@client.example", "ruleDigest": policy.rule_digest(good)}
+        good = {**good, "id": "faq-book", "actions": ["crm.create"]}
+        good = signed({k: v for k, v in good.items() if k != "signoff"})
         with tempfile.TemporaryDirectory() as tmp:
-            compiled = compiler.compile_workspace(self.workspace(tmp, good), "receptionist")[0]
+            compiled = compiler.compile_workspace(self.workspace(tmp, good), "receptionist", environment_binding=TEST_BINDING)[0]
         self.assertTrue(any(r["id"] == "faq-book" for p in compiled["policies"] for r in p["spec"]["rules"]))
         for bad in ({"maxPerDay": 0}, {"maxPerDay": "3"}, {"arguments": {}}, {"arguments": {"c": []}},
                     {"arguments": {"c": [{"x": 1}]}}, {"unknown": 1}, {}):
-            malformed = {"id": "bad", "effect": "allow", "actions": ["calendar.book"], "conditions": bad}
+            malformed = {"id": "bad", "effect": "allow", "actions": ["crm.create"], "conditions": bad}
             with tempfile.TemporaryDirectory() as tmp, self.assertRaises(ValueError, msg=str(bad)):
                 compiler.compile_workspace(self.workspace(tmp, malformed), "receptionist")
 
     def test_editing_a_condition_after_signing_blocks_compilation_until_resigned(self):
-        original = {"id": "faq-book", "effect": "allow", "actions": ["calendar.book"], "conditions": FAQ_ONLY}
+        original = {"id": "faq-book", "effect": "allow", "actions": ["crm.create"], "conditions": FAQ_ONLY}
         approved = signed(original)
         widened = {**approved, "conditions": {"arguments": {"category": ["faq", "billing"]}}}
         with tempfile.TemporaryDirectory() as tmp:
-            self.assertTrue(compiler.compile_workspace(self.workspace(tmp, approved), "receptionist"))
+            self.assertTrue(compiler.compile_workspace(self.workspace(tmp, approved), "receptionist", environment_binding=TEST_BINDING))
         with tempfile.TemporaryDirectory() as tmp, self.assertRaisesRegex(ValueError, "faq-book.*sign-off"):
-            compiler.compile_workspace(self.workspace(tmp, widened), "receptionist")
+            compiler.compile_workspace(self.workspace(tmp, widened), "receptionist", environment_binding=TEST_BINDING)
 
     def test_approval_preview_shows_conditional_for_a_conditioned_allow_rule(self):
-        booking = signed({"id": "limited-book", "effect": "allow", "actions": ["calendar.book"],
+        booking = signed({"id": "limited-book", "effect": "allow", "actions": ["crm.create"],
                           "conditions": {"maxPerDay": 4}})
         with tempfile.TemporaryDirectory() as tmp:
             report = compiler.workspace_approvals(self.workspace(tmp, booking), "receptionist", ())
             text = compiler.format_approvals(report)
         rows = {a["tool"]: a for entry in report[0]["skills"] for a in entry["actions"]}
-        self.assertEqual(rows["calendar.book"]["member"], "conditional")
-        self.assertIn("conditional", text)
+        # Without a trusted binding, the preview must not promise autonomy.
+        self.assertEqual(rows["crm.create"]["member"], "approval")
+        self.assertIn("approval", text)
 
 
 if __name__ == "__main__":

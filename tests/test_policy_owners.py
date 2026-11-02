@@ -34,8 +34,12 @@ TOOLS = [{"metadata": {"name": "calendar.book"}, "spec": {"risk": "write", "appr
 RULE = {"id": "auto-book", "effect": "allow", "actions": ["calendar.book"]}
 
 
+TEST_OWNER_KEY = policy.generate_owner_key()
+TEST_KEYS = {"owner@client.example": TEST_OWNER_KEY["public"]}
+
+
 def signed(owner: str, rule: dict = RULE) -> dict:
-    return {**rule, "signoff": {"owner": owner, "ruleDigest": policy.rule_digest(rule)}}
+    return policy.sign_rule(rule, owner, TEST_OWNER_KEY["private"])
 
 
 def doc(rule: dict) -> dict:
@@ -44,10 +48,11 @@ def doc(rule: dict) -> dict:
 
 class RelaxationTests(unittest.TestCase):
     def errors(self, rule, owners):
-        return policy.relaxation_errors([doc(rule)], TOOLS, owners)
+        return policy.relaxation_errors([doc(rule)], TOOLS, owners, TEST_KEYS)
 
-    def test_no_owner_list_keeps_the_previous_behaviour(self):
-        self.assertEqual(self.errors(signed("anyone@x.example"), None), [])
+    def test_no_owner_list_still_requires_a_trusted_signing_key(self):
+        self.assertEqual(self.errors(signed("owner@client.example"), None), [])
+        self.assertTrue(any("signoff.signature" in e for e in self.errors(signed("anyone@x.example"), None)))
 
     def test_a_named_owner_may_sign_and_matching_ignores_case_and_spacing(self):
         self.assertEqual(self.errors(signed(" Owner@Client.example "), ["owner@client.example"]), [])
@@ -78,7 +83,8 @@ class RelaxationTests(unittest.TestCase):
         rule = {**RULE, "id": "public-book", "principals": ["public"]}
         self.assertEqual(len(self.errors(signed("intruder@evil.example", rule), ["owner@client.example"])), 1)
         self.assertTrue(any("governance.ownerKeys" in error for error in
-                            self.errors(signed("owner@client.example", rule), ["owner@client.example"])))
+                            policy.relaxation_errors([doc(signed("owner@client.example", rule))], TOOLS,
+                                                     ["owner@client.example"], None)))
         key = policy.generate_owner_key()
         attested = policy.sign_rule(rule, "owner@client.example", key["private"])
         self.assertEqual(policy.relaxation_errors([doc(attested)], TOOLS,
@@ -125,16 +131,16 @@ class CompileTests(unittest.TestCase):
         return compiler.compile_workspace(workspace, "receptionist", environment_binding=binding)[0]
 
     def test_compilation_refuses_a_rule_signed_by_someone_the_environment_does_not_name(self):
-        binding = {"environment": "dev", "connectors": CONNECTORS, "governance": {"owners": ["owner@client.example"]}}
+        binding = {"environment": "dev", "connectors": CONNECTORS, "governance": {"owners": ["owner@client.example"], "ownerKeys": TEST_KEYS}}
         with tempfile.TemporaryDirectory() as tmp:
             self.assertTrue(self.compile(self.workspace(pathlib.Path(tmp), "owner@client.example"), binding))
         with tempfile.TemporaryDirectory() as tmp, self.assertRaisesRegex(ValueError, "auto-create.*not a named owner"):
             self.compile(self.workspace(pathlib.Path(tmp), "consultant@agency.example"), binding)
 
-    def test_without_a_named_owner_list_the_digest_alone_is_still_accepted(self):
+    def test_without_a_trusted_owner_key_member_waiver_fails_compilation(self):
         for binding in ({"environment": "dev", "connectors": CONNECTORS}, None):
-            with tempfile.TemporaryDirectory() as tmp:
-                self.assertTrue(self.compile(self.workspace(pathlib.Path(tmp), "anyone@x.example"), binding))
+            with tempfile.TemporaryDirectory() as tmp, self.assertRaisesRegex(ValueError, "governance.ownerKeys"):
+                self.compile(self.workspace(pathlib.Path(tmp), "anyone@x.example"), binding)
 
     def test_a_malformed_owner_list_fails_compilation_with_a_clear_message(self):
         with tempfile.TemporaryDirectory() as tmp, self.assertRaisesRegex(ValueError, "governance.owners"):

@@ -407,7 +407,7 @@ administrator changing both state and trust roots, or prove customer-owned MCP
 connection, provider-side identity, consent, OAuth, revocation or live action receipts.
 
 
-### Public-write owner-key safety floor (v0.8.283; #114)
+### Authenticated owner-key safety floor (v0.8.285; #114)
 
 A client-editable Policy rule with `signoff.owner` and a matching
 `ruleDigest` is **not** authenticated owner consent. Public callers may
@@ -417,17 +417,19 @@ when the EnvironmentBinding supplies an independently approved
 the rule carries a valid signature over its exact content. The governed
 runtime rechecks the key and signature for each call; missing, revoked,
 wrong-owner or tampered keys/rules deny the public write before execution.
-The compiler now rejects public autonomy rules without the trusted key
-binding. A public principal still cannot approve, reach privileged Tools,
+The compiler now rejects **all** approval-relaxing rules without the trusted key
+binding, including legacy member-only digest waivers. A public principal still cannot approve, reach privileged Tools,
 or send external communications, and Agent/Tool/Policy stricter rules win.
 
 **Migration:** Before upgrading any workspace that previously used a
-digest-only public booking rule, arrange independent client-owner key
+digest-only public or member write-approval waiver, arrange independent client-owner key
 enrollment and protected review/promotion, re-sign the exact rule using
 `scripts/policy-signoff.py`, and include the trusted owner public key
-in the approved EnvironmentBinding. Otherwise the public booking is
-**intentionally unavailable**, not silently auto-approved; use a named
-human/approval route instead. The older digest-only member-policy
-compatibility path remains unchanged and is not proof of authenticated
-client consent. Offline signature and authorization regressions do not
+in the approved EnvironmentBinding. Otherwise the write remains **approval-required** for members and
+**unavailable** for public callers; use the existing named human/approval
+route. Compilation rejects digest-only relaxing rules, including members,
+until they are re-signed with a trusted owner key. Pre-existing compiled
+states also fail closed at Tool time. Test the migration in DEV before
+promoting the signed policy and retain a reviewed rollback to a more
+restrictive rule; do not downgrade to digest-only autonomy. Offline signature and authorization regressions do not
 establish key custody, real tenant approval or provider booking evidence.

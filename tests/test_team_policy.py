@@ -13,8 +13,12 @@ policy = team_runtime.GOVERN.POLICY
 OWNER = "owner@client.example"
 
 
+TEST_OWNER_KEY = policy.generate_owner_key()
+TEST_KEYS = {OWNER: TEST_OWNER_KEY["public"]}
+
+
 def signed(rule: dict) -> dict:
-    return {**rule, "signoff": {"owner": OWNER, "ruleDigest": policy.rule_digest(rule)}}
+    return policy.sign_rule(rule, OWNER, TEST_OWNER_KEY["private"])
 
 
 def document(*rules: dict) -> list[dict]:
@@ -31,6 +35,7 @@ class PolicyCase(Case):
         for state in built:
             if state["agent"]["metadata"]["name"] == "receptionist":
                 state["policies"] = policies if policies is not None else document(ALLOW_ONE_CREATE)
+                state["policyOwnerKeys"] = TEST_KEYS
         kwargs.setdefault("runtime_kwargs", {"principal_resolver": lambda: principal})
         kwargs.setdefault("environment_binding", BINDING)
         kwargs.setdefault("environ", {})

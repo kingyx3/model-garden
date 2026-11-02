@@ -13,11 +13,15 @@ govern = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(govern)
 
 
+TEST_OWNER_KEY = govern.POLICY.generate_owner_key()
+TEST_KEYS = {"owner@example.invalid": TEST_OWNER_KEY["public"]}
+
+
 def state(*, per_principal=False, limited=True):
     rule = {"id": "one-faq", "effect": "allow", "actions": ["mail.send"]}
     if limited:
         rule["conditions"] = {"maxPerPrincipalPerDay" if per_principal else "maxPerDay": 1}
-    rule["signoff"] = {"owner": "owner@example.invalid", "ruleDigest": govern.POLICY.rule_digest(rule)}
+    rule = govern.POLICY.sign_rule(rule, "owner@example.invalid", TEST_OWNER_KEY["private"])
     return {
         "source": {"name": "receptionist"},
         "agent": {"spec": {"approvals": {"externalActions": "none"},
@@ -25,6 +29,7 @@ def state(*, per_principal=False, limited=True):
         "tools": [{"metadata": {"name": "mail.send"},
                    "spec": {"risk": "external-communication", "approvalRequired": True}}],
         "policies": [{"spec": {"rules": [rule]}}],
+        "policyOwnerKeys": TEST_KEYS,
     }
 
 
@@ -159,7 +164,7 @@ class PolicyQuotaSerializationTests(unittest.TestCase):
         desired = state()
         rule = desired["policies"][0]["spec"]["rules"][0]
         rule["conditions"]["maxPerDay"] = 2
-        rule["signoff"]["ruleDigest"] = govern.POLICY.rule_digest(rule)
+        desired["policies"][0]["spec"]["rules"][0] = govern.POLICY.sign_rule(rule, "owner@example.invalid", TEST_OWNER_KEY["private"])
         for _ in range(2):
             result = govern.execute_action(
                 desired, "mail.send", {"category": "same"},
