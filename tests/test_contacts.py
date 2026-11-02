@@ -438,6 +438,19 @@ class TenantBindingTests(StoreCase):
         self.assertEqual(events[-1]["action"], "contacts.bind-tenant")
         self.assertEqual(events[-1]["details"], {"tenant": "acme", "sourceReviewed": True})
 
+    def test_bound_contact_data_cannot_be_a_symlink_or_hardlink(self):
+        bound = C.ContactStore(self.root, tenant="acme")
+        bound.create_contact({"name": "Alex"})
+        saved = self.root / "saved"
+        self.store.path.rename(saved)
+        self.store.path.symlink_to(saved)
+        with self.assertRaisesRegex(C.ContactError, "contact.*untrusted|binding"):
+            bound.review_queue()
+        self.store.path.unlink()
+        os.link(saved, self.store.path)
+        with self.assertRaisesRegex(C.ContactError, "contact.*untrusted|binding"):
+            bound.review_queue()
+
     def test_linked_witness_is_rejected(self):
         bound = C.ContactStore(self.root, tenant="acme")
         bound.create_contact({"name": "Alex"})
