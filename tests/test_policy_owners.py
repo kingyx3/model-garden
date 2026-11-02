@@ -77,7 +77,12 @@ class RelaxationTests(unittest.TestCase):
     def test_a_public_booking_rule_needs_a_named_owner_too(self):
         rule = {**RULE, "id": "public-book", "principals": ["public"]}
         self.assertEqual(len(self.errors(signed("intruder@evil.example", rule), ["owner@client.example"])), 1)
-        self.assertEqual(self.errors(signed("owner@client.example", rule), ["owner@client.example"]), [])
+        self.assertTrue(any("governance.ownerKeys" in error for error in
+                            self.errors(signed("owner@client.example", rule), ["owner@client.example"])))
+        key = policy.generate_owner_key()
+        attested = policy.sign_rule(rule, "owner@client.example", key["private"])
+        self.assertEqual(policy.relaxation_errors([doc(attested)], TOOLS,
+                                                   ["owner@client.example"], {"owner@client.example": key["public"]}), [])
 
 
 class BindingTests(unittest.TestCase):
