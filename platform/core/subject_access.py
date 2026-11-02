@@ -348,6 +348,12 @@ class SubjectAccess:
             self.contacts.require_tenant(self.tenant)
         except (AttributeError, OSError, ValueError) as exc:
             raise SubjectAccessError("contact store tenant binding is unavailable or mismatched; no subject data released") from exc
+        if self.conversations is not None:
+            expected = pathlib.Path(self.contacts.root).parent / "conversations"
+            if (getattr(self.conversations, "tenant", None) != self.tenant
+                    or pathlib.Path(getattr(self.conversations, "root", "")) != expected
+                    or pathlib.Path(getattr(self.conversations, "path", "")) != expected / f"{self.tenant}.conversations.json"):
+                raise SubjectAccessError("conversation store tenant or root does not match the bound contact client")
 
     def export(self, out_dir: str | os.PathLike[str], *, verified_by: str, approved_by: str, method: str, reason: str, now: int,
                contact_id: str | None = None, email: str | None = None, phone: str | None = None) -> dict[str, Any]:
