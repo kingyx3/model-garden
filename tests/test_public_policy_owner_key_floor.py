@@ -80,7 +80,8 @@ class PublicOwnerKeyFloorTests(unittest.TestCase):
             errors = policy.relaxation_errors([document(rule)], tools, [OWNER], None)
             self.assertTrue(any("governance.ownerKeys" in error for error in errors), errors)
         self.assertEqual(policy.relaxation_errors([document(self.signed)], tools, [OWNER], self.keys), [])
-        read = {"id": "public-read", "effect": "allow", "actions": ["calendar.availability"], "principals": ["public"]}
+        # A read-only member rule does not relax a write floor or need a key.
+        read = {"id": "member-read", "effect": "allow", "actions": ["calendar.availability"]}
         self.assertEqual(policy.relaxation_errors([document(read)], [
             {"metadata": {"name": "calendar.availability"}, "spec": {"risk": "read"}}
         ], None, None), [])
