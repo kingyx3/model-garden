@@ -143,7 +143,7 @@ class LedgerCountTests(unittest.TestCase):
         return {
             "schemaVersion": 1, "source": {"name": "support"},
             "agent": {"spec": {"approvals": {"externalActions": "none"}, "security": {"dataClassification": "internal"}}},
-            "tools": self.TOOLS, "policies": [doc(*rules)],
+            "tools": self.TOOLS, "policies": [doc(*rules)], "policyOwnerKeys": TEST_KEYS,
         }
 
     def run_send(self, state: dict, audit: pathlib.Path, category: str = "faq") -> dict:
