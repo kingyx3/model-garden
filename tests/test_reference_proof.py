@@ -360,6 +360,43 @@ class SameCallScenarioTests(unittest.TestCase):
         self.assertNotIn(ROOM, str(data["referenceScenario"]))
         self.assertNotIn("What time", str(data["referenceScenario"]))
 
+    def test_cold_human_transfer_cannot_pass_the_combined_reference_scenario(self):
+        # A completed two-way *pre-transfer* conversation is not a transcript
+        # of the human leg. A separate transfer receipt cannot fill that gap.
+        lifecycle = [voice("CallStarted"), voice("HumanTransfer", timestamp=105),
+                     voice("CallEnded", timestamp=110)]
+        record = {**transcript(), "outcome": "transferred",
+                  "transfer": {"offsetSeconds": 5.0, "turnsAfter": 0, "captured": False}}
+        data, result = self.check_scenario(lifecycle, [record], self.action_rows())
+        self.assertEqual(data["transcripts"]["completeTwoWayCalls"], 1)
+        self.assertEqual(data["transcripts"]["completeThroughTransferCalls"], 0)
+        self.assertEqual(data["referenceScenario"]["completeCalls"], 0)
+        self.assertFalse(result["passed"])
+
+    def test_human_turn_after_verified_transfer_can_pass_the_structural_scenario(self):
+        lifecycle = [voice("CallStarted"), voice("HumanTransfer", timestamp=105),
+                     voice("CallEnded", timestamp=110)]
+        record = {**transcript(), "outcome": "transferred",
+                  "turns": [*transcript()["turns"],
+                            {"index": 2, "speaker": "human", "offsetSeconds": 6.0,
+                             "text": "I can help.", "afterTransfer": True}],
+                  "transfer": {"offsetSeconds": 5.0, "turnsAfter": 1, "captured": True}}
+        data, result = self.check_scenario(lifecycle, [record], self.action_rows())
+        self.assertEqual(data["transcripts"]["completeThroughTransferCalls"], 1)
+        self.assertEqual(data["referenceScenario"]["completeCalls"], 1)
+        self.assertTrue(result["passed"])
+
+    def test_conflicting_start_or_end_receipts_cannot_stitch_one_scenario(self):
+        original = [voice("CallStarted"), voice("CallEnded", timestamp=110),
+                    voice("FallbackMessage", timestamp=105)]
+        for conflicting in (voice("CallStarted", timestamp=101),
+                            voice("CallEnded", timestamp=111)):
+            with self.subTest(conflicting=conflicting):
+                lifecycle = [*original, conflicting]
+                data, result = self.check_scenario(lifecycle, [transcript()], self.action_rows())
+                self.assertEqual(data["referenceScenario"]["completeCalls"], 0)
+                self.assertFalse(result["passed"])
+
     def test_reused_room_with_two_agents_is_not_unique_call_proof(self):
         lifecycle = [voice("CallStarted"), voice("CallEnded", timestamp=110),
                      voice("CallStarted", agent="other"), voice("CallEnded", timestamp=110, agent="other"),
