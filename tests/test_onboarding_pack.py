@@ -63,6 +63,31 @@ class BuildTests(Case):
         self.assertEqual(result["needsAction"], [])
         self.assertEqual(result["switchedOff"], ["book-appointment"])
 
+    def test_disabled_skill_keeps_its_missing_setup_visible_without_claiming_activation(self):
+        result = self.packs(self.workspace(disabled=["book-appointment", "log-conversation"]))
+        self.assertEqual(result["needsAction"], [])
+        self.assertEqual(result["switchedOff"], ["book-appointment", "log-conversation"])
+        self.assertEqual([item["name"] for item in result["setupWhileOff"]], ["book-appointment"])
+        booking = result["setupWhileOff"][0]
+        self.assertIn("calendar: not connected yet", booking["missing"])
+        self.assertEqual(booking["connect"][0]["command"],
+                         "python3 scripts/client-operator.py connect calendar --agent receptionist")
+        self.assertFalse(any(option["usable"] for option in booking["connect"][0]["options"]))
+        text = pack.render([result])
+        self.assertIn("book-appointment: switched off and still needs setup", text)
+        self.assertIn("No usable connector for this is shipped yet", text)
+        self.assertIn("log-conversation: listed for review but not active", text)
+        self.assertNotIn("book-appointment** cannot work yet", text)
+
+    def test_disabled_skill_cannot_claim_ready_when_required_dependency_is_missing(self):
+        report = [{"agent": "front", "environment": "dev", "skills": [
+            {"name": "book", "kind": "Skill", "enabled": False, "ready": True,
+             "dependencies": [{"capability": "calendar", "family": "calendar",
+                               "required": True, "status": "missing"}]}]}]
+        approvals = [{"agent": "front", "policyVersion": "policy:test", "skills": []}]
+        with self.assertRaisesRegex(pack.PackError, "claims ready"):
+            pack.build(report, approvals)
+
     def test_a_blocked_skill_names_what_is_missing_and_the_one_next_step(self):
         result = self.packs(self.workspace(disabled=[]))
         blocked = {item["name"]: item for item in result["needsAction"]}
