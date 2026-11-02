@@ -76,6 +76,32 @@ def _connect_options(family: str, options: Options | None) -> list[dict[str, Any
     ]
 
 
+
+def _setup_guidance(
+    entry: Mapping[str, Any], *, agent: str, options: Options | None,
+) -> dict[str, Any]:
+    """Explain unmet requirements without confusing a preview with an authorization."""
+    blocked = [item for item in entry["dependencies"]
+               if item.get("required", True) and item["status"] in
+               {"missing", "no-content", "unavailable", "no-grant", "grant-unavailable", "grant-scope"}]
+    if not blocked:
+        raise PackError(f"blocked Skill {entry['name']!r} has no required blocking dependency")
+    families = sorted({item["family"] for item in blocked if item["status"] in _CONNECTION_BLOCKERS})
+    if any(not isinstance(family, str) or not _CAPABILITY_FAMILY.fullmatch(family) for family in families):
+        raise PackError("invalid capability family for coworker connection guidance")
+    return {
+        "name": entry["name"],
+        "kind": entry.get("kind", "Skill"),
+        "missing": [_dependency(item) for item in blocked],
+        "action": entry.get("remediation"),
+        "connect": [
+            {"family": family, "command": f"python3 scripts/client-operator.py connect {family} --agent {agent}",
+             "options": _connect_options(family, options)}
+            for family in families
+        ],
+    }
+
+
 def build(
     readiness: Iterable[Mapping[str, Any]],
     approvals: Iterable[Mapping[str, Any]],
@@ -116,12 +142,15 @@ def build(
         working: list[dict[str, Any]] = []
         needs: list[dict[str, Any]] = []
         off: list[str] = []
+        setup_while_off: list[dict[str, Any]] = []
         for entry in agent["skills"]:
             key = (entry.get("kind", "Skill"), entry["name"])
             if key in seen_skills:
                 raise PackError(f"duplicate Skill {key!r} for Agent {name!r}")
             seen_skills.add(key)
-            if entry.get("enabled", True) and entry["ready"] and any(
+            # Disabled is not an exemption from truthful readiness: the owner
+            # must not see an unavailable Skill as ready for re-enablement.
+            if entry["ready"] and any(
                 dependency.get("required", True) and dependency["status"] in
                 {"missing", "no-content", "unavailable", "no-grant", "grant-unavailable", "grant-scope"}
                 for dependency in entry["dependencies"]
@@ -130,25 +159,12 @@ def build(
             label = {"name": entry["name"], "kind": entry.get("kind", "Skill")}
             if not entry.get("enabled", True):
                 off.append(entry["name"])
+                if not entry["ready"]:
+                    setup_while_off.append(_setup_guidance(entry, agent=name, options=options))
             elif entry["ready"]:
                 working.append({**label, "uses": [_dependency(item) for item in entry["dependencies"]]})
             else:
-                blocked = [item for item in entry["dependencies"] if item["status"] != "bound" and item.get("required", True)]
-                if not blocked:
-                    raise PackError(f"blocked Skill {entry['name']!r} has no required blocking dependency")
-                families = sorted({item["family"] for item in blocked if item["status"] in _CONNECTION_BLOCKERS})
-                if any(not isinstance(family, str) or not _CAPABILITY_FAMILY.fullmatch(family) for family in families):
-                    raise PackError("invalid capability family for coworker connection guidance")
-                needs.append({
-                    **label,
-                    "missing": [_dependency(item) for item in blocked],
-                    "action": entry.get("remediation"),
-                    "connect": [
-                        {"family": family, "command": f"python3 scripts/client-operator.py connect {family} --agent {name}",
-                         "options": _connect_options(family, options)}
-                        for family in families
-                    ],
-                })
+                needs.append(_setup_guidance(entry, agent=name, options=options))
         policy = approvals_by_agent[name]
         actions = [
             {"skill": group["skill"], "tool": action["tool"], "risk": action["risk"], "team": action["member"], "public": action["public"]}
@@ -162,6 +178,7 @@ def build(
             "working": working,
             "needsAction": needs,
             "switchedOff": sorted(off),
+            "setupWhileOff": setup_while_off,
             "actions": actions,
         })
     return packs
@@ -203,7 +220,23 @@ def render(packs: Iterable[Mapping[str, Any]]) -> str:
             lines.append("- Nothing is blocked.")
         if pack["switchedOff"]:
             lines += ["", "## Switched off on purpose", ""]
-            lines += [f"- {name}: listed for review but not active. Your consultant enables it after the setup it needs and a test." for name in pack["switchedOff"]]
+            off_setup = {item["name"]: item for item in pack.get("setupWhileOff", [])}
+            for name in pack["switchedOff"]:
+                if name not in off_setup:
+                    lines.append(f"- {name}: listed for review but not active. Your consultant enables it after the setup it needs and a test.")
+                    continue
+                item = off_setup[name]
+                lines.append(f"- {name}: switched off and still needs setup: {'; '.join(item['missing'])}.")
+                if item["action"]:
+                    lines.append(f"  - Next step: {item['action']}")
+                for family in item["connect"]:
+                    lines.append(f"  - Review choices for this coworker: `{family['command']}` (does not grant or repair access).")
+                    if any(choice["usable"] for choice in family["options"]):
+                        lines.append("  - Available in the registry: " + ", ".join(
+                            f"{choice['id']} (tier {choice['tier']})" for choice in family["options"] if choice["usable"]))
+                    else:
+                        lines.append("  - No usable connector for this is shipped yet; your consultant can tell you the plan.")
+                lines.append("  - Do not enable until the owner authorizes the setup and DEV validation succeeds.")
         lines += ["", "## What it will and will not do without asking you", ""]
         if pack["actions"]:
             if pack["policyVersion"]:
