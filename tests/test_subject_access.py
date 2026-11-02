@@ -227,6 +227,36 @@ class CrossStoreProvenanceTests(Case):
             self.assertNotIn(secret, json.dumps(bundle["provenance"]))
         self.assertEqual(len([event for event in self.events if event[0] == "subject-access.exported"]), 1)
 
+    def test_same_slug_foreign_provenance_roots_cannot_enter_subject_export(self):
+        self._stores()
+        linked = self.conversations.list_conversations()[0]["id"]
+        foreign = self.root / "another-workspace"
+        for kind in ("memory", "sync"):
+            with self.subTest(kind=kind):
+                original = getattr(self.service, kind)
+                candidate = type(original)(foreign / ("memory" if kind == "memory" else "crm-sync"), tenant="acme")
+                if kind == "memory":
+                    candidate.remember("client", "FOREIGN private note", agent="receptionist", owner=self.alex, now=NOW)
+                else:
+                    candidate.enqueue(channel="chat", external_id="foreign", interaction_type="chat",
+                                      now=NOW, conversation_id=linked)
+                setattr(self.service, kind, candidate)
+                try:
+                    with self.assertRaisesRegex(subject.SubjectAccessError, "root|workspace"):
+                        self.export()
+                    self.assertFalse(self.bundles.exists())
+                    self.assertFalse(self.events)
+                finally:
+                    setattr(self.service, kind, original)
+
+    def test_missing_foreign_provenance_root_cannot_be_reported_as_empty(self):
+        self._stores()
+        self.service.memory = type(self.memory)(self.root / "foreign" / "memory", tenant="acme")
+        with self.assertRaisesRegex(subject.SubjectAccessError, "root|workspace"):
+            self.export()
+        self.assertFalse(self.bundles.exists())
+        self.assertFalse(self.events)
+
     def test_foreign_tenant_and_corrupt_store_fail_before_bundle_or_audit(self):
         self._stores()
         self.memory.tenant = "another-client"
