@@ -21,6 +21,7 @@ class PolicyLedgerIntegrityTests(unittest.TestCase):
         self.addCleanup(self.tmp.cleanup)
         self.path = pathlib.Path(self.tmp.name) / "audit.jsonl"
         self.today = dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%d")
+        self.owner_key = govern.POLICY.generate_owner_key()
 
     def record(self, *, user="owner@client.example", tool="mail.send", outcome="succeeded"):
         govern.append_audit_event(self.path, {
@@ -30,14 +31,10 @@ class PolicyLedgerIntegrityTests(unittest.TestCase):
         })
 
     def state(self):
-        import hashlib
         rule = {"id": "faq-limit", "effect": "allow", "actions": ["mail.send"],
                 "conditions": {"maxPerDay": 3}}
-        rule["signoff"] = {"owner": "owner@client.example",
-                           "ruleDigest": hashlib.sha256(json.dumps(
-                               {k: v for k, v in rule.items() if k != "signoff"},
-                               sort_keys=True, separators=(",", ":"), ensure_ascii=False,
-                           ).encode()).hexdigest()}
+        owner_key = self.owner_key
+        rule = govern.POLICY.sign_rule(rule, "owner@client.example", owner_key["private"])
         return {
             "source": {"name": "receptionist"},
             "agent": {"metadata": {"name": "receptionist"},
@@ -45,6 +42,7 @@ class PolicyLedgerIntegrityTests(unittest.TestCase):
             "tools": [{"metadata": {"name": "mail.send"},
                        "spec": {"risk": "external-communication", "approvalRequired": True}}],
             "policies": [{"spec": {"rules": [rule]}}],
+            "policyOwnerKeys": {"owner@client.example": owner_key["public"]},
         }
 
     def test_valid_chained_records_count_and_authorize_under_limit(self):
