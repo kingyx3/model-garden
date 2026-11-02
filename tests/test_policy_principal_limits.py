@@ -30,8 +30,12 @@ ALICE, BOB = "alice@acme.example", "bob@acme.example"
 STRANGER = "unmapped:slack:3f2a9c0d11"
 
 
+TEST_OWNER_KEY = policy.generate_owner_key()
+TEST_KEYS = {"owner@client.example": TEST_OWNER_KEY["public"]}
+
+
 def signed(rule: dict, owner: str = "owner@client.example") -> dict:
-    return {**rule, "signoff": {"owner": owner, "ruleDigest": policy.rule_digest(rule)}}
+    return policy.sign_rule(rule, owner, TEST_OWNER_KEY["private"])
 
 
 def doc(*rules: dict) -> dict:
@@ -44,6 +48,7 @@ def rule(**conditions) -> dict:
 
 
 def evaluate(*rules: dict, **kwargs) -> dict:
+    kwargs.setdefault("owner_keys", TEST_KEYS)
     return policy.evaluate([doc(*rules)], tool_name="mail.send", risk="external-communication", tool_requires_approval=True, **kwargs)
 
 
@@ -85,7 +90,7 @@ class EvaluateTests(unittest.TestCase):
         self.assertEqual(evaluate(widened, usage_by_principal=50)["decision"], "require-approval")
 
     def test_the_approval_preview_reports_conditional_for_a_rule_with_only_the_new_limit(self):
-        preview = policy.preview([doc(rule(maxPerPrincipalPerDay=1))], tool_name="mail.send", risk="external-communication", tool_requires_approval=True)
+        preview = policy.preview([doc(rule(maxPerPrincipalPerDay=1))], tool_name="mail.send", risk="external-communication", tool_requires_approval=True, owner_keys=TEST_KEYS)
         self.assertEqual(preview["member"], "conditional")
 
 
@@ -95,7 +100,7 @@ class LedgerTests(unittest.TestCase):
     def state(self, *rules: dict, name: str = "support") -> dict:
         return {"schemaVersion": 1, "source": {"name": name}, "agent": {"metadata": {"name": name},
                 "spec": {"approvals": {"externalActions": "none"}, "security": {"dataClassification": "internal"}}},
-                "tools": self.TOOLS, "policies": [doc(*rules)]}
+                "tools": self.TOOLS, "policies": [doc(*rules)], "policyOwnerKeys": TEST_KEYS}
 
     def send(self, state, audit, who, *, access="member"):
         return govern.execute_action(state, "mail.send", {"to": "x@example.com"}, lambda args: {"id": "m"}, audit_path=audit,
