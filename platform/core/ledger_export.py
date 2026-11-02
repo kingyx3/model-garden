@@ -35,6 +35,7 @@ import urllib.parse
 import urllib.request
 from bisect import bisect_right
 from collections.abc import Callable, Iterable, Iterator, Mapping
+from contextlib import contextmanager
 from typing import Any
 
 EXPORT_SCHEMA_VERSION = 1
