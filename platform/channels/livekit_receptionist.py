@@ -35,6 +35,7 @@ from livekit.plugins import openai
 
 from call_transcript import CallTranscript, config_from_env as transcript_config_from_env, finalize as finalize_transcript, redact, store_private_jsonl
 from voice_pause import HOLDING, paused as voice_paused, stop_session_on_pause
+from transfer_target import valid_transfer_target
 
 LOGGER = logging.getLogger("model-garden.receptionist")
 # An unsafe transcript configuration (for example no disclosure and no lawful-basis owner) stops the worker at start.
@@ -149,10 +150,10 @@ class ReceptionistVoiceAgent(Agent):
         """Transfer the active SIP caller to the approved human fallback."""
         if await voice_paused():
             return HOLDING
-        target = os.environ.get("MODEL_GARDEN_HUMAN_TRANSFER_TARGET", "").strip()
+        target = os.environ.get("MODEL_GARDEN_HUMAN_TRANSFER_TARGET", "")
         if not target:
             return "Human transfer is not configured. Offer to capture a message instead."
-        if not (target.startswith("tel:") or target.startswith("sip:")):
+        if not valid_transfer_target(target):
             return "Human transfer target is invalid. Offer to capture a message instead."
         job_ctx = get_job_context()
         try:
