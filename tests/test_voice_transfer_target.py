@@ -68,12 +68,19 @@ class TransferTargetTests(unittest.TestCase):
             "sip:human@example.com?subject=private", "sip:human@example.com#frag",
             "sip:human@example.com:65536", "sip:human@example.com:0",
             "sip:human:secret@example.com", "sips:human@example.com",
-            "http://example.com", None, 42, "sip:" + "x" * 300,
+            "http://example.com", 42, "sip:" + "x" * 300,
         ):
             with self.subTest(destination=repr(destination)):
                 self.assertFalse(TARGET.valid_transfer_target(destination))
                 with self.assertRaisesRegex(ValueError, "human_transfer_target"):
                     DEPLOY._voice(binding(destination))
+
+    def test_unconfigured_transfer_remains_optional(self):
+        self.assertIsNone(DEPLOY._voice(binding(None))["human_transfer_target"])
+        self.assertNotIn("human_transfer_target", DEPLOY._voice({"spec": {"channels": {"voice": {
+            "provider": "livekit", "url": "wss://voice.example.test",
+            "api_key_ref": "secret://voice/key", "api_secret_ref": "secret://voice/secret",
+        }}}}))
 
     def test_runtime_rejects_malformed_target_without_sip_or_message_effect(self):
         tree = ast.parse(WORKER_PATH.read_text(encoding="utf-8"))
