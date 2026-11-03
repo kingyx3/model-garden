@@ -56,6 +56,19 @@ def _load_lawful_basis():
 transcript_environment = _load_lawful_basis().transcript_environment
 
 
+def _load_transfer_target():
+    path = ROOT / "platform" / "channels" / "transfer_target.py"
+    spec = importlib.util.spec_from_file_location("model_garden_transfer_target", path)
+    module = importlib.util.module_from_spec(spec)
+    if spec.loader is None:
+        raise RuntimeError("cannot load voice transfer destination contract")
+    spec.loader.exec_module(module)
+    return module
+
+
+valid_transfer_target = _load_transfer_target().valid_transfer_target
+
+
 def _load_json(path: pathlib.Path) -> dict[str, Any]:
     value = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(value, dict):
@@ -79,8 +92,8 @@ def _voice(binding: dict[str, Any]) -> dict[str, Any] | None:
     if not voice["api_key_ref"].startswith("secret://") or not voice["api_secret_ref"].startswith("secret://"):
         raise ValueError("LiveKit API credentials must be secret:// references")
     target = voice.get("human_transfer_target")
-    if target is not None and (not isinstance(target, str) or not (target.startswith("tel:") or target.startswith("sip:"))):
-        raise ValueError("channels.voice.human_transfer_target must be tel: or sip: when supplied")
+    if target is not None and not valid_transfer_target(target):
+        raise ValueError("channels.voice.human_transfer_target must be a valid E.164 tel: or restricted sip: URI")
     return voice
 
 
@@ -189,9 +202,10 @@ def _context(root: pathlib.Path) -> pathlib.Path:
     shutil.copy2(ROOT / "platform" / "channels" / "livekit_receptionist.py", context / "livekit_receptionist.py")
     shutil.copy2(ROOT / "platform" / "channels" / "call_transcript.py", context / "call_transcript.py")
     shutil.copy2(ROOT / "platform" / "channels" / "voice_pause.py", context / "voice_pause.py")
+    shutil.copy2(ROOT / "platform" / "channels" / "transfer_target.py", context / "transfer_target.py")
     shutil.copy2(ROOT / "platform" / "core" / "pause.py", context / "pause.py")
     (context / "Dockerfile").write_text(
-        """ARG BASE_IMAGE\nFROM ${BASE_IMAGE}\nCOPY requirements-voice.txt /tmp/requirements-voice.txt\nRUN python -m pip install --no-cache-dir -r /tmp/requirements-voice.txt\nCOPY livekit_receptionist.py /opt/model-garden-livekit-receptionist.py\nCOPY call_transcript.py /opt/call_transcript.py\nCOPY voice_pause.py /opt/voice_pause.py\nCOPY pause.py /opt/pause.py\nENTRYPOINT [\"python\", \"/opt/model-garden-livekit-receptionist.py\"]\nCMD [\"start\"]\n""",
+        """ARG BASE_IMAGE\nFROM ${BASE_IMAGE}\nCOPY requirements-voice.txt /tmp/requirements-voice.txt\nRUN python -m pip install --no-cache-dir -r /tmp/requirements-voice.txt\nCOPY livekit_receptionist.py /opt/model-garden-livekit-receptionist.py\nCOPY call_transcript.py /opt/call_transcript.py\nCOPY voice_pause.py /opt/voice_pause.py\nCOPY transfer_target.py /opt/transfer_target.py\nCOPY pause.py /opt/pause.py\nENTRYPOINT [\"python\", \"/opt/model-garden-livekit-receptionist.py\"]\nCMD [\"start\"]\n""",
         encoding="utf-8",
     )
     return context
