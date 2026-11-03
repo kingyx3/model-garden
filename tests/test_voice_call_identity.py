@@ -159,6 +159,9 @@ class CallIdentityTests(unittest.TestCase):
             "get_job_context": lambda: job,
             "voice_paused": active,
             "HOLDING": "paused",
+            # This fixture exercises ambiguous SIP participant rejection; the
+            # actual destination validator is tested in test_voice_transfer_target.
+            "valid_transfer_target": lambda target: target == "tel:+1234567",
             "os": os,
             "time": time,
             "api": SimpleNamespace(TransferSIPParticipantRequest=lambda **kw: kw),
