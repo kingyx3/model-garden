@@ -227,3 +227,22 @@ Retain independent provider receipts and real operator acceptance for #117.
 When `reference-proof.py --require-governed-action` is requested, the collector now verifies the **entire** collected Action Ledger snapshot against the same v1-prefix/v2/v3 SHA-256 chaining and sequence contract used by the governed runtime, before reporting action evidence. It requires at least one chained record; missing governed runtime, malformed links, changed events, missing middle records, reordered or duplicate records stop the collector without writing a misleading successful manifest. Non-strict service inventory remains available without the additional ledger requirement. The verifier operates on a private in-memory snapshot; it does not export speech or Tool arguments.
 
 **Assurance boundary:** A self-consistent local chain is still not an independently anchored or immutable ledger. A privileged actor who truncates the *tail* and retains a valid prefix cannot be detected without an independently held trusted head. This change does not authenticate SIP/LiveKit, provider execution, human delivery, customer consent or live client acceptance. For #80 and #117, independently verify exported head hashes, external provider receipts and client-approved retained evidence before closure.
+
+
+### Reviewed human-transfer destination safety (#107)
+
+The optional `channels.voice.human_transfer_target` is a **fixed operator-reviewed
+destination**, never a caller-selected URI. Deployment and the LiveKit worker
+now use the same strict validator: `tel:+` followed by an E.164 number, or
+`sip:user@host` with an optional numeric port (1–65535) and optional
+`;transport=tcp|udp|tls`. SIP user and DNS-host components permit only
+bounded ASCII identifiers. No whitespace, control characters, embedded
+credentials, URI headers, queries, arbitrary SIP parameters, or redirects are
+accepted. An invalid configured destination is rejected before deployment and
+again before any transfer attempt; the receptionist offers message capture
+instead. Existing deployments using other SIP URI extensions require an
+explicitly reviewed migration to this narrow contract before upgrading.
+
+Credential-free regression tests cover both validation boundaries and the
+packaged worker build context. They do **not** prove a live SIP transfer,
+recipient authorization, human conversation capture, or provider receipts.
